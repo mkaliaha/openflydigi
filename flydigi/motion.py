@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Motion sensor data from the Apex 5's vendor input stream.
 
 The kernel's xpad driver decodes sticks and buttons but not the IMU, so gyro

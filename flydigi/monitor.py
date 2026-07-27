@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """XGameMonitor-equivalent engine: read game memory, drive trigger effects.
 
 Flydigi's XGameMonitor.exe is a generic engine -- all 31 games it supports are

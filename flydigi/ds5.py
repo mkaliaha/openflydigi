@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """DualSense input/output report codec.
 
 Layouts follow inputtino's ps5.hpp (MIT) -- see NOTICE.

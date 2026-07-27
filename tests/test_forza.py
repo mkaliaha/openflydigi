@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Self-test for the Forza telemetry parser and rule engine.
 
 Builds synthetic Data Out packets and checks the shipped Flydigi rules fire the

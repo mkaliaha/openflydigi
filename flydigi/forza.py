@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Forza "Data Out" telemetry -> Apex 5 trigger effects.
 
 Native reimplementation of Flydigi's ForzaDualSense.exe. Instead of the original

@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Self-test for the XGameMonitor engine.
 
 Spawns a real child process holding a known pointer chain in its own memory,

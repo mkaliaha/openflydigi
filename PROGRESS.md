@@ -17,19 +17,28 @@ the device-configuration features Space Station has that we do not.
 | 4. Virtual DualSense | **any DS5-aware game** | Deathloop |
 | 5. Third-party mods | 11 | works via the DSX listener; not supported |
 
-Everything is pure Python, zero dependencies, MIT. `PROTOCOL.md` has the wire protocol and what is
-hardware-verified. Nothing Flydigi-owned is committed; `tools/fetch-configs` restores it.
+The backend is pure Python with zero dependencies — that is a feature worth defending, since it
+means `flydigi-ds5` runs on any machine with Python 3.9 and no Qt. `PROTOCOL.md` has the wire
+protocol and what is hardware-verified. Nothing Flydigi-owned is committed; `tools/fetch-configs`
+restores it.
+
+Licensing is per-file via REUSE: MIT backend, CC0 protocol docs and system config, GPL-3.0-or-later
+for `gui/` only. `LICENSE` explains why, `gui/README.md` states the rule that keeps it true
+(`gui/` may import `flydigi/`, never the reverse). Verify with `reuse lint`.
 
 ## Next: frontend + Space Station's exclusive features
 
 Two workstreams, in the order discussed:
 
-**1. Frontend (Qt/KDE).** The library/CLI split exists so a GUI sits on top without rework. Decision
-still open, and it matters:
-  * **PySide6** — same language as the backend, simplest, no IPC needed. Recommended unless a
-    native KDE app is wanted.
-  * **C++/Kirigami + D-Bus** — a "proper" KDE app; the backend would become a daemon exposing D-Bus,
-    which is also how `flydigictl` does it and would let the daemon run as a system service.
+**1. Frontend (Qt/KDE) — settled: PySide6**, in `gui/`, calling the backend in-process. No D-Bus for
+now; if the tier daemon later needs to run headless with the GUI as an optional face, that is a
+D-Bus interface added to the Python backend rather than a rewrite, and QtDBus speaks it fine.
+
+PySide6 specifically, **not PyQt6** — PyQt is GPL-only and would force the whole tree copyleft,
+which is where the "Qt means GPL" belief comes from. PySide6 is LGPLv3, so linking it from a
+non-GPL codebase is fine. Avoid the Qt add-ons that are GPL-3.0-only in the open-source release
+(Charts, Data Visualization, Virtual Keyboard) — draw the trigger curve with `QPainter` or a QML
+`Canvas` instead of reaching for Qt Charts.
 
 What the GUI needs from the backend that does not exist yet:
   * **a daemon that picks the right tier per game** — currently `flydigid`, `flydigi-forza`,

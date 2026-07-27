@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Send synthetic Forza Data Out telemetry, for testing without the game.
 
 Run tools/flydigi-forza in one terminal, this in another:

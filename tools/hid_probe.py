@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Passive HID probe for Flydigi Apex 5.
 
 Reads hidraw device info and report descriptors. Writes nothing to the device.

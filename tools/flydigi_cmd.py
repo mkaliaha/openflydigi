@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Flydigi Apex 5 vendor command tool (Linux hidraw).
 
 Packet framing (from decompiled Flydigi.Basic AbstractCommand.CreateSimpleCommand):

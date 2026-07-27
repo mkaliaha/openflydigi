@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Fetch Flydigi's game list and per-game configs.
 
 None of this is redistributed in the repository -- it is Flydigi's content, and

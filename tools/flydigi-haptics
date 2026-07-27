@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Drive Apex 5 rumble from DualSense haptic audio.
 
 Games like Deathloop write haptic waveforms to the controller's USB audio

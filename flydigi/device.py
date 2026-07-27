@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Flydigi controller transport over Linux hidraw.
 
 Packet framing (verified on Apex 5, wired and dongle):

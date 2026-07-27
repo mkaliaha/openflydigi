@@ -76,12 +76,45 @@ sources, extracted assemblies, mod binaries, or config files. To reproduce:
 
 ## Licensing
 
-This project is MIT licensed (see [LICENSE](LICENSE)).
+Per-file, following [REUSE](https://reuse.software/) — every file carries an
+SPDX header, full texts are in `LICENSES/`, and `reuse lint` verifies it.
+
+| | |
+|---|---|
+| `flydigi/`, `tools/`, `tests/` | MIT |
+| `README.md`, `PROGRESS.md`, `docs/` | MIT |
+| `PROTOCOL.md` | CC0-1.0 |
+| `udev/`, `pipewire/` | CC0-1.0 |
+| `gui/` | GPL-3.0-or-later |
+
+The protocol implementation is MIT because reuse is welcome without conditions —
+take it into any project, under any license. Only the desktop frontend is
+copyleft, since it links Qt and copyleft costs nothing there. The GUI importing
+`flydigi/` does not make `flydigi/` GPL; those files stay independently
+reusable. See [LICENSE](LICENSE) for the full reasoning.
 
 The DualSense report descriptor and feature-report blobs in
 `flydigi/ps5_data.py` are generated from
 [inputtino](https://github.com/games-on-whales/inputtino), MIT licensed — see
 [NOTICE](NOTICE).
+
+## Building a release
+
+The backend has no dependencies, so a source release needs nothing special. The
+GUI adds PySide6, which is LGPLv3 — that only creates obligations if you ship
+Qt yourself.
+
+- **Source / PyPI / AUR / COPR** — you distribute no Qt at all (pip or the
+  distro provides it), so there is nothing to discharge.
+- **AppImage** — bundles Qt, so it is conveyed as a whole under GPL-3.0. Include
+  `LICENSES/` in the image, name the bundled PySide6 and Qt versions in the
+  release notes with a link to their sources, and use PyInstaller `--onedir`
+  rather than `--onefile` so the libraries stay swappable. Corresponding source
+  is satisfied twice over: it is a Python app, so the source is inside the
+  bundle, and the git tag sits next to the download.
+- **Flatpak** — cleanest licensing (Qt comes from `org.kde.Platform`) but the
+  sandbox cannot see host PIDs, so `flydigi-monitor` cannot work from inside
+  one. Only viable once the GUI talks to a host daemon over D-Bus.
 
 Protocol details were obtained by reverse engineering Flydigi's software for
 interoperability. Flydigi's game configs and mod binaries are their content and

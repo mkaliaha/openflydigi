@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Drive Apex 5 adaptive triggers from Forza telemetry.
 
 In game: HUD and Gameplay -> Data Out -> ON, IP 127.0.0.1, port 5300.

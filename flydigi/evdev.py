@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Minimal evdev reader -- no python-evdev dependency.
 
 The Apex 5's interface 0 binds to the kernel's xpad driver, which decodes the

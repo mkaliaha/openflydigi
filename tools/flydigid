@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Polling daemon: detect a running game, apply its trigger config, reset on exit.
 
 Mirrors Flydigi's own AdapterTriggerRunner.CheckGameRunning (1 s poll on process

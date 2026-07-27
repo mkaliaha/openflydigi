@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Play a tone into each channel of a real DualSense, one at a time.
 
 Maps channel index to physical output: which channels drive the haptic

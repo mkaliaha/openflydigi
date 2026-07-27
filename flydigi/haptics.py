@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Convert DualSense haptic audio into Apex 5 rumble.
 
 Some games drive the DualSense's voice coils by writing waveforms to the

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Trigger effect commands for the Apex 5.
 
 Two families exist (see PROTOCOL.md):

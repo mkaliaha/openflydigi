@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Game list handling.
 
 gamelist.json comes from the public, unauthenticated endpoint:

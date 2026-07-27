@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Probe the Apex 5's motion sensors over the vendor input stream.
 
 The kernel's xpad driver gives us sticks and buttons but no IMU. Flydigi's own

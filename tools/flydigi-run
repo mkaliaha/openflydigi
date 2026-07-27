@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Steam launch wrapper: apply a game's trigger config, run it, reset on exit.
 
 Steam launch options:

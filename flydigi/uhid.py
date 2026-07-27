@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Minimal /dev/uhid binding.
 
 uhid lets userspace create a kernel-side HID device. Unlike uinput (which only

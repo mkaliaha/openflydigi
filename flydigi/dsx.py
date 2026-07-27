@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """DualSenseX (DSX) UDP protocol listener.
 
 Flydigi adopted the DSX protocol wholesale rather than inventing one, which is

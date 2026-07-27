@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Present the Apex 5 to games as a DualSense, and translate its effects back.
 
     Apex 5 ──evdev──► relay ──► virtual DualSense (uhid) ──► game

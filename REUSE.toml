@@ -1,0 +1,39 @@
+version = 1
+SPDX-PackageName = "flydigi-apex5-linux"
+SPDX-PackageSupplier = "Mikalai Kaliaha"
+
+# Code and configuration carry inline SPDX headers. Only the files below are
+# annotated here instead -- prose, because headers clutter a document meant to
+# be read and copied from, and gui/, so that anything added there is copyleft by
+# default rather than by remembering.
+#
+# precedence = "closest" everywhere: a file's own header always wins over these.
+
+[[annotations]]
+path = ["README.md", "PROGRESS.md", "docs/**"]
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 Mikalai Kaliaha"
+SPDX-License-Identifier = "MIT"
+
+# Protocol facts should not carry attribution conditions, so the writeup is
+# public domain rather than MIT.
+[[annotations]]
+path = "PROTOCOL.md"
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 Mikalai Kaliaha"
+SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = [".gitignore", "LICENSE", "NOTICE", "REUSE.toml"]
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 Mikalai Kaliaha"
+SPDX-License-Identifier = "CC0-1.0"
+
+# The GUI links Qt, so copyleft costs nothing there, and a desktop frontend is
+# not something anyone needs to embed. Everything under flydigi/ and tools/
+# stays MIT so it can be reused without conditions.
+[[annotations]]
+path = "gui/**"
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 Mikalai Kaliaha"
+SPDX-License-Identifier = "GPL-3.0-or-later"

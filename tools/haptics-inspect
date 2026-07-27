@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Watch a sink's individual channels, to see what a game writes to a DualSense.
 
 A real DualSense's USB audio device has four output channels. Game audio and

@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Self-test for the DSX protocol listener. No controller or game required.
 
     python3 tests/test_dsx.py

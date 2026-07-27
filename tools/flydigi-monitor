@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Drive Apex 5 triggers from game memory, using Flydigi's XGameMonitor configs.
 
 Reads the game's memory via /proc/<pid>/mem -- nothing is injected and the game

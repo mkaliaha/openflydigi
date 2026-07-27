@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Mapping between the Apex 5 (evdev) and a virtual DualSense.
 
 Kept in the library rather than the CLI so it can be unit tested and reused by

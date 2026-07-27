@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
 """Self-test for the Apex 5 -> DualSense mapping. No hardware required.
 
     python3 tests/test_relay.py

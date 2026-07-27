@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: CC0-1.0
+
 # Access rules for the Flydigi Apex 5 and the virtual DualSense.
 #
 #   sudo cp udev/99-flydigi-apex5.rules /etc/udev/rules.d/
