@@ -93,15 +93,15 @@ class ProfilePage(QWidget):
             button = QPushButton(label)
             button.clicked.connect(slot)
             actions.addWidget(button)
-        self.write_button = QPushButton("Write to pad")
+        self.write_button = QPushButton("Apply")
         self.write_button.clicked.connect(lambda: self._write(save=False))
         actions.addWidget(self.write_button)
-        self.save_button = QPushButton("Write && save to flash")
+        self.save_button = QPushButton("Apply && save")
         self.save_button.clicked.connect(lambda: self._write(save=True))
         actions.addWidget(self.save_button)
         layout.addLayout(actions)
 
-        self.hint = QLabel("Writing takes effect at once; saving also survives a power cycle.")
+        self.hint = QLabel("Apply takes effect at once; save also keeps it across a power cycle.")
         self.hint.setWordWrap(True)
         layout.addWidget(self.hint)
 
@@ -381,8 +381,8 @@ class ProfilePage(QWidget):
         self.write_button.setEnabled(dirty)
         self.save_button.setEnabled(dirty)
         if dirty:
-            self.hint.setText("Unwritten changes. "
-                              "Write applies now; save also survives a power cycle.")
+            self.hint.setText("Unsaved changes. Apply takes effect now; "
+                              "save also keeps it across a power cycle.")
         else:
             self.hint.setText("Matches what is on the pad.")
 

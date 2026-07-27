@@ -117,10 +117,10 @@ class LightingPage(QWidget):
 
         actions = QHBoxLayout()
         actions.addStretch(1)
-        self.write_button = QPushButton("Write to pad")
+        self.write_button = QPushButton("Apply")
         self.write_button.clicked.connect(lambda: self._write(save=False))
         actions.addWidget(self.write_button)
-        self.save_button = QPushButton("Write && save to flash")
+        self.save_button = QPushButton("Apply && save")
         self.save_button.clicked.connect(lambda: self._write(save=True))
         actions.addWidget(self.save_button)
         layout.addLayout(actions)

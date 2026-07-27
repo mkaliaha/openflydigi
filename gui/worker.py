@@ -110,7 +110,9 @@ class DeviceWorker(QObject):
 
         def work(ctrl):
             sent = mapping.write_config(ctrl, cfg_id, new, old=old)
-            saved = mapping.save_config(ctrl) if save else False
+            # Pass the config's own id so committing does not overwrite the
+            # slot's version tag with zero.
+            saved = mapping.save_config(ctrl, new.data_version) if save else False
             return sent, saved
 
         result = self._attempt(work, f"writing profile {cfg_id + 1}")
@@ -155,7 +157,9 @@ class DeviceWorker(QObject):
         def work(ctrl):
             sent = lighting.write_config(ctrl, new, old=old)
             # Lighting shares the mapping save command; the pad commits the
-            # working set, not one config at a time.
+            # working set, not one config at a time. The lighting blob has no
+            # version tag of its own, so this leaves the field at zero -- which
+            # is one reason saving lighting is still unverified on hardware.
             saved = mapping.save_config(ctrl) if save else False
             return sent, saved
 

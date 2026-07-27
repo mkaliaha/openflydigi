@@ -185,7 +185,20 @@ def apply_config(ctrl, cfg_id, wait=0.5):
 
 
 def save_config(ctrl, version=0, wait=2.0):
-    """Commit the working config to flash. Slow -- the pad takes seconds."""
+    """Commit the working config to flash. Slow -- the pad takes seconds.
+
+    `version` is the id `read_status` reports for the slot, and the same value
+    the blob carries at OFF_DATA_VERSION. Flydigi's SDK gives this command a
+    10 second timeout where every other command gets 500 ms, which is what a
+    flash write looks like.
+
+    The observed values (23224, 65078, 65535 for an untouched slot) look like
+    random tags for change detection rather than a counter, so callers should
+    pass the config's own `data_version` to leave it alone. Passing 0 -- the
+    default -- overwrites the slot's id with zero, which is almost certainly
+    not what you want; it is kept as the default only because nothing has yet
+    confirmed what the pad does with the value.
+    """
     payload = struct.pack("<H", version & 0xFFFF)
     for body in blobs.replies(ctrl, build(CMD_SAVE, payload), wait):
         if body[2] == CMD_SAVE:

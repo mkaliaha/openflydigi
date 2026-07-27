@@ -5,8 +5,9 @@ now covers five delivery mechanisms plus a virtual DualSense.
 
 ## Read this first
 
-**Status: the trigger work is done and validated in real games.** What remains is a frontend and
-the device-configuration features Space Station has that we do not.
+**Status: adaptive triggers are done and validated in real games, and the desktop app now covers
+profiles, button remapping, vibration, per-profile trigger config and RGB lighting.** What remains
+is macros, screen images, the device settings, and a daemon that picks the right tier per game.
 
 | Tier | Games | Validated in |
 |---|---|---|
@@ -26,39 +27,102 @@ Licensing is per-file via REUSE: MIT backend, CC0 protocol docs and system confi
 for `gui/` only. `LICENSE` explains why, `gui/README.md` states the rule that keeps it true
 (`gui/` may import `flydigi/`, never the reverse). Verify with `reuse lint`.
 
-## Next: frontend + Space Station's exclusive features
+## The desktop app
 
-Two workstreams, in the order discussed:
+**PySide6, in `gui/`**, calling the backend in-process — no D-Bus. Run it with:
 
-**1. Frontend (Qt/KDE) — settled: PySide6**, in `gui/`, calling the backend in-process. No D-Bus for
-now; if the tier daemon later needs to run headless with the GUI as an optional face, that is a
-D-Bus interface added to the Python backend rather than a rewrite, and QtDBus speaks it fine.
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r gui/requirements.txt
+.venv/bin/python -m gui
+```
 
 PySide6 specifically, **not PyQt6** — PyQt is GPL-only and would force the whole tree copyleft,
-which is where the "Qt means GPL" belief comes from. PySide6 is LGPLv3, so linking it from a
-non-GPL codebase is fine. Avoid the Qt add-ons that are GPL-3.0-only in the open-source release
-(Charts, Data Visualization, Virtual Keyboard) — draw the trigger curve with `QPainter` or a QML
-`Canvas` instead of reaching for Qt Charts.
+which is where the "Qt means GPL" belief comes from. Installed as `PySide6-Essentials`, which also
+leaves out the add-ons that are GPL-3.0-only (Charts, Data Visualization, Virtual Keyboard). Draw
+graphs with `QPainter` or a QML `Canvas`.
 
-What the GUI needs from the backend that does not exist yet:
-  * **a daemon that picks the right tier per game** — currently `flydigid`, `flydigi-forza`,
-    `flydigi-monitor` and `flydigi-ds5` are separate manual tools
+| Tab | What works |
+|---|---|
+| Profiles → Buttons | remap, turbo + hold/toggle, rename, switch active, back up / restore to file |
+| Profiles → Vibration | master switch, per-grip enable, min/max window, strength |
+| Profiles → Triggers | stored effect (off / constant resistance), dead zone, trigger motor |
+| Adaptive triggers | all 94 games, searchable, filtered by route; pad-side ones apply from here |
+| Lighting | effect, up to 5 colours, brightness, cycle time, react-to-rumble |
+
+**Everything device-facing runs on a worker thread** (`gui/worker.py`) and requests cross as
+signals. Calling a worker slot directly runs it on the caller's thread, which silently puts blocking
+HID traffic back on the UI thread — that bug was written twice already.
+
+**Apply vs save.** "Apply" writes the changed packets (164/165) and takes effect immediately;
+"Apply & save" additionally sends 166, which Flydigi's SDK gives a 10 s timeout where everything
+else gets 500 ms.
+
+Confirmed on hardware: **an applied-but-unsaved change is lost when the pad sleeps** — not merely
+on a power cycle. Applied lighting reverted after the pad idled out. So "apply" is working memory
+in the literal sense, and anything meant to last needs the save.
+
+Still unverified: that 166 itself works. It has only ever run against the fake pad, and nothing has
+yet confirmed a saved change surviving a sleep.
+
+### Tests, and how to run them without hardware
+
+`tests/fake_pad.py` answers reads, diffed writes, apply and save, and refuses a bad checksum by
+staying silent exactly as the pad does. `tests/test_gui.py` drives the real widgets offscreen.
+
+```bash
+for t in tests/test_*.py; do python3 "$t"; done   # 105 backend tests, no Qt needed
+.venv/bin/python tests/test_gui.py                # 24 GUI tests
+```
+
+`test_gui.py` exits 0 with a skip message when PySide6 is absent, so the backend run stays
+dependency-free.
+
+## Next
+
+  * **a daemon that picks the right tier per game** — `flydigid`, `flydigi-forza`,
+    `flydigi-monitor` and `flydigi-ds5` are still separate manual tools, and the GUI's trigger tab
+    can only tell you which to start
   * **per-game mode preference** — six titles support both Flydigi's mod and PS5 mode
     (Cyberpunk 2077, Death Stranding DC, Jedi Survivor, Spider-Man Remastered, Miles Morales,
-    Uncharted 4) and there is no way to express a choice
-  * game list browsing, enable/disable per game, status display
+    Uncharted 4); `gui/triggers.py` has the storage but no UI to set it
+  * **verify command 166 on hardware** — write, save, power-cycle the pad, read back
+  * **macros, screen images, the 22 device settings** — see the table below
+  * `UpdateSleepTimeCommandFactory` would fix the pad sleeping mid-session
 
-**2. Space Station exclusives — device configuration.** All command factories are already decompiled
-under `decompiled/Flydigi.ControllerSdk/`. None are implemented yet:
+## Space Station exclusives — what is done and what is not
 
-| Feature | Commands | Notes |
+All command factories are decompiled under `decompiled/Flydigi.ControllerSdk/`.
+
+| Feature | Commands | State |
 |---|---|---|
-| RGB / lighting | `ReadLedConfig` **167** (works, response captured), `WriteRgbConfig` **169** (packed) | See the RGB section below — the test command 245 does nothing |
-| Screen image (pad + dock) | `UploadPic2K2Start/Data/End/Finish`, `UploadPicCommandK1/K2`, `TestScreen`, `OffScreen`, `ReadScreenSetting` | Image encoding may live in the Electron layer; likely the hardest |
-| Mapping profiles | `ApplyMappingConfigByCfgId`, `SaveCurrentMappingConfig`, `ReadCurrentMappingConfigId`, `WriteAllMappingConfig`, `ResetMappingConfigByCfgId` | Profile switching |
-| Macros | `ReadMacroConfig`, `WriteMarcoConfig`, `SetHardwareMacroEnable` | |
-| Device settings | 22 in `command.setting/` | report rate, stick sensitivity/precision, debounce, rebound, auto-calibration, motion debounce, sleep time, dock smart stop, mode switch, nickname |
-| Dock / cooler | `Flydigi.ChargerSdk.dll`, `Flydigi.CoolerSdk.dll` in `bundle/` | not yet decompiled |
+| Mapping profiles | status **161**, apply **162**, read **163**, write **164**/**165**, save **166** | **done** — `flydigi/mapping.py`, `tools/flydigi-mapping`, GUI |
+| Vibration + triggers | inside the profile blob | **done** — same module |
+| RGB / lighting | read **167**, write **168**/**169** | **done** — `flydigi/lighting.py`, GUI |
+| Macros | `ReadMacroConfig`, `WriteMarcoConfig`, `SetHardwareMacroEnable` | not started; blob at 230..768 is carried through untouched |
+| Screen image (pad + dock) | `UploadPic2K2Start/Data/End/Finish`, `UploadPicCommandK1/K2`, `TestScreen`, `OffScreen` | not started; encoding may live in the Electron layer |
+| Device settings | 22 in `command.setting/` | not started — report rate, stick sensitivity/precision, debounce, rebound, auto-calibration, motion debounce, sleep time, dock smart stop, nickname |
+| Dock / cooler | `Flydigi.ChargerSdk.dll`, `Flydigi.CoolerSdk.dll` in `bundle/` | not decompiled; out of scope by agreement |
+
+### Config blobs, both verified on hardware
+
+Mapping profile, 840 bytes (42 packets of 20), protocol v3.1:
+
+```
+0..2 version   2 package count   3..13 legacy LED   13..109 key table (32 x 3)
+109..123 joystick curves      123..137 trigger travel curves
+137..145 motion               145..154 grip vibration (master + 2 x 4)
+154..183 trigger motors       183..185 wheel
+185..225 force trigger (2 x 20)   225..227 data version   230..768 macros
+770..790 title UTF-16LE       790..840 joystick extra, macro cycle, motion curve
+```
+
+Lighting, 380 bytes (19 packets of 20):
+
+```
+0..2 version   2 click feedback   3 loop start   4 loop end   5 cycle time
+6 brightness   7 LED count (12)   8 mode   9..20 reserved
+20.. frames of `LED count` RGB triples -- 10 x 12 on an Apex 5
+```
 
 Config structures for mapping/macro/RGB are already decompiled as `m_fdg_*_struct_t` types.
 
@@ -72,11 +136,30 @@ Config structures for mapping/macro/RGB are already decompiled as `m_fdg_*_struc
   * **Never match a game process by cmdline alone** — Steam/Proton wrappers (`reaper`, `bwrap`,
     `pv-adverb`, `steam.exe`) all carry the game's path. Require the PE to be mapped.
   * **Effects persist in controller state** until changed; there is no timeout.
+  * **The pad discards unsaved config when it sleeps.** Not just on a power cycle — idling out is
+    enough, observed with lighting. Applying is working memory; command 166 is what makes it last.
   * **`effects.rumble()` must use `wait=0`** when driven continuously, or the 100 ms ACK wait puts
     the motors far behind.
   * **Steam Input must be off** for Tier 4 — it masks the pad and breaks DualSense semantics.
   * The Apex 5 sleeps on idle and its hidraw/evdev node numbers change on reconnect. Resolve by
     name/descriptor, never by path.
+  * **Reading a mapping config switches the pad to it.** The firmware pages it in as the live one,
+    audibly re-seating the trigger motors — that noise is the tell. Confirmed: after reading config
+    2, `read_status` reports 2 as active. Use `read_config_preserving`, and prefer command **161**,
+    which reports the active slot and a version id per slot with no side effect at all.
+  * **The config commands are checksummed and the trigger-effect commands are not.** A mapping or
+    lighting packet with a bad checksum gets no reply — the pad stays silent rather than erroring.
+  * **Lighting effects are frame data, not a mode byte.** The pad has no animation generator; it
+    plays the stored frames. Space Station computes them from (mode, colours) and uploads them, so
+    writing a different mode number alone changes nothing visible.
+  * **Frame geometry is not 16 x 10** despite what `LedConfigParser` walks — that is the older
+    490-byte layout. An Apex 5 returns 380 bytes = 10 frames x 12 LEDs. Derive it from the blob.
+  * **M1–M4 and C/Z are remap sources, not targets.** They have no XInput equivalent, so mapping a
+    face button onto one makes it send nothing. `APEX5_KEYS` is the source list, `XINPUT_TARGETS`
+    is what a remap may point at.
+  * **Never combine a `pkill -f` with the relaunch in one shell command** — the pattern matches the
+    shell running it and kills the session (exit 144). Two separate commands, and the `'[p]attern'`
+    bracket trick.
 
 ## Environment
 
@@ -94,7 +177,9 @@ Config structures for mapping/macro/RGB are already decompiled as `m_fdg_*_struc
 | Path | What |
 |---|---|
 | `PROTOCOL.md` | Full wire protocol + hardware verification results |
-| `flydigi/` | Library — `device.py` (transport), `effects.py` (commands), `games.py` (game list), `forza.py` (telemetry + rule engine) |
+| `flydigi/` | Library — `device.py` (transport), `blobs.py` (packetised config transfer), `effects.py` (live trigger commands), `mapping.py` (profiles, remapping, vibration, stored triggers), `lighting.py` (RGB), `games.py`, `forza.py` |
+| `gui/` | PySide6 desktop app (GPL-3.0-or-later) — `main.py`, `worker.py` (all device I/O), `profiles.py`, `triggers.py`, `lighting.py` |
+| `tools/flydigi-mapping` | CLI for profiles — list/show/set/clear/rename/apply/backup/restore |
 | `tools/flydigi-forza` | Forza driver — UDP 5300 → rules → triggers (`--dump` for telemetry only) |
 | `tools/flydigi-dsx` | DSX protocol listener on UDP 7878 — drives triggers from any DSX-compatible mod |
 | `tools/flydigi-monitor` | Memory-reading driver using Flydigi's XGameMonitor configs (`--probe` to debug offsets) |
@@ -102,7 +187,8 @@ Config structures for mapping/macro/RGB are already decompiled as `m_fdg_*_struc
 | `flydigi/ps5_data.py` | Generated DualSense descriptor + feature blobs (from MIT inputtino) |
 | `tools/gen_ps5_data.py` | Regenerates the above from inputtino's `ps5.hpp` |
 | `work/ref/inputtino/` | MIT reference clone — DS5 output report layout, canned feature reports |
-| `tests/` | `test_forza.py` (7), `test_dsx.py` (9), `test_monitor.py` — all pass without hardware |
+| `tests/` | `test_forza.py` (7), `test_dsx.py` (9), `test_monitor.py`, `test_relay.py` (37), `test_mapping.py` (105), `test_gui.py` (24) — all pass without hardware |
+| `tests/fake_pad.py` | Stand-in controller: multi-packet reads, diffed writes, apply, save, checksum rejection |
 | `tools/forza-simulate` | Synthetic telemetry generator, for testing without the game |
 | `tests/test_forza.py` | Self-test for the parser and rule engine (no hardware needed) |
 | `configs/forza.json` | Flydigi's own 15-rule Forza config, reused verbatim |
