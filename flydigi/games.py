@@ -68,8 +68,10 @@ def tier(game):
 def process_index(games=None):
     """Map lowercased process name -> game, for detection.
 
-    Note: many entries have empty processGameNames (Silksong, Space Marine 2),
-    so polling alone cannot detect every game. The launch wrapper covers those.
+    All 94 entries carry a name: 72 have only the singular `processGameName`
+    and an empty `processGameNames` list, which is why both are indexed here.
+    An earlier version of this note claimed some games were undetectable -- that
+    was reading the empty plural field as "no name", and it is not true.
     """
     games = games if games is not None else load()
     index = {}

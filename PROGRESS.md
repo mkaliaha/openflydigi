@@ -175,17 +175,18 @@ inventing something cleverer, because it is deliberately dull:
   * `ModStartType` says where the mod executable lives: 0 = game directory + mod path,
     1 = Space Station's own directory + mod path
 
+**Detection covers every game.** All 94 entries carry a process name — 72 have only the singular
+`processGameName` with an empty `processGameNames` list, which is why `games.process_index()` reads
+both. Polling can reach the whole list, so `flydigi-run` is a convenience (instant, no 1 Hz lag,
+survives a renamed process) rather than a requirement for coverage.
+
 So 1 Hz is enough and `flydigid`'s approach is already the right one. Two things they do not have
 to deal with that we do: Proton wrappers carrying the game's path in their cmdline (see
 `monitor.find_process`, which requires the PE to actually be mapped), and no equivalent of their
 "launch the game from our UI" path — which is what `flydigi-run` replaces.
 
-Two things that will bite:
+One thing that will bite:
 
-  * **Polling cannot detect every game.** Many entries have empty `processGameNames` (Silksong,
-    Space Marine 2), so those need the `flydigi-run` launch wrapper via Steam launch options
-    instead. A per-game Auto toggle should say which mechanism a title will use, or it will
-    silently do nothing for the ones polling cannot see.
   * **Per-game mode preference** — six titles support both Flydigi's mod and PS5 mode (Cyberpunk
     2077, Death Stranding DC, Jedi Survivor, Spider-Man Remastered, Miles Morales, Uncharted 4).
     Auto has to know which to start; the storage exists, the UI does not.
