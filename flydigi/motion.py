@@ -148,6 +148,24 @@ def read_report(ctrl):
     return None
 
 
+def read_info(ctrl, wait=0.6):
+    """Ask for device info and wait for the reply. None if the pad is asleep.
+
+    `read_report` is non-blocking and returns None the moment nothing is
+    pending, so polling it in a loop spins instead of waiting. This sends the
+    request and lets the transport block on select for the reply, which is what
+    a caller asking a one-off question actually wants.
+    """
+    buf = build(CMD_GET_INFO)
+    buf[4] = 2
+    buf[5] = checksum(buf, 3, 3 + buf[4])
+    for reply in ctrl.send(buf, wait=wait):
+        info = parse_info(reply)
+        if info:
+            return info
+    return None
+
+
 def read(ctrl):
     """Backwards-compatible motion-only read."""
     result = read_report(ctrl)

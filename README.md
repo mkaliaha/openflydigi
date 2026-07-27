@@ -54,6 +54,19 @@ tools/flydigi-ds5
 #   and disable Steam Input for that game
 ```
 
+## Desktop app
+
+Profiles, button remapping and per-game trigger routes, without Space Station:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r gui/requirements.txt
+.venv/bin/python -m gui
+```
+
+PySide6 is a dependency of the GUI only — everything under `flydigi/` and
+`tools/` keeps working on a machine with no Qt installed.
+
 ## Requirements
 
 - Linux with `hidraw` (`/dev/hidraw*` readable — usually already the case)
