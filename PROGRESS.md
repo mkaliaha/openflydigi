@@ -54,7 +54,7 @@ What remains is **coverage and ergonomics**, not feasibility.
 | 1. Vibration bind | 33 | cmd `82` SyncWithGrip, config from API, driven by game rumble | **Done & automated** — verified in Death Stranding 2, triggers buzz with in-game rumble, daemon auto-detects and applies |
 | 2. ForzaDualSense | 4 | Forza "Data Out" UDP telemetry → JSON rule engine → cmd `81` | **Built & self-tested.** Native reimplementation; 7/7 tests pass and a simulated drive drives real effects. Awaiting in-game validation |
 | 3. XGameMonitor | 31 | Generic engine + per-game config; reads game process memory | **Built & self-tested.** Chain walker verified against a real process via `/proc/<pid>/mem`. Needs a game to validate offsets |
-| 4. PS5 emulation | 15 | Game natively speaks DualSense; needs uhid virtual DS5 | **Foundation working.** Virtual DualSense created via pure-Python uhid; `hid-playstation` probes it and builds the full device tree (gamepad + motion + touchpad). Input relay and effect translation still to do |
+| 4. PS5 emulation | 15 | Game natively speaks DualSense; needs uhid virtual DS5 | **Built.** Virtual DS5 via pure-Python uhid, `hid-playstation` binds to it; input relay verified live (521 frames, all axes/buttons correct). DS5-effect→Flydigi-mode table is provisional and needs tuning in a game |
 | 5. Bespoke | 11 | One mod per game (F1 23/24/25, GTA5, Fallout 4, MH Rise, DMC5, RE2/3/7, Bannerlord) | Not started |
 
 ## Owned games (for prioritisation)
@@ -103,11 +103,15 @@ any undocumented command ordering.
 
 ## Next steps
 
-1. **Validate Forza in-game** once FH6 finishes: enable Data Out (127.0.0.1:5300), run
-   `tools/flydigi-forza`. Confirm effects fire while driving.
-2. **DSX UDP listener on 7878** — lets third-party DSX mods (a large existing ecosystem, not just
-   Flydigi's) drive the pad. Schema is in PROTOCOL.md §4.
-3. **Inspect XGameMonitor configs** in `mods/` to judge the `process_vm_readv` route for Tier 3
-   (31 games). Offline work, no downloads needed.
-4. **Decompile ChargerSdk / CoolerSdk** for dock support.
-5. **Qt/KDE app** once the backend covers enough ground.
+All five engines are built. What remains needs games, not code:
+
+1. **Forza Horizon 6** — enable Data Out (127.0.0.1:5300), run `tools/flydigi-forza --dump`
+   first to confirm telemetry crosses the Proton boundary, then run it for real.
+2. **Dark Souls: Remastered** — validates Tier 3 (31 games). Run
+   `tools/flydigi-monitor --probe <config>` and check the `move` define changes as you swing.
+   If it reads 0, suspect module-base resolution under Proton.
+3. **Deathloop** — validates Tier 4. Launch with
+   `SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501` so it binds the virtual DualSense, then
+   tune `relay.EFFECT_MAP` by feel.
+4. **Decompile ChargerSdk / CoolerSdk** for the gen2 dock.
+5. **Qt/KDE app** — see the end-goal section above.
