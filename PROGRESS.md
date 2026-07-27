@@ -91,6 +91,54 @@ What remains is **coverage and ergonomics**, not feasibility.
   acquire/heartbeat (`0x1C`). May need to disable Steam Input for the pad or tolerate it.
 - Which command family the K6 path needs (`83`/`85`/`87`) — untested; `81`/`82` were sufficient so far.
 
+## Next-session runbook
+
+Start by reading this file and `PROTOCOL.md`. Everything gitignored is reproducible:
+`tools/fetch-configs --monitor-configs --all-mods` restores `gamelist.json`, `configs/` and `mods/`.
+The decompile toolchain lives in the `wine-arch` distrobox (see Environment above); the decompiled
+sources under `decompiled/` are only needed for new protocol work, not to run anything.
+
+### Deathloop — validates Tier 4 (virtual DualSense, 15 games)
+
+Deathloop is `isPS5` with no mod: the game speaks DualSense natively, so there is nothing to
+install. The whole job is the relay.
+
+1. Connect the pad (it sleeps on idle — wake it first) and confirm all three interfaces:
+   `python3 tools/hid_probe.py` should show the vendor node (`usage pages 0xffa0`), and
+   `/dev/input/by-id/` should list `...-event-joystick`.
+2. Steam launch options for Deathloop:
+   `SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501 %command%`
+   Without this the game may bind the real Apex 5 instead of the virtual DualSense.
+3. Run `tools/flydigi-ds5` before launching the game. It logs each decoded DS5 effect and what
+   it translated to.
+4. In game, check the button prompts show PlayStation glyphs — that confirms it bound the virtual pad.
+5. Tune `flydigi/relay.py::EFFECT_MAP` by feel. It is provisional: the Flydigi modes are confirmed
+   but which DS5 effect type maps to which has never been felt in a game.
+
+What to watch for:
+- Double input (both pads registering) → the SDL ignore variable is not taking effect.
+- Effects logged but not felt → EFFECT_MAP mapping is wrong, not the transport; the transport is
+  the same cmd 81 that Forza already proved.
+- Touchpad-click is on the touchpad *sub-device*, which needs `udev/99-flydigi-apex5.rules`
+  installed or the node stays root-owned.
+
+### Dark Souls: Remastered — validates Tier 3 (memory monitor, 31 games)
+
+Chosen for the shortest pointer chain (3 hops vs 6-12 elsewhere) and the smallest download.
+
+1. `tools/fetch-configs --monitor-configs` → `configs/monitor/DarkSoulsRemastered.default.json`
+2. Start the game, get in-world, then:
+   `tools/flydigi-monitor --probe configs/monitor/DarkSoulsRemastered.default.json`
+   `--probe` reads memory and prints values without touching the controller.
+3. Success looks like: the `move` define changing as you swing a weapon or roll.
+4. If it reads 0 or a constant, the prime suspect is **module-base resolution under Proton**.
+   `find_module_base()` takes the lowest mapped address of a `.exe` in `/proc/<pid>/maps`; Wine may
+   map the PE differently from how `Module32Next` reports it on Windows. Inspect the maps directly
+   and compare against the config's first offset (`0x1A31768` for DS:R).
+5. Once values move sensibly, drop `--probe` to drive the triggers.
+
+Pointer chains are build-specific: a game patch will break a config until Flydigi ships new offsets.
+
 ## End goal: Qt/KDE app replacing Space Station
 
 Not just triggers — a full replacement covering what Steam Input and input-remapper cannot do.
