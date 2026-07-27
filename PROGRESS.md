@@ -52,7 +52,7 @@ What remains is **coverage and ergonomics**, not feasibility.
 | Tier | Games | Mechanism | State |
 |---|---|---|---|
 | 1. Vibration bind | 33 | cmd `82` SyncWithGrip, config from API, driven by game rumble | **Done & automated** — verified in Death Stranding 2, triggers buzz with in-game rumble, daemon auto-detects and applies |
-| 2. ForzaDualSense | 4 | Forza "Data Out" UDP telemetry → JSON rule engine → cmd `81` | **Built & self-tested.** Native reimplementation; 7/7 tests pass and a simulated drive drives real effects. Awaiting in-game validation |
+| 2. ForzaDualSense | 4 | Forza "Data Out" UDP telemetry → JSON rule engine → cmd `81` | **Done — validated in Forza Horizon 6.** All 7 distinct rules fired in-game and the effects are felt on the pad |
 | 3. XGameMonitor | 31 | Generic engine + per-game config; reads game process memory | **Built & self-tested.** Chain walker verified against a real process via `/proc/<pid>/mem`. Needs a game to validate offsets |
 | 4. PS5 emulation | 15 | Game natively speaks DualSense; needs uhid virtual DS5 | **Built.** Virtual DS5 via pure-Python uhid, `hid-playstation` binds to it; input relay verified live (521 frames, all axes/buttons correct). DS5-effect→Flydigi-mode table is provisional and needs tuning in a game |
 | 5. Bespoke | 11 | One mod per game (F1 23/24/25, GTA5, Fallout 4, MH Rise, DMC5, RE2/3/7, Bannerlord) | Not started |
@@ -66,6 +66,19 @@ What remains is **coverage and ergonomics**, not feasibility.
   Atomic Heart, 7 Days to Die, Mafia, Hunter: Call of the Wild
 - **Tier 4**: Deathloop, GTA5 Enhanced. *(Marvel Rivals does not run on Linux — anti-cheat)*
 - **Tier 5**: DMC5
+
+## Forza notes
+
+- **FH6 uses the 324-byte Data Out format**, same as FH5 — no `--accept` override needed.
+- In-game: HUD and Gameplay → Data Out → ON, IP `127.0.0.1`, port `5300`.
+- All four Forza mods (FH4, FH5, FH6, Motorsport) ship byte-identical rule configs (`af0961d95b34`),
+  so one `configs/forza.json` covers every one of them.
+- Validation run: 162 effect writes, all 7 behaviours exercised — traction loss/regain, gear shift,
+  low- and high-speed braking, manual and automatic reverse.
+- **FH6 itself is unstable under Proton**, unrelated to this project: it hits an NVIDIA-only sparse
+  model-buffer bug (vkd3d-proton#3053, Xid 109 / `NVRM: can't update VA space`). Root cause is still
+  unidentified upstream. Disabling DLSS/Reflex avoids the early splash crash; low geometry quality
+  reduces sparse buffer pressure. FH5 is the calmer target and exercises identical code.
 
 ## Open issues
 
