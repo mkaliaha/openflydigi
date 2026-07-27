@@ -47,7 +47,7 @@ graphs with `QPainter` or a QML `Canvas`.
 | Profiles → Buttons | remap, turbo + hold/toggle, rename, switch active, back up / restore to file |
 | Profiles → Vibration | master switch, per-grip enable, min/max window, strength |
 | Profiles → Triggers | stored effect (off / constant resistance), dead zone, trigger motor |
-| Adaptive triggers | all 94 games, searchable, filtered by route; pad-side ones apply from here |
+| Adaptive triggers | all 94 games, searchable, filtered by route; vibration presets load onto the pad from here |
 | Lighting | effect, up to 5 colours, brightness, cycle time, react-to-rumble |
 
 **Everything device-facing runs on a worker thread** (`gui/worker.py`) and requests cross as
@@ -137,10 +137,12 @@ data[11] stick precision   data[12] stick sensitivity
 
 So sleep time is readable as well as writable — worth reading before `UpdateSleepTime` writes it.
 
-**4b. An editor for the pad-side vibration bind.** The "Adaptive triggers" tab can apply a game's
-bind but not change it — it writes Flydigi's shipped `vibParams` (stroke, pressure, strength,
-frequency per side), `vibType`, `vibFilter` and `pwmScal` straight out of `gamelist.json`. Only
-`tools/flydigi_cmd.py bind` can vary them, which is not a real answer for tuning.
+**4b. An editor for the vibration bind.** Tier 1 is one bind — game rumble drives the trigger
+motors — and each "supported game" is a **preset** of numbers for it: `vibType`, `vibFilter`,
+`pwmScal`, and `vibParams` (stroke, pressure, strength, frequency per side). That is a sensible
+design; the labels just have to say so, or it reads as a per-game integration like the other four
+routes. Wording was fixed; the numbers still cannot be edited from the GUI, only through
+`tools/flydigi_cmd.py bind`.
 
 A lead worth checking first: the profile blob's force-trigger section (185..225) holds a `bind`
 sub-struct of **type, filter, scale + 5 params**, and the live bind command (82) takes bindType,

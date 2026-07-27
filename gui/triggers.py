@@ -7,16 +7,19 @@
 Games reach the triggers by five different routes and the difference matters to
 the user, because it decides what they have to do:
 
-    vibration   the pad does it -- write the binding once, nothing else runs
+    vibration   the pad does it -- one bind, tuned per game by a preset
     telemetry   a listener consumes the game's own network telemetry
     monitor     effects driven by reading the game's memory
     ps5         the game drives a DualSense; the virtual pad translates
     bespoke     a third-party mod speaks DSX; we only listen
 
-Only the vibration route can be applied from here and then forgotten, because
-it lives in the pad. The rest need a process running alongside the game, so
-this page tells you which and leaves starting it to you -- there is no daemon
-picking the route automatically yet.
+The vibration route is not really per-game: it is one bind -- game rumble drives
+the trigger motors -- and each "supported game" is a preset of numbers for it
+(vibType, vibFilter, pwmScal, and stroke/pressure/strength/frequency per side).
+Wording here should say preset rather than imply a per-game integration.
+
+The other four do need a process running alongside the game, so this page names
+which and leaves starting it to you -- there is no daemon picking automatically.
 
 Choices are stored per game in the user's config directory, not on the pad.
 """
@@ -36,7 +39,7 @@ CONFIG_DIR = os.path.join(
 PREFS_PATH = os.path.join(CONFIG_DIR, "games.json")
 
 TIER_LABELS = {
-    "vibration": "Pad-side — the pad binds game rumble to the triggers",
+    "vibration": "Preset — tunes the pad's rumble-to-trigger bind",
     "telemetry": "Game telemetry (needs flydigi-forza)",
     "monitor": "Game memory (needs flydigi-monitor)",
     "ps5": "DualSense mode (needs flydigi-ds5)",
@@ -108,7 +111,7 @@ class TriggerPage(QWidget):
         self.detail = QLabel("")
         self.detail.setWordWrap(True)
         bottom.addWidget(self.detail, 1)
-        self.apply_button = QPushButton("Apply to pad now")
+        self.apply_button = QPushButton("Load preset onto pad")
         self.apply_button.setEnabled(False)
         self.apply_button.clicked.connect(self._apply_selected)
         bottom.addWidget(self.apply_button)
@@ -189,9 +192,9 @@ class TriggerPage(QWidget):
         processes = ", ".join(game.get("processGameNames") or []) or "not listed"
         note = TIER_LABELS.get(route, route)
         if route == "vibration":
-            note += (" — the pad routes this game's rumble into the trigger motors itself, so "
-                     "nothing runs alongside the game. Applying writes Flydigi's own parameters; "
-                     "they are not editable here yet.")
+            note = ("The pad drives the triggers from this game's own rumble — nothing runs "
+                    "alongside it. This entry is a preset for that bind: travel, strength and "
+                    "filtering, tuned for this game. Loading it replaces the current bind.")
         elif route == "unknown":
             note += "."
         else:
