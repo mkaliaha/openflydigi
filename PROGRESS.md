@@ -54,7 +54,7 @@ What remains is **coverage and ergonomics**, not feasibility.
 | 1. Vibration bind | 33 | cmd `82` SyncWithGrip, config from API, driven by game rumble | **Done & automated** — verified in Death Stranding 2, triggers buzz with in-game rumble, daemon auto-detects and applies |
 | 2. ForzaDualSense | 4 | Forza "Data Out" UDP telemetry → JSON rule engine → cmd `81` | **Done — validated in Forza Horizon 6.** All 7 distinct rules fired in-game and the effects are felt on the pad |
 | 3. XGameMonitor | 31 | Generic engine + per-game config; reads game process memory | **Built & self-tested.** Chain walker verified against a real process via `/proc/<pid>/mem`. Needs a game to validate offsets |
-| 4. PS5 emulation | 15 | Game natively speaks DualSense; needs uhid virtual DS5 | **Built.** Virtual DS5 via pure-Python uhid, `hid-playstation` binds to it; input relay verified live (521 frames, all axes/buttons correct). Effect mapping transcribed from Flydigi's own `PS5DataManager.ProcessDataWithResult` — no longer guesswork |
+| 4. PS5 emulation | 15 | Game natively speaks DualSense; needs uhid virtual DS5 | **Validated in Deathloop** — adaptive triggers work in-game. Input relay, DS5 binding and effect translation all confirmed. Rumble and gyro outstanding, see notes |
 | 5. Bespoke | 11 | One mod per game (F1 23/24/25, GTA5, Fallout 4, MH Rise, DMC5, RE2/3/7, Bannerlord) | Not started |
 
 ## Owned games (for prioritisation)
@@ -79,6 +79,27 @@ What remains is **coverage and ergonomics**, not feasibility.
   model-buffer bug (vkd3d-proton#3053, Xid 109 / `NVRM: can't update VA space`). Root cause is still
   unidentified upstream. Disabling DLSS/Reflex avoids the early splash crash; low geometry quality
   reduces sparse buffer pressure. FH5 is the calmer target and exercises identical code.
+
+## Deathloop / Tier 4 findings
+
+Adaptive triggers **work in game**. Confirmed the transcribed mapping behaves exactly like
+Flydigi's: the game sent `type=0x25 p[0]=12` → `mode 3 [70,0,12]` and `type=0x21 p[1]=3` →
+`mode 1 [140,1]`, both matching their table's branches. Zero unmapped patterns.
+
+Two gaps remain, neither in the transport:
+
+- **No rumble.** The game sets trigger flags repeatedly but set the motor bits only once, at
+  startup, with zeros. Our output path is fine — a direct cmd `0x12` rumbles the pad and ACKs.
+  Most likely Deathloop drives haptics through the DualSense's USB *audio* device (it was a PS5
+  haptics showcase), which our HID-only virtual pad does not provide. Alternative duller
+  explanation: the PC port only implements motor rumble for XInput pads.
+  **To confirm:** run Deathloop with the real Apex 5 as a plain Xbox pad (no relay, no
+  `SDL_GAMECONTROLLER_IGNORE_DEVICES`). If it rumbles there, the DualSense path is haptics-only.
+  **Possible fix:** a PipeWire null sink presenting a fake DualSense audio endpoint, converting
+  what the game writes into motor rumble. Real work, but tractable.
+- **No gyro aiming.** Expected: we send zeros for gyro/accel. Real motion data needs the vendor
+  input stream (v2), which also brings the M1-M4 buttons. Not a permissions issue — SDL reads the
+  virtual pad's hidraw directly, so the evdev sub-device ACLs are irrelevant for Steam games.
 
 ## Open issues
 
