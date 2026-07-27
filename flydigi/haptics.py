@@ -41,6 +41,17 @@ CROSSOVER_HZ = 150.0
 
 SILENCE = 5e-5
 
+# The DualSense's voice coils have a perceptual floor that ERM motors do not:
+# quiet haptic content that is imperceptible on a real DualSense still spins a
+# motor. Gate it out rather than faithfully reproducing signal the reference
+# hardware effectively ignores.
+GATE = 0.015
+
+# Shaping exponent. 0.5 (square root) lifts quiet content hard, which is what
+# made the pad feel more sensitive than the DualSense; higher values keep quiet
+# passages quiet while still compressing the top end.
+CURVE = 0.7
+
 
 class Splitter:
     """Splits a haptic signal into low and high bands and measures each.
@@ -77,15 +88,18 @@ class Splitter:
         return math.sqrt(low_acc / frames), math.sqrt(high_acc / frames)
 
 
-def to_motor(level, gain):
+def to_motor(level, gain, gate=GATE, curve=CURVE):
     """Map a band level to a motor value (0-255).
 
-    Square-root shaping because audio energy spans a far wider range than the
-    motors can express; linear mapping leaves everything either off or maxed.
+    Compressive shaping because audio energy spans a far wider range than the
+    motors can express, and a gate below which nothing is emitted at all.
     """
-    if level < SILENCE:
+    if level < max(gate, SILENCE):
         return 0
-    return int(min(1.0, math.sqrt(level * gain)) * 255)
+    # Rescale above the gate so the first perceptible motion starts there
+    # rather than jumping straight to a mid value.
+    scaled = (level - gate) / max(1e-9, 1.0 - gate)
+    return int(min(1.0, (scaled * gain) ** curve) * 255)
 
 
 def unpack(buf, stride=CHANNELS):
@@ -95,6 +109,6 @@ def unpack(buf, stride=CHANNELS):
     return struct.unpack_from(f"<{frames * stride}f", buf, 0)
 
 
-def levels_to_motors(low, high, gain):
+def levels_to_motors(low, high, gain, gate=GATE, curve=CURVE):
     """Low band -> left (large, low-frequency), high band -> right (small)."""
-    return to_motor(low, gain), to_motor(high, gain)
+    return to_motor(low, gain, gate, curve), to_motor(high, gain, gate, curve)

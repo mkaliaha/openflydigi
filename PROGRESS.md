@@ -215,6 +215,25 @@ What reading them is still worth:
 For anything else the pad's own onboard remapping is the better mechanism -- it works with no
 software running and persists in controller memory.
 
+## Prior art (researched)
+
+  * **`DualSense-haptic-helper`** (MIT) — real hardware; independently found haptics on channels
+    2 and 3 of a 4.0 stream, matching our tone probing. Warns that **Steam Input masks the
+    DualSense as an Xbox pad and breaks 4-channel audio**, so it must be disabled.
+  * **`Haptic-Feedback-Linux`** and **`xzn/proton-ds5-haptic`** — Wine/Proton patches enabling DS5
+    haptics, plus a udev rule setting `SOUND_DESCRIPTION="Wireless Controller"`.
+  * **GE-Proton 11-2** and **proton-cachyos** now ship wired PS5 haptics natively for real
+    controllers. A WirePlumber rule may be needed to stop PipeWire collapsing the DS5 node to mono.
+
+**The mechanism**, from the patch discussions: games locate the haptic device by name, and the Wine
+patches "fetch the audio-side ContainerId from setupapi so HID and MMDevice agree by construction".
+That is precisely the association our null sink lacked — a uhid device and an unrelated PipeWire
+sink can never share a ContainerId.
+
+**Nobody has emulated a virtual DualSense with a working audio device.** Every project either uses
+real hardware or emulates HID only (inputtino, DSX). The audio half of virtual emulation is
+unexplored, consistent with the blockers below.
+
 ## Virtual USB composite device (not built)
 
 Our PipeWire null sink was ignored by the game even when named "Wireless Controller", while a real
@@ -231,8 +250,20 @@ the kernel creates the hidraw node and the ALSA card from the same device:
 Both modules are present on the kernel. Target spec, from the real device:
 `s16le 4ch 48000Hz`, `alsa.components = USB054c:0ce6`, `device.bus = usb`, haptics on ch3.
 
-Requires root, and a rewrite of the working uhid path. The conversion half is already proven, so
-this is purely "make the game write to us instead of a real DualSense".
+**Blocked on this kernel.** Fedora ships neither `usb_f_uac2` nor `raw_gadget`, so there is no way
+to present a USB audio interface without building and signing a kernel module — an ongoing chore on
+a Secure Boot, auto-updating, ostree system. `dummy_hcd`, `vhci-hcd`, `usb_f_hid` and `usb_f_fs`
+are all present and Fedora-signed, so the HID half is easy; only audio is missing.
+
+Remaining routes, none cheap: build `usb_f_uac2` and sign it; implement UAC2 over FunctionFS
+including isochronous endpoints (no reference implementation exists); or rebase to an image that
+ships the module.
+
+**Deliberately not pursued:** deriving rumble from the game's own audio output. It fires on music
+and dialogue and does not resemble real haptics.
+
+**Status: parked.** The conversion works and is proven against real game haptics; it needs a real
+DualSense present as the source. Reviving this means solving the audio-device emulation above.
 
 ## Open issues
 

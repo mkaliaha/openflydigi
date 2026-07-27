@@ -131,6 +131,11 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sink", help="sink to listen on (default: find a DualSense)")
     ap.add_argument("--gain", type=float, default=3.0)
+    ap.add_argument("--gate", type=float, default=haptics.GATE,
+                    help="ignore levels below this; raise it if the pad rumbles "
+                         "where a real DualSense feels silent")
+    ap.add_argument("--curve", type=float, default=haptics.CURVE,
+                    help="shaping exponent; higher keeps quiet content quiet")
     ap.add_argument("--crossover", type=float, default=haptics.CROSSOVER_HZ,
                     help="Hz dividing low-band (left motor) from high (right)")
     ap.add_argument("--dump", action="store_true",
@@ -172,7 +177,8 @@ def main():
                 break
             dropped_total += dropped
             low, high = splitter.process(haptics.unpack(buf))
-            motors = haptics.levels_to_motors(low, high, args.gain)
+            motors = haptics.levels_to_motors(low, high, args.gain,
+                                              args.gate, args.curve)
 
             if args.watch and time.time() - last_watch > 2.0:
                 last_watch = time.time()
