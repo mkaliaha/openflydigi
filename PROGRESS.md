@@ -177,8 +177,9 @@ inventing something cleverer, because it is deliberately dull:
 
 **Detection covers every game.** All 94 entries carry a process name — 72 have only the singular
 `processGameName` with an empty `processGameNames` list, which is why `games.process_index()` reads
-both. The plural list is for alternate executables of one build, not per-store variants: Apex
-Legends (`r5apex` / `r5apex_dx12`) is the only entry genuinely using it, 21 others merely repeat
+both. The plural list is for one game shipping several executables — typically one per graphics API —
+not per-store variants: Apex Legends (`r5apex` / `r5apex_dx12`) is the only entry genuinely using
+it, 21 others merely repeat
 the singular, and most multi-store titles have none because their executable name is the same
 everywhere. Polling can reach the whole list, so `flydigi-run` is a convenience (instant, no 1 Hz lag,
 survives a renamed process) rather than a requirement for coverage.

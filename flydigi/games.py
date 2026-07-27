@@ -73,10 +73,10 @@ def process_index(games=None):
     An earlier version of this note claimed some games were undetectable -- that
     was reading the empty plural field as "no name", and it is not true.
 
-    The plural list holds alternate executables for the same game rather than
-    per-store variants: Apex Legends is the only entry that really uses it
-    (`r5apex` and `r5apex_dx12`, a DX11/DX12 pair), and most of the other 21
-    just repeat the singular name. Multi-store titles mostly have no plural list
+    The plural list is for one game shipping several executables -- typically
+    one per graphics API -- rather than per-store variants. Apex Legends is the
+    only entry that really uses it (`r5apex` and `r5apex_dx12`), and the other
+    21 just repeat the singular name. Multi-store titles mostly have no plural list
     at all, their executables being named the same everywhere.
     """
     games = games if games is not None else load()
