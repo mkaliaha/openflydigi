@@ -74,6 +74,26 @@ sources, extracted assemblies, mod binaries, or config files. To reproduce:
    in [PROGRESS.md](PROGRESS.md) — install the Windows app under Wine, unpack
    the .NET single-file bundle with `sfextract`, decompile with `ilspycmd`.
 
+## Disclaimer
+
+This is an independent project. It is **not affiliated with, authorised by, or
+endorsed by Flydigi**. "Flydigi", "Space Station" and "Apex 5" are used only to
+identify the hardware and software this project interoperates with; any
+trademarks belong to their respective owners.
+
+The protocol was determined by reverse engineering Flydigi's own software for
+the sole purpose of making hardware you already own work on Linux — an
+interoperability purpose expressly permitted in some jurisdictions (in the EU,
+Directive 2009/24/EC Art. 6, which Art. 8 protects from contractual override)
+and treated differently in others. Check what applies where you are.
+
+No Flydigi code, assembly, asset, game config or mod binary is included or
+redistributed here. `tools/fetch-configs` contacts Flydigi's public API only
+when you run it, and stores what it fetches locally without republishing it.
+
+Provided as-is, with no warranty. Writing configuration to a controller carries
+the ordinary risk of writing to any device's flash.
+
 ## Licensing
 
 Per-file, following [REUSE](https://reuse.software/) — every file carries an

@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
+"""Read and edit the button-remapping profiles stored in the pad.
+
+    tools/flydigi-mapping list
+    tools/flydigi-mapping show 0
+    tools/flydigi-mapping set 0 m1 a --save
+    tools/flydigi-mapping clear 0 m1 --save
+    tools/flydigi-mapping rename 3 "Racing" --save
+    tools/flydigi-mapping apply 1
+    tools/flydigi-mapping backup 0 profile0.bin
+    tools/flydigi-mapping restore 0 profile0.bin --save
+
+Edits land in the pad's working memory immediately; --save commits them to
+flash so they survive a power cycle. Always back up before writing -- these
+profiles are the only copy, and Space Station is not available to rebuild them.
+"""
+import argparse
+import sys
+
+sys.path.insert(0, __file__.rsplit("/", 2)[0])
+
+from flydigi import device, mapping
+
+
+def open_pad():
+    try:
+        return device.Controller()
+    except device.DeviceNotFound as exc:
+        sys.exit(f"error: {exc}")
+
+
+def read(ctrl, cfg_id):
+    try:
+        return mapping.read_config(ctrl, cfg_id)
+    except mapping.ProtocolError as exc:
+        sys.exit(f"error: {exc}")
+
+
+def describe(config):
+    remapped = config.remapped()
+    if not remapped:
+        return "default"
+    parts = []
+    for key, (target, mode, frequency) in sorted(remapped.items()):
+        label = f"{key}->{target}"
+        if frequency:
+            label += f" turbo/{frequency}"
+            label += "(hold)" if mode == mapping.TURBO_WHILE_HELD else "(toggle)"
+        parts.append(label)
+    return ", ".join(parts)
+
+
+def commit(ctrl, cfg_id, new, old, save):
+    sent = mapping.write_config(ctrl, cfg_id, new, old=old)
+    print(f"wrote {sent} packet(s) to profile {cfg_id}")
+    if save:
+        print("saved to flash" if mapping.save_config(ctrl)
+              else "warning: no reply to save -- change may be lost on power cycle")
+    else:
+        print("not saved -- pass --save to keep it across a power cycle")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--profiles", type=int, default=4,
+                        help="how many profile slots to scan (default 4)")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("list", help="show every profile")
+    p = sub.add_parser("show", help="show one profile in full")
+    p.add_argument("cfg", type=int)
+
+    p = sub.add_parser("set", help="remap a button")
+    p.add_argument("cfg", type=int)
+    p.add_argument("key", help=f"one of: {', '.join(mapping.APEX5_KEYS)}")
+    p.add_argument("target", help="key to send instead")
+    p.add_argument("--turbo", type=int, default=0,
+                   help="turbo frequency; 0 disables")
+    p.add_argument("--turbo-toggle", action="store_true",
+                   help="turbo toggles rather than repeating while held")
+    p.add_argument("--save", action="store_true")
+
+    p = sub.add_parser("clear", help="restore a button to its default")
+    p.add_argument("cfg", type=int)
+    p.add_argument("key")
+    p.add_argument("--save", action="store_true")
+
+    p = sub.add_parser("rename", help="rename a profile")
+    p.add_argument("cfg", type=int)
+    p.add_argument("title")
+    p.add_argument("--save", action="store_true")
+
+    p = sub.add_parser("apply", help="switch the pad to a profile")
+    p.add_argument("cfg", type=int)
+
+    p = sub.add_parser("backup", help="dump a profile to a file")
+    p.add_argument("cfg", type=int)
+    p.add_argument("path")
+
+    p = sub.add_parser("restore", help="write a dumped profile back")
+    p.add_argument("cfg", type=int)
+    p.add_argument("path")
+    p.add_argument("--save", action="store_true")
+
+    args = parser.parse_args()
+    ctrl = open_pad()
+
+    if args.cmd == "list":
+        for cfg_id in range(args.profiles):
+            try:
+                config = mapping.read_config(ctrl, cfg_id)
+            except mapping.ProtocolError as exc:
+                print(f"{cfg_id}: unreadable ({exc})")
+                continue
+            print(f"{cfg_id}: {config.title!r:20} {describe(config)}")
+        return
+
+    if args.cmd == "apply":
+        print("switched" if mapping.apply_config(ctrl, args.cfg)
+              else "no reply -- the pad may be asleep")
+        return
+
+    config = read(ctrl, args.cfg)
+
+    if args.cmd == "show":
+        version = f"{config.proto_version >> 8}.{config.proto_version & 0xF}"
+        print(f"profile {args.cfg}: {config.title!r}")
+        print(f"  protocol v{version}, {len(config.blob)} bytes, "
+              f"data version {config.data_version}")
+        for key in mapping.APEX5_KEYS:
+            target, mode, frequency = config.mapping(key)
+            note = "" if target == key and not frequency else "   <-- remapped"
+            turbo = f" turbo {frequency}" if frequency else ""
+            print(f"  {key:<7} -> {target}{turbo}{note}")
+        return
+
+    if args.cmd == "backup":
+        with open(args.path, "wb") as fh:
+            fh.write(bytes(config.blob))
+        print(f"wrote {len(config.blob)} bytes to {args.path}")
+        return
+
+    new = config.copy()
+    if args.cmd == "set":
+        if args.key not in mapping.KEY_IDS:
+            sys.exit(f"error: unknown key {args.key!r}")
+        if args.target not in mapping.KEY_IDS:
+            sys.exit(f"error: unknown target {args.target!r}")
+        mode = mapping.TURBO_TOGGLE if args.turbo_toggle else mapping.TURBO_WHILE_HELD
+        new.set_mapping(args.key, args.target, mode, args.turbo)
+    elif args.cmd == "clear":
+        new.set_mapping(args.key, None)
+    elif args.cmd == "rename":
+        new.title = args.title
+    elif args.cmd == "restore":
+        with open(args.path, "rb") as fh:
+            blob = fh.read()
+        if len(blob) != len(config.blob):
+            sys.exit(f"error: {args.path} is {len(blob)} bytes, "
+                     f"pad expects {len(config.blob)}")
+        new = mapping.MappingConfig(blob, args.cfg)
+
+    commit(ctrl, args.cfg, new, config, getattr(args, "save", False))
+
+
+if __name__ == "__main__":
+    main()
