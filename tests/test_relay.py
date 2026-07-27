@@ -72,12 +72,25 @@ def main():
                          state.buttons0 == 0 and state.buttons1 == 0
                          and state.buttons2 == 0))
 
-    # Face buttons must map positionally, not by label.
-    state = relay.build_state(FakeReader([evdev.BTN_WEST]), ds5.InputState())
-    results.append(check("BTN_WEST -> SQUARE", bool(state.buttons0 & ds5.SQUARE)))
-    state = relay.build_state(FakeReader([evdev.BTN_NORTH]), ds5.InputState())
-    results.append(check("BTN_NORTH -> TRIANGLE",
-                         bool(state.buttons0 & ds5.TRIANGLE)))
+    # Face buttons map by physical position. The evdev compass aliases are
+    # inverted for Xbox-layout pads (0x133 = X = left, 0x134 = Y = top), so
+    # these pin the raw codes rather than the alias names.
+    state = relay.build_state(FakeReader([0x133]), ds5.InputState())
+    results.append(check("code 0x133 (Xbox X, left) -> SQUARE (left)",
+                         bool(state.buttons0 & ds5.SQUARE)
+                         and not state.buttons0 & ds5.TRIANGLE,
+                         f"buttons0={state.buttons0:#x}"))
+    state = relay.build_state(FakeReader([0x134]), ds5.InputState())
+    results.append(check("code 0x134 (Xbox Y, top) -> TRIANGLE (top)",
+                         bool(state.buttons0 & ds5.TRIANGLE)
+                         and not state.buttons0 & ds5.SQUARE,
+                         f"buttons0={state.buttons0:#x}"))
+    state = relay.build_state(FakeReader([0x130]), ds5.InputState())
+    results.append(check("code 0x130 (A, bottom) -> CROSS (bottom)",
+                         bool(state.buttons0 & ds5.CROSS)))
+    state = relay.build_state(FakeReader([0x131]), ds5.InputState())
+    results.append(check("code 0x131 (B, right) -> CIRCLE (right)",
+                         bool(state.buttons0 & ds5.CIRCLE)))
 
     # Digital L2/R2 derived from analog travel.
     state = relay.build_state(
@@ -131,6 +144,16 @@ def main():
     for name, side, type_, params, expected in cases:
         got = relay.translate(eff(side, type_, params))
         results.append(check(name, got == expected, f"got {got}, want {expected}"))
+
+    # Rumble must register when only USE_RUMBLE_NOT_HAPTICS (0x02) is set, and
+    # when trigger bits share the report -- not just on MOTOR (0x01) alone.
+    def out(flag0):
+        b = bytearray(64); b[0] = 0x02; b[1] = flag0; b[3] = 77; b[4] = 180
+        return ds5.parse_output(bytes(b))["rumble"]
+    results.append(check("rumble on MOTOR bit", out(0x01) == (180, 77)))
+    results.append(check("rumble on USE_RUMBLE_NOT_HAPTICS alone", out(0x02) == (180, 77)))
+    results.append(check("rumble alongside trigger bits", out(0x0D) == (180, 77)))
+    results.append(check("no rumble when no motor flags", out(0x00) is None))
 
     # Unrecognised types must leave the trigger alone, not clear it.
     results.append(check("unknown type -> None (trigger untouched)",

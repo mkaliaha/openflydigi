@@ -26,7 +26,17 @@ ABS_RX, ABS_RY, ABS_RZ = 0x03, 0x04, 0x05
 ABS_HAT0X, ABS_HAT0Y = 0x10, 0x11
 
 BTN_SOUTH, BTN_EAST = 0x130, 0x131
-BTN_NORTH, BTN_WEST = 0x133, 0x134
+
+# Trap: the directional aliases are positionally WRONG for Xbox-layout pads.
+# 0x133/0x134 were originally BTN_X/BTN_Y (a Nintendo-ish layout where X is the
+# top button), and the BTN_NORTH/BTN_WEST aliases were bolted on later. xpad
+# sends Xbox X -> 0x133 and Xbox Y -> 0x134, so on this controller:
+#     0x133 = X = the LEFT face button   (aliased BTN_NORTH)
+#     0x134 = Y = the TOP face button    (aliased BTN_WEST)
+# Use BTN_X / BTN_Y below and ignore the compass names.
+BTN_X, BTN_Y = 0x133, 0x134
+BTN_NORTH, BTN_WEST = BTN_X, BTN_Y  # kept for reference; prefer BTN_X / BTN_Y
+
 BTN_TL, BTN_TR = 0x136, 0x137
 BTN_SELECT, BTN_START, BTN_MODE = 0x13A, 0x13B, 0x13C
 BTN_THUMBL, BTN_THUMBR = 0x13D, 0x13E

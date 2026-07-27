@@ -11,11 +11,15 @@ FLYDIGI_VID, FLYDIGI_PID = 0x37D7, 0x2501
 TRIGGER_DIGITAL_THRESHOLD = 0.12
 
 # Positional mapping: Xbox layout -> DualSense layout.
+#
+# Use BTN_X / BTN_Y, not the BTN_NORTH / BTN_WEST aliases: on Xbox-layout pads
+# those aliases are positionally inverted (see flydigi/evdev.py). Mapping by the
+# compass names put Y on Square instead of Triangle.
 FACE_BUTTONS = [
-    (evdev.BTN_SOUTH, ds5.CROSS, 0),
-    (evdev.BTN_EAST, ds5.CIRCLE, 0),
-    (evdev.BTN_WEST, ds5.SQUARE, 0),
-    (evdev.BTN_NORTH, ds5.TRIANGLE, 0),
+    (evdev.BTN_SOUTH, ds5.CROSS, 0),     # A (bottom)  -> Cross (bottom)
+    (evdev.BTN_EAST, ds5.CIRCLE, 0),     # B (right)   -> Circle (right)
+    (evdev.BTN_X, ds5.SQUARE, 0),        # X (left)    -> Square (left)
+    (evdev.BTN_Y, ds5.TRIANGLE, 0),      # Y (top)     -> Triangle (top)
     (evdev.BTN_TL, ds5.L1, 1),
     (evdev.BTN_TR, ds5.R1, 1),
     (evdev.BTN_START, ds5.OPTIONS, 1),

@@ -41,6 +41,7 @@ BATTERY_FULL = 0x01
 DS_OUTPUT_REPORT_USB = 0x02
 DS_OUTPUT_REPORT_BT = 0x31
 FLAG0_MOTOR = 0x01
+FLAG0_USE_RUMBLE_NOT_HAPTICS = 0x02
 FLAG0_RIGHT_TRIGGER = 0x04
 FLAG0_LEFT_TRIGGER = 0x08
 FLAG2_COMPATIBLE_VIBRATION = 0x04
@@ -151,7 +152,13 @@ def parse_output(data):
     motor_left = data[base + 3]
     flag2 = data[base + 38] if len(data) > base + 38 else 0
 
-    if flag0 & FLAG0_MOTOR or flag2 & FLAG2_COMPATIBLE_VIBRATION:
+    # Flydigi accepts motor data when valid_flag0 is exactly 1, 2 or 3, i.e. it
+    # treats USE_RUMBLE_NOT_HAPTICS (0x02) on its own as valid. Testing only
+    # MOTOR (0x01) would miss games that set just 0x02. Using a bitmask rather
+    # than their exact-value match, so motor data still registers when trigger
+    # bits are set in the same report.
+    if flag0 & (FLAG0_MOTOR | FLAG0_USE_RUMBLE_NOT_HAPTICS) \
+            or flag2 & FLAG2_COMPATIBLE_VIBRATION:
         result["rumble"] = (motor_left, motor_right)
 
     if flag0 & FLAG0_RIGHT_TRIGGER:
