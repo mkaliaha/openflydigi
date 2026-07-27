@@ -59,6 +59,29 @@ BRIGHTNESS_MAX = 100
 # writing colours runs off the end and silently grows the config.
 DEFAULT_LEDS_PER_FRAME = 10
 
+# Effect ids as Space Station numbers them, recovered from its own enum. An
+# Apex 5 ships storing 7 (wave).
+#
+# These are what goes in the mode byte. The *look*, though, comes from the
+# frames -- changing the byte alone was not observed to alter anything -- so
+# the generators below produce frame data and set the matching id, which keeps
+# a config coherent if Space Station ever reads it back.
+EFFECT_OFF = 0
+EFFECT_STREAMING = 1        # "Flow"
+EFFECT_ROTATION = 2
+EFFECT_BREATHING = 3
+EFFECT_STATIC_SINGLE = 4
+EFFECT_STATIC_MULTI = 5
+EFFECT_RAINBOW = 6
+EFFECT_WAVE = 7
+EFFECT_FLASH = 8
+EFFECT_SMART = 9
+EFFECT_CUSTOM = 99
+
+# Space Station allows five, and offers this blue when adding one.
+MAX_COLOURS = 5
+DEFAULT_COLOUR = (0, 116, 255)
+
 
 def _blend(first, second, amount):
     return tuple(int(a + (b - a) * amount) for a, b in zip(first, second))
@@ -82,6 +105,19 @@ def _hue(position):
     falling = 255 - rising
     return [(255, rising, 0), (falling, 255, 0), (0, 255, rising),
             (0, falling, 255), (rising, 0, 255), (255, 0, falling)][offset]
+
+
+def suggest_colour(existing=()):
+    """A colour to offer when adding one, distinct from what is already there.
+
+    Space Station always offers the same blue, which is fine in a UI that shows
+    a colour wheel next to it but reads as "adding did nothing" here: a second
+    identical colour produces an identical animation.
+    """
+    existing = list(existing)
+    if not existing:
+        return DEFAULT_COLOUR
+    return _hue((len(existing) / MAX_COLOURS + 0.33) % 1.0)
 
 
 def read_config(ctrl, cfg_id=0, wait=1.5, retries=3):
@@ -206,6 +242,29 @@ class LedConfig:
     def _all_frames(self):
         self.loop = (0, max(0, self.frames - 1))
 
+    def apply_effect(self, effect, colours=()):
+        """Generate frames for one of Space Station's effect ids.
+
+        The frame data is ours -- only the ids and the names come from their
+        software -- so these match in spirit rather than pixel for pixel.
+        """
+        colours = list(colours) or [DEFAULT_COLOUR]
+        builder = {
+            EFFECT_OFF: lambda: self.set_off(),
+            EFFECT_STREAMING: lambda: self.set_flow(colours),
+            EFFECT_ROTATION: lambda: self.set_rotation(colours),
+            EFFECT_BREATHING: lambda: self.set_breath(colours),
+            EFFECT_STATIC_SINGLE: lambda: self.set_solid(colours[0]),
+            EFFECT_STATIC_MULTI: lambda: self.set_static_multi(colours),
+            EFFECT_RAINBOW: lambda: self.set_rainbow(),
+            EFFECT_WAVE: lambda: self.set_wave(colours),
+            EFFECT_FLASH: lambda: self.set_flash(colours),
+        }.get(effect)
+        if builder is None:
+            raise ValueError(f"no frame generator for effect {effect}")
+        builder()
+        self.mode = effect
+
     def set_breath(self, colours):
         """Fade the whole pad in and out through each colour in turn."""
         colours = list(colours) or [(255, 255, 255)]
@@ -230,6 +289,59 @@ class LedConfig:
                 position = (led / leds + frame / max(1, self.frames)) % 1.0
                 self.set_led(frame, led, _sample(colours, position))
         self._all_frames()
+
+    def set_rotation(self, colours):
+        """A lit arc travelling around the pad, the rest dark."""
+        colours = list(colours) or [DEFAULT_COLOUR]
+        leds = self.leds_per_frame
+        span = max(1, leds // 3)          # how much of the ring is lit at once
+        for frame in range(self.frames):
+            head = frame * leds / max(1, self.frames)
+            colour = colours[frame % len(colours)]
+            for led in range(leds):
+                # Distance behind the head, wrapped, so the arc fades out.
+                behind = (head - led) % leds
+                level = max(0.0, 1.0 - behind / span)
+                self.set_led(frame, led,
+                             tuple(int(channel * level) for channel in colour))
+        self._all_frames()
+
+    def set_wave(self, colours):
+        """A brightness wave running along the pad."""
+        colours = list(colours) or [DEFAULT_COLOUR]
+        leds = self.leds_per_frame
+        for frame in range(self.frames):
+            for led in range(leds):
+                position = (led / leds + frame / max(1, self.frames)) % 1.0
+                # Triangular rather than sinusoidal, to keep this dependency
+                # free and because the difference is not visible on 12 LEDs.
+                level = 1.0 - abs(2.0 * position - 1.0)
+                colour = _sample(colours, led / leds)
+                self.set_led(frame, led,
+                             tuple(int(channel * level) for channel in colour))
+        self._all_frames()
+
+    def set_flash(self, colours):
+        """Everything on, everything off."""
+        colours = list(colours) or [DEFAULT_COLOUR]
+        for frame in range(self.frames):
+            lit = frame % 2 == 0
+            colour = colours[(frame // 2) % len(colours)] if lit else (0, 0, 0)
+            for led in range(self.leds_per_frame):
+                self.set_led(frame, led, colour)
+        self._all_frames()
+
+    def set_static_multi(self, colours):
+        """The colours spread across the pad at once, not animated."""
+        colours = list(colours) or [DEFAULT_COLOUR]
+        leds = self.leds_per_frame
+        for frame in range(self.frames):
+            for led in range(leds):
+                self.set_led(frame, led, _sample(colours, led / leds))
+        self._all_frames()
+
+    def set_off(self):
+        self.set_solid((0, 0, 0))
 
     def set_rainbow(self):
         """A full hue sweep, the degenerate case of flow over the wheel."""

@@ -14,12 +14,20 @@ from PySide6.QtWidgets import (
 
 from flydigi import lighting
 
-# Effects we generate frames for. The pad has no animation generator of its own
-# -- see flydigi/lighting.py -- so each of these writes the frame data, and the
-# mode byte stored alongside is only a record of which one produced it.
-# "Breath" and "Flow" are Space Station's own names for its two controller
-# modes; static and rainbow are the obvious remaining cases.
-EFFECTS = ["Static", "Breath", "Flow", "Rainbow"]
+# Space Station's own effect ids and names. The pad has no animation generator
+# -- see flydigi/lighting.py -- so picking one of these writes frame data and
+# records the matching id.
+EFFECTS = [
+    ("Static", lighting.EFFECT_STATIC_SINGLE, 1),
+    ("Static, multiple colours", lighting.EFFECT_STATIC_MULTI, lighting.MAX_COLOURS),
+    ("Breathing", lighting.EFFECT_BREATHING, lighting.MAX_COLOURS),
+    ("Flow", lighting.EFFECT_STREAMING, lighting.MAX_COLOURS),
+    ("Rotation", lighting.EFFECT_ROTATION, lighting.MAX_COLOURS),
+    ("Wave", lighting.EFFECT_WAVE, lighting.MAX_COLOURS),
+    ("Flash", lighting.EFFECT_FLASH, lighting.MAX_COLOURS),
+    ("Rainbow", lighting.EFFECT_RAINBOW, 0),
+    ("Off", lighting.EFFECT_OFF, 0),
+]
 
 # The stored mode byte uses Space Station's numbering, not ours, so on load we
 # cannot say which of our effects produced what is on the pad. Rather than
@@ -42,7 +50,7 @@ class LightingPage(QWidget):
         self._stored = None       # bytes as last read from the pad
         self._edited = None
         self._loading = False
-        self._colour = (0, 128, 255)
+        self._colours = [lighting.DEFAULT_COLOUR]
 
         layout = QVBoxLayout(self)
 
@@ -50,7 +58,7 @@ class LightingPage(QWidget):
         form = QFormLayout(box)
 
         self.mode = QComboBox()
-        self.mode.addItems([KEEP_CURRENT] + EFFECTS)
+        self.mode.addItems([KEEP_CURRENT] + [name for name, _id, _n in EFFECTS])
         self.mode.currentIndexChanged.connect(self._edit)
         form.addRow("Effect", self.mode)
 
@@ -85,15 +93,20 @@ class LightingPage(QWidget):
         self.click_feedback.toggled.connect(self._edit)
         form.addRow(self.click_feedback)
 
-        colour_row = QHBoxLayout()
-        self.colour_button = QPushButton("Pick colour…")
-        self.colour_button.clicked.connect(self._pick_colour)
-        self.colour_preview = QLabel()
-        self.colour_preview.setMinimumWidth(60)
-        self.colour_preview.setAutoFillBackground(True)
-        colour_row.addWidget(self.colour_button)
-        colour_row.addWidget(self.colour_preview, 1)
-        form.addRow("Colour", colour_row)
+        self.colour_row = QHBoxLayout()
+        self.swatches = []
+        self.add_colour = QPushButton("+")
+        self.add_colour.setFixedWidth(30)
+        self.add_colour.setToolTip(f"Add a colour (up to {lighting.MAX_COLOURS})")
+        self.add_colour.clicked.connect(self._add_colour)
+        self.remove_colour = QPushButton("−")
+        self.remove_colour.setFixedWidth(30)
+        self.remove_colour.setToolTip("Remove the last colour")
+        self.remove_colour.clicked.connect(self._remove_colour)
+        self.colour_row.addStretch(1)
+        self.colour_row.addWidget(self.add_colour)
+        self.colour_row.addWidget(self.remove_colour)
+        form.addRow("Colours", self.colour_row)
 
         layout.addWidget(box)
 
@@ -124,10 +137,10 @@ class LightingPage(QWidget):
         self._show_cycle(self.speed.value())
         self.click_feedback.setChecked(self._edited.click_feedback)
         self.mode.setCurrentIndex(0)          # KEEP_CURRENT
-        # Seed the picker from a lit LED, since frame 0 of a breath is black.
-        self._colour = self._first_lit() or (0, 128, 255)
+        # Seed from a lit LED, since frame 0 of a breath is black.
+        self._colours = [self._first_lit() or lighting.DEFAULT_COLOUR]
         self._loading = False
-        self._update_preview()
+        self._rebuild_swatches()
         self.info.setText(
             f"{self._edited.frames} frames of {self._edited.leds_per_frame} LEDs, "
             f"protocol v{self._edited.version:#06x}. The pad has no effect "
@@ -149,22 +162,66 @@ class LightingPage(QWidget):
     def _show_cycle(self, value):
         self.speed_readout.setText(f"cycle {self._invert(value)}")
 
-    def _pick_colour(self):
+    def _rebuild_swatches(self):
+        """One clickable button per colour, kept in step with the list."""
+        for button in self.swatches:
+            self.colour_row.removeWidget(button)
+            button.deleteLater()
+        self.swatches = []
+        for index, colour in enumerate(self._colours):
+            button = QPushButton()
+            button.setFixedSize(44, 24)
+            button.setToolTip("Click to change this colour")
+            button.setStyleSheet(
+                f"background: rgb({colour[0]},{colour[1]},{colour[2]});"
+                " border: 1px solid palette(mid);")
+            button.clicked.connect(lambda _c=False, i=index: self._pick_colour(i))
+            self.colour_row.insertWidget(index, button)
+            self.swatches.append(button)
+        self._update_colour_controls()
+
+    def _update_colour_controls(self):
+        allowed = self._max_colours()
+        self.add_colour.setEnabled(len(self._colours) < allowed)
+        self.remove_colour.setEnabled(len(self._colours) > 1 and allowed > 1)
+        for button in self.swatches:
+            button.setVisible(allowed > 0)
+        self.add_colour.setVisible(allowed > 1)
+        self.remove_colour.setVisible(allowed > 1)
+
+    def _max_colours(self):
+        """How many colours the chosen effect uses. Rainbow and Off use none."""
+        index = self.mode.currentIndex() - 1
+        return EFFECTS[index][2] if 0 <= index < len(EFFECTS) else 1
+
+    def _add_colour(self):
+        if len(self._colours) >= self._max_colours():
+            return
+        self._colours.append(lighting.suggest_colour(self._colours))
+        self._rebuild_swatches()
+        self._regenerate()
+
+    def _remove_colour(self):
+        if len(self._colours) <= 1:
+            return
+        self._colours.pop()
+        self._rebuild_swatches()
+        self._regenerate()
+
+    def _pick_colour(self, index):
         from PySide6.QtGui import QColor
-        current = QColor(*self._colour)
-        chosen = QColorDialog.getColor(current, self, "Lighting colour")
+        chosen = QColorDialog.getColor(QColor(*self._colours[index]), self,
+                                       "Lighting colour")
         if not chosen.isValid():
             return
-        self._colour = (chosen.red(), chosen.green(), chosen.blue())
-        self._update_preview()
-        if self._edited is not None:
+        self._colours[index] = (chosen.red(), chosen.green(), chosen.blue())
+        self._rebuild_swatches()
+        self._regenerate()
+
+    def _regenerate(self):
+        if self._edited is not None and not self._loading:
             self._apply_effect()
             self._mark_changes()
-
-    def _update_preview(self):
-        red, green, blue = self._colour
-        self.colour_preview.setStyleSheet(
-            f"background: rgb({red},{green},{blue}); border: 1px solid palette(mid);")
 
     def _edit(self):
         if self._loading or self._edited is None:
@@ -177,23 +234,17 @@ class LightingPage(QWidget):
 
     def _apply_effect(self):
         """Regenerate the frames, which is the only thing that changes the look."""
-        effect = self.mode.currentText()
-        if effect == KEEP_CURRENT:
-            self.colour_button.setEnabled(False)
+        index = self.mode.currentIndex() - 1
+        if index < 0:
+            self._update_colour_controls()
             return
-        colours = [self._colour]
-        if effect == "Static":
-            self._edited.set_solid(self._colour)
-        elif effect == "Breath":
-            self._edited.set_breath(colours)
-        elif effect == "Flow":
-            self._edited.set_flow(colours + [(0, 0, 0)])
-        elif effect == "Rainbow":
-            self._edited.set_rainbow()
-        # Keep the byte in step with what we generated, so a round trip through
-        # Space Station sees something coherent.
-        self._edited.mode = EFFECTS.index(effect)
-        self.colour_button.setEnabled(effect != "Rainbow")
+        _name, effect, allowed = EFFECTS[index]
+        # Trim if the effect takes fewer colours than are on screen.
+        if allowed and len(self._colours) > allowed:
+            del self._colours[allowed:]
+            self._rebuild_swatches()
+        self._edited.apply_effect(effect, self._colours)
+        self._update_colour_controls()
 
     def _mark_changes(self):
         dirty = self._edited is not None and bytes(self._edited.blob) != self._stored

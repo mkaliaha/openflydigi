@@ -264,6 +264,47 @@ def test_lighting_effects_write_frames():
           str(config.loop))
 
 
+def test_effects_by_id_and_colours():
+    config = lighting.read_config(FakePad())
+    for effect in (lighting.EFFECT_OFF, lighting.EFFECT_STREAMING,
+                   lighting.EFFECT_ROTATION, lighting.EFFECT_BREATHING,
+                   lighting.EFFECT_STATIC_SINGLE, lighting.EFFECT_STATIC_MULTI,
+                   lighting.EFFECT_RAINBOW, lighting.EFFECT_WAVE,
+                   lighting.EFFECT_FLASH):
+        config.apply_effect(effect, [(255, 0, 0), (0, 0, 255)])
+        check(f"effect {effect} records its id", config.mode == effect)
+        check(f"effect {effect} stays in bounds", len(config.blob) == 380)
+
+    config.apply_effect(lighting.EFFECT_OFF)
+    check("off is dark everywhere",
+          all(config.led(f, l) == (0, 0, 0)
+              for f in range(config.frames) for l in range(config.leds_per_frame)))
+
+    # Two colours must not produce the same frames as one.
+    config.apply_effect(lighting.EFFECT_STATIC_MULTI, [(255, 0, 0)])
+    one = bytes(config.blob)
+    config.apply_effect(lighting.EFFECT_STATIC_MULTI, [(255, 0, 0), (0, 255, 0)])
+    check("a second colour changes the result", bytes(config.blob) != one)
+
+    check("an unknown effect id is refused",
+          _raises(lambda: config.apply_effect(1234, [(1, 2, 3)])))
+
+
+def test_suggested_colours_differ():
+    first = lighting.suggest_colour([])
+    second = lighting.suggest_colour([first])
+    check("adding a colour offers something new", first != second,
+          f"{first} {second}")
+
+
+def _raises(call):
+    try:
+        call()
+    except ValueError:
+        return True
+    return False
+
+
 def test_cycle_time_is_a_duration():
     config = lighting.read_config(FakePad())
     config.cycle_time = 12
@@ -283,7 +324,8 @@ def main():
                  test_editing_extras_does_not_disturb_buttons,
                  test_targets_exclude_buttons_xinput_cannot_send,
                  test_lighting_round_trip, test_lighting_brightness_is_clamped,
-                 test_lighting_effects_write_frames, test_cycle_time_is_a_duration):
+                 test_lighting_effects_write_frames, test_cycle_time_is_a_duration,
+                 test_effects_by_id_and_colours, test_suggested_colours_differ):
         test()
     total = len(PASSED) + len(FAILED)
     print(f"\n{len(PASSED)}/{total} passed")
