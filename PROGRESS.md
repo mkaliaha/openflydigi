@@ -294,6 +294,22 @@ This is not Linux-specific: a virtual audio device on Windows needs an audio dri
 a virtual gamepad bus driver rather than one — consistent with DSX's virtual pad also failing to
 produce haptics in Death Stranding DC.
 
+**Untested idea worth revisiting.** Plug in a real DualSense purely as a haptic transducer, but
+unbind its HID interface so the game cannot see it as a gamepad:
+
+    echo -n "0003:054C:0CE6.00XX" | sudo tee /sys/bus/hid/drivers/playstation/unbind
+
+The audio card stays (snd-usb-audio is untouched), so there is a genuine USB DualSense audio
+endpoint with a proper instance id, while input comes from our virtual pad. If the game then writes
+haptics to it, matching is **by name** and a cleverer virtual device might work; if not, matching is
+**by association** and only real USB topology will ever do. Either way it answers the question we
+could not settle, because the earlier fake-sink test failed for a different reason (no USB instance
+id at all). Note `SDL_GAMECONTROLLER_IGNORE_DEVICES` cannot be used to hide the real pad -- our
+virtual one shares its VID/PID.
+
+Of limited practical value on its own (it needs a DualSense physically attached), but diagnostically
+decisive.
+
 **Blocked on this kernel.** Fedora ships neither `usb_f_uac2` nor `raw_gadget`, so there is no way
 to present a USB audio interface without building and signing a kernel module — an ongoing chore on
 a Secure Boot, auto-updating, ostree system. `dummy_hcd`, `vhci-hcd`, `usb_f_hid` and `usb_f_fs`
