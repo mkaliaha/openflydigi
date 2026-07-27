@@ -99,12 +99,19 @@ Two gaps remain, neither in the transport:
   a menu button press — so it does emit motor rumble, just not to a DualSense. Our own output path
   is proven: a direct cmd `0x12` rumbles the pad and ACKs.
 
-  **Not fixable in practice, and not specific to us.** DSX on Windows — a mature tool with its own
-  kernel driver — has the same problem in Death Stranding DC. A game finds the haptic audio
-  endpoint by OS-level association between the HID device and the audio device; a virtual pad has
-  no such association, on Windows or Linux. A PipeWire null sink named like a DualSense was tried
-  and abandoned: if it does not work on Windows where the association machinery exists, it will not
-  work under Proton.
+  **Not implemented, feasibility untested.** DSX on Windows does not implement audio haptics
+  either — it simply omits them, which is why Death Stranding DC behaves the same way there. That
+  is not evidence the approach is impossible, only that nobody has built it.
+
+  The open doubt is device association: a game locates the haptic audio endpoint through an
+  OS-level link between the HID device and the audio device, and a virtual pad has no such link.
+  Whether a game would instead accept an unassociated, suitably-named audio sink is **unknown and
+  untested**. A PipeWire null sink was created and removed without ever being tested against a
+  running game, so nothing here is settled empirically.
+
+  If revisited: create a 4-channel sink (2 haptic + 2 speaker) described as "Wireless Controller",
+  launch a haptic-audio title with the relay running, and check whether the game opens any stream
+  against it. That single observation decides whether the rest is worth building.
 
   **Practical consequence, per game:** for titles using haptic audio, choose adaptive triggers
   (DS5 mode) or rumble (plain Xbox mode). Titles using the HID motor path get both, and that is
