@@ -21,6 +21,7 @@ Tell games to ignore the physical pad so they bind to the virtual one:
 import argparse
 import os
 import select
+import signal
 import sys
 import time
 
@@ -51,6 +52,15 @@ def main():
                          f"(default {motion.ACCEL_SCALE:.3f}, derived from the "
                          f"DualSense calibration we advertise)")
     args = ap.parse_args()
+
+    # Turn SIGTERM into the same clean shutdown as Ctrl-C. Without this, being
+    # killed leaves the controller streaming raw data and any trigger effect
+    # still applied, because the cleanup below never runs.
+    def _terminate(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _terminate)
+    signal.signal(signal.SIGHUP, _terminate)
 
     path, name = evdev.find_device(vendor=FLYDIGI_VID, product=FLYDIGI_PID)
     if not path:
