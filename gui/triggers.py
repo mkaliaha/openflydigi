@@ -22,6 +22,11 @@ The other four do need a process running alongside the game, so this page names
 which and leaves starting it to you -- there is no daemon picking automatically.
 
 Choices are stored per game in the user's config directory, not on the pad.
+
+The "Auto" column is a placeholder. It is meant to mean "when this game starts,
+load its preset or bring up its helper for me" -- which needs the daemon that
+does not exist yet, so it currently only says so rather than offering a switch
+that would do nothing.
 """
 import json
 import os
@@ -47,7 +52,8 @@ TIER_LABELS = {
     "unknown": "No trigger support",
 }
 
-# The six titles that support both Flydigi's own mod and PS5 mode.
+# The six titles that support both Flydigi's own mod and PS5 mode. Auto-start
+# will have to know which of the two to bring up for these.
 DUAL_MODE_HINT = "Both routes work; pick one"
 
 COL_NAME, COL_ROUTE, COL_MODE = range(3)
@@ -93,7 +99,7 @@ class TriggerPage(QWidget):
         layout.addLayout(top)
 
         self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Game", "Route", "Preference"])
+        self.table.setHorizontalHeaderLabels(["Game", "Route", "Auto"])
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -169,8 +175,11 @@ class TriggerPage(QWidget):
             self.table.setItem(row, COL_NAME, item)
             self.table.setItem(row, COL_ROUTE, QTableWidgetItem(TIER_LABELS.get(route, route)))
 
-            preference = self._prefs.get(name, {}).get("route", "")
-            cell = QTableWidgetItem(preference or ("—" if route != "ps5" else DUAL_MODE_HINT))
+            # Placeholder until the daemon exists: this column is meant to be a
+            # per-game "start the right thing automatically" toggle, which needs
+            # something running to honour it.
+            cell = QTableWidgetItem("not yet")
+            cell.setToolTip("Automatic start on game launch is not implemented yet")
             self.table.setItem(row, COL_MODE, cell)
 
     # -- selection ---------------------------------------------------------

@@ -151,11 +151,27 @@ filter, scale, stroke, pressure, strength, frequency. Same fields, with one para
 setting, an editor could write the bind into the profile so it survives a sleep instead of needing
 re-applying every session. Test by applying a game bind, reading the profile, and diffing 185..225.
 
-**5. A daemon that picks the right tier per game.** `flydigid`, `flydigi-forza`,
-`flydigi-monitor` and `flydigi-ds5` are still separate manual tools, and the GUI's trigger tab can
-only tell you which to start. Needs **per-game mode preference** too — six titles support both
-Flydigi's mod and PS5 mode (Cyberpunk 2077, Death Stranding DC, Jedi Survivor, Spider-Man
-Remastered, Miles Morales, Uncharted 4); `gui/triggers.py` has the storage but no UI.
+**5. Auto-launch per game — the daemon.** This is what the games tab is missing, and what its
+"Preference" column should really be: a per-game **Auto** toggle meaning *when this game starts, do
+the right thing for it without me*. Concretely, on detecting the game:
+
+  * vibration → load its preset onto the pad
+  * telemetry / monitor / ps5 / bespoke → start `flydigi-forza`, `flydigi-monitor`, `flydigi-ds5`
+    or `flydigi-dsx`, and stop it again when the game exits
+
+`flydigid` already does detect-and-apply for the vibration route, so the work is generalising it to
+launch and supervise the other four, plus a UI toggle and somewhere to persist it
+(`gui/triggers.py` already writes `~/.config/flydigi/games.json`).
+
+Two things that will bite:
+
+  * **Polling cannot detect every game.** Many entries have empty `processGameNames` (Silksong,
+    Space Marine 2), so those need the `flydigi-run` launch wrapper via Steam launch options
+    instead. A per-game Auto toggle should say which mechanism a title will use, or it will
+    silently do nothing for the ones polling cannot see.
+  * **Per-game mode preference** — six titles support both Flydigi's mod and PS5 mode (Cyberpunk
+    2077, Death Stranding DC, Jedi Survivor, Spider-Man Remastered, Miles Morales, Uncharted 4).
+    Auto has to know which to start; the storage exists, the UI does not.
 
 **Small and worth doing first:**
   * **verify command 166 on hardware** — apply, save, let the pad sleep, read back. It is the last
