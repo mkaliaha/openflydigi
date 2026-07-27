@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+"""Convert DualSense haptic audio into Apex 5 rumble.
+
+Some games (Deathloop, Death Stranding DC) drive the DualSense's voice coils by
+writing waveforms to the controller's USB audio device rather than using the
+HID motor fields. A virtual pad has no such audio device, so those games feel
+silent.
+
+This listens to a fake DualSense sink, measures the energy in the haptic
+channels and turns it into motor rumble.
+
+Setup (once): the sink is created by
+    ~/.config/pipewire/pipewire.conf.d/99-dualsense-haptics.conf
+
+Usage:
+    tools/flydigi-haptics              # convert audio to rumble
+    tools/flydigi-haptics --dump       # show levels only, do not drive the pad
+    tools/flydigi-haptics --selftest   # play a tone into the sink and verify
+
+Whether a game will actually use an unassociated audio sink is unproven -- on
+real hardware the endpoint is linked to the HID device by the OS. --watch
+reports whether anything ever connects, which is the question that matters.
+"""
+import argparse
+import math
+import os
+import shutil
+import struct
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from flydigi import effects  # noqa: E402
+from flydigi.device import Controller, DeviceNotFound  # noqa: E402
+
+SINK = "dualsense_haptics"
+MONITOR = f"{SINK}.monitor"
+RATE = 48000
+CHANNELS = 4
+# A real DualSense puts the haptic actuators on one pair of channels and the
+# speaker on the other, but we cannot rely on a fixed index: a writer that does
+# not declare a channel map gets remixed by PipeWire, which moves the energy
+# around (verified -- audio written to channel 1 arrived on channel 2). So
+# measure every channel and split them into two groups rather than trusting
+# specific positions.
+LEFT_CHANNELS = (0, 2)
+RIGHT_CHANNELS = (1, 3)
+FRAME_BYTES = 4 * CHANNELS          # float32 per channel
+CHUNK_FRAMES = 480                  # 10 ms
+SILENCE = 1e-4
+
+
+def log(msg):
+    print(f"[haptics] {msg}", flush=True)
+
+
+def sink_exists():
+    out = subprocess.run(["pactl", "list", "short", "sinks"],
+                         capture_output=True, text=True).stdout
+    return SINK in out
+
+
+def sink_index():
+    """Numeric index of our sink, which is what sink-inputs reference."""
+    out = subprocess.run(["pactl", "list", "short", "sinks"],
+                         capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == SINK:
+            return parts[0]
+    return None
+
+
+def connected_streams():
+    """Names of streams playing into *our* sink specifically.
+
+    sink-inputs reference the sink by index, not name, so this has to resolve
+    the index first. Matching any numeric sink here reports every stream on the
+    system as a hit -- which produced a false positive that briefly looked like
+    a game had connected.
+    """
+    index = sink_index()
+    if index is None:
+        return []
+    out = subprocess.run(["pactl", "list", "sink-inputs"],
+                         capture_output=True, text=True).stdout
+    streams, current, sink_ok = [], None, False
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("Sink Input #"):
+            if sink_ok and current:
+                streams.append(current)
+            current, sink_ok = None, False
+        elif line.startswith("Sink:"):
+            sink_ok = line.split()[-1] == index
+        elif "application.name" in line:
+            current = line.split("=", 1)[-1].strip().strip('"')
+    if sink_ok and current:
+        streams.append(current)
+    return streams
+
+
+def recorder():
+    """Start a raw capture of the sink's monitor."""
+    # parec first: --raw gives headerless samples. pw-record prepends a file
+    # header, which silently misaligns a raw reader.
+    tool = shutil.which("parec") or shutil.which("pw-record")
+    if not tool:
+        sys.exit("need parec or pw-record (pulseaudio-utils / pipewire-utils)")
+    if tool.endswith("parec"):
+        cmd = [tool, "-d", MONITOR, "--raw", "--format=float32le",
+               f"--rate={RATE}", f"--channels={CHANNELS}"]
+    else:
+        cmd = [tool, "--target", MONITOR, "--rate", str(RATE),
+               "--channels", str(CHANNELS), "--format", "f32", "-"]
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL), tool
+
+
+def rms_per_channel(buf, mono=False):
+    """RMS energy in an interleaved float32 chunk, as (left, right).
+
+    Every channel is measured, then grouped. With `mono`, the loudest channel
+    drives both motors -- the safest option when the writer's channel layout is
+    unknown.
+    """
+    frames = len(buf) // FRAME_BYTES
+    if frames == 0:
+        return 0.0, 0.0
+    samples = struct.unpack_from(f"<{frames * CHANNELS}f", buf, 0)
+    per_channel = []
+    for ch in range(CHANNELS):
+        acc = 0.0
+        for f in range(frames):
+            v = samples[f * CHANNELS + ch]
+            acc += v * v
+        per_channel.append(math.sqrt(acc / frames))
+    if mono:
+        loudest = max(per_channel)
+        return loudest, loudest
+    return (max(per_channel[c] for c in LEFT_CHANNELS),
+            max(per_channel[c] for c in RIGHT_CHANNELS))
+
+
+def to_motor(level, gain):
+    """Map an RMS level (0..1) to a motor value (0..255)."""
+    if level < SILENCE:
+        return 0
+    # Perceptual-ish: audio energy is wide-range, motors are not.
+    scaled = min(1.0, (level * gain) ** 0.5)
+    return int(scaled * 255)
+
+
+def selftest(args):
+    """Play a tone into the sink and confirm we measure it."""
+    if not shutil.which("pw-play") and not shutil.which("paplay"):
+        sys.exit("need pw-play or paplay for --selftest")
+    log("playing a 2s tone into the fake DualSense sink...")
+    tone = bytearray()
+    for n in range(RATE * 2):
+        v = 0.6 * math.sin(2 * math.pi * 120 * n / RATE)
+        frame = struct.pack("<4f", v, v, 0.0, 0.0)   # haptic channels only
+        tone += frame
+    player = shutil.which("paplay") or shutil.which("pw-play")
+    if player.endswith("paplay"):
+        cmd = [player, "-d", SINK, "--raw", "--format=float32le",
+               f"--rate={RATE}", f"--channels={CHANNELS}"]
+    else:
+        cmd = [player, "--target", SINK, "--rate", str(RATE),
+               "--channels", str(CHANNELS), "--format", "f32", "-"]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        proc.stdin.write(bytes(tone))
+        proc.stdin.close()
+    except BrokenPipeError:
+        pass
+    return proc
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--dump", action="store_true",
+                    help="print levels only, do not drive the pad")
+    ap.add_argument("--gain", type=float, default=6.0,
+                    help="amplification before mapping to motor values")
+    ap.add_argument("--selftest", action="store_true",
+                    help="play a tone into the sink and verify it is measured")
+    ap.add_argument("--mono", action="store_true",
+                    help="drive both motors from the loudest channel; safest "
+                         "when the writer's channel layout is unknown")
+    ap.add_argument("--watch", action="store_true",
+                    help="also report which applications connect to the sink")
+    args = ap.parse_args()
+
+    if not sink_exists():
+        sys.exit(f"sink {SINK!r} not found -- is the pipewire config installed?")
+
+    ctrl = None
+    if not args.dump:
+        try:
+            ctrl = Controller()
+            log(f"controller: {ctrl.path}")
+        except DeviceNotFound:
+            log("controller not found; running in dump mode")
+
+    tone_proc = selftest(args) if args.selftest else None
+
+    proc, tool = recorder()
+    log(f"listening on {MONITOR} via {os.path.basename(tool)}")
+    if args.watch:
+        log("watching for applications connecting to the sink")
+
+    last = (0, 0)
+    peak = 0.0
+    last_watch = 0.0
+    seen_streams = set()
+    chunk = CHUNK_FRAMES * FRAME_BYTES
+    try:
+        while True:
+            buf = proc.stdout.read(chunk)
+            if not buf:
+                break
+            left, right = rms_per_channel(buf, mono=args.mono)
+            peak = max(peak, left, right)
+
+            if args.watch and time.time() - last_watch > 2.0:
+                last_watch = time.time()
+                for name in connected_streams():
+                    if name not in seen_streams:
+                        seen_streams.add(name)
+                        log(f"STREAM CONNECTED: {name}")
+
+            motors = (to_motor(left, args.gain), to_motor(right, args.gain))
+            if motors != last:
+                last = motors
+                if motors != (0, 0) or args.dump:
+                    log(f"haptic rms L={left:.4f} R={right:.4f} -> motors {motors}")
+                if ctrl:
+                    effects.rumble(ctrl, motors[0], motors[1])
+            if tone_proc and tone_proc.poll() is not None and peak > 0:
+                break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        proc.terminate()
+        if tone_proc:
+            tone_proc.terminate()
+        if ctrl:
+            try:
+                effects.rumble(ctrl, 0, 0)
+            except OSError:
+                pass
+            ctrl.close()
+        if args.selftest:
+            if peak > SILENCE:
+                log(f"SELFTEST PASS: measured peak rms {peak:.4f}")
+            else:
+                log("SELFTEST FAIL: no audio measured on the sink monitor")
+
+
+if __name__ == "__main__":
+    main()

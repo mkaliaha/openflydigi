@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""Play synthetic DualSense haptic audio into the fake sink.
+
+Stands in for a game that drives haptics through the controller's audio device,
+so the audio-to-rumble bridge can be verified and tuned without one.
+
+Run tools/flydigi-haptics in one terminal, this in another:
+
+    tools/haptics-simulate              # scripted sequence
+    tools/haptics-simulate --channels   # identify which channel is which
+"""
+import argparse
+import math
+import os
+import shutil
+import struct
+import subprocess
+import sys
+
+RATE = 48000
+CHANNELS = 4
+SINK = "dualsense_haptics"
+
+
+def player():
+    tool = shutil.which("paplay") or shutil.which("pw-play")
+    if not tool:
+        sys.exit("need paplay or pw-play")
+    if tool.endswith("paplay"):
+        cmd = [tool, "-d", SINK, "--raw", "--format=float32le",
+               f"--rate={RATE}", f"--channels={CHANNELS}"]
+    else:
+        cmd = [tool, "--target", SINK, "--rate", str(RATE),
+               "--channels", str(CHANNELS), "--format", "f32", "-"]
+    return subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+
+def tone(seconds, freq, amp_left, amp_right, envelope=None):
+    """Interleaved float32 frames. Channels 0/1 are the haptic actuators."""
+    out = bytearray()
+    total = int(RATE * seconds)
+    for n in range(total):
+        env = envelope(n / total) if envelope else 1.0
+        v = math.sin(2 * math.pi * freq * n / RATE) * env
+        out += struct.pack("<4f", v * amp_left, v * amp_right, 0.0, 0.0)
+    return bytes(out)
+
+
+def silence(seconds):
+    return b"\x00" * (int(RATE * seconds) * 4 * CHANNELS)
+
+
+def decay(x):
+    return math.exp(-6 * x)
+
+
+def ramp(x):
+    return x
+
+
+# (label, waveform) -- shaped like effects a game would actually emit.
+def sequence():
+    return [
+        ("silence", silence(0.6)),
+        ("low continuous rumble (engine)", tone(2.0, 60, 0.35, 0.35)),
+        ("silence", silence(0.4)),
+        ("sharp burst (gunshot) x3", b"".join(
+            tone(0.12, 90, 0.9, 0.9, decay) + silence(0.25) for _ in range(3))),
+        ("silence", silence(0.4)),
+        ("rising ramp", tone(1.5, 70, 0.8, 0.8, ramp)),
+        ("decaying tail", tone(1.2, 50, 0.8, 0.8, decay)),
+        ("left actuator only", tone(1.0, 70, 0.8, 0.0)),
+        ("right actuator only", tone(1.0, 70, 0.0, 0.8)),
+        ("silence", silence(0.8)),
+    ]
+
+
+def channel_ident():
+    return [
+        (f"channel {ch} only (amp 0.8)", b"".join(
+            struct.pack("<4f", *[0.8 * math.sin(2 * math.pi * 70 * n / RATE)
+                                 if c == ch else 0.0 for c in range(CHANNELS)])
+            for n in range(int(RATE * 1.2))))
+        for ch in range(CHANNELS)
+    ]
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--channels", action="store_true",
+                    help="play each channel in turn to identify the mapping")
+    args = ap.parse_args()
+
+    steps = channel_ident() if args.channels else sequence()
+    proc = player()
+    try:
+        for label, data in steps:
+            print(f"  {label}", flush=True)
+            proc.stdin.write(data)
+            proc.stdin.flush()
+        proc.stdin.close()
+        proc.wait(timeout=30)
+    except (BrokenPipeError, subprocess.TimeoutExpired):
+        pass
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+    print("done")
+
+
+if __name__ == "__main__":
+    main()

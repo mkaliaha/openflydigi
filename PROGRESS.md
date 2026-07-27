@@ -99,19 +99,27 @@ Two gaps remain, neither in the transport:
   a menu button press — so it does emit motor rumble, just not to a DualSense. Our own output path
   is proven: a direct cmd `0x12` rumbles the pad and ACKs.
 
-  **Not implemented, feasibility untested.** DSX on Windows does not implement audio haptics
-  either — it simply omits them, which is why Death Stranding DC behaves the same way there. That
-  is not evidence the approach is impossible, only that nobody has built it.
+  **Built, tested, negative result.** Neither Flydigi nor DSX implements audio haptics — verified
+  by decompilation: Space Station bundles no audio libraries at all, and its `EnableAudio` command
+  is a device feature toggle, not PC audio capture.
 
-  The open doubt is device association: a game locates the haptic audio endpoint through an
-  OS-level link between the HID device and the audio device, and a virtual pad has no such link.
-  Whether a game would instead accept an unassociated, suitably-named audio sink is **unknown and
-  untested**. A PipeWire null sink was created and removed without ever being tested against a
-  running game, so nothing here is settled empirically.
+  We built the missing piece anyway (`tools/flydigi-haptics`): a fake 4-channel DualSense sink
+  (`pipewire/99-dualsense-haptics.conf`) plus a bridge that measures haptic-channel energy and
+  converts it to motor rumble. **The bridge works** — verified with `tools/haptics-simulate`, which
+  plays synthetic gunshots and engine rumble and produces correctly decaying motor values.
 
-  If revisited: create a 4-channel sink (2 haptic + 2 speaker) described as "Wireless Controller",
-  launch a haptic-audio title with the relay running, and check whether the game opens any stream
-  against it. That single observation decides whether the rest is worth building.
+  **But games do not use it.** With the sink present and named "Wireless Controller", Deathloop
+  opened exactly one audio stream and routed it to the speakers; our sink measured absolute silence
+  (peak 0.00000). A virtual pad has no OS-level link between its HID device and an audio endpoint,
+  and an unassociated sink is not picked up.
+
+  Cannot distinguish "looked for a controller endpoint and rejected ours" from "never looks on PC".
+  The outcome is the same either way. Tooling is kept because it is proven working — if a game is
+  ever found that does write to such a sink, only the sink config needs reinstalling.
+
+  Two notes for anyone re-running this: `pw-record` prepends a file header and will silently
+  misalign a raw reader (use `parec --raw`), and `paplay --raw` declares no channel map so PipeWire
+  remixes the channels — do not assume fixed haptic channel indices.
 
   **Practical consequence, per game:** for titles using haptic audio, choose adaptive triggers
   (DS5 mode) or rumble (plain Xbox mode). Titles using the HID motor path get both, and that is
