@@ -147,6 +147,28 @@ Also worth knowing: **battery already reaches the desktop**. `hid-playstation` t
 pad's reported battery into a power-supply device, so it appears in KDE's battery widget as
 "Wireless Controller" — verified via `upower`.
 
+## M1-M4 buttons: no DualSense destination
+
+Reading M1-M4 from the vendor stream is easy, but there is nowhere in the DualSense protocol to
+deliver them, so the scope is smaller than it first looks.
+
+Emulating a **DualSense Edge is the wrong answer**:
+  * it has two back buttons, not four;
+  * even on a real Edge they have no HID inputs of their own -- they must be remapped onto existing
+    buttons in the controller;
+  * its different hardware ID *loses* native DualSense support in some games. DSX has a "DualSense
+    Emulation" mode and Special K an "Identify DualSense Edge as DualSense" option precisely to undo
+    this, and `ds5-edge-relay` exists to convert an Edge into a plain DualSense.
+
+What reading them is still worth:
+  * **M1 -> touchpad click**, which frees SELECT to be Create (its correct mapping). Today we
+    sacrifice Create because there is no other source for touchpad-click.
+  * **daemon-side actions** that never reach the game: profile switching, toggling the relay,
+    cycling trigger presets.
+
+For anything else the pad's own onboard remapping is the better mechanism -- it works with no
+software running and persists in controller memory.
+
 ## Open issues
 
 - **Game detection**: many entries have empty `processGameNames` (incl. Silksong, Space Marine 2).
