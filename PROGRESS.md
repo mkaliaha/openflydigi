@@ -137,6 +137,18 @@ data[11] stick precision   data[12] stick sensitivity
 
 So sleep time is readable as well as writable — worth reading before `UpdateSleepTime` writes it.
 
+**4b. An editor for the pad-side vibration bind.** The "Adaptive triggers" tab can apply a game's
+bind but not change it — it writes Flydigi's shipped `vibParams` (stroke, pressure, strength,
+frequency per side), `vibType`, `vibFilter` and `pwmScal` straight out of `gamelist.json`. Only
+`tools/flydigi_cmd.py bind` can vary them, which is not a real answer for tuning.
+
+A lead worth checking first: the profile blob's force-trigger section (185..225) holds a `bind`
+sub-struct of **type, filter, scale + 5 params**, and the live bind command (82) takes bindType,
+filter, scale, stroke, pressure, strength, frequency. Same fields, with one param byte spare.
+**Unverified** — the counts do not match exactly — but if it is the persistent form of the same
+setting, an editor could write the bind into the profile so it survives a sleep instead of needing
+re-applying every session. Test by applying a game bind, reading the profile, and diffing 185..225.
+
 **5. A daemon that picks the right tier per game.** `flydigid`, `flydigi-forza`,
 `flydigi-monitor` and `flydigi-ds5` are still separate manual tools, and the GUI's trigger tab can
 only tell you which to start. Needs **per-game mode preference** too — six titles support both

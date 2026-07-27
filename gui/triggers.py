@@ -36,7 +36,7 @@ CONFIG_DIR = os.path.join(
 PREFS_PATH = os.path.join(CONFIG_DIR, "games.json")
 
 TIER_LABELS = {
-    "vibration": "Pad-side (stored on the pad)",
+    "vibration": "Pad-side — the pad binds game rumble to the triggers",
     "telemetry": "Game telemetry (needs flydigi-forza)",
     "monitor": "Game memory (needs flydigi-monitor)",
     "ps5": "DualSense mode (needs flydigi-ds5)",
@@ -189,7 +189,9 @@ class TriggerPage(QWidget):
         processes = ", ".join(game.get("processGameNames") or []) or "not listed"
         note = TIER_LABELS.get(route, route)
         if route == "vibration":
-            note += " — applying writes the binding into the pad, and it stays."
+            note += (" — the pad routes this game's rumble into the trigger motors itself, so "
+                     "nothing runs alongside the game. Applying writes Flydigi's own parameters; "
+                     "they are not editable here yet.")
         elif route == "unknown":
             note += "."
         else:
