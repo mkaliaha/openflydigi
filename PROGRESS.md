@@ -53,7 +53,7 @@ What remains is **coverage and ergonomics**, not feasibility.
 |---|---|---|---|
 | 1. Vibration bind | 33 | cmd `82` SyncWithGrip, config from API, driven by game rumble | **Done & automated** — verified in Death Stranding 2, triggers buzz with in-game rumble, daemon auto-detects and applies |
 | 2. ForzaDualSense | 4 | Forza "Data Out" UDP telemetry → JSON rule engine → cmd `81` | **Done — validated in Forza Horizon 6.** All 7 distinct rules fired in-game and the effects are felt on the pad |
-| 3. XGameMonitor | 31 | Generic engine + per-game config; reads game process memory | **Built & self-tested.** Chain walker verified against a real process via `/proc/<pid>/mem`. Needs a game to validate offsets |
+| 3. XGameMonitor | 31 | Generic engine + per-game config; reads game process memory | **Done — validated in Dark Souls: Remastered.** Weapon-specific filters fire from live memory reads; resistance differs correctly per weapon |
 | 4. PS5 emulation | 15 listed, **any DS5-aware game in practice** | Game natively speaks DualSense; needs uhid virtual DS5 | **Validated in Deathloop** — adaptive triggers work in-game. Input relay, DS5 binding and effect translation all confirmed. Rumble and gyro outstanding, see notes |
 | 5. Bespoke | 11 | One mod per game (F1 23/24/25, GTA5, Fallout 4, MH Rise, DMC5, RE2/3/7, Bannerlord) | Not started |
 
@@ -381,7 +381,22 @@ What to watch for:
 - Touchpad-click is on the touchpad *sub-device*, which needs `udev/99-flydigi-apex5.rules`
   installed or the node stays root-owned.
 
-### Dark Souls: Remastered — validates Tier 3 (memory monitor, 31 games)
+### Dark Souls: Remastered — VALIDATED
+
+Confirmed working. Notes from doing it:
+
+  * **Wine maps the PE at its image base** (`0x140000000` for a 64-bit game), the same value
+    `Module32Next` reports on Windows, so Flydigi's offsets work unmodified. This was the
+    assumption flagged as riskiest and it turned out fine.
+  * **Process selection cannot match on command line alone.** Under Steam and Proton a chain of
+    wrappers (`reaper`, `bwrap`, `pv-adverb`, `steam.exe`) all carry the game's path in their
+    cmdline. `find_process` now requires the candidate to have actually mapped the PE, which also
+    yields the module base.
+  * Dark Souls: Remastered keys off `move` (an animation id encoding weapon + attack). Black Knight
+    Halberd swings produced `1123300`/`1123310`, matching the config's 黑骑士钺 entries, and the
+    right trigger resisted heavily while the shield side stayed light — exactly as configured.
+
+### Original notes
 
 Chosen for the shortest pointer chain (3 hops vs 6-12 elsewhere) and the smallest download.
 

@@ -75,18 +75,56 @@ def _exe_names(pid):
     return names
 
 
+def _maps_exe_base(pid, exe_name):
+    """Lowest mapping of `exe_name` in this process, or None.
+
+    This doubles as the module base: Wine maps the PE at its image base, so the
+    lowest mapping of the executable is what Module32Next would report.
+    """
+    best = None
+    try:
+        with open(f"/proc/{pid}/maps") as fh:
+            for line in fh:
+                parts = line.split(None, 5)
+                if len(parts) < 6:
+                    continue
+                if os.path.basename(parts[5].strip()).lower() != exe_name:
+                    continue
+                start = int(parts[0].split("-")[0], 16)
+                if best is None or start < best:
+                    best = start
+    except OSError:
+        return None
+    return best
+
+
 def find_process(process_name):
     """Find a running game by its configured process name.
 
-    Under Proton the Windows executable appears in the process cmdline, so both
-    'sekiro' and 'sekiro.exe' are accepted.
+    Matching on the command line alone is not enough: under Steam and Proton a
+    whole chain of wrappers (reaper, pressure-vessel, pv-adverb, steam.exe)
+    carries the game's path in its cmdline. Those match by name but have no PE
+    mapped, so require the candidate to have actually mapped the executable.
     """
-    wanted = {process_name.lower(), f"{process_name.lower()}.exe"}
+    exe_name = process_name.lower()
+    if not exe_name.endswith(".exe"):
+        exe_name += ".exe"
+    wanted = {process_name.lower(), exe_name}
+
+    fallback = None
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
             continue
-        if _exe_names(entry) & wanted:
+        if not (_exe_names(entry) & wanted):
+            continue
+        if _maps_exe_base(entry, exe_name) is not None:
             return int(entry)
+        if fallback is None:
+            fallback = int(entry)
+    if fallback is not None:
+        raise ProcessNotFound(
+            f"found processes matching {process_name!r} but none had "
+            f"{exe_name} mapped -- they are probably Steam/Proton wrappers")
     raise ProcessNotFound(f"no process matching {process_name!r}")
 
 
@@ -101,6 +139,8 @@ def find_module_base(pid, module_name):
         wanted += ".exe"
     best = None
     best_path = None
+    # Wine maps the PE at its image base (typically 0x140000000 for a 64-bit
+    # game), so the lowest mapping of the executable is the module base.
     with open(f"/proc/{pid}/maps") as fh:
         for line in fh:
             parts = line.split(None, 5)
