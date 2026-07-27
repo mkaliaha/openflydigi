@@ -54,7 +54,7 @@ What remains is **coverage and ergonomics**, not feasibility.
 | 1. Vibration bind | 33 | cmd `82` SyncWithGrip, config from API, driven by game rumble | **Done & automated** — verified in Death Stranding 2, triggers buzz with in-game rumble, daemon auto-detects and applies |
 | 2. ForzaDualSense | 4 | Forza "Data Out" UDP telemetry → JSON rule engine → cmd `81` | **Done — validated in Forza Horizon 6.** All 7 distinct rules fired in-game and the effects are felt on the pad |
 | 3. XGameMonitor | 31 | Generic engine + per-game config; reads game process memory | **Built & self-tested.** Chain walker verified against a real process via `/proc/<pid>/mem`. Needs a game to validate offsets |
-| 4. PS5 emulation | 15 | Game natively speaks DualSense; needs uhid virtual DS5 | **Validated in Deathloop** — adaptive triggers work in-game. Input relay, DS5 binding and effect translation all confirmed. Rumble and gyro outstanding, see notes |
+| 4. PS5 emulation | 15 listed, **any DS5-aware game in practice** | Game natively speaks DualSense; needs uhid virtual DS5 | **Validated in Deathloop** — adaptive triggers work in-game. Input relay, DS5 binding and effect translation all confirmed. Rumble and gyro outstanding, see notes |
 | 5. Bespoke | 11 | One mod per game (F1 23/24/25, GTA5, Fallout 4, MH Rise, DMC5, RE2/3/7, Bannerlord) | Not started |
 
 ## Owned games (for prioritisation)
@@ -79,6 +79,33 @@ What remains is **coverage and ergonomics**, not feasibility.
   model-buffer bug (vkd3d-proton#3053, Xid 109 / `NVRM: can't update VA space`). Root cause is still
   unidentified upstream. Disabling DLSS/Reflex avoids the early splash crash; low geometry quality
   reduces sparse buffer pressure. FH5 is the calmer target and exercises identical code.
+
+## Tier 4 is not limited to Flydigi's game list
+
+The virtual DualSense is game-agnostic. Nothing in `tools/flydigi-ds5` is per-game, and
+`relay.translate_ds5` maps DualSense effect **types**, not titles. So it works with any PC game that
+natively supports DualSense adaptive triggers — Metro Exodus Enhanced, Ghostwire Tokyo, FF7 Remake,
+Returnal, Ratchet & Clank, Stellar Blade, the Spider-Man ports, God of War Ragnarok, and whatever
+ships next.
+
+That is a better proposition than the mod-based tiers: Flydigi must author a mod per title, while
+this covers every DualSense-aware game for free, including ones released after any given Space
+Station update. The 15 in the game list are only the ones *Flydigi* flagged as PS5-mode.
+
+**What works, and what to tell users:**
+
+| Feature | Status |
+|---|---|
+| Adaptive triggers | Works — proven in Deathloop |
+| Rumble via HID motor fields | Works — the path most games use |
+| Gyro / motion aiming | Works |
+| Battery reporting | Works, including the desktop battery widget |
+| Touchpad click | Works, mapped to SELECT |
+| HD / audio haptics | **Does not work** — structurally blocked, see below |
+| Touchpad gestures, finger position | Does not work — the Apex has no touchpad |
+
+Requirements per game: Steam Input **disabled** (it masks the pad and breaks DualSense semantics)
+and `SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501` so the game binds the virtual pad.
 
 ## Deathloop / Tier 4 findings
 
