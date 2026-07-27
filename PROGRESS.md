@@ -336,6 +336,31 @@ and dialogue and does not resemble real haptics.
 **Status: parked.** The conversion works and is proven against real game haptics; it needs a real
 DualSense present as the source. Reviving this means solving the audio-device emulation above.
 
+## RGB: not working via the test command
+
+`TestLedCommandFactory` (command **245**, `[4]=5, [5]=R, [6]=G, [7]=B, [8]=sum(3,3+5)`) ACKs
+cleanly and echoes the exact RGB values back, but **the controller's lighting does not change** --
+tested with 3-second holds per colour, re-sent at 4 Hz, so an overriding mode would have shown as a
+flicker.
+
+Most likely explanation: 245 lives in `command.test/` alongside TestScreen/TestJoystick/TestRF and
+is exposed as `IpcCommandEnum_TestRgb`. These are factory-test commands and may require the device
+to be in a diagnostic state first.
+
+**The real path is the persistent config**, which is how Space Station does it:
+
+  * `ReadLedConfigCommand` = **167**, `[4]=4, [5]=cfgId, [6]=pkgSize, [7]=sum`. Confirmed working --
+    the pad replied `04 5a a5 a7 0c 00 00 00 03 00 00 09 04 14 0c 07 01 ff ff ff ...`
+  * `WriteRgbConfigCommand` = **169**, written in packs: `[4]=len+3, [5]=packNum, [6..]=pack data`
+  * Structure `m_fdg_mapping_rgb_sturct_t`: `version[2], type, loop_start, loop_end, loop_time,
+    light_scale, rgb_num, rgb_type, reserve[11], id[16]` where each id is 10 x `{r,g,b}`.
+    `type` / `rgb_type` select the lighting mode -- that is what needs setting to a static mode
+    before a colour will stick.
+
+So bridging the DualSense lightbar to the pad means decoding that config, setting a static mode and
+writing it back -- a real job, not the one-command bridge originally assumed. The lightbar bytes
+themselves are already parsed (`data[45..47]` of the DS5 output report).
+
 ## Open issues
 
 - **Game detection**: many entries have empty `processGameNames` (incl. Silksong, Space Marine 2).
