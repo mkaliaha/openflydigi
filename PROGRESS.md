@@ -128,6 +128,25 @@ Two gaps remain, neither in the transport:
   flagging charging). Also fixed `BATTERY_FULL`, which was 0x01 (= charging) rather than 0x02, so
   the pad had been reporting "charging" permanently.
 
+## Dual-mode games
+
+Six titles are both `XGameMonitor` and `isPS5`, so Space Station lets the user choose between
+Flydigi's memory-reading mod and DualSense emulation (`AutoTriggerMapMode { Flydigi, PS5 }`,
+stored per game as `MapMode`):
+
+    Cyberpunk 2077          Spider-Man Remastered
+    Death Stranding DC      Spider-Man: Miles Morales
+    Jedi Survivor           Uncharted 4
+
+We expose no equivalent choice — `tools/flydigi-ds5` and `tools/flydigi-monitor` are run manually.
+A per-game mode preference belongs in the daemon (and in the GUI later). Note the tradeoff differs
+per mode: PS5 mode gives the game full DualSense semantics including battery reporting, while
+Flydigi mode uses their hand-tuned per-game effects.
+
+Also worth knowing: **battery already reaches the desktop**. `hid-playstation` turns the virtual
+pad's reported battery into a power-supply device, so it appears in KDE's battery widget as
+"Wireless Controller" — verified via `upower`.
+
 ## Open issues
 
 - **Game detection**: many entries have empty `processGameNames` (incl. Silksong, Space Marine 2).
