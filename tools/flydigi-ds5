@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""Present the Apex 5 to games as a DualSense, and translate its effects back.
+
+    Apex 5 ──evdev──► relay ──► virtual DualSense (uhid) ──► game
+                        ▲                                    │
+                        └────── DS5 output reports ◄──────────┘
+                        │       (trigger effects, rumble)
+                        ▼
+                  Flydigi cmd 81 / 0x12
+
+For the 15 games that natively speak DualSense. Games see a real DualSense --
+the kernel's hid-playstation driver binds to it and builds the usual device
+tree.
+
+    tools/flydigi-ds5              # run
+    tools/flydigi-ds5 --dump       # decode effects, do not drive the pad
+
+Tell games to ignore the physical pad so they bind to the virtual one:
+    SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501 %command%
+"""
+import argparse
+import os
+import select
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from flydigi import ds5, effects, evdev, ps5_data, relay, uhid  # noqa: E402
+from flydigi.device import Controller, DeviceNotFound  # noqa: E402
+
+FLYDIGI_VID, FLYDIGI_PID = relay.FLYDIGI_VID, relay.FLYDIGI_PID
+
+
+def log(msg):
+    print(f"[ds5] {msg}", flush=True)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--dump", action="store_true",
+                    help="print decoded effects, do not drive the Apex 5")
+    ap.add_argument("--quiet", action="store_true")
+    args = ap.parse_args()
+
+    path, name = evdev.find_device(vendor=FLYDIGI_VID, product=FLYDIGI_PID)
+    if not path:
+        path, name = evdev.find_device(name="Apex")
+    if not path:
+        sys.exit("Apex 5 gamepad not found in /dev/input -- is it connected?")
+    log(f"input: {name} ({path})")
+
+    ctrl = None
+    if not args.dump:
+        try:
+            ctrl = Controller()
+            log(f"controller: {ctrl.path}")
+        except DeviceNotFound:
+            log("vendor interface not found; effects will not be applied")
+
+    virtual = uhid.Device(
+        "Wireless Controller", 0x054C, 0x0CE6, ps5_data.PS5_RDESC,
+        bus=uhid.BUS_USB, version=0x8111,
+        feature_reports={
+            ps5_data.CALIBRATION: ps5_data.PS5_CALIBRATION_INFO,
+            ps5_data.PAIRING_INFO: ps5_data.PS5_PAIRING_INFO,
+            ps5_data.FIRMWARE_INFO: ps5_data.PS5_FIRMWARE_INFO,
+        })
+    log("virtual DualSense created")
+    log("games: set SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501")
+
+    state = ds5.InputState()
+    applied = {}
+    last_rumble = None
+    frames = 0
+
+    try:
+        with evdev.Reader(path) as reader:
+            relay.build_state(reader, state)
+            virtual.send_input(state.pack())
+            while True:
+                ready, _, _ = select.select([reader.fileno(), virtual.fd], [], [], 1.0)
+                if reader.fileno() in ready:
+                    if reader.read():
+                        relay.build_state(reader, state)
+                        virtual.send_input(state.pack())
+                        frames += 1
+                if virtual.fd in ready:
+                    for _rtype, data in virtual.poll(0.0):
+                        parsed = ds5.parse_output(data)
+                        rumble = parsed["rumble"]
+                        if rumble and rumble != last_rumble:
+                            last_rumble = rumble
+                            if not args.quiet:
+                                log(f"rumble {rumble}")
+                            if ctrl:
+                                effects.rumble(ctrl, rumble[0], rumble[1])
+                        for effect in parsed["effects"]:
+                            if applied.get(effect.side) == effect.key():
+                                continue
+                            applied[effect.side] = effect.key()
+                            side, mode, params = relay.translate(effect)
+                            if not args.quiet:
+                                log(f"{effect} -> mode={mode} params={params}")
+                            if ctrl:
+                                ctrl.send(
+                                    effects.common_effect_payload(side, mode, params),
+                                    wait=0.0)
+    except KeyboardInterrupt:
+        log(f"stopping after {frames} input frames")
+    finally:
+        virtual.destroy()
+        if ctrl:
+            try:
+                effects.clear_all(ctrl)
+            except OSError:
+                pass
+            ctrl.close()
+
+
+if __name__ == "__main__":
+    main()

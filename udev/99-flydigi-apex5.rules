@@ -1,0 +1,21 @@
+# Access rules for the Flydigi Apex 5 and the virtual DualSense.
+#
+#   sudo cp udev/99-flydigi-apex5.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload && sudo udevadm trigger
+#
+# On many systems none of this is needed -- check first. On Aurora/Fedora the
+# hidraw nodes are already world-accessible and the main gamepad node gets a
+# uaccess ACL automatically. The rule that usually *is* needed is the third one.
+
+# Apex 5 vendor command interface (trigger effects, rumble, config).
+KERNEL=="hidraw*", ATTRS{idVendor}=="37d7", ATTRS{idProduct}=="2501", TAG+="uaccess"
+
+# /dev/uhid, needed to create the virtual DualSense.
+KERNEL=="uhid", TAG+="uaccess"
+
+# The virtual DualSense's sub-devices. systemd tags the main gamepad node for
+# seat access but leaves the touchpad, motion-sensor and headset-jack nodes
+# owned by root:input -- which silently breaks touchpad-click, since that is
+# reported on the touchpad node rather than the gamepad one.
+# Matches a real DualSense too, which is harmless.
+SUBSYSTEM=="input", ATTRS{name}=="Wireless Controller*", TAG+="uaccess"
