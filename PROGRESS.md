@@ -315,6 +315,17 @@ to present a USB audio interface without building and signing a kernel module â€
 a Secure Boot, auto-updating, ostree system. `dummy_hcd`, `vhci-hcd`, `usb_f_hid` and `usb_f_fs`
 are all present and Fedora-signed, so the HID half is easy; only audio is missing.
 
+**Open question: does a gaming distro ship these?** Not answered â€” searching returned only generic
+distro comparisons. Worth checking directly rather than guessing, since some ship custom kernels for
+handheld hardware that needs gadget mode (the Steam Deck has a real dual-role USB port, so SteamOS
+plausibly enables UAC2 gadget). To check on any candidate:
+
+    zcat /proc/config.gz | grep -E 'F_UAC2|RAW_GADGET'      # on a live/booted system
+    # or inspect the distro's kernel spec/config in its repo
+
+Candidates: SteamOS, Bazzite, CachyOS, Nobara. If one ships `usb_f_uac2`, the whole gadget route
+becomes a rebase instead of a build-and-sign treadmill.
+
 Remaining routes, none cheap: build `usb_f_uac2` and sign it; implement UAC2 over FunctionFS
 including isochronous endpoints (no reference implementation exists); or rebase to an image that
 ships the module.
