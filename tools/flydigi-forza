@@ -40,7 +40,19 @@ def main():
     ap.add_argument("--dump", action="store_true",
                     help="print telemetry, do not touch the controller")
     ap.add_argument("--quiet", action="store_true", help="do not log each effect")
+    ap.add_argument("--accept", action="append", metavar="LEN:OFFSET", default=[],
+                    help="treat datagrams of LEN bytes as telemetry with the given "
+                         "post-sled offset, e.g. --accept 331:12. Use when a newer "
+                         "Forza ships a packet size we do not know yet")
     args = ap.parse_args()
+
+    for spec in args.accept:
+        try:
+            length, offset = (int(x) for x in spec.split(":", 1))
+        except ValueError:
+            sys.exit(f"--accept expects LEN:OFFSET, got {spec!r}")
+        forza.BUFFER_OFFSETS[length] = offset
+        log(f"accepting {length}-byte packets with offset {offset}")
 
     config = forza.load_config(args.config)
     log(f"{len(config.get('actions') or [])} rules from {os.path.basename(args.config)}")
@@ -73,7 +85,12 @@ def main():
             if packet is None:
                 if len(data) not in unknown:
                     unknown.add(len(data))
-                    log(f"ignoring unknown packet size {len(data)}")
+                    log(f"unknown packet size {len(data)} -- telemetry IS arriving, "
+                        f"but this format is not known")
+                    log(f"    known sizes: {sorted(forza.BUFFER_OFFSETS)}. The sled "
+                        f"(first 232 bytes) is stable across versions, so try:")
+                    log(f"    --accept {len(data)}:{len(data) - 312}  "
+                        f"(then check gear/speed look sane in --dump)")
                 continue
             packets += 1
             if packets == 1:
