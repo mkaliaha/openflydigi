@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""Listen for DualSenseX (DSX) UDP packets and drive the Apex 5 triggers.
+
+Point any DSX-compatible game mod at 127.0.0.1:7878. Mods running under Proton
+reach this listener unchanged, since Wine shares the host network stack.
+
+    tools/flydigi-dsx                  # run
+    tools/flydigi-dsx --dump           # decode packets, do not touch the pad
+    tools/flydigi-dsx --forward 8787   # also relay datagrams onward
+"""
+import argparse
+import os
+import socket
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from flydigi import dsx, effects  # noqa: E402
+from flydigi.device import Controller, DeviceNotFound  # noqa: E402
+
+
+def log(msg):
+    print(f"[dsx] {msg}", flush=True)
+
+
+class DryRunController:
+    def send(self, buf, wait=0.0):
+        return []
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--port", type=int, default=dsx.DSX_PORT)
+    ap.add_argument("--forward", type=int, default=None,
+                    help=f"relay datagrams to this port (Flydigi uses {dsx.FORWARD_PORT})")
+    ap.add_argument("--dump", action="store_true",
+                    help="decode and print only, no HID writes")
+    ap.add_argument("--quiet", action="store_true")
+    args = ap.parse_args()
+
+    if args.dump:
+        ctrl = DryRunController()
+        log("dry run: no HID writes")
+    else:
+        try:
+            ctrl = Controller()
+        except DeviceNotFound:
+            sys.exit("controller not found -- is it connected?")
+        log(f"controller: {ctrl.path}")
+
+    listener = dsx.Listener(ctrl, forward_port=args.forward,
+                            verbose=not args.quiet and not args.dump)
+    sock = dsx.listen(args.port)
+    log(f"listening on 127.0.0.1:{args.port}")
+    if args.forward:
+        log(f"forwarding to 127.0.0.1:{args.forward}")
+
+    total = applied = 0
+    try:
+        while True:
+            try:
+                data, _ = sock.recvfrom(65535)
+            except socket.timeout:
+                continue
+            total += 1
+            if args.dump:
+                parsed = dsx.parse(data)
+                log(f"{len(data)}B -> {parsed if parsed else 'no trigger instructions'}")
+                continue
+            applied += listener.handle(data)
+    except KeyboardInterrupt:
+        log(f"stopping: {total} packets, {applied} effects applied")
+    finally:
+        listener.close()
+        if not args.dump:
+            try:
+                effects.clear_all(ctrl)
+                log("triggers reset")
+            except OSError:
+                pass
+            ctrl.close()
+
+
+if __name__ == "__main__":
+    main()

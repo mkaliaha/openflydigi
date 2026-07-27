@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""Drive Apex 5 adaptive triggers from Forza telemetry.
+
+In game: HUD and Gameplay -> Data Out -> ON, IP 127.0.0.1, port 5300.
+Works with the game under Proton -- Wine shares the host loopback.
+
+    tools/flydigi-forza                 # run
+    tools/flydigi-forza --dump          # print telemetry only, no HID writes
+"""
+import argparse
+import os
+import socket
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from flydigi import effects, forza  # noqa: E402
+from flydigi.device import Controller, DeviceNotFound  # noqa: E402
+
+DEFAULT_CONFIG = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "forza.json"
+)
+
+
+def log(msg):
+    print(f"[forza] {msg}", flush=True)
+
+
+class DryRunController:
+    def send(self, buf, wait=0.0):
+        return []
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--port", type=int, default=forza.FORZA_DATA_OUT_PORT)
+    ap.add_argument("--config", default=DEFAULT_CONFIG)
+    ap.add_argument("--dump", action="store_true",
+                    help="print telemetry, do not touch the controller")
+    ap.add_argument("--quiet", action="store_true", help="do not log each effect")
+    args = ap.parse_args()
+
+    config = forza.load_config(args.config)
+    log(f"{len(config.get('actions') or [])} rules from {os.path.basename(args.config)}")
+
+    if args.dump:
+        ctrl = DryRunController()
+        log("dry run: no HID writes")
+    else:
+        try:
+            ctrl = Controller()
+        except DeviceNotFound:
+            sys.exit("controller not found -- is it connected?")
+        log(f"controller: {ctrl.path}")
+
+    engine = forza.Engine(config, ctrl, verbose=not args.quiet and not args.dump)
+    sock = forza.listen(args.port)
+    log(f"listening on 127.0.0.1:{args.port} -- enable Data Out in game")
+
+    packets = 0
+    unknown = set()
+    last_report = time.time()
+    try:
+        while True:
+            engine.flush_pending()
+            try:
+                data, _ = sock.recvfrom(2048)
+            except socket.timeout:
+                continue
+            packet = forza.parse(data)
+            if packet is None:
+                if len(data) not in unknown:
+                    unknown.add(len(data))
+                    log(f"ignoring unknown packet size {len(data)}")
+                continue
+            packets += 1
+            if packets == 1:
+                log(f"telemetry flowing ({len(data)}-byte format)")
+            if not packet.get("IsRaceOn"):
+                continue
+            if args.dump:
+                if time.time() - last_report >= 0.5:
+                    last_report = time.time()
+                    log(
+                        f"gear={packet['Gear']} speed={packet['Speed']:.1f} "
+                        f"accel={packet['Accelerator']} brake={packet['Brake']} "
+                        f"slipRR={packet['TireSlipRatioRearRight']:+.2f}"
+                    )
+                continue
+            engine.feed(packet)
+    except KeyboardInterrupt:
+        log(f"stopping after {packets} packets")
+    finally:
+        if not args.dump:
+            try:
+                effects.clear_all(ctrl)
+                log("triggers reset")
+            except OSError:
+                pass
+            ctrl.close()
+
+
+if __name__ == "__main__":
+    main()

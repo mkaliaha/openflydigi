@@ -1,0 +1,29 @@
+# Third-party / proprietary content -- never commit.
+# All of it is reproducible: see README.md "Reproducing the analysis".
+
+# Decompiled Flydigi software and everything extracted from it
+decompiled/
+bundle/
+asar/
+bin/
+installer-listing.txt
+
+# Flydigi's downloaded game mods and their configs
+mods/
+configs/
+gamelist.json
+
+# Scratch: extracted mods, cloned reference repos
+work/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Fetch Flydigi's game list and per-game configs.
+
+None of this is redistributed in the repository -- it is Flydigi's content, and
+their API is public and unauthenticated, so we fetch it on demand instead.
+
+    tools/fetch-configs              # game list + Forza rule config
+    tools/fetch-configs --all-mods   # also every downloadable mod (~44 MB)
+"""
+import argparse
+import io
+import json
+import os
+import sys
+import urllib.request
+import zipfile
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from flydigi import games  # noqa: E402
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CONFIG_DIR = os.path.join(ROOT, "configs")
+MOD_DIR = os.path.join(ROOT, "mods")
+
+
+def log(msg):
+    print(f"[fetch] {msg}", flush=True)
+
+
+def fetch_gamelist():
+    data = games.fetch_gamelist()
+    log(f"game list: {len(data)} games -> gamelist.json")
+    return data
+
+
+def extract_from_mod(entry, members, dest_dir):
+    """Download a mod zip and pull selected files out of it."""
+    with urllib.request.urlopen(entry["modDownLoadUrl"], timeout=60) as resp:
+        blob = resp.read()
+    written = []
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        for name in zf.namelist():
+            base = os.path.basename(name)
+            if base in members:
+                os.makedirs(dest_dir, exist_ok=True)
+                target = os.path.join(dest_dir, members[base])
+                with open(target, "wb") as fh:
+                    fh.write(zf.read(name))
+                written.append(target)
+    return written
+
+
+def fetch_forza(data):
+    entry = next((g for g in data if g.get("enGameName") == "ForzaHorizon5"), None)
+    if not entry or not entry.get("modDownLoadUrl"):
+        log("Forza mod not listed; skipping")
+        return
+    written = extract_from_mod(entry, {"config.default.json": "forza.json"}, CONFIG_DIR)
+    for path in written:
+        log(f"Forza rules -> {os.path.relpath(path, ROOT)}")
+
+
+def fetch_monitor_configs(data):
+    """Pull the JSON config out of every XGameMonitor mod."""
+    targets = [g for g in data if g.get("modName") == "XGameMonitor.exe"]
+    dest = os.path.join(CONFIG_DIR, "monitor")
+    count = 0
+    for entry in targets:
+        try:
+            with urllib.request.urlopen(entry["modDownLoadUrl"], timeout=60) as resp:
+                blob = resp.read()
+            with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+                for name in zf.namelist():
+                    if "/configs/" in name and name.endswith(".json"):
+                        os.makedirs(dest, exist_ok=True)
+                        with open(os.path.join(dest, os.path.basename(name)), "wb") as fh:
+                            fh.write(zf.read(name))
+                        count += 1
+        except Exception as exc:  # noqa: BLE001
+            log(f"  {entry.get('enGameName')}: {exc}")
+    log(f"monitor configs: {count} -> configs/monitor/")
+
+
+def fetch_all_mods(data):
+    os.makedirs(MOD_DIR, exist_ok=True)
+    targets = [g for g in data if g.get("modDownLoadUrl")]
+    for entry in targets:
+        name = f"{entry['id']:03d}_{(entry.get('enGameName') or 'unknown')}"
+        name = name.replace("/", "_").replace(" ", "_")[:48] + ".zip"
+        dest = os.path.join(MOD_DIR, name)
+        if os.path.exists(dest) and os.path.getsize(dest):
+            continue
+        try:
+            urllib.request.urlretrieve(entry["modDownLoadUrl"], dest)
+        except Exception as exc:  # noqa: BLE001
+            log(f"  {name}: {exc}")
+    log(f"mods: {len(os.listdir(MOD_DIR))} archives -> mods/")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--all-mods", action="store_true",
+                    help="also download every mod archive (~44 MB)")
+    ap.add_argument("--monitor-configs", action="store_true",
+                    help="extract the JSON config from every XGameMonitor mod")
+    args = ap.parse_args()
+
+    data = fetch_gamelist()
+    fetch_forza(data)
+    if args.monitor_configs:
+        fetch_monitor_configs(data)
+    if args.all_mods:
+        fetch_all_mods(data)
+
+
+if __name__ == "__main__":
+    main()

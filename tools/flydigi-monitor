@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""Drive Apex 5 triggers from game memory, using Flydigi's XGameMonitor configs.
+
+Reads the game's memory via /proc/<pid>/mem -- nothing is injected and the game
+runs untouched under Proton.
+
+    tools/flydigi-monitor mods/.../configs/sekiro.json
+    tools/flydigi-monitor --probe <config>     # resolve + print values only
+
+Needs kernel.yama.ptrace_scope = 0 (check: sysctl kernel.yama.ptrace_scope).
+Pointer chains are build-specific: a game update will usually break a config
+until Flydigi ships new offsets.
+"""
+import argparse
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from flydigi import effects, monitor  # noqa: E402
+from flydigi.device import Controller, DeviceNotFound  # noqa: E402
+
+
+def log(msg):
+    print(f"[monitor] {msg}", flush=True)
+
+
+class DryRunController:
+    def send(self, buf, wait=0.0):
+        return []
+
+
+def check_ptrace_scope():
+    try:
+        with open("/proc/sys/kernel/yama/ptrace_scope") as fh:
+            scope = int(fh.read().strip())
+    except OSError:
+        return
+    if scope != 0:
+        log(f"warning: kernel.yama.ptrace_scope={scope}; reading game memory will")
+        log("         likely fail. Set it to 0 or grant CAP_SYS_PTRACE.")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("config", help="path to an XGameMonitor config json")
+    ap.add_argument("--probe", action="store_true",
+                    help="print resolved base and define values, no HID writes")
+    ap.add_argument("--process", help="override the config's process_name")
+    ap.add_argument("--quiet", action="store_true")
+    args = ap.parse_args()
+
+    config = monitor.load_config(args.config)
+    process_name = args.process or config.get("process_name")
+    log(f"{config.get('game_name') or '?'} -- process {process_name!r}, "
+        f"{len(config.get('vDefines') or [])} defines, "
+        f"{len(config.get('vFilters') or [])} filters, "
+        f"period {config.get('period')}ms")
+    check_ptrace_scope()
+
+    try:
+        pid = monitor.find_process(process_name)
+    except monitor.ProcessNotFound as exc:
+        sys.exit(f"{exc} -- is the game running?")
+    log(f"pid {pid}")
+
+    try:
+        base, path = monitor.find_module_base(pid, config.get("module_name"))
+    except (monitor.ModuleNotFound, OSError) as exc:
+        sys.exit(f"could not resolve module base: {exc}")
+    log(f"module base 0x{base:X} ({os.path.basename(path)})")
+
+    if args.probe:
+        ctrl = DryRunController()
+    else:
+        try:
+            ctrl = Controller()
+        except DeviceNotFound:
+            sys.exit("controller not found")
+        log(f"controller: {ctrl.path}")
+
+    engine = monitor.Engine(config, ctrl, verbose=not args.quiet)
+
+    try:
+        with monitor.MemoryReader(pid) as reader:
+            while True:
+                if not os.path.exists(f"/proc/{pid}"):
+                    log("game exited")
+                    break
+                engine.flush_pending()
+                changed = engine.poll(reader, base)
+                if changed and not args.probe:
+                    engine.evaluate(changed)
+                time.sleep(engine.period)
+    except PermissionError:
+        sys.exit("permission denied reading game memory -- check ptrace_scope")
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if not args.probe:
+            try:
+                effects.clear_all(ctrl)
+                log("triggers reset")
+            except OSError:
+                pass
+            ctrl.close()
+
+
+if __name__ == "__main__":
+    main()

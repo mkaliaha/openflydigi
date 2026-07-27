@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Polling daemon: detect a running game, apply its trigger config, reset on exit.
+
+Mirrors Flydigi's own AdapterTriggerRunner.CheckGameRunning (1 s poll on process
+names). Covers launchers the Steam wrapper cannot -- Heroic, umu, standalone.
+
+Games whose gamelist entry has no processGameNames cannot be detected this way;
+use tools/flydigi-run for those.
+"""
+import argparse
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from flydigi import effects, games  # noqa: E402
+from flydigi.device import Controller, DeviceNotFound  # noqa: E402
+
+
+def log(msg):
+    print(f"[flydigid] {msg}", flush=True)
+
+
+def candidate_names(pid):
+    """Names a process might be known by, lowercased and extension-stripped.
+
+    Proton games appear as a Windows path inside cmdline, so the basename of
+    every argument is checked, not just comm.
+    """
+    out = set()
+    try:
+        with open(f"/proc/{pid}/comm") as fh:
+            out.add(fh.read().strip().lower())
+    except OSError:
+        return out
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            parts = fh.read().split(b"\0")
+    except OSError:
+        parts = []
+    for raw in parts:
+        if not raw:
+            continue
+        token = raw.decode("utf-8", "replace").replace("\\", "/")
+        base = os.path.basename(token).strip().lower()
+        if base:
+            out.add(base)
+            if base.endswith(".exe"):
+                out.add(base[:-4])
+    return out
+
+
+def scan(index):
+    """Return (game, pid) for the first running known game, else (None, None)."""
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        for name in candidate_names(entry):
+            game = index.get(name)
+            if game is not None:
+                return game, int(entry)
+    return None, None
+
+
+def pid_alive(pid):
+    return os.path.exists(f"/proc/{pid}")
+
+
+def apply_for(game):
+    tier = games.tier(game)
+    if tier != "vibration":
+        log(f"{game.get('enGameName')}: tier '{tier}' not implemented, ignoring")
+        return False
+    try:
+        with Controller() as ctrl:
+            results = effects.apply_game(ctrl, game)
+        log(f"applied {game.get('enGameName')}: " + ", ".join(
+            f"{s}={'ok' if ok else 'no-ack' if ok is False else 'skip'}" for s, ok in results
+        ))
+        return True
+    except (DeviceNotFound, OSError) as exc:
+        log(f"could not apply: {exc}")
+        return False
+
+
+def reset():
+    try:
+        with Controller() as ctrl:
+            effects.clear_all(ctrl)
+        log("triggers reset")
+    except (DeviceNotFound, OSError) as exc:
+        log(f"reset skipped: {exc}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--interval", type=float, default=1.0)
+    ap.add_argument("--reassert", type=float, default=0.0,
+                    help="re-apply config every N seconds (counters Steam Input "
+                         "resetting controller state; 0 disables)")
+    args = ap.parse_args()
+
+    index = games.process_index()
+    log(f"watching for {len(index)} process names")
+
+    active = None
+    active_pid = None
+    last_assert = 0.0
+
+    while True:
+        if active is None:
+            game, pid = scan(index)
+            if game is not None:
+                active, active_pid = game, pid
+                if apply_for(game):
+                    last_assert = time.time()
+                else:
+                    active, active_pid = None, None
+        else:
+            if not pid_alive(active_pid):
+                log(f"{active.get('enGameName')} exited")
+                reset()
+                active, active_pid = None, None
+            elif args.reassert and time.time() - last_assert >= args.reassert:
+                apply_for(active)
+                last_assert = time.time()
+        time.sleep(args.interval)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        reset()

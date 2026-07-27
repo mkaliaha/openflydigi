@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Steam launch wrapper: apply a game's trigger config, run it, reset on exit.
+
+Steam launch options:
+    /path/to/flydigi-run "DEATH STRANDING 2" -- %command%
+
+Knowing the game up front removes detection entirely, which matters because
+many gamelist entries have no processGameNames at all.
+"""
+import os
+import signal
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from flydigi import effects, games  # noqa: E402
+from flydigi.device import Controller, DeviceNotFound  # noqa: E402
+
+
+def log(msg):
+    print(f"[flydigi-run] {msg}", file=sys.stderr, flush=True)
+
+
+def apply_config(name):
+    """Returns True if a config was applied."""
+    try:
+        game = games.find(name)
+    except (KeyError, OSError) as exc:
+        log(f"no config: {exc}")
+        return False
+
+    tier = games.tier(game)
+    log(f"{game.get('enGameName')} (id={game.get('id')}, tier={tier})")
+    if tier != "vibration":
+        log(f"tier '{tier}' not implemented yet; launching without trigger config")
+        return False
+
+    try:
+        with Controller() as ctrl:
+            for side, ok in effects.apply_game(ctrl, game):
+                log(f"  {side}: {'ok' if ok else 'no ack' if ok is False else 'skipped'}")
+        return True
+    except DeviceNotFound:
+        log("controller not connected; launching anyway")
+    except OSError as exc:
+        log(f"controller error: {exc}; launching anyway")
+    return False
+
+
+def reset():
+    try:
+        with Controller() as ctrl:
+            effects.clear_all(ctrl)
+        log("triggers reset")
+    except (DeviceNotFound, OSError) as exc:
+        log(f"reset skipped: {exc}")
+
+
+def main():
+    argv = sys.argv[1:]
+    if "--" not in argv:
+        sys.exit('usage: flydigi-run "<game name>" -- %command%')
+    split = argv.index("--")
+    name = " ".join(argv[:split]).strip()
+    command = argv[split + 1 :]
+    if not name or not command:
+        sys.exit('usage: flydigi-run "<game name>" -- %command%')
+
+    applied = apply_config(name)
+
+    proc = subprocess.Popen(command)
+
+    def forward(signum, _frame):
+        proc.send_signal(signum)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, forward)
+
+    try:
+        rc = proc.wait()
+    finally:
+        if applied:
+            reset()
+    sys.exit(rc)
+
+
+if __name__ == "__main__":
+    main()

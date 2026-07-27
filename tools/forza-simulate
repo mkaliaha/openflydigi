@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""Send synthetic Forza Data Out telemetry, for testing without the game.
+
+Run tools/flydigi-forza in one terminal, this in another:
+
+    tools/forza-simulate            # a short scripted drive
+    tools/forza-simulate --hold 3   # linger on each phase
+"""
+import argparse
+import os
+import socket
+import struct
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from flydigi import forza  # noqa: E402
+
+
+def make_packet(**values):
+    buf = bytearray(324)
+    shift = forza.BUFFER_OFFSETS[324]
+    values.setdefault("IsRaceOn", 1.0)
+    for name, value in values.items():
+        kind, offset, shifted = forza.FIELDS[name]
+        _size, fmt = forza._READERS[kind]
+        struct.pack_into(fmt, buf, offset + (shift if shifted else 0), value)
+    return bytes(buf)
+
+
+# (label, field overrides) -- mirrors a short drive.
+PHASES = [
+    ("idle, in gear",        dict(Gear=1, Accelerator=0, Brake=0, Speed=0.0)),
+    ("accelerating",         dict(Gear=1, Accelerator=220, Brake=0, Speed=15.0)),
+    ("GEAR SHIFT 1->2",      dict(Gear=2, Accelerator=220, Brake=0, Speed=20.0)),
+    ("GEAR SHIFT 2->3",      dict(Gear=3, Accelerator=220, Brake=0, Speed=30.0)),
+    ("cruising",             dict(Gear=3, Accelerator=200, Brake=0, Speed=45.0)),
+    ("WHEELSPIN (traction loss)",
+     dict(Gear=3, Accelerator=255, Brake=0, Speed=45.0,
+          TireSlipRatioRearLeft=0.95, TireSlipRatioRearRight=0.95)),
+    ("grip regained",        dict(Gear=3, Accelerator=200, Brake=0, Speed=45.0)),
+    ("HIGH-SPEED BRAKING",   dict(Gear=3, Accelerator=0, Brake=200, Speed=40.0)),
+    ("slowing",              dict(Gear=2, Accelerator=0, Brake=90, Speed=18.0)),
+    ("LOW-SPEED BRAKING",    dict(Gear=1, Accelerator=0, Brake=160, Speed=8.0)),
+    ("stopped",              dict(Gear=1, Accelerator=0, Brake=0, Speed=0.0)),
+]
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--port", type=int, default=forza.FORZA_DATA_OUT_PORT)
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--hold", type=float, default=1.5,
+                    help="seconds per phase")
+    ap.add_argument("--rate", type=float, default=60.0,
+                    help="packets per second, like the real game")
+    args = ap.parse_args()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    interval = 1.0 / args.rate
+    print(f"sending to {args.host}:{args.port} at {args.rate:.0f} Hz")
+
+    for label, values in PHASES:
+        print(f"  {label}")
+        packet = make_packet(**values)
+        deadline = time.time() + args.hold
+        while time.time() < deadline:
+            sock.sendto(packet, (args.host, args.port))
+            time.sleep(interval)
+    print("done")
+
+
+if __name__ == "__main__":
+    main()
