@@ -42,6 +42,16 @@ tools/flydigi-forza
 
 # any DualSenseX-compatible mod
 tools/flydigi-dsx
+
+# game-memory driven effects (Dark Souls, Cyberpunk, Elden Ring, ...)
+tools/fetch-configs --monitor-configs
+tools/flydigi-monitor --probe configs/monitor/<game>.json   # check offsets first
+tools/flydigi-monitor configs/monitor/<game>.json
+
+# present the pad to games as a DualSense (triggers, gyro, battery)
+tools/flydigi-ds5
+#   set per-game: SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501 %command%
+#   and disable Steam Input for that game
 ```
 
 ## Requirements

@@ -1,13 +1,73 @@
 # Apex 5 on Linux — project state
 
-Goal: adaptive triggers (ForceAdapt) working on Linux without the Windows Space Station app.
+Goal: replace Flydigi's Windows-only Space Station app on Linux. Started with adaptive triggers;
+now covers five delivery mechanisms plus a virtual DualSense.
 
-## Status: core problem solved
+## Read this first
 
-Trigger force effects and trigger haptics are both driven successfully from a native Linux
-Python script over `/dev/hidraw4`. Physically confirmed on hardware. See `PROTOCOL.md`.
+**Status: the trigger work is done and validated in real games.** What remains is a frontend and
+the device-configuration features Space Station has that we do not.
 
-What remains is **coverage and ergonomics**, not feasibility.
+| Tier | Games | Validated in |
+|---|---|---|
+| 1. Vibration bind (cmd 82) | 33 | Death Stranding 2 |
+| 2. Forza telemetry | 4 | Forza Horizon 6 |
+| 2b. DSX listener (UDP 7878) | third-party mod ecosystem | hardware |
+| 3. XGameMonitor (memory) | 31 | Dark Souls: Remastered |
+| 4. Virtual DualSense | **any DS5-aware game** | Deathloop |
+| 5. Third-party mods | 11 | works via the DSX listener; not supported |
+
+Everything is pure Python, zero dependencies, MIT. `PROTOCOL.md` has the wire protocol and what is
+hardware-verified. Nothing Flydigi-owned is committed; `tools/fetch-configs` restores it.
+
+## Next: frontend + Space Station's exclusive features
+
+Two workstreams, in the order discussed:
+
+**1. Frontend (Qt/KDE).** The library/CLI split exists so a GUI sits on top without rework. Decision
+still open, and it matters:
+  * **PySide6** — same language as the backend, simplest, no IPC needed. Recommended unless a
+    native KDE app is wanted.
+  * **C++/Kirigami + D-Bus** — a "proper" KDE app; the backend would become a daemon exposing D-Bus,
+    which is also how `flydigictl` does it and would let the daemon run as a system service.
+
+What the GUI needs from the backend that does not exist yet:
+  * **a daemon that picks the right tier per game** — currently `flydigid`, `flydigi-forza`,
+    `flydigi-monitor` and `flydigi-ds5` are separate manual tools
+  * **per-game mode preference** — six titles support both Flydigi's mod and PS5 mode
+    (Cyberpunk 2077, Death Stranding DC, Jedi Survivor, Spider-Man Remastered, Miles Morales,
+    Uncharted 4) and there is no way to express a choice
+  * game list browsing, enable/disable per game, status display
+
+**2. Space Station exclusives — device configuration.** All command factories are already decompiled
+under `decompiled/Flydigi.ControllerSdk/`. None are implemented yet:
+
+| Feature | Commands | Notes |
+|---|---|---|
+| RGB / lighting | `ReadLedConfig` **167** (works, response captured), `WriteRgbConfig` **169** (packed) | See the RGB section below — the test command 245 does nothing |
+| Screen image (pad + dock) | `UploadPic2K2Start/Data/End/Finish`, `UploadPicCommandK1/K2`, `TestScreen`, `OffScreen`, `ReadScreenSetting` | Image encoding may live in the Electron layer; likely the hardest |
+| Mapping profiles | `ApplyMappingConfigByCfgId`, `SaveCurrentMappingConfig`, `ReadCurrentMappingConfigId`, `WriteAllMappingConfig`, `ResetMappingConfigByCfgId` | Profile switching |
+| Macros | `ReadMacroConfig`, `WriteMarcoConfig`, `SetHardwareMacroEnable` | |
+| Device settings | 22 in `command.setting/` | report rate, stick sensitivity/precision, debounce, rebound, auto-calibration, motion debounce, sleep time, dock smart stop, mode switch, nickname |
+| Dock / cooler | `Flydigi.ChargerSdk.dll`, `Flydigi.CoolerSdk.dll` in `bundle/` | not yet decompiled |
+
+Config structures for mapping/macro/RGB are already decompiled as `m_fdg_*_struct_t` types.
+
+## Hard-won facts worth not rediscovering
+
+  * **Report id is `0x03`** on the vendor interface, not the `6` the decompiled
+    `TakeEndpointByDevice()` suggests. Find the node by report-descriptor prefix `06 a0 ff`; it moves
+    between wired and dongle.
+  * **Wine maps game PEs at their image base** (`0x140000000`), same as Windows, so Flydigi's memory
+    offsets work unmodified.
+  * **Never match a game process by cmdline alone** — Steam/Proton wrappers (`reaper`, `bwrap`,
+    `pv-adverb`, `steam.exe`) all carry the game's path. Require the PE to be mapped.
+  * **Effects persist in controller state** until changed; there is no timeout.
+  * **`effects.rumble()` must use `wait=0`** when driven continuously, or the 100 ms ACK wait puts
+    the motors far behind.
+  * **Steam Input must be off** for Tier 4 — it masks the pad and breaks DualSense semantics.
+  * The Apex 5 sleeps on idle and its hidraw/evdev node numbers change on reconnect. Resolve by
+    name/descriptor, never by path.
 
 ## Environment
 
