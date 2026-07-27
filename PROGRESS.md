@@ -163,6 +163,23 @@ the right thing for it without me*. Concretely, on detecting the game:
 launch and supervise the other four, plus a UI toggle and somewhere to persist it
 (`gui/triggers.py` already writes `~/.config/flydigi/games.json`).
 
+**How Space Station does it**, from `AdapterTriggerRunner.CheckGameRunning` — worth knowing before
+inventing something cleverer, because it is deliberately dull:
+
+  * a loop with `Task.Delay(1000)`: plain **1 Hz polling**, no WMI event watcher, no ETW
+  * `GameHelper.IsProcessRunning` wraps `Process.GetProcessesByName` behind a **5 second cache**,
+    so the poll is cheap even with the whole game list to check
+  * tries `ProcessGameName` first, then each entry in `ProcessGameNames`, and latches whichever
+    matched
+  * separately checks whether the mod process is already running, so it does not start it twice
+  * `ModStartType` says where the mod executable lives: 0 = game directory + mod path,
+    1 = Space Station's own directory + mod path
+
+So 1 Hz is enough and `flydigid`'s approach is already the right one. Two things they do not have
+to deal with that we do: Proton wrappers carrying the game's path in their cmdline (see
+`monitor.find_process`, which requires the PE to actually be mapped), and no equivalent of their
+"launch the game from our UI" path — which is what `flydigi-run` replaces.
+
 Two things that will bite:
 
   * **Polling cannot detect every game.** Many entries have empty `processGameNames` (Silksong,
