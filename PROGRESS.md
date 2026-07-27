@@ -7,8 +7,8 @@ now covers five delivery mechanisms plus a virtual DualSense.
 
 **Status: adaptive triggers are done and validated in real games, and the desktop app now covers
 profiles, button remapping, vibration, per-profile trigger config and RGB lighting.** What remains
-is the screen/GIF upload, a real battery reading, the charging dock, a Steam Input toggle, macros,
-the device settings, and a daemon that picks the right tier per game — see "Next".
+is the screen/GIF upload, a real battery reading, the charging dock, the third-party-app mapping
+toggle, macros, the device settings, and a daemon that picks the right tier per game — see "Next".
 
 | Tier | Games | Validated in |
 |---|---|---|
@@ -102,11 +102,40 @@ before assuming 8 steps is all the hardware exposes.
 and `cd2_led_sync` — "Keep the lighting mode of the controller and dock in sync". So the dock has
 its own effect set plus a sync toggle, which is the integration the user wants.
 
-**4. Toggling Steam Input.** Ambiguous until confirmed — two different things:
-  * Steam's per-game Steam Input setting, stored host-side in
-    `~/.steam/steam/userdata/<id>/config/localconfig.vdf`. This is the one that has to be **off**
-    for Tier 4, so a toggle would remove a manual step that has already bitten us.
-  * the pad's own output mode, `SwitchModeCommandFactory` in `command.setting/`.
+**4. "Allow third-party apps to take over mappings"** — a pad-side setting, not Steam's. Space
+Station's own words:
+
+> When the switch is turned on and a third-party application (such as Steam, reWASD, etc.) is
+> opened, the controller mapping will be taken over, and all Space Station settings will be invalid
+> at this time.
+
+The likely command is `EnableMappingSwitchCommandFactory`, NewXInput **19**, payload
+`[4]=4, [5]=4, [6]=enable`, crc at `[7]` — the `[5]=4` looks like a sub-function selector, so 19 is
+probably a generic "enable feature N". **Unconfirmed**: the flag it sets is called `MappingSwitch`,
+which might instead mean the Menu-button profile switching. Read the state back with command 3
+(below), toggle, and read again to find out which bit moves — that settles it in one test.
+
+Also relevant to the "extra buttons and gyro" part: `DeviceMaskCommandFactory` (**16**) takes
+`maskController`, `maskMedia`, `maskGyro`, which is how the pad decides what to expose to the host.
+
+### Command 3: the whole settings block in one read
+
+Found while chasing the above, and it covers most of item 6 by itself. `ReadHardwareFunctionStatus`,
+NewXInput command **3**, payload length 2 (no arguments). The reply carries capability and enabled
+bits separately, so the pad tells you both what it supports and what is on:
+
+```
+data[5]  supported   bit0 quick-switch config   bit1 Xbox home button  bit2 motion debounce
+                     bit3 mapping switch        bit4 stick debounce    bit5 stick auto-calibration
+                     bit6 stick rebound         bit7 status bar always on
+data[6]  enabled     same bit order
+data[7]  supported   bit0 off-screen   bit1 audio
+data[8]  enabled     same
+data[9]  sleep time        data[10] report rate
+data[11] stick precision   data[12] stick sensitivity
+```
+
+So sleep time is readable as well as writable — worth reading before `UpdateSleepTime` writes it.
 
 **5. A daemon that picks the right tier per game.** `flydigid`, `flydigi-forza`,
 `flydigi-monitor` and `flydigi-ds5` are still separate manual tools, and the GUI's trigger tab can
@@ -133,7 +162,7 @@ All command factories are decompiled under `decompiled/Flydigi.ControllerSdk/`.
 | RGB / lighting | read **167**, write **168**/**169** | **done** — `flydigi/lighting.py`, GUI |
 | Macros | `ReadMacroConfig`, `WriteMarcoConfig`, `SetHardwareMacroEnable` | not started; blob at 230..768 is carried through untouched |
 | Screen image (pad + dock) | `UploadPic2K2Start/Data/End/Finish`, `UploadPicCommandK1/K2`, `TestScreen`, `OffScreen` | not started; **wired only in Space Station**; encoding may live in the Electron layer |
-| Device settings | 22 in `command.setting/` | not started — report rate, stick sensitivity/precision, debounce, rebound, auto-calibration, motion debounce, sleep time, dock smart stop, nickname |
+| Device settings | read them all with **3**; writes are the 22 factories in `command.setting/` | not started — but command 3 already returns supported/enabled bits plus sleep time, report rate and stick precision/sensitivity in one reply, see "Next" |
 | Dock / cooler | `Flydigi.ChargerSdk.dll`, `Flydigi.CoolerSdk.dll` in `bundle/` | not decompiled — now in scope, including `cd2_led_sync` (dock/pad lighting sync) |
 
 ### Config blobs, both verified on hardware
