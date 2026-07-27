@@ -250,6 +250,23 @@ the kernel creates the hidraw node and the ALSA card from the same device:
 Both modules are present on the kernel. Target spec, from the real device:
 `s16le 4ch 48000Hz`, `alsa.components = USB054c:0ce6`, `device.bus = usb`, haptics on ch3.
 
+**Tested and ruled out: PipeWire property spoofing.** Wine synthesises the Windows device instance
+id from the underlying Linux device — USB devices become `USB\VID_xxxx&PID_xxxx\...`, everything
+else `ROOT\MEDIA\N`, and that string is what ties an audio endpoint to a HID device. A null sink
+was given every property the real device carries (`device.bus=usb`, `device.vendor.id=0x054c`,
+`device.product.id=0x0ce6`, `sysfs.path`, `alsa.components`), then the node name and description
+were made byte-identical to the real device's. Wine still assigned `ROOT\MEDIA\N` and the game
+never opened the sink. Per Wine development discussion, winepulse resolves identity through the
+**sysfs path** and looks it up in setupapi — a virtual node has no kernel device to find.
+
+**Why uhid cannot close this.** uhid creates HID devices only; it has no audio concept and no way to
+attach one. A real DualSense is a composite USB device whose HID and audio interfaces are siblings
+under one USB device. Only real (or emulated) USB device topology produces that.
+
+This is not Linux-specific: a virtual audio device on Windows needs an audio driver, and DSX ships
+a virtual gamepad bus driver rather than one — consistent with DSX's virtual pad also failing to
+produce haptics in Death Stranding DC.
+
 **Blocked on this kernel.** Fedora ships neither `usb_f_uac2` nor `raw_gadget`, so there is no way
 to present a USB audio interface without building and signing a kernel module — an ongoing chore on
 a Secure Boot, auto-updating, ostree system. `dummy_hcd`, `vhci-hcd`, `usb_f_hid` and `usb_f_fs`
