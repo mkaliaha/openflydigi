@@ -16,7 +16,8 @@ Moved exactly like a mapping profile, with its own command ids:
     2      click feedback -- light reacts to rumble
     3      loop start frame
     4      loop end frame
-    5      loop time (animation speed)
+    5      cycle time -- Space Station calls this "Cycle time", so a
+           larger number is a slower animation, not a faster one
     6      brightness
     7      LED count (12 on an Apex 5)
     8      mode
@@ -24,9 +25,13 @@ Moved exactly like a mapping profile, with its own command ids:
     20..   animation frames of `LED count` LEDs, 3 bytes each, RGB
            (10 frames x 12 LEDs on an Apex 5 -- see below)
 
-The frames are an animation: `mode` picks the built-in effect, and the pad
-cycles frames `loop_start`..`loop_end` at `loop_time`. A static colour is the
-degenerate case -- every frame the same.
+**The frames are the effect.** The pad has no built-in animation generator: it
+plays the stored frames, cycling `loop_start`..`loop_end` every `cycle_time`.
+Space Station's UI offers "Breath" and "Flow" over a list of colours and
+computes the frames from them before uploading, so the `mode` byte only records
+which of its modes produced the data. Writing a different mode number changes
+nothing visible -- to change the lighting you have to write frames, which is
+what `set_breath`, `set_flow`, `set_rainbow` and `set_solid` do.
 """
 from . import blobs
 from .blobs import ProtocolError, build          # re-exported for callers
@@ -39,7 +44,7 @@ OFF_VERSION = 0
 OFF_CLICK_FEEDBACK = 2
 OFF_LOOP_START = 3
 OFF_LOOP_END = 4
-OFF_LOOP_TIME = 5
+OFF_LOOP_TIME = 5      # "cycle time": bigger is slower
 OFF_BRIGHTNESS = 6
 OFF_LED_COUNT = 7
 OFF_MODE = 8
@@ -53,6 +58,30 @@ BRIGHTNESS_MAX = 100
 # loop range of 0..9. So derive both from the blob rather than assuming, or
 # writing colours runs off the end and silently grows the config.
 DEFAULT_LEDS_PER_FRAME = 10
+
+
+def _blend(first, second, amount):
+    return tuple(int(a + (b - a) * amount) for a, b in zip(first, second))
+
+
+def _sample(colours, position):
+    """Colour at `position` (0..1) around a cyclic list, blended between stops."""
+    count = len(colours)
+    if count == 1:
+        return tuple(colours[0])
+    exact = position * count
+    index = int(exact) % count
+    return _blend(colours[index], colours[(index + 1) % count], exact - int(exact))
+
+
+def _hue(position):
+    """A saturated, full-brightness colour at `position` (0..1) round the wheel."""
+    sector = position * 6.0
+    offset = int(sector) % 6
+    rising = int(255 * (sector - int(sector)))
+    falling = 255 - rising
+    return [(255, rising, 0), (falling, 255, 0), (0, 255, rising),
+            (0, falling, 255), (rising, 0, 255), (255, 0, falling)][offset]
 
 
 def read_config(ctrl, cfg_id=0, wait=1.5, retries=3):
@@ -117,12 +146,13 @@ class LedConfig:
         self.blob[OFF_CLICK_FEEDBACK] = 1 if value else 0
 
     @property
-    def speed(self):
+    def cycle_time(self):
+        """How long one animation step lasts. Bigger is slower."""
         return self.blob[OFF_LOOP_TIME]
 
-    @speed.setter
-    def speed(self, value):
-        self.blob[OFF_LOOP_TIME] = max(0, min(255, int(value)))
+    @cycle_time.setter
+    def cycle_time(self, value):
+        self.blob[OFF_LOOP_TIME] = max(1, min(255, int(value)))
 
     @property
     def loop(self):
@@ -164,6 +194,47 @@ class LedConfig:
     def frame(self, index):
         return [self.led(index, led) for led in range(self.leds_per_frame)]
 
+    # -- effects -----------------------------------------------------------
+    #
+    # The pad does not synthesise animations. It plays back the frames stored
+    # here, cycling loop_start..loop_end every `cycle_time`. Space Station's UI
+    # offers "Breath" and "Flow" over a list of colours and computes the frames
+    # from them; the mode byte only records which of its modes produced them,
+    # so writing a different mode alone changes nothing visible. These build
+    # the frame data, which is what actually changes the lighting.
+
+    def _all_frames(self):
+        self.loop = (0, max(0, self.frames - 1))
+
+    def set_breath(self, colours):
+        """Fade the whole pad in and out through each colour in turn."""
+        colours = list(colours) or [(255, 255, 255)]
+        for frame in range(self.frames):
+            # Triangular ramp so the loop joins back to itself smoothly.
+            position = frame / max(1, self.frames)
+            level = 1.0 - abs(2.0 * position - 1.0)
+            colour = colours[int(position * len(colours)) % len(colours)]
+            faded = tuple(int(channel * level) for channel in colour)
+            for led in range(self.leds_per_frame):
+                self.set_led(frame, led, faded)
+        self._all_frames()
+
+    def set_flow(self, colours):
+        """Run the colours along the pad, shifting by one frame each step."""
+        colours = list(colours) or [(255, 0, 0)]
+        leds = self.leds_per_frame
+        for frame in range(self.frames):
+            for led in range(leds):
+                # Position along the colour list, advanced by the frame so the
+                # pattern travels rather than merely repeating.
+                position = (led / leds + frame / max(1, self.frames)) % 1.0
+                self.set_led(frame, led, _sample(colours, position))
+        self._all_frames()
+
+    def set_rainbow(self):
+        """A full hue sweep, the degenerate case of flow over the wheel."""
+        self.set_flow([_hue(index / 6.0) for index in range(6)])
+
     def set_solid(self, colour):
         """One colour, everywhere, on every frame.
 
@@ -179,4 +250,4 @@ class LedConfig:
         return (f"<LedConfig v{self.version:#06x} mode={self.mode} "
                 f"brightness={self.brightness} "
                 f"{self.frames}x{self.leds_per_frame} leds "
-                f"loop={self.loop} speed={self.speed}>")
+                f"loop={self.loop} cycle={self.cycle_time}>")

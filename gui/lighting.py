@@ -14,11 +14,23 @@ from PySide6.QtWidgets import (
 
 from flydigi import lighting
 
-# The pad's built-in animations. Only the id is protocol; the names are ours,
-# from watching what each does, so they are descriptions rather than Flydigi's
-# labels.
-MODES = [(0, "Off"), (1, "Static"), (2, "Breathing"), (3, "Rainbow"),
-         (4, "Wave"), (5, "Ripple"), (6, "Chase"), (7, "Spectrum cycle")]
+# Effects we generate frames for. The pad has no animation generator of its own
+# -- see flydigi/lighting.py -- so each of these writes the frame data, and the
+# mode byte stored alongside is only a record of which one produced it.
+# "Breath" and "Flow" are Space Station's own names for its two controller
+# modes; static and rainbow are the obvious remaining cases.
+EFFECTS = ["Static", "Breath", "Flow", "Rainbow"]
+
+# The stored mode byte uses Space Station's numbering, not ours, so on load we
+# cannot say which of our effects produced what is on the pad. Rather than
+# claim one, the picker starts here: leave the frames alone until an effect is
+# actually chosen.
+KEEP_CURRENT = "(keep what is on the pad)"
+
+# A slower cycle is a larger stored number, which reads backwards on a control
+# labelled "speed". The slider is inverted so that right is faster, and the
+# stored value is shown next to it rather than hidden.
+CYCLE_MIN, CYCLE_MAX = 1, 30
 
 
 class LightingPage(QWidget):
@@ -38,8 +50,7 @@ class LightingPage(QWidget):
         form = QFormLayout(box)
 
         self.mode = QComboBox()
-        for _value, label in MODES:
-            self.mode.addItem(label)
+        self.mode.addItems([KEEP_CURRENT] + EFFECTS)
         self.mode.currentIndexChanged.connect(self._edit)
         form.addRow("Effect", self.mode)
 
@@ -55,9 +66,17 @@ class LightingPage(QWidget):
         form.addRow("Brightness", row)
 
         self.speed = QSlider(Qt.Horizontal)
-        self.speed.setRange(1, 30)
+        self.speed.setRange(CYCLE_MIN, CYCLE_MAX)
+        self.speed_readout = QLabel("")
+        self.speed_readout.setMinimumWidth(96)
+        self.speed.valueChanged.connect(self._show_cycle)
         self.speed.valueChanged.connect(lambda _v: self._edit())
-        form.addRow("Animation speed", self.speed)
+        speed_row = QHBoxLayout()
+        speed_row.addWidget(QLabel("slower"))
+        speed_row.addWidget(self.speed, 1)
+        speed_row.addWidget(QLabel("faster"))
+        speed_row.addWidget(self.speed_readout)
+        form.addRow("Animation speed", speed_row)
 
         self.click_feedback = QCheckBox("React to rumble")
         self.click_feedback.setToolTip(
@@ -74,7 +93,7 @@ class LightingPage(QWidget):
         self.colour_preview.setAutoFillBackground(True)
         colour_row.addWidget(self.colour_button)
         colour_row.addWidget(self.colour_preview, 1)
-        form.addRow("Solid colour", colour_row)
+        form.addRow("Colour", colour_row)
 
         layout.addWidget(box)
 
@@ -100,25 +119,35 @@ class LightingPage(QWidget):
         self._edited = lighting.LedConfig(bytearray(blob))
         self.setEnabled(True)
         self._loading = True
-        index = next((i for i, (value, _l) in enumerate(MODES)
-                      if value == self._edited.mode), None)
-        if index is None:
-            # An effect we have no name for -- show the number rather than
-            # silently snapping it to something else.
-            self.mode.addItem(f"Effect {self._edited.mode}")
-            index = self.mode.count() - 1
-            MODES.append((self._edited.mode, f"Effect {self._edited.mode}"))
-        self.mode.setCurrentIndex(index)
         self.brightness.setValue(self._edited.brightness)
-        self.speed.setValue(max(1, self._edited.speed))
+        self.speed.setValue(self._invert(self._edited.cycle_time))
+        self._show_cycle(self.speed.value())
         self.click_feedback.setChecked(self._edited.click_feedback)
-        self._colour = self._edited.led(0, 0)
+        self.mode.setCurrentIndex(0)          # KEEP_CURRENT
+        # Seed the picker from a lit LED, since frame 0 of a breath is black.
+        self._colour = self._first_lit() or (0, 128, 255)
         self._loading = False
         self._update_preview()
         self.info.setText(
-            f"{self._edited.led_count} LEDs, protocol v{self._edited.version:#06x}. "
-            "Picking a colour writes it to every animation frame.")
+            f"{self._edited.frames} frames of {self._edited.leds_per_frame} LEDs, "
+            f"protocol v{self._edited.version:#06x}. The pad has no effect "
+            "generator — choosing an effect rewrites the frames it plays.")
         self._mark_changes()
+
+    def _first_lit(self):
+        for frame in range(self._edited.frames):
+            for led in self._edited.frame(frame):
+                if any(led):
+                    return led
+        return None
+
+    @staticmethod
+    def _invert(cycle):
+        """Map stored cycle time to slider position, so right is faster."""
+        return max(CYCLE_MIN, min(CYCLE_MAX, CYCLE_MAX + CYCLE_MIN - int(cycle)))
+
+    def _show_cycle(self, value):
+        self.speed_readout.setText(f"cycle {self._invert(value)}")
 
     def _pick_colour(self):
         from PySide6.QtGui import QColor
@@ -129,7 +158,7 @@ class LightingPage(QWidget):
         self._colour = (chosen.red(), chosen.green(), chosen.blue())
         self._update_preview()
         if self._edited is not None:
-            self._edited.set_solid(self._colour)
+            self._apply_effect()
             self._mark_changes()
 
     def _update_preview(self):
@@ -140,11 +169,31 @@ class LightingPage(QWidget):
     def _edit(self):
         if self._loading or self._edited is None:
             return
-        self._edited.mode = MODES[self.mode.currentIndex()][0]
         self._edited.brightness = self.brightness.value()
-        self._edited.speed = self.speed.value()
+        self._edited.cycle_time = self._invert(self.speed.value())
         self._edited.click_feedback = self.click_feedback.isChecked()
+        self._apply_effect()
         self._mark_changes()
+
+    def _apply_effect(self):
+        """Regenerate the frames, which is the only thing that changes the look."""
+        effect = self.mode.currentText()
+        if effect == KEEP_CURRENT:
+            self.colour_button.setEnabled(False)
+            return
+        colours = [self._colour]
+        if effect == "Static":
+            self._edited.set_solid(self._colour)
+        elif effect == "Breath":
+            self._edited.set_breath(colours)
+        elif effect == "Flow":
+            self._edited.set_flow(colours + [(0, 0, 0)])
+        elif effect == "Rainbow":
+            self._edited.set_rainbow()
+        # Keep the byte in step with what we generated, so a round trip through
+        # Space Station sees something coherent.
+        self._edited.mode = EFFECTS.index(effect)
+        self.colour_button.setEnabled(effect != "Rainbow")
 
     def _mark_changes(self):
         dirty = self._edited is not None and bytes(self._edited.blob) != self._stored

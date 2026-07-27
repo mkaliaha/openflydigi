@@ -235,6 +235,44 @@ def test_lighting_brightness_is_clamped():
     check("brightness clamps to zero", config.brightness == 0, str(config.brightness))
 
 
+def test_lighting_effects_write_frames():
+    """The pad plays stored frames, so an effect must change the frame data."""
+    config = lighting.read_config(FakePad())
+    blank = bytes(config.blob)
+
+    config.set_solid((10, 20, 30))
+    check("static writes every frame",
+          all(config.led(f, l) == (10, 20, 30)
+              for f in range(config.frames) for l in range(config.leds_per_frame)))
+
+    config.set_breath([(255, 0, 0)])
+    levels = {config.led(f, 0)[0] for f in range(config.frames)}
+    check("breath varies over the loop", len(levels) > 1, str(sorted(levels)))
+    check("breath is uniform across the pad",
+          len({config.led(3, l) for l in range(config.leds_per_frame)}) == 1)
+
+    config.set_flow([(255, 0, 0), (0, 0, 0)])
+    check("flow varies along the pad",
+          len({config.led(0, l) for l in range(config.leds_per_frame)}) > 1)
+    check("flow travels between frames", config.frame(0) != config.frame(3))
+
+    config.set_rainbow()
+    check("rainbow uses many colours",
+          len({config.led(0, l) for l in range(config.leds_per_frame)}) > 3)
+    check("effects never resize the config", len(config.blob) == len(blank))
+    check("effects loop over every frame", config.loop == (0, config.frames - 1),
+          str(config.loop))
+
+
+def test_cycle_time_is_a_duration():
+    config = lighting.read_config(FakePad())
+    config.cycle_time = 12
+    check("cycle time round-trips", config.cycle_time == 12)
+    config.cycle_time = 0
+    check("cycle time never reaches zero", config.cycle_time >= 1,
+          str(config.cycle_time))
+
+
 def main():
     for test in (test_packet_framing, test_identity_and_remap, test_turbo,
                  test_title, test_read_write_round_trip,
@@ -244,7 +282,8 @@ def main():
                  test_trigger_effect_and_curve,
                  test_editing_extras_does_not_disturb_buttons,
                  test_targets_exclude_buttons_xinput_cannot_send,
-                 test_lighting_round_trip, test_lighting_brightness_is_clamped):
+                 test_lighting_round_trip, test_lighting_brightness_is_clamped,
+                 test_lighting_effects_write_frames, test_cycle_time_is_a_duration):
         test()
     total = len(PASSED) + len(FAILED)
     print(f"\n{len(PASSED)}/{total} passed")
