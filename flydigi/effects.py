@@ -77,13 +77,18 @@ def common_effect_payload(side, mode, params):
     return buf
 
 
-def rumble(ctrl, low, high):
-    """Drive the grip motors directly (SDL framing)."""
+def rumble(ctrl, low, high, wait=0.1):
+    """Drive the grip motors directly (SDL framing).
+
+    `wait` is how long to collect the ACK for. Pass 0.0 when driving rumble
+    continuously: waiting 100 ms per update makes the motors lag well behind
+    whatever is driving them, and the ACK carries nothing we need.
+    """
     buf = device.build(CMD_RUMBLE)
     buf[4] = 6
     buf[5] = low & 0xFF
     buf[6] = high & 0xFF
-    return ctrl.send(buf, wait=0.1)
+    return ctrl.send(buf, wait=wait)
 
 
 def apply_game(ctrl, game):

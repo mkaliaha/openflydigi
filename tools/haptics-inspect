@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""Watch a sink's individual channels, to see what a game writes to a DualSense.
+
+A real DualSense's USB audio device has four output channels. Game audio and
+haptic actuator data land on different ones, so per-channel levels tell the two
+apart -- an overall level cannot.
+
+    tools/haptics-inspect                       # auto-find a real DualSense
+    tools/haptics-inspect --sink <name>
+    tools/haptics-inspect --streams             # also report what connects
+"""
+import argparse
+import math
+import struct
+import subprocess
+import sys
+import time
+
+RATE = 48000
+CHANNELS = 4
+FRAME = 4 * CHANNELS
+SILENCE = 5e-5
+
+
+def find_dualsense_sink():
+    out = subprocess.run(["pactl", "list", "short", "sinks"],
+                         capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and "DualSense" in parts[1]:
+            return parts[1]
+    return None
+
+
+def stream_map():
+    """{sink_index: [app names]} for everything currently playing."""
+    out = subprocess.run(["pactl", "list", "sink-inputs"],
+                         capture_output=True, text=True).stdout
+    result, sink, name = {}, None, None
+    for line in out.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Sink Input #"):
+            if sink is not None and name:
+                result.setdefault(sink, []).append(name)
+            sink, name = None, None
+        elif stripped.startswith("Sink:"):
+            sink = stripped.split()[-1]
+        elif "application.name" in stripped:
+            name = stripped.split("=", 1)[-1].strip().strip('"')
+    if sink is not None and name:
+        result.setdefault(sink, []).append(name)
+    return result
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--sink")
+    ap.add_argument("--streams", action="store_true")
+    ap.add_argument("--interval", type=float, default=0.4)
+    args = ap.parse_args()
+
+    sink = args.sink or find_dualsense_sink()
+    if not sink:
+        sys.exit("no DualSense sink found; pass --sink")
+    print(f"[inspect] sink: {sink}", flush=True)
+    print("[inspect] per-channel RMS; ch0-3 of the DualSense audio device", flush=True)
+
+    proc = subprocess.Popen(
+        ["parec", "-d", f"{sink}.monitor", "--raw", "--format=float32le",
+         f"--rate={RATE}", f"--channels={CHANNELS}"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+    window = int(RATE * args.interval)
+    acc = [0.0] * CHANNELS
+    count = 0
+    peaks = [0.0] * CHANNELS
+    seen_streams = set()
+    last_report = time.time()
+    try:
+        while True:
+            buf = proc.stdout.read(FRAME * 1024)
+            if not buf:
+                break
+            frames = len(buf) // FRAME
+            samples = struct.unpack_from(f"<{frames * CHANNELS}f", buf, 0)
+            for f in range(frames):
+                for c in range(CHANNELS):
+                    v = samples[f * CHANNELS + c]
+                    acc[c] += v * v
+            count += frames
+
+            if count >= window:
+                rms = [math.sqrt(a / count) for a in acc]
+                for c in range(CHANNELS):
+                    peaks[c] = max(peaks[c], rms[c])
+                if any(r > SILENCE for r in rms):
+                    bars = "  ".join(
+                        f"ch{c}={rms[c]:.4f}{'#' * min(12, int(rms[c] * 40))}"
+                        for c in range(CHANNELS))
+                    print(f"  {bars}", flush=True)
+                acc = [0.0] * CHANNELS
+                count = 0
+
+            if args.streams and time.time() - last_report > 2.0:
+                last_report = time.time()
+                for idx, names in stream_map().items():
+                    for n in names:
+                        key = (idx, n)
+                        if key not in seen_streams:
+                            seen_streams.add(key)
+                            print(f"  [stream] sink {idx}: {n}", flush=True)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        proc.terminate()
+        print("\n[inspect] peak per channel: " +
+              "  ".join(f"ch{c}={peaks[c]:.4f}" for c in range(CHANNELS)), flush=True)
+
+
+if __name__ == "__main__":
+    main()

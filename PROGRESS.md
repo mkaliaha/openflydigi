@@ -99,6 +99,8 @@ Two gaps remain, neither in the transport:
   a menu button press — so it does emit motor rumble, just not to a DualSense. Our own output path
   is proven: a direct cmd `0x12` rumbles the pad and ACKs.
 
+  **Superseded — see "Haptic audio" below.** Original finding retained for context:
+
   **Built, tested, negative result.** Neither Flydigi nor DSX implements audio haptics — verified
   by decompilation: Space Station bundles no audio libraries at all, and its `EnableAudio` command
   is a device feature toggle, not PC audio capture.
@@ -135,6 +137,42 @@ Two gaps remain, neither in the transport:
   every 30 s and mapped to the DualSense's 0-10 scale (Flydigi reports 0-5, with a high nibble
   flagging charging). Also fixed `BATTERY_FULL`, which was 0x01 (= charging) rather than 0x02, so
   the pad had been reporting "charging" permanently.
+
+## Haptic audio
+
+Deathloop *does* drive DualSense haptics on PC, and it works under Proton — verified with a real
+DualSense connected over USB (haptic audio needs wired USB; over Bluetooth the endpoint does not
+exist). The game opens a **dedicated second stream** to the controller's audio device alongside its
+normal game audio, so this is real haptic output rather than misrouted sound.
+
+**DualSense audio channel map**, established by playing tones into each channel and having a human
+report what happened — identified by pulse count rather than play order, after an off-by-one made
+the first attempt wrong:
+
+    ch0  headphone jack        ch2  left haptic actuator
+    ch1  speaker               ch3  right haptic actuator
+
+Deathloop writes **ch3 only** (active in 87% of 373 sampled windows; ch1 never touched). Treat
+haptics as mono rather than assuming stereo.
+
+**Conversion** (`flydigi/haptics.py`, `tools/flydigi-haptics`): the DualSense's actuators are
+full-range voice coils, but the Apex 5's motors are not interchangeable — left is a large
+low-frequency mass, right a small high-frequency one. Mapping left-to-left would throw away the
+character of the waveform, so the signal is split by frequency instead: low band drives the left
+motor, high band the right. Confirmed working against live game haptics.
+
+Three things dominated latency, all of which made it feel sluggish and "keep going" after effects
+ended:
+  * `effects.rumble()` waited 100 ms for an ACK on every update. Pass `wait=0.0` when driving
+    continuously — the ACK carries nothing useful.
+  * `parec` buffers generously by default; ask for `--latency-msec`.
+  * When falling behind, **drop stale audio** rather than working through the backlog.
+
+Useful settings: `--gain 1.5 --crossover 250`.
+
+**What this does not do:** it requires a real DualSense present as the haptic source. Making the
+Apex work standalone needs the game to write haptics to a device we control — see the USB gadget
+note below.
 
 ## Dual-mode games
 
@@ -176,6 +214,25 @@ What reading them is still worth:
 
 For anything else the pad's own onboard remapping is the better mechanism -- it works with no
 software running and persists in controller memory.
+
+## Virtual USB composite device (not built)
+
+Our PipeWire null sink was ignored by the game even when named "Wireless Controller", while a real
+DualSense was used immediately. That points at device identity/association rather than name
+matching: a game finds the haptic endpoint via the OS-level link between the HID device and the
+audio device, which a null sink does not have.
+
+The architecturally correct fix is one virtual USB composite device exposing both interfaces, so
+the kernel creates the hidraw node and the ALSA card from the same device:
+
+    dummy_hcd   provides a virtual UDC (this laptop is USB host-only, so there is no real one)
+    configfs    gadget with hid.usb0 + uac2.usb0, VID:PID 054c:0ce6
+
+Both modules are present on the kernel. Target spec, from the real device:
+`s16le 4ch 48000Hz`, `alsa.components = USB054c:0ce6`, `device.bus = usb`, haptics on ch3.
+
+Requires root, and a rewrite of the working uhid path. The conversion half is already proven, so
+this is purely "make the game write to us instead of a real DualSense".
 
 ## Open issues
 
