@@ -7,7 +7,8 @@ now covers five delivery mechanisms plus a virtual DualSense.
 
 **Status: adaptive triggers are done and validated in real games, and the desktop app now covers
 profiles, button remapping, vibration, per-profile trigger config and RGB lighting.** What remains
-is macros, screen images, the device settings, and a daemon that picks the right tier per game.
+is the screen/GIF upload, a real battery reading, the charging dock, a Steam Input toggle, macros,
+the device settings, and a daemon that picks the right tier per game — see "Next".
 
 | Tier | Games | Validated in |
 |---|---|---|
@@ -79,15 +80,47 @@ dependency-free.
 
 ## Next
 
-  * **a daemon that picks the right tier per game** — `flydigid`, `flydigi-forza`,
-    `flydigi-monitor` and `flydigi-ds5` are still separate manual tools, and the GUI's trigger tab
-    can only tell you which to start
-  * **per-game mode preference** — six titles support both Flydigi's mod and PS5 mode
-    (Cyberpunk 2077, Death Stranding DC, Jedi Survivor, Spider-Man Remastered, Miles Morales,
-    Uncharted 4); `gui/triggers.py` has the storage but no UI to set it
-  * **verify command 166 on hardware** — write, save, power-cycle the pad, read back
-  * **macros, screen images, the 22 device settings** — see the table below
-  * `UpdateSleepTimeCommandFactory` would fix the pad sleeping mid-session
+Agreed feature list, roughly in the order it came up. Each is a fresh-context-sized piece of work.
+
+**1. Screen image / GIF upload.** `UploadPic2K2Start/Data/End/Finish`, `UploadPicCommandK1/K2`,
+`TestScreen`, `OffScreen`, `ReadScreenSetting`. Note Space Station only offers this **over a wired
+connection** — worth assuming the dongle cannot carry it, and testing wired first rather than
+debugging a dongle failure that is by design. The image encoding may live in the Electron layer
+rather than the SDK, so check `asar/` as well as `decompiled/`.
+
+**2. A real battery reading.** Currently `motion.parse_info` takes `data[12] & 0x0F` and reports
+x/8, which is what the pad's own nibble gives. Somewhere better is likely:
+`HeartBeatCommandFactory.cs` carries more device state (it is where `CurrentConfigId` comes from at
+`data[3]` / `data[27]`), and a voltage or percentage field may be in the same reply. Start there
+before assuming 8 steps is all the hardware exposes.
+
+**3. Charging dock, and syncing it with the pad.** `Flydigi.ChargerSdk.dll` and
+`Flydigi.CoolerSdk.dll` are in `bundle/` and **not yet decompiled** — that is step one
+(`~/.dotnet/tools/ilspycmd -o decompiled/Flydigi.ChargerSdk bundle/Flydigi.ChargerSdk.dll` in the
+`wine-arch` distrobox). The Electron locales already show what the feature looks like:
+`cd2_charger_led_type_{breath,custom,default,diagonal_flow,gradient,pulse,rainbow,wave_gradient}`,
+and `cd2_led_sync` — "Keep the lighting mode of the controller and dock in sync". So the dock has
+its own effect set plus a sync toggle, which is the integration the user wants.
+
+**4. Toggling Steam Input.** Ambiguous until confirmed — two different things:
+  * Steam's per-game Steam Input setting, stored host-side in
+    `~/.steam/steam/userdata/<id>/config/localconfig.vdf`. This is the one that has to be **off**
+    for Tier 4, so a toggle would remove a manual step that has already bitten us.
+  * the pad's own output mode, `SwitchModeCommandFactory` in `command.setting/`.
+
+**5. A daemon that picks the right tier per game.** `flydigid`, `flydigi-forza`,
+`flydigi-monitor` and `flydigi-ds5` are still separate manual tools, and the GUI's trigger tab can
+only tell you which to start. Needs **per-game mode preference** too — six titles support both
+Flydigi's mod and PS5 mode (Cyberpunk 2077, Death Stranding DC, Jedi Survivor, Spider-Man
+Remastered, Miles Morales, Uncharted 4); `gui/triggers.py` has the storage but no UI.
+
+**Small and worth doing first:**
+  * **verify command 166 on hardware** — apply, save, let the pad sleep, read back. It is the last
+    unknown in the write path and takes minutes.
+  * `UpdateSleepTimeCommandFactory` — raising the sleep timeout would stop the pad dropping out
+    mid-session, which has interrupted nearly every test.
+  * macros (`ReadMacroConfig`, `WriteMarcoConfig`, `SetHardwareMacroEnable`); the profile blob at
+    230..768 is already carried through untouched.
 
 ## Space Station exclusives — what is done and what is not
 
@@ -99,9 +132,9 @@ All command factories are decompiled under `decompiled/Flydigi.ControllerSdk/`.
 | Vibration + triggers | inside the profile blob | **done** — same module |
 | RGB / lighting | read **167**, write **168**/**169** | **done** — `flydigi/lighting.py`, GUI |
 | Macros | `ReadMacroConfig`, `WriteMarcoConfig`, `SetHardwareMacroEnable` | not started; blob at 230..768 is carried through untouched |
-| Screen image (pad + dock) | `UploadPic2K2Start/Data/End/Finish`, `UploadPicCommandK1/K2`, `TestScreen`, `OffScreen` | not started; encoding may live in the Electron layer |
+| Screen image (pad + dock) | `UploadPic2K2Start/Data/End/Finish`, `UploadPicCommandK1/K2`, `TestScreen`, `OffScreen` | not started; **wired only in Space Station**; encoding may live in the Electron layer |
 | Device settings | 22 in `command.setting/` | not started — report rate, stick sensitivity/precision, debounce, rebound, auto-calibration, motion debounce, sleep time, dock smart stop, nickname |
-| Dock / cooler | `Flydigi.ChargerSdk.dll`, `Flydigi.CoolerSdk.dll` in `bundle/` | not decompiled; out of scope by agreement |
+| Dock / cooler | `Flydigi.ChargerSdk.dll`, `Flydigi.CoolerSdk.dll` in `bundle/` | not decompiled — now in scope, including `cd2_led_sync` (dock/pad lighting sync) |
 
 ### Config blobs, both verified on hardware
 
