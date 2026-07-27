@@ -73,6 +73,7 @@ def main():
     state = ds5.InputState()
     applied = {}
     last_rumble = None
+    left_motor = 0      # Flydigi stashes this and reuses it for one left case
     frames = 0
 
     try:
@@ -90,6 +91,8 @@ def main():
                     for _rtype, data in virtual.poll(0.0):
                         parsed = ds5.parse_output(data)
                         rumble = parsed["rumble"]
+                        if rumble:
+                            left_motor = rumble[0]
                         if rumble and rumble != last_rumble:
                             last_rumble = rumble
                             if not args.quiet:
@@ -100,7 +103,15 @@ def main():
                             if applied.get(effect.side) == effect.key():
                                 continue
                             applied[effect.side] = effect.key()
-                            side, mode, params = relay.translate(effect)
+                            mapped = relay.translate(effect, left_motor)
+                            if mapped is None:
+                                # Unrecognised effect: leave the trigger alone,
+                                # as Flydigi does. Logged so unmapped patterns
+                                # from new games are visible.
+                                if not args.quiet:
+                                    log(f"{effect} -> unmapped, trigger unchanged")
+                                continue
+                            side, mode, params = mapped
                             if not args.quiet:
                                 log(f"{effect} -> mode={mode} params={params}")
                             if ctrl:

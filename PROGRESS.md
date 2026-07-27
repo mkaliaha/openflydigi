@@ -54,7 +54,7 @@ What remains is **coverage and ergonomics**, not feasibility.
 | 1. Vibration bind | 33 | cmd `82` SyncWithGrip, config from API, driven by game rumble | **Done & automated** — verified in Death Stranding 2, triggers buzz with in-game rumble, daemon auto-detects and applies |
 | 2. ForzaDualSense | 4 | Forza "Data Out" UDP telemetry → JSON rule engine → cmd `81` | **Done — validated in Forza Horizon 6.** All 7 distinct rules fired in-game and the effects are felt on the pad |
 | 3. XGameMonitor | 31 | Generic engine + per-game config; reads game process memory | **Built & self-tested.** Chain walker verified against a real process via `/proc/<pid>/mem`. Needs a game to validate offsets |
-| 4. PS5 emulation | 15 | Game natively speaks DualSense; needs uhid virtual DS5 | **Built.** Virtual DS5 via pure-Python uhid, `hid-playstation` binds to it; input relay verified live (521 frames, all axes/buttons correct). DS5-effect→Flydigi-mode table is provisional and needs tuning in a game |
+| 4. PS5 emulation | 15 | Game natively speaks DualSense; needs uhid virtual DS5 | **Built.** Virtual DS5 via pure-Python uhid, `hid-playstation` binds to it; input relay verified live (521 frames, all axes/buttons correct). Effect mapping transcribed from Flydigi's own `PS5DataManager.ProcessDataWithResult` — no longer guesswork |
 | 5. Bespoke | 11 | One mod per game (F1 23/24/25, GTA5, Fallout 4, MH Rise, DMC5, RE2/3/7, Bannerlord) | Not started |
 
 ## Owned games (for prioritisation)
@@ -112,8 +112,11 @@ install. The whole job is the relay.
 3. Run `tools/flydigi-ds5` before launching the game. It logs each decoded DS5 effect and what
    it translated to.
 4. In game, check the button prompts show PlayStation glyphs — that confirms it bound the virtual pad.
-5. Tune `flydigi/relay.py::EFFECT_MAP` by feel. It is provisional: the Flydigi modes are confirmed
-   but which DS5 effect type maps to which has never been felt in a game.
+5. The effect mapping in `flydigi/relay.py::translate_ds5` is transcribed from Flydigi's
+   `PS5DataManager.ProcessDataWithResult`, so it should be right rather than approximate. If
+   something feels wrong, diff against that decompiled method before adjusting by feel.
+   Unmapped effect patterns are logged as "unmapped, trigger unchanged" — those are new byte
+   patterns Flydigi never handled, and are worth recording.
 
 What to watch for:
 - Double input (both pads registering) → the SDL ignore variable is not taking effect.

@@ -97,23 +97,60 @@ def main():
         FakeReader(axes={evdev.ABS_HAT0X: 1, evdev.ABS_HAT0Y: -1}), ds5.InputState())
     results.append(check("dpad up-right -> HAT_NE", state.hat == ds5.HAT_NE))
 
-    # Effect translation
-    off = relay.translate(ds5.TriggerEffect("right", 0x00, bytes(10)))
-    results.append(check("DS5 'off' -> Flydigi normal",
-                         off == (2, 0, [0, 0, 0, 0]), str(off)))
-    rigid = relay.translate(ds5.TriggerEffect("left", 0x01, bytes([90, 200] + [0] * 8)))
-    results.append(check("DS5 rigid -> race with start/force",
-                         rigid[0] == 1 and rigid[1] == 1 and rigid[2][:2] == [90, 200],
-                         str(rigid)))
-    weapon = relay.translate(ds5.TriggerEffect("right", 0x02, bytes([10, 20, 150] + [0] * 7)))
-    results.append(check("DS5 weapon -> vibration mode",
-                         weapon[1] == 2 and weapon[2][2] == 150, str(weapon)))
-    unknown = relay.translate(ds5.TriggerEffect("right", 0xEE, bytes(10)))
-    results.append(check("unknown effect type falls back to normal",
-                         unknown[1] == 0, str(unknown)))
-    zero = relay.translate(ds5.TriggerEffect("left", 0x01, bytes(10)))
-    results.append(check("zero force clamped to at least 1",
-                         zero[2][1] >= 1, str(zero)))
+    # Effect translation, checked against Flydigi's PS5DataManager table.
+    def eff(side, type_, params):
+        return ds5.TriggerEffect(side, type_, bytes(list(params) + [0] * (10 - len(params))))
+
+    cases = [
+        # (name, side, type, params, expected (side_id, mode, params5))
+        ("type 1 rigid -> mode 1, params passthrough",
+         "right", 1, [90, 200], (2, 1, [90, 200, 0, 0, 0])),
+        ("type 2 weapon -> mode 3 (not 2)",
+         "right", 2, [10, 20, 150], (2, 3, [10, 20, 150, 0, 0])),
+        ("type 5 off -> mode 0",
+         "right", 5, [], (2, 0, [0, 0, 0, 0, 0])),
+        ("type 6 vibration -> mode 2 with reordered params",
+         "right", 6, [11, 22, 33], (2, 2, [33, 22, 22, 11, 0])),
+        ("left type 6 reorders the same way",
+         "left", 6, [11, 22, 33], (1, 2, [33, 22, 22, 11, 0])),
+        ("right type 33, p0=0 -> preset 120/1",
+         "right", 33, [0], (2, 1, [120, 1, 0, 0, 0])),
+        ("right type 33, ff/03/ff -> preset 110/50 overrides",
+         "right", 33, [255, 3, 255], (2, 1, [110, 50, 0, 0, 0])),
+        ("right type 37, p0=20 p2=2 -> preset",
+         "right", 37, [20, 0, 2], (2, 3, [70, 20, 20, 0, 0])),
+        ("right type 37, p0=36 p2=4 -> stepped strength",
+         "right", 37, [36, 0, 4], (2, 3, [10, 36, 50, 0, 0])),
+        ("right type 37 default -> passthrough shape",
+         "right", 37, [99, 0, 7], (2, 3, [64, 99, 0, 7, 1])),
+        ("left type 37 is simple, unlike right",
+         "left", 37, [99, 0, 7], (1, 3, [64, 99, 0, 7, 1])),
+        ("right type 38 -> inverted p0",
+         "right", 38, [10, 1], (2, 2, [245, 1, 60, 0, 0])),
+    ]
+    for name, side, type_, params, expected in cases:
+        got = relay.translate(eff(side, type_, params))
+        results.append(check(name, got == expected, f"got {got}, want {expected}"))
+
+    # Unrecognised types must leave the trigger alone, not clear it.
+    results.append(check("unknown type -> None (trigger untouched)",
+                         relay.translate(eff("right", 0xEE, [])) is None))
+    results.append(check("left type 38 ff/03/../ff marked invalid -> None",
+                         relay.translate(eff("left", 38, [255, 3, 0, 255])) is None))
+
+    # Left type 38 reuses the stashed motor value.
+    got = relay.translate(eff("left", 38, [240, 3, 0, 0]), left_motor=77)
+    results.append(check("left type 38 reuses stored motor_left",
+                         got == (1, 1, [30, 77, 0, 0, 0]), str(got)))
+
+    # Left type 33 overrides run after the main branch.
+    got = relay.translate(eff("left", 33, [128, 0, 0, 0, 55]))
+    results.append(check("left type 33 p0=128 override uses p[4]",
+                         got == (1, 1, [128, 55, 0, 0, 0]), str(got)))
+
+    # Short parameter blocks must not raise.
+    results.append(check("short parameter block tolerated",
+                         relay.translate(ds5.TriggerEffect("right", 1, b"\x05")) is not None))
 
     print(f"\n{sum(results)}/{len(results)} passed")
     return 0 if all(results) else 1
