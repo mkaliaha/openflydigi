@@ -23,7 +23,7 @@ class DeviceWorker(QObject):
     """Runs on its own thread. Slots are invoked queued, signals arrive on the UI thread."""
 
     info_changed = Signal(dict)          # battery, connection
-    profiles_changed = Signal(list)      # [(cfg_id, blob, title), ...]
+    profile_loaded = Signal(int, bytes, str)   # cfg_id, blob, title
     profile_written = Signal(int, int, bool)   # cfg_id, packets, saved to flash
     vibration_applied = Signal(str, str)       # game name, sides applied
     active_changed = Signal(int)
@@ -72,19 +72,32 @@ class DeviceWorker(QObject):
             self.info_changed.emit(info)
 
     @Slot(int)
-    def load_profiles(self, count):
-        self.status.emit("Reading profiles…")
-        profiles = []
-        for cfg_id in range(count):
-            config = self._attempt(
-                lambda ctrl, c=cfg_id: mapping.read_config(ctrl, c),
-                f"reading profile {cfg_id + 1}")
-            if config is None:
-                break
-            profiles.append((cfg_id, bytes(config.blob), config.title))
-        if profiles:
-            self.profiles_changed.emit(profiles)
-            self.status.emit(f"Read {len(profiles)} profile(s)")
+    def load_profile(self, cfg_id):
+        """Read a single profile.
+
+        Reading is not free: the pad audibly re-seats its trigger motors on
+        every config read, so pulling all four at startup makes it clatter four
+        times for data the user has not asked to see. Profiles are fetched when
+        first opened instead.
+        """
+        self.status.emit(f"Reading profile {cfg_id + 1}…")
+        result = self._attempt(
+            lambda ctrl: mapping.read_config_preserving(ctrl, cfg_id),
+            f"reading profile {cfg_id + 1}")
+        if result is None:
+            return
+        config, restored = result
+        self.profile_loaded.emit(cfg_id, bytes(config.blob), config.title)
+        if restored is not None:
+            self.active_changed.emit(restored)
+        self.status.emit(f"Profile {cfg_id + 1} read")
+
+    @Slot()
+    def refresh_status(self):
+        """Which profile the pad is actually on. Cheap and side-effect free."""
+        status = self._attempt(mapping.read_status, "reading controller status")
+        if status:
+            self.active_changed.emit(status["active"])
 
     @Slot(int, bytes, bytes, bool)
     def write_profile(self, cfg_id, blob, previous, save):

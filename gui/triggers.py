@@ -94,7 +94,13 @@ class TriggerPage(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.horizontalHeader().setSectionResizeMode(COL_NAME, QHeaderView.Stretch)
+        header = self.table.horizontalHeader()
+        # Route and preference hold fixed vocabularies, so size them to their
+        # own content and give the leftover width to the game name rather than
+        # letting the name take everything and truncate the other two.
+        header.setSectionResizeMode(COL_NAME, QHeaderView.Stretch)
+        header.setSectionResizeMode(COL_ROUTE, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(COL_MODE, QHeaderView.ResizeToContents)
         self.table.itemSelectionChanged.connect(self._selection_changed)
         layout.addWidget(self.table, 1)
 

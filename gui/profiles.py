@@ -32,13 +32,15 @@ class ProfilePage(QWidget):
 
     write_requested = Signal(int, bytes, bytes, bool)
     apply_requested = Signal(int)
-    reload_requested = Signal(int)
+    load_requested = Signal(int)
 
     def __init__(self):
         super().__init__()
         self._profiles = {}       # cfg_id -> bytes as last read from the pad
+        self._pending = set()     # reads already asked for, not yet arrived
         self._edited = None       # MappingConfig being edited
         self._cfg_id = None
+        self._active = None
         self._loading = False
 
         layout = QVBoxLayout(self)
@@ -129,27 +131,67 @@ class ProfilePage(QWidget):
                        self.write_button, self.save_button, self.reset_button):
             widget.setEnabled(enabled)
 
-    def set_profiles(self, profiles):
-        """Replace everything with what was just read off the pad."""
+    def set_slots(self, count):
+        """List the profile slots. Reads nothing -- `forget` starts that."""
         self._loading = True
-        self._profiles = {cfg_id: blob for cfg_id, blob, _ in profiles}
-        current = self.selector.currentIndex()
         self.selector.clear()
-        for cfg_id, _blob, title in profiles:
-            self.selector.addItem(f"{cfg_id + 1}. {title or '(unnamed)'}", cfg_id)
+        for cfg_id in range(count):
+            self.selector.addItem(f"Profile {cfg_id + 1}", cfg_id)
+        self.selector.setCurrentIndex(0)
         self._loading = False
-        self.set_enabled(True)
-        self.selector.setCurrentIndex(min(max(current, 0), self.selector.count() - 1))
+
+    def set_active(self, cfg_id):
+        """Mark which profile the pad is actually using."""
+        self._active = cfg_id
+        for index in range(self.selector.count()):
+            slot = self.selector.itemData(index)
+            text = self.selector.itemText(index).removesuffix("  ● in use")
+            self.selector.setItemText(
+                index, text + ("  ● in use" if slot == cfg_id else ""))
+        self.activate.setEnabled(self._cfg_id is not None and self._cfg_id != cfg_id)
+
+    def forget(self):
+        """Drop cached profiles so the open one is re-read from the pad."""
+        self._profiles.clear()
+        self._pending.clear()
         self._select(self.selector.currentIndex())
+
+    def profile_loaded(self, cfg_id, blob, title):
+        self._profiles[cfg_id] = bytes(blob)
+        self._pending.discard(cfg_id)
+        index = self.selector.findData(cfg_id)
+        if index >= 0:
+            self._loading = True
+            self.selector.setItemText(index, f"{cfg_id + 1}. {title or '(unnamed)'}")
+            self._loading = False
+            if self._active is not None:
+                self.set_active(self._active)
+        if cfg_id == self._cfg_id:
+            self._show_cached()
 
     def _select(self, index):
         if self._loading or index < 0:
             return
         self._cfg_id = self.selector.itemData(index)
-        blob = self._profiles.get(self._cfg_id)
-        if blob is None:
-            return
-        self._edited = mapping.MappingConfig(bytearray(blob), self._cfg_id)
+        if self._cfg_id in self._profiles:
+            self._show_cached()
+        else:
+            # Not read yet -- ask for it and stay disabled until it arrives.
+            self._edited = None
+            self.set_enabled(False)
+            self.selector.setEnabled(True)
+            self.hint.setText("Reading this profile from the pad…")
+            # Reading is expensive and switches the pad, so never ask twice for
+            # the same profile: the user can press Reload repeatedly, and the
+            # window's own startup path would otherwise race with it.
+            if self._cfg_id not in self._pending:
+                self._pending.add(self._cfg_id)
+                self.load_requested.emit(self._cfg_id)
+
+    def _show_cached(self):
+        self._edited = mapping.MappingConfig(
+            bytearray(self._profiles[self._cfg_id]), self._cfg_id)
+        self.set_enabled(True)
         self._refresh_widgets()
 
     def _refresh_widgets(self):

@@ -49,6 +49,7 @@ import struct
 
 from . import device
 
+CMD_STATUS = 161
 CMD_APPLY = 162
 CMD_READ = 163
 CMD_WRITE_START = 164
@@ -126,12 +127,39 @@ def _replies(ctrl, buf, wait):
     return [r[1:] for r in ctrl.send(buf, wait=wait) if len(r) > 7]
 
 
+def read_status(ctrl, wait=1.0, slots=4):
+    """Which profile is active, and a version id for each.
+
+    Cheap, and unlike `read_config` it has no side effect -- worth preferring
+    wherever it will do. The version ids are each config's `data_version`
+    field, so a caller can tell whether a cached copy is still current without
+    reading the config at all. 0xFFFF means the slot has never been written.
+    """
+    for body in _replies(ctrl, build(CMD_STATUS, b""), wait):
+        if body[2] != CMD_STATUS:
+            continue
+        raw = body[5]
+        # Slots are reported across two banks of four; the second bank reports
+        # 4..7 for the same profiles.
+        active = raw - 4 if 3 < raw <= 7 else (raw if raw <= 7 else 0)
+        versions = [(body[7 + 2 * i] << 8) | body[6 + 2 * i] for i in range(slots)]
+        return {"active": active, "versions": versions}
+    return None
+
+
 def read_config(ctrl, cfg_id, wait=1.5, retries=3):
     """Read one stored config off the pad.
 
     The reply is a run of packets carrying (total, index, cfgId, 20 bytes). The
     pad sends them back to back, so collect until the last index arrives rather
     than issuing one request per packet.
+
+    **This switches the pad to the config being read** -- the firmware pages it
+    in as the live one, audibly re-seating the trigger motors. Confirmed on
+    hardware: after reading config 2, `read_status` reports 2 as active. A
+    caller that does not intend to change what the user is playing with must
+    read the status first and re-apply the original afterwards; see
+    `read_config_preserving`.
     """
     for _ in range(retries):
         chunks = {}
@@ -152,6 +180,22 @@ def read_config(ctrl, cfg_id, wait=1.5, retries=3):
         else:
             last_error = "no reply -- the pad may be asleep, press a button"
     raise ProtocolError(f"reading config {cfg_id} failed: {last_error}")
+
+
+def read_config_preserving(ctrl, cfg_id, wait=1.5):
+    """Read a config and leave the pad on whatever it was using before.
+
+    Reading switches the pad, which is not what someone browsing their profiles
+    asked for. Returns (config, restored_to) so the caller can say what
+    happened; restored_to is None when no restore was needed or possible.
+    """
+    status = read_status(ctrl)
+    config = read_config(ctrl, cfg_id, wait=wait)
+    previous = status["active"] if status else None
+    if previous is None or previous == cfg_id:
+        return config, None
+    apply_config(ctrl, previous)
+    return config, previous
 
 
 def apply_config(ctrl, cfg_id, wait=0.5):

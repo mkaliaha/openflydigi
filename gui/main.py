@@ -27,7 +27,7 @@ class MainWindow(QMainWindow):
     # slot on an object living in another thread just runs it on this one,
     # which would put blocking HID traffic back on the UI thread.
     request_info = Signal()
-    request_profiles = Signal(int)
+    request_status = Signal()
     request_vibration = Signal(dict)
 
     def __init__(self):
@@ -63,28 +63,37 @@ class MainWindow(QMainWindow):
 
         self.profile_page.write_requested.connect(worker.write_profile)
         self.profile_page.apply_requested.connect(worker.apply_profile)
+        self.profile_page.load_requested.connect(worker.load_profile)
         self.trigger_page.apply_vibration.connect(self.request_vibration)
         self.request_info.connect(worker.refresh_info)
-        self.request_profiles.connect(worker.load_profiles)
+        self.request_status.connect(worker.refresh_status)
         self.request_vibration.connect(worker.apply_vibration)
         worker.vibration_applied.connect(self._vibration_applied)
 
         worker.info_changed.connect(self._info_changed)
-        worker.profiles_changed.connect(self.profile_page.set_profiles)
+        worker.active_changed.connect(self.profile_page.set_active)
+        worker.profile_loaded.connect(self.profile_page.profile_loaded)
         worker.profile_written.connect(self._written)
         worker.status.connect(self.statusBar().showMessage)
         worker.failed.connect(self._failed)
 
         # Kick off the first read once the window is up, so it appears
         # immediately rather than after a second of blocking HID traffic.
+        self.profile_page.set_slots(PROFILE_COUNT)
         QTimer.singleShot(0, self._reload)
         self._info_timer = QTimer(self)
         self._info_timer.timeout.connect(self.request_info)
         self._info_timer.start(INFO_INTERVAL_MS)
 
     def _reload(self):
+        """Re-read from the pad: info now, and the open profile on demand.
+
+        Other profiles stay unread until opened, because each read makes the
+        pad audibly re-seat its trigger motors.
+        """
         self.request_info.emit()
-        self.request_profiles.emit(PROFILE_COUNT)
+        self.request_status.emit()
+        self.profile_page.forget()
 
     def _info_changed(self, info):
         self.device_label.setText(f"Apex 5 connected ({info['connect_type']})")
