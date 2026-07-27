@@ -88,15 +88,27 @@ Flydigi's: the game sent `type=0x25 p[0]=12` → `mode 3 [70,0,12]` and `type=0x
 
 Two gaps remain, neither in the transport:
 
-- **No rumble.** The game sets trigger flags repeatedly but set the motor bits only once, at
-  startup, with zeros. Our output path is fine — a direct cmd `0x12` rumbles the pad and ACKs.
-  Most likely Deathloop drives haptics through the DualSense's USB *audio* device (it was a PS5
-  haptics showcase), which our HID-only virtual pad does not provide. Alternative duller
-  explanation: the PC port only implements motor rumble for XInput pads.
-  **To confirm:** run Deathloop with the real Apex 5 as a plain Xbox pad (no relay, no
-  `SDL_GAMECONTROLLER_IGNORE_DEVICES`). If it rumbles there, the DualSense path is haptics-only.
-  **Possible fix:** a PipeWire null sink presenting a fake DualSense audio endpoint, converting
-  what the game writes into motor rumble. Real work, but tractable.
+- **No rumble — investigated and closed as a known limitation of virtual DualSense emulation.**
+
+  The DualSense has no conventional rumble motors; its voice coils do both jobs. Games can drive
+  them two ways: `motor_left`/`motor_right` in the HID output report (the compatibility path, which
+  we already support and which most PC ports use), or arbitrary waveforms written to the
+  controller's USB *audio* device (the rich PS5 haptics). Deathloop uses the audio path.
+
+  Confirmed by testing: with the real Apex 5 as a plain Xbox pad the game vibrates readily, even on
+  a menu button press — so it does emit motor rumble, just not to a DualSense. Our own output path
+  is proven: a direct cmd `0x12` rumbles the pad and ACKs.
+
+  **Not fixable in practice, and not specific to us.** DSX on Windows — a mature tool with its own
+  kernel driver — has the same problem in Death Stranding DC. A game finds the haptic audio
+  endpoint by OS-level association between the HID device and the audio device; a virtual pad has
+  no such association, on Windows or Linux. A PipeWire null sink named like a DualSense was tried
+  and abandoned: if it does not work on Windows where the association machinery exists, it will not
+  work under Proton.
+
+  **Practical consequence, per game:** for titles using haptic audio, choose adaptive triggers
+  (DS5 mode) or rumble (plain Xbox mode). Titles using the HID motor path get both, and that is
+  the majority.
 - **Gyro/accel: implemented.** The vendor input stream (command 17, "raw data transport in")
   carries the IMU at ~300 Hz, and enabling it does **not** disturb the xpad node, so sticks and
   buttons still come from evdev. Offsets follow `OperatorDataParser` for `NewXInput`, shifted by
