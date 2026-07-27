@@ -97,9 +97,17 @@ Two gaps remain, neither in the transport:
   `SDL_GAMECONTROLLER_IGNORE_DEVICES`). If it rumbles there, the DualSense path is haptics-only.
   **Possible fix:** a PipeWire null sink presenting a fake DualSense audio endpoint, converting
   what the game writes into motor rumble. Real work, but tractable.
-- **No gyro aiming.** Expected: we send zeros for gyro/accel. Real motion data needs the vendor
-  input stream (v2), which also brings the M1-M4 buttons. Not a permissions issue — SDL reads the
-  virtual pad's hidraw directly, so the evdev sub-device ACLs are irrelevant for Steam games.
+- **Gyro/accel: implemented.** The vendor input stream (command 17, "raw data transport in")
+  carries the IMU at ~300 Hz, and enabling it does **not** disturb the xpad node, so sticks and
+  buttons still come from evdev. Offsets follow `OperatorDataParser` for `NewXInput`, shifted by
+  one because we keep the report-id byte. Accelerometer is scaled by 2.441: the pad reports
+  ~4096/g while the DualSense calibration we advertise implies 10000/g — verified by the pad
+  reading exactly 1.00 g flat. Gyro scale is left at 1.0 and is the one value worth tuning by feel
+  (`--gyro-scale`). M1-M4 buttons are in the same stream and still to do.
+- **Battery: implemented.** Command 1 returns device type, connection type and battery; polled
+  every 30 s and mapped to the DualSense's 0-10 scale (Flydigi reports 0-5, with a high nibble
+  flagging charging). Also fixed `BATTERY_FULL`, which was 0x01 (= charging) rather than 0x02, so
+  the pad had been reporting "charging" permanently.
 
 ## Open issues
 

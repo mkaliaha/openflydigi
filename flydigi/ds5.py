@@ -35,7 +35,9 @@ HAT_N, HAT_NE, HAT_E, HAT_SE = 0, 1, 2, 3
 HAT_S, HAT_SW, HAT_W, HAT_NW = 4, 5, 6, 7
 HAT_NEUTRAL = 8
 
-BATTERY_FULL = 0x01
+BATTERY_DISCHARGING = 0x00
+BATTERY_CHARGING = 0x01
+BATTERY_FULL = 0x02
 
 # Output report
 DS_OUTPUT_REPORT_USB = 0x02
@@ -82,6 +84,11 @@ class InputState:
         self.seq = 0
         self.battery_charge = 10        # 0-10, i.e. 100%
         self.battery_status = BATTERY_FULL
+        self.gyro = [0, 0, 0]           # signed 16-bit, pitch/yaw/roll
+        self.accel = [0, 0, 0]          # signed 16-bit
+        # hid-playstation derives sensor timing from this; leaving it at zero
+        # makes the motion device look dead even when values change.
+        self.sensor_timestamp = 0
 
     def set(self, mask, group, pressed):
         attr = f"buttons{group}"
@@ -101,6 +108,13 @@ class InputState:
         report[8] = (self.hat & 0x0F) | (self.buttons0 & 0xF0)
         report[9] = self.buttons1 & 0xFF
         report[10] = self.buttons2 & 0xFF
+        # Motion: gyro[3] then accel[3], little-endian signed 16-bit, followed
+        # by a 32-bit timestamp.
+        for i, value in enumerate(self.gyro):
+            struct.pack_into("<h", report, 16 + i * 2, max(-32768, min(32767, int(value))))
+        for i, value in enumerate(self.accel):
+            struct.pack_into("<h", report, 22 + i * 2, max(-32768, min(32767, int(value))))
+        struct.pack_into("<I", report, 28, self.sensor_timestamp & 0xFFFFFFFF)
         # Touch points inactive: the 'contact' bit (0x80) set means no contact.
         report[33] = 0x80
         report[37] = 0x80

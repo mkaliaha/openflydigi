@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Probe the Apex 5's motion sensors over the vendor input stream.
+
+The kernel's xpad driver gives us sticks and buttons but no IMU. Flydigi's own
+SDK reads gyro/accel from the vendor interface after enabling raw data
+transport (command 17). This checks whether that works here, and whether it
+disturbs the xpad path we rely on for everything else.
+
+    tools/gyro-probe            # enable, sample, then restore
+    tools/gyro-probe --keep     # leave raw data enabled on exit
+"""
+import argparse
+import os
+import select
+import struct
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from flydigi import evdev  # noqa: E402
+from flydigi.device import Controller, build, checksum  # noqa: E402
+
+CMD_ENABLE_RAW = 17
+UNCHANGED = 0xFF
+INPUT_REPORT_ID = 0x04
+
+
+def enable_raw(ctrl, controller_data=UNCHANGED, raw=UNCHANGED,
+               keyboard=UNCHANGED, mouse=UNCHANGED, third_party=UNCHANGED):
+    """Command 17: [4]=7, [5..9]=flags, [10]=sum(3, 3+7). 0xFF leaves a flag alone."""
+    buf = build(CMD_ENABLE_RAW)
+    buf[4] = 7
+    buf[5] = controller_data
+    buf[6] = raw
+    buf[7] = keyboard
+    buf[8] = mouse
+    buf[9] = third_party
+    buf[10] = checksum(buf, 3, 3 + buf[4])
+    replies = ctrl.send(buf, wait=0.4)
+    ok = any(len(r) > 3 and r[3] == CMD_ENABLE_RAW for r in replies)
+    return ok, replies
+
+
+def sample(ctrl, seconds):
+    """Read vendor input reports and pull out motion values.
+
+    Offsets follow OperatorDataParser for ControllerType.NewXInput, shifted by
+    one because we keep the report-ID byte that their HID layer strips.
+    """
+    seen = 0
+    ranges = {}
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        ready, _, _ = select.select([ctrl.fd], [], [], 0.3)
+        if not ready:
+            continue
+        data = os.read(ctrl.fd, 64)
+        if len(data) < 30 or data[0] != INPUT_REPORT_ID:
+            continue
+        seen += 1
+        vals = {}
+        for name, off in (("gyroX", 18), ("gyroY", 20), ("gyroZ", 22),
+                          ("accX", 24), ("accY", 26), ("accZ", 28)):
+            if off + 1 < len(data):
+                vals[name] = struct.unpack_from("<h", data, off)[0]
+        for name, value in vals.items():
+            lo, hi = ranges.get(name, (value, value))
+            ranges[name] = (min(lo, value), max(hi, value))
+    return seen, ranges
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--seconds", type=float, default=8.0)
+    ap.add_argument("--keep", action="store_true",
+                    help="leave raw data enabled instead of restoring")
+    args = ap.parse_args()
+
+    path, name = evdev.find_device(name="Apex")
+    print(f"xpad node before: {name} ({path})")
+
+    with Controller() as ctrl:
+        print(f"controller: {ctrl.path}")
+        print("\nenabling raw data transport (command 17)...")
+        ok, replies = enable_raw(ctrl, controller_data=1, raw=1)
+        print(f"  ack: {ok}")
+        for r in replies[:2]:
+            print(f"  reply: {r.hex(' ')[:56]}")
+
+        print(f"\nsampling for {args.seconds:.0f}s -- ROTATE AND TILT THE PAD NOW\n")
+        seen, ranges = sample(ctrl, args.seconds)
+        print(f"  vendor input reports seen: {seen}")
+        if not ranges:
+            print("  no motion fields decoded")
+        for key in ("gyroX", "gyroY", "gyroZ", "accX", "accY", "accZ"):
+            if key in ranges:
+                lo, hi = ranges[key]
+                moved = "MOVES" if lo != hi else "static"
+                print(f"    {key:6} {lo:>7} .. {hi:>7}   {moved}")
+
+        if not args.keep:
+            print("\nrestoring (raw data off)...")
+            ok, _ = enable_raw(ctrl, controller_data=UNCHANGED, raw=0)
+            print(f"  ack: {ok}")
+
+    path2, name2 = evdev.find_device(name="Apex")
+    print(f"\nxpad node after: {name2} ({path2})")
+    if path2 != path:
+        print("  WARNING: the xpad node changed -- the relay's input source moved")
+    elif path2 is None:
+        print("  WARNING: xpad gamepad disappeared")
+    else:
+        print("  xpad path unchanged")
+
+
+if __name__ == "__main__":
+    main()

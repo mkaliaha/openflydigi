@@ -26,7 +26,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flydigi import ds5, effects, evdev, ps5_data, relay, uhid  # noqa: E402
+from flydigi import ds5, effects, evdev, motion, ps5_data, relay, uhid  # noqa: E402
 from flydigi.device import Controller, DeviceNotFound  # noqa: E402
 
 FLYDIGI_VID, FLYDIGI_PID = relay.FLYDIGI_VID, relay.FLYDIGI_PID
@@ -42,6 +42,14 @@ def main():
     ap.add_argument("--dump", action="store_true",
                     help="print decoded effects, do not drive the Apex 5")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--no-motion", action="store_true",
+                    help="do not enable the vendor motion stream (no gyro)")
+    ap.add_argument("--gyro-scale", type=float, default=1.0,
+                    help="scale factor applied to gyro values; tune by feel")
+    ap.add_argument("--accel-scale", type=float, default=motion.ACCEL_SCALE,
+                    help=f"scale factor applied to accelerometer values "
+                         f"(default {motion.ACCEL_SCALE:.3f}, derived from the "
+                         f"DualSense calibration we advertise)")
     args = ap.parse_args()
 
     path, name = evdev.find_device(vendor=FLYDIGI_VID, product=FLYDIGI_PID)
@@ -70,18 +78,62 @@ def main():
     log("virtual DualSense created")
     log("games: set SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501")
 
+    motion_on = False
+    if ctrl and not args.no_motion:
+        motion_on = motion.enable(ctrl)
+        log(f"motion stream: {'enabled' if motion_on else 'FAILED to enable'}")
+
     state = ds5.InputState()
     applied = {}
     last_rumble = None
     left_motor = 0      # Flydigi stashes this and reuses it for one left case
     frames = 0
+    motion_frames = 0
+    last_info = None
+    next_info_poll = 0.0
 
     try:
         with evdev.Reader(path) as reader:
             relay.build_state(reader, state)
             virtual.send_input(state.pack())
+            watch = [reader.fileno(), virtual.fd]
+            if motion_on:
+                watch.append(ctrl.fd)
             while True:
-                ready, _, _ = select.select([reader.fileno(), virtual.fd], [], [], 1.0)
+                ready, _, _ = select.select(watch, [], [], 1.0)
+                if motion_on and ctrl.fd in ready:
+                    # Motion arrives at ~300 Hz, far faster than evdev events.
+                    # Fold it into the state and emit, so aiming stays smooth
+                    # rather than only updating when a stick moves.
+                    report = motion.read_report(ctrl)
+                    if report and report[0] == "motion":
+                        _kind, gyro, accel = report
+                        state.gyro = [v * args.gyro_scale for v in gyro]
+                        state.accel = [v * args.accel_scale for v in accel]
+                        state.sensor_timestamp += 188  # ~0.33us units at 300 Hz
+                        virtual.send_input(state.pack())
+                        motion_frames += 1
+                    elif report and report[0] == "info":
+                        info = report[1]
+                        level = info["battery_level"]
+                        if info["charging"]:
+                            state.battery_status = ds5.BATTERY_CHARGING
+                            state.battery_charge = 10
+                        else:
+                            # Flydigi reports 0..5; DualSense wants 0..10.
+                            state.battery_charge = min(10, level * 2)
+                            state.battery_status = (
+                                ds5.BATTERY_FULL if level >= motion.MAX_LEVEL
+                                else ds5.BATTERY_DISCHARGING)
+                        if info != last_info:
+                            last_info = info
+                            log(f"battery {level}/5"
+                                f"{' (charging)' if info['charging'] else ''}"
+                                f", {info['connect_type']}")
+                if motion_on and time.time() >= next_info_poll:
+                    # Battery only changes slowly; poll rarely.
+                    next_info_poll = time.time() + 30.0
+                    motion.request_info(ctrl)
                 if reader.fileno() in ready:
                     if reader.read():
                         relay.build_state(reader, state)
@@ -119,10 +171,15 @@ def main():
                                     effects.common_effect_payload(side, mode, params),
                                     wait=0.0)
     except KeyboardInterrupt:
-        log(f"stopping after {frames} input frames")
+        log(f"stopping after {frames} input frames, {motion_frames} motion frames")
     finally:
         virtual.destroy()
         if ctrl:
+            if motion_on:
+                try:
+                    motion.disable(ctrl)
+                except OSError:
+                    pass
             try:
                 effects.clear_all(ctrl)
             except OSError:
