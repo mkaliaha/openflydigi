@@ -16,7 +16,7 @@ once" rather than as fatal.
 """
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
-from flydigi import device, effects, mapping, motion
+from flydigi import blobs, device, effects, lighting, mapping, motion
 
 
 class DeviceWorker(QObject):
@@ -26,6 +26,8 @@ class DeviceWorker(QObject):
     profile_loaded = Signal(int, bytes, str)   # cfg_id, blob, title
     profile_written = Signal(int, int, bool)   # cfg_id, packets, saved to flash
     vibration_applied = Signal(str, str)       # game name, sides applied
+    lighting_loaded = Signal(bytes)
+    lighting_written = Signal(int, bool)
     active_changed = Signal(int)
     status = Signal(str)
     failed = Signal(str)
@@ -52,7 +54,7 @@ class DeviceWorker(QObject):
         for attempt in (1, 2):
             try:
                 return work(self._controller())
-            except (OSError, device.DeviceNotFound, mapping.ProtocolError) as exc:
+            except (OSError, device.DeviceNotFound, blobs.ProtocolError) as exc:
                 self._drop()
                 if attempt == 2:
                     self.failed.emit(f"{what}: {exc}")
@@ -64,7 +66,7 @@ class DeviceWorker(QObject):
         def work(ctrl):
             info = motion.read_info(ctrl)
             if info is None:
-                raise mapping.ProtocolError("no reply -- press a button to wake the pad")
+                raise blobs.ProtocolError("no reply -- press a button to wake the pad")
             return info
 
         info = self._attempt(work, "reading device info")
@@ -137,6 +139,29 @@ class DeviceWorker(QObject):
             self.status.emit(f"Pad switched to profile {cfg_id + 1}")
         elif ok is not None:
             self.failed.emit("No reply to the switch -- the pad may be asleep")
+
+    @Slot()
+    def load_lighting(self):
+        config = self._attempt(lighting.read_config, "reading the lighting config")
+        if config is not None:
+            self.lighting_loaded.emit(bytes(config.blob))
+
+    @Slot(bytes, bytes, bool)
+    def write_lighting(self, blob, previous, save):
+        self.status.emit("Writing lighting…")
+        new = lighting.LedConfig(blob)
+        old = lighting.LedConfig(previous) if previous else None
+
+        def work(ctrl):
+            sent = lighting.write_config(ctrl, new, old=old)
+            # Lighting shares the mapping save command; the pad commits the
+            # working set, not one config at a time.
+            saved = mapping.save_config(ctrl) if save else False
+            return sent, saved
+
+        result = self._attempt(work, "writing lighting")
+        if result is not None:
+            self.lighting_written.emit(*result)
 
     @Slot()
     def shutdown(self):

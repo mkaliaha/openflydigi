@@ -15,9 +15,10 @@ profiles and Space Station is not available on Linux to rebuild them, so
 """
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QFileDialog, QGroupBox, QHBoxLayout, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QSpinBox, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget)
+    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFormLayout,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QSlider, QSpinBox, QTabWidget, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget)
 
 from flydigi import mapping
 
@@ -25,6 +26,12 @@ COL_BUTTON, COL_TARGET, COL_TURBO, COL_MODE = range(4)
 
 TURBO_MODES = [("While held", mapping.TURBO_WHILE_HELD),
                ("Toggle", mapping.TURBO_TOGGLE)]
+
+# Effect ids as stored in the profile, using the same vocabulary as the live
+# SetForceTrigger command. Only these two are confirmed on hardware; the rest
+# of the range is left out rather than guessed at in a UI.
+TRIGGER_MODES = [("Off — normal travel", 0),
+                 ("Constant resistance", 1)]
 
 
 class ProfilePage(QWidget):
@@ -61,8 +68,10 @@ class ProfilePage(QWidget):
         picker.addWidget(self.activate)
         layout.addLayout(picker)
 
-        box = QGroupBox("Buttons")
-        box_layout = QVBoxLayout(box)
+        # Buttons, vibration and triggers all live in the same profile blob, so
+        # they share one dirty state and one write button rather than each
+        # pretending to be independently saveable.
+        self.sections = QTabWidget()
         self.table = QTableWidget(len(mapping.APEX5_KEYS), 4)
         self.table.setHorizontalHeaderLabels(["Button", "Sends", "Turbo (Hz)", "Turbo mode"])
         self.table.verticalHeader().setVisible(False)
@@ -70,8 +79,10 @@ class ProfilePage(QWidget):
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
         self.table.horizontalHeader().setStretchLastSection(True)
         self._build_rows()
-        box_layout.addWidget(self.table)
-        layout.addWidget(box, 1)
+        self.sections.addTab(self.table, "Buttons")
+        self.sections.addTab(self._build_vibration(), "Vibration")
+        self.sections.addTab(self._build_triggers(), "Triggers")
+        layout.addWidget(self.sections, 1)
 
         actions = QHBoxLayout()
         self.reset_button = QPushButton("Reset all to default")
@@ -97,7 +108,7 @@ class ProfilePage(QWidget):
         self.set_enabled(False)
 
     def _build_rows(self):
-        targets = ["(default)"] + mapping.APEX5_KEYS
+        targets = ["(default)"] + mapping.XINPUT_TARGETS
         for row, key in enumerate(mapping.APEX5_KEYS):
             item = QTableWidgetItem(key.upper())
             item.setFlags(Qt.ItemIsEnabled)
@@ -119,6 +130,81 @@ class ProfilePage(QWidget):
             mode.currentIndexChanged.connect(lambda _i, k=key: self._retarget(k))
             self.table.setCellWidget(row, COL_MODE, mode)
         self.table.resizeColumnsToContents()
+
+    def _slider(self, minimum, maximum, on_change):
+        row = QHBoxLayout()
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(minimum, maximum)
+        readout = QLabel("0")
+        readout.setMinimumWidth(34)
+        slider.valueChanged.connect(lambda v: readout.setText(str(v)))
+        slider.valueChanged.connect(lambda _v: on_change())
+        row.addWidget(slider, 1)
+        row.addWidget(readout)
+        return row, slider
+
+    def _build_vibration(self):
+        """Grip motor limits. The pad clamps a game's rumble into this window."""
+        page = QWidget()
+        layout = QFormLayout(page)
+        self.vib_master = QCheckBox("Rumble enabled")
+        self.vib_master.toggled.connect(self._vibration_edited)
+        layout.addRow(self.vib_master)
+
+        self.vib = {}
+        for side in ("left", "right"):
+            box = QGroupBox(f"{side.capitalize()} grip")
+            form = QFormLayout(box)
+            controls = {}
+            controls["enabled"] = QCheckBox("Enabled")
+            controls["enabled"].toggled.connect(self._vibration_edited)
+            form.addRow(controls["enabled"])
+            for field, label in (("min", "Minimum"), ("max", "Maximum"),
+                                 ("scale", "Strength")):
+                row, slider = self._slider(0, 255, self._vibration_edited)
+                controls[field] = slider
+                form.addRow(label, row)
+            self.vib[side] = controls
+            layout.addRow(box)
+
+        note = QLabel("Minimum and maximum bound how hard the motor may run; "
+                      "the pad squeezes whatever a game asks for into that range.")
+        note.setWordWrap(True)
+        layout.addRow(note)
+        return page
+
+    def _build_triggers(self):
+        """Adaptive-trigger settings held in the profile, so no game is needed."""
+        page = QWidget()
+        layout = QFormLayout(page)
+        self.trig = {}
+        for side in ("left", "right"):
+            box = QGroupBox(f"{side.capitalize()} trigger")
+            form = QFormLayout(box)
+            controls = {}
+            controls["mode"] = QComboBox()
+            for label, _mode in TRIGGER_MODES:
+                controls["mode"].addItem(label)
+            controls["mode"].currentIndexChanged.connect(self._trigger_edited)
+            form.addRow("Effect", controls["mode"])
+            for field, label, top in (("start", "Starts at", 255),
+                                      ("strength", "Resistance", 255),
+                                      ("deadzone", "Dead zone", 255)):
+                row, slider = self._slider(0, top, self._trigger_edited)
+                controls[field] = slider
+                form.addRow(label, row)
+            controls["motor"] = QCheckBox("Trigger vibration motor")
+            controls["motor"].toggled.connect(self._trigger_edited)
+            form.addRow(controls["motor"])
+            self.trig[side] = controls
+            layout.addRow(box)
+
+        note = QLabel("Stored in the profile, so it applies with no game "
+                      "integration and no program running. A game that drives "
+                      "the triggers itself will override it while it runs.")
+        note.setWordWrap(True)
+        layout.addRow(note)
+        return page
 
     def _widgets(self, key):
         row = mapping.APEX5_KEYS.index(key)
@@ -202,8 +288,8 @@ class ProfilePage(QWidget):
             combo, spin, mode_combo = self._widgets(key)
             if target == key and not frequency:
                 combo.setCurrentIndex(0)
-            elif target in mapping.APEX5_KEYS:
-                combo.setCurrentIndex(mapping.APEX5_KEYS.index(target) + 1)
+            elif target in mapping.XINPUT_TARGETS:
+                combo.setCurrentIndex(mapping.XINPUT_TARGETS.index(target) + 1)
             else:
                 # macro / keyboard bindings we do not model yet
                 combo.setCurrentIndex(0)
@@ -211,7 +297,53 @@ class ProfilePage(QWidget):
             spin.setValue(frequency)
             mode_combo.setCurrentIndex(1 if mode == mapping.TURBO_TOGGLE else 0)
             mode_combo.setEnabled(frequency > 0)
+        self._refresh_extras()
         self._loading = False
+        self._mark_changes()
+
+    def _refresh_extras(self):
+        """Pull vibration and trigger state out of the config into the widgets."""
+        config = self._edited
+        self.vib_master.setChecked(config.vibration_enabled)
+        for side, controls in self.vib.items():
+            enabled, minimum, maximum, scale = config.vibration(side)
+            controls["enabled"].setChecked(enabled)
+            controls["min"].setValue(minimum)
+            controls["max"].setValue(maximum)
+            controls["scale"].setValue(scale)
+        for side, controls in self.trig.items():
+            mode, params = config.trigger_effect(side)
+            index = next((i for i, (_l, m) in enumerate(TRIGGER_MODES) if m == mode), 0)
+            controls["mode"].setCurrentIndex(index)
+            controls["start"].setValue(params[0])
+            controls["strength"].setValue(params[1])
+            controls["deadzone"].setValue(config.trigger_curve(side)["zero"])
+            controls["motor"].setChecked(config.trigger_motor(side)[0])
+
+    def _vibration_edited(self):
+        if self._loading or self._edited is None:
+            return
+        self._edited.vibration_enabled = self.vib_master.isChecked()
+        for side, controls in self.vib.items():
+            self._edited.set_vibration(
+                side,
+                enabled=controls["enabled"].isChecked(),
+                minimum=controls["min"].value(),
+                maximum=controls["max"].value(),
+                scale=controls["scale"].value())
+        self._mark_changes()
+
+    def _trigger_edited(self):
+        if self._loading or self._edited is None:
+            return
+        for side, controls in self.trig.items():
+            _label, mode = TRIGGER_MODES[controls["mode"].currentIndex()]
+            # Params mirror the live race effect: where resistance begins, then
+            # how hard it pushes back.
+            self._edited.set_trigger_effect(
+                side, mode, [controls["start"].value(), controls["strength"].value()])
+            self._edited.set_trigger_curve(side, zero=controls["deadzone"].value())
+            self._edited.set_trigger_motor(side, enabled=controls["motor"].isChecked())
         self._mark_changes()
 
     def _retarget(self, key):

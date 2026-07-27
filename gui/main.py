@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QMainWindow, QPushButton, QStatusBar,
     QTabWidget, QVBoxLayout, QWidget)
 
+from .lighting import LightingPage
 from .profiles import ProfilePage
 from .triggers import TriggerPage
 from .worker import DeviceThread
@@ -28,6 +29,7 @@ class MainWindow(QMainWindow):
     # which would put blocking HID traffic back on the UI thread.
     request_info = Signal()
     request_status = Signal()
+    request_lighting = Signal()
     request_vibration = Signal(dict)
 
     def __init__(self):
@@ -56,6 +58,8 @@ class MainWindow(QMainWindow):
         self.trigger_page = TriggerPage()
         self.tabs.addTab(self.profile_page, "Profiles && buttons")
         self.tabs.addTab(self.trigger_page, "Adaptive triggers")
+        self.lighting_page = LightingPage()
+        self.tabs.addTab(self.lighting_page, "Lighting")
         layout.addWidget(self.tabs, 1)
 
         self.setCentralWidget(central)
@@ -69,6 +73,11 @@ class MainWindow(QMainWindow):
         self.request_status.connect(worker.refresh_status)
         self.request_vibration.connect(worker.apply_vibration)
         worker.vibration_applied.connect(self._vibration_applied)
+
+        self.lighting_page.write_requested.connect(worker.write_lighting)
+        self.request_lighting.connect(worker.load_lighting)
+        worker.lighting_loaded.connect(self.lighting_page.config_loaded)
+        worker.lighting_written.connect(self._lighting_written)
 
         worker.info_changed.connect(self._info_changed)
         worker.active_changed.connect(self.profile_page.set_active)
@@ -93,6 +102,7 @@ class MainWindow(QMainWindow):
         """
         self.request_info.emit()
         self.request_status.emit()
+        self.request_lighting.emit()
         self.profile_page.forget()
 
     def _info_changed(self, info):
@@ -107,6 +117,12 @@ class MainWindow(QMainWindow):
         where = "saved to flash" if saved else "in memory only"
         self.statusBar().showMessage(
             f"Profile {cfg_id + 1}: wrote {packets} packet(s), {where}", 8000)
+
+    def _lighting_written(self, packets, saved):
+        self.lighting_page.confirm_written()
+        where = "saved to flash" if saved else "in memory only"
+        self.statusBar().showMessage(
+            f"Lighting: wrote {packets} packet(s), {where}", 8000)
 
     def _failed(self, message):
         self.statusBar().showMessage(message, 10_000)

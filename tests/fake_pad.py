@@ -10,7 +10,7 @@ config blob per slot and answers exactly as the pad does, including the
 checksummed framing -- which means a packet the real pad would reject is
 rejected here too.
 """
-from flydigi import device, mapping
+from flydigi import device, lighting, mapping
 
 PROTO_V31 = 0x0301
 PACKAGE_COUNT = 84
@@ -36,6 +36,19 @@ class FakePad:
 
     def __init__(self, slots=4):
         self.blobs = {i: blank_blob(f"Profile {i + 1}") for i in range(slots)}
+        # Lighting is a separate config with the same transfer shape.
+        self.led_blob = bytearray(b"\xff" * 380)
+        self.led_blob[lighting.OFF_VERSION] = 0x00
+        self.led_blob[lighting.OFF_VERSION + 1] = 0x03
+        self.led_blob[lighting.OFF_BRIGHTNESS] = 20
+        self.led_blob[lighting.OFF_LED_COUNT] = 12
+        self.led_blob[lighting.OFF_MODE] = 7
+        self.led_blob[lighting.OFF_CLICK_FEEDBACK] = 0
+        self.led_blob[lighting.OFF_LOOP_START] = 0
+        self.led_blob[lighting.OFF_LOOP_END] = 9
+        self.led_blob[lighting.OFF_LOOP_TIME] = 4
+        for i in range(lighting.OFF_FRAMES, len(self.led_blob)):
+            self.led_blob[i] = 0
         self.active = 0
         self.saved = {}
         self.packets_received = 0
@@ -53,6 +66,9 @@ class FakePad:
             return []                  # the real pad simply does not answer
         payload = buf[5 : 3 + length]
         handler = {
+            lighting.CMD_READ: self._read_led,
+            lighting.CMD_WRITE_START: self._write_start_led,
+            lighting.CMD_WRITE_PACK: self._write_pack_led,
             mapping.CMD_READ: self._read,
             mapping.CMD_APPLY: self._apply,
             mapping.CMD_SAVE: self._save,
@@ -80,13 +96,16 @@ class FakePad:
         blob = self.blobs.get(cfg_id)
         if blob is None:
             return []
+        return self._stream(mapping.CMD_READ, blob, cfg_id, pkg_size)
+
+    def _stream(self, cmd, blob, cfg_id, pkg_size):
         total = len(blob) // pkg_size
         replies = []
         for index in range(total):
             body = bytearray(32)
             body[0] = 0x04
             body[1], body[2] = device.MAGIC1, device.MAGIC2
-            body[3] = mapping.CMD_READ      # data[2] once the report id is stripped
+            body[3] = cmd                   # data[2] once the report id is stripped
             body[4] = total
             body[5] = index
             body[6] = cfg_id
@@ -94,6 +113,21 @@ class FakePad:
             body[7 : 7 + len(chunk)] = chunk
             replies.append(bytes(body))
         return replies
+
+    def _read_led(self, payload):
+        return self._stream(lighting.CMD_READ, self.led_blob, payload[0], payload[1])
+
+    def _write_start_led(self, payload):
+        self._pending_led = (payload[1], payload[2])
+        return [self._ack(lighting.CMD_WRITE_START)]
+
+    def _write_pack_led(self, payload):
+        start, _count = getattr(self, "_pending_led", (0, 0))
+        index = start + payload[0]
+        chunk = payload[1:]
+        self.led_blob[index * mapping.PKG_SIZE : index * mapping.PKG_SIZE + len(chunk)] = chunk
+        self.packets_received += 1
+        return [self._ack(lighting.CMD_WRITE_PACK)]
 
     def _apply(self, payload):
         self.active = payload[0]

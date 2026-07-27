@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flydigi import device, mapping
+from flydigi import device, lighting, mapping
 from tests.fake_pad import BLOB_LEN, FakePad, blank_blob
 
 PASSED = []
@@ -135,12 +135,116 @@ def test_bad_checksum_is_rejected():
     check("corrupt packet did not switch the pad", pad.active == 0)
 
 
+def test_vibration_intensity():
+    config = mapping.MappingConfig(blank_blob())
+    config.set_vibration("left", enabled=True, minimum=40, maximum=200, scale=90)
+    check("vibration round-trips", config.vibration("left") == (True, 40, 200, 90),
+          str(config.vibration("left")))
+    check("sides are independent", config.vibration("right") != (True, 40, 200, 90))
+
+    # A slider dragged past its partner must not produce an inverted window.
+    config.set_vibration("left", minimum=250)
+    enabled, minimum, maximum, _scale = config.vibration("left")
+    check("min and max are kept in order", minimum <= maximum,
+          f"min {minimum} max {maximum}")
+
+    config.set_vibration("left", enabled=False)
+    check("disabling is stored inverted",
+          config.blob[mapping.OFF_GRIP_VIBRATION + 1] == mapping.DISABLED)
+    check("disabled reads back as disabled", config.vibration("left")[0] is False)
+
+    config.vibration_enabled = False
+    check("master switch round-trips", config.vibration_enabled is False)
+
+
+def test_trigger_effect_and_curve():
+    config = mapping.MappingConfig(blank_blob())
+    config.set_trigger_effect("right", 1, [80, 200])
+    mode, params = config.trigger_effect("right")
+    check("trigger mode round-trips", mode == 1)
+    check("trigger params round-trip", params[:2] == [80, 200], str(params[:2]))
+    check("left trigger untouched", config.trigger_effect("left")[0] != 1)
+
+    config.set_trigger_curve("left", zero=25)
+    check("dead zone round-trips", config.trigger_curve("left")["zero"] == 25)
+
+    config.set_trigger_motor("left", enabled=True, minimum=10, maximum=90, scale=70)
+    check("trigger motor round-trips",
+          config.trigger_motor("left") == (True, 10, 90, 70),
+          str(config.trigger_motor("left")))
+
+
+def test_editing_extras_does_not_disturb_buttons():
+    """The blob holds everything, so an edit must stay in its own bytes."""
+    config = mapping.MappingConfig(blank_blob())
+    config.set_mapping("m1", "a")
+    before = config.remapped()
+    config.set_vibration("left", minimum=10, maximum=250, scale=99)
+    config.set_trigger_effect("left", 1, [50, 120])
+    check("button mapping survives unrelated edits", config.remapped() == before,
+          str(config.remapped()))
+    check("title survives too", config.title == "Profile", config.title)
+
+
+def test_targets_exclude_buttons_xinput_cannot_send():
+    for key in ("m1", "m2", "m3", "m4", "c", "z"):
+        check(f"{key} is not offered as a target",
+              key not in mapping.XINPUT_TARGETS)
+        check(f"{key} is still a source", key in mapping.APEX5_KEYS)
+    for key in ("a", "b", "lb", "start"):
+        check(f"{key} is a valid target", key in mapping.XINPUT_TARGETS)
+
+
+def test_lighting_round_trip():
+    pad = FakePad()
+    config = lighting.read_config(pad)
+    check("lighting reads back", config.led_count == 12, str(config.led_count))
+    check("brightness decoded", config.brightness == 20, str(config.brightness))
+    check("mode decoded", config.mode == 7, str(config.mode))
+
+    edited = config.copy()
+    edited.brightness = 80
+    edited.mode = 1
+    edited.set_solid((255, 0, 128))
+    pad.packets_received = 0
+    sent = lighting.write_config(pad, edited, old=config)
+    check("lighting write sends only changed packets", 0 < sent <= 19, f"sent {sent}")
+
+    back = lighting.read_config(pad)
+    check("brightness persisted", back.brightness == 80, str(back.brightness))
+    check("mode persisted", back.mode == 1)
+    last_frame, last_led = back.frames - 1, back.leds_per_frame - 1
+    check("colour reached every frame",
+          back.led(0, 0) == (255, 0, 128)
+          and back.led(last_frame, last_led) == (255, 0, 128),
+          f"{back.led(0, 0)} {back.led(last_frame, last_led)}")
+    check("writing colours did not resize the config",
+          len(back.blob) == len(config.blob),
+          f"{len(config.blob)} -> {len(back.blob)}")
+    check("geometry matches the LED count",
+          (back.frames, back.leds_per_frame) == (10, 12),
+          f"{back.frames}x{back.leds_per_frame}")
+
+
+def test_lighting_brightness_is_clamped():
+    config = lighting.LedConfig(FakePad().led_blob)
+    config.brightness = 500
+    check("brightness clamps to the top", config.brightness == lighting.BRIGHTNESS_MAX,
+          str(config.brightness))
+    config.brightness = -5
+    check("brightness clamps to zero", config.brightness == 0, str(config.brightness))
+
+
 def main():
     for test in (test_packet_framing, test_identity_and_remap, test_turbo,
                  test_title, test_read_write_round_trip,
                  test_write_without_baseline_sends_everything,
                  test_unchanged_write_sends_nothing, test_apply_and_save,
-                 test_bad_checksum_is_rejected):
+                 test_bad_checksum_is_rejected, test_vibration_intensity,
+                 test_trigger_effect_and_curve,
+                 test_editing_extras_does_not_disturb_buttons,
+                 test_targets_exclude_buttons_xinput_cannot_send,
+                 test_lighting_round_trip, test_lighting_brightness_is_clamped):
         test()
     total = len(PASSED) + len(FAILED)
     print(f"\n{len(PASSED)}/{total} passed")

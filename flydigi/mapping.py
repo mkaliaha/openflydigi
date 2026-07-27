@@ -47,7 +47,8 @@ trigger and macro state.
 """
 import struct
 
-from . import device
+from . import blobs
+from .blobs import PKG_SIZE, ProtocolError, build   # re-exported for callers
 
 CMD_STATUS = 161
 CMD_APPLY = 162
@@ -56,15 +57,22 @@ CMD_WRITE_START = 164
 CMD_WRITE_PACK = 165
 CMD_SAVE = 166
 
-# NewXInput moves 20 bytes per packet; older protocols use 10.
-PKG_SIZE = 20
-
 OFF_PROTO_VERSION = 0
 OFF_PACKAGE_COUNT = 2
 OFF_KEY_TABLE = 13
+OFF_TRIGGER_CURVE = 123    # 2 x 7: travel curve per trigger
+OFF_GRIP_VIBRATION = 145   # 1 + 2 x 4: the grip motors
+OFF_TRIGGER_MOTOR = 154    # 1 + 2 x 14: the trigger motors
+OFF_FORCE_TRIGGER = 185    # 2 x 20: the adaptive-trigger effect
 OFF_DATA_VERSION = 225
 OFF_TITLE = 770
 TITLE_BYTES = 20
+
+# Enable flags in this config are stored inverted: 0 means on, 0xFF means off.
+ENABLED, DISABLED = 0, 0xFF
+
+SIDE_LEFT, SIDE_RIGHT = 0, 1
+SIDES = ("left", "right")
 
 KEY_SLOTS = 32
 KEY_ENTRY = 3
@@ -103,28 +111,14 @@ APEX5_KEYS = [
     "m1", "m2", "m3", "m4",
 ]
 
-
-class ProtocolError(Exception):
-    pass
-
-
-def build(cmd_id, payload):
-    """Build a checksummed vendor packet.
-
-    The length byte counts the command and length bytes themselves, so it is
-    payload length + 2, and the checksum lands at 3 + length. Flydigi's
-    `CreateSimpleCommand` + `Crc(3, 3 + len)` in one step.
-    """
-    buf = device.build(cmd_id)
-    length = len(payload) + 2
-    buf[4] = length
-    buf[5 : 5 + len(payload)] = payload
-    buf[3 + length] = device.checksum(buf, 3, 3 + length)
-    return buf
-
-
-def _replies(ctrl, buf, wait):
-    return [r[1:] for r in ctrl.send(buf, wait=wait) if len(r) > 7]
+# What a key may be remapped *to*. Deliberately smaller than APEX5_KEYS: the
+# extra buttons (M1-M4, and the C/Z pair by the bumpers) have no XInput
+# equivalent, so a host cannot receive them. They are sources -- you map a
+# paddle onto a real button, which is what the pad ships doing -- and offering
+# them as targets would let someone map A to something nothing can see, which
+# reads as "A stopped working".
+EXTRA_KEYS = ["c", "z", "m1", "m2", "m3", "m4"]
+XINPUT_TARGETS = [key for key in APEX5_KEYS if key not in EXTRA_KEYS]
 
 
 def read_status(ctrl, wait=1.0, slots=4):
@@ -135,7 +129,7 @@ def read_status(ctrl, wait=1.0, slots=4):
     field, so a caller can tell whether a cached copy is still current without
     reading the config at all. 0xFFFF means the slot has never been written.
     """
-    for body in _replies(ctrl, build(CMD_STATUS, b""), wait):
+    for body in blobs.replies(ctrl, build(CMD_STATUS, b""), wait):
         if body[2] != CMD_STATUS:
             continue
         raw = body[5]
@@ -161,25 +155,9 @@ def read_config(ctrl, cfg_id, wait=1.5, retries=3):
     read the status first and re-apply the original afterwards; see
     `read_config_preserving`.
     """
-    for _ in range(retries):
-        chunks = {}
-        total = None
-        for body in _replies(ctrl, build(CMD_READ, bytes([cfg_id, PKG_SIZE])), wait):
-            if body[2] != CMD_READ:
-                continue
-            total, index = body[3], body[4]
-            chunks[index] = bytes(body[6 : 6 + PKG_SIZE])
-        if total and len(chunks) == total:
-            blob = bytearray(total * PKG_SIZE)
-            for index, chunk in chunks.items():
-                blob[index * PKG_SIZE : (index + 1) * PKG_SIZE] = chunk
-            return MappingConfig(blob, cfg_id)
-        if total:
-            missing = sorted(set(range(total)) - set(chunks))
-            last_error = f"got {len(chunks)}/{total} packets, missing {missing}"
-        else:
-            last_error = "no reply -- the pad may be asleep, press a button"
-    raise ProtocolError(f"reading config {cfg_id} failed: {last_error}")
+    blob = blobs.read_blob(ctrl, CMD_READ, cfg_id, f"config {cfg_id}",
+                           wait=wait, retries=retries)
+    return MappingConfig(blob, cfg_id)
 
 
 def read_config_preserving(ctrl, cfg_id, wait=1.5):
@@ -200,7 +178,7 @@ def read_config_preserving(ctrl, cfg_id, wait=1.5):
 
 def apply_config(ctrl, cfg_id, wait=0.5):
     """Switch the pad to a stored config."""
-    for body in _replies(ctrl, build(CMD_APPLY, bytes([cfg_id])), wait):
+    for body in blobs.replies(ctrl, build(CMD_APPLY, bytes([cfg_id])), wait):
         if body[2] == CMD_APPLY:
             return True
     return False
@@ -209,7 +187,7 @@ def apply_config(ctrl, cfg_id, wait=0.5):
 def save_config(ctrl, version=0, wait=2.0):
     """Commit the working config to flash. Slow -- the pad takes seconds."""
     payload = struct.pack("<H", version & 0xFFFF)
-    for body in _replies(ctrl, build(CMD_SAVE, payload), wait):
+    for body in blobs.replies(ctrl, build(CMD_SAVE, payload), wait):
         if body[2] == CMD_SAVE:
             return True
     return False
@@ -225,37 +203,9 @@ def write_config(ctrl, cfg_id, config, old=None, wait=0.5):
     Returns the number of packets sent. Call `save_config` afterwards to make
     it survive a power cycle.
     """
-    new_packets = config.packets()
-    old_packets = old.packets() if old is not None else None
-    if old_packets is not None and len(old_packets) != len(new_packets):
-        old_packets = None
-
-    runs = []
-    run_start = None
-    for i, packet in enumerate(new_packets):
-        changed = old_packets is None or packet != old_packets[i]
-        if changed and run_start is None:
-            run_start = i
-        elif not changed and run_start is not None:
-            runs.append((run_start, new_packets[run_start:i]))
-            run_start = None
-    if run_start is not None:
-        runs.append((run_start, new_packets[run_start:]))
-
-    sent = 0
-    for start, packets in runs:
-        header = bytes([cfg_id, start, len(packets), PKG_SIZE])
-        if not _acked(ctrl, CMD_WRITE_START, header, wait):
-            raise ProtocolError(f"pad rejected write header at packet {start}")
-        for offset, packet in enumerate(packets):
-            if not _acked(ctrl, CMD_WRITE_PACK, bytes([offset]) + packet, wait):
-                raise ProtocolError(f"pad rejected packet {start + offset}")
-            sent += 1
-    return sent
-
-
-def _acked(ctrl, cmd_id, payload, wait):
-    return any(body[2] == cmd_id for body in _replies(ctrl, build(cmd_id, payload), wait))
+    return blobs.write_blob(ctrl, CMD_WRITE_START, CMD_WRITE_PACK, cfg_id,
+                            config.blob, old.blob if old is not None else None,
+                            wait=wait)
 
 
 class MappingConfig:
@@ -360,6 +310,105 @@ class MappingConfig:
             if target != key or frequency:
                 out[key] = (target, mode, frequency)
         return out
+
+    # -- grip vibration ---------------------------------------------------
+    #
+    # 9 bytes: a master switch, then per side (switch, min, max, scale). The
+    # switches are inverted -- 0 is on. min/max bound how hard the motor is
+    # allowed to run, so they are the intensity control; the pad clamps the
+    # game's rumble into that window.
+
+    def vibration(self, side):
+        """(enabled, min, max, scale) for one grip motor."""
+        base = OFF_GRIP_VIBRATION + 1 + self._side(side) * 4
+        return (self.blob[base] == ENABLED, self.blob[base + 1],
+                self.blob[base + 2], self.blob[base + 3])
+
+    def set_vibration(self, side, enabled=None, minimum=None, maximum=None,
+                      scale=None):
+        base = OFF_GRIP_VIBRATION + 1 + self._side(side) * 4
+        if enabled is not None:
+            self.blob[base] = ENABLED if enabled else DISABLED
+        if minimum is not None:
+            self.blob[base + 1] = max(0, min(255, minimum))
+        if maximum is not None:
+            self.blob[base + 2] = max(0, min(255, maximum))
+        if scale is not None:
+            self.blob[base + 3] = max(0, min(255, scale))
+        # The pad reads these as a window, so keep min <= max rather than
+        # letting a slider produce an inverted range.
+        if self.blob[base + 1] > self.blob[base + 2]:
+            self.blob[base + 1], self.blob[base + 2] = (
+                self.blob[base + 2], self.blob[base + 1])
+
+    @property
+    def vibration_enabled(self):
+        return self.blob[OFF_GRIP_VIBRATION] == ENABLED
+
+    @vibration_enabled.setter
+    def vibration_enabled(self, value):
+        self.blob[OFF_GRIP_VIBRATION] = ENABLED if value else DISABLED
+
+    # -- adaptive triggers, stored per profile ----------------------------
+    #
+    # 20 bytes per side: effect type, an 8-byte rumble binding, a mixed border
+    # and 10 effect parameters. This is the same effect vocabulary the live
+    # SetForceTrigger command uses -- the difference is that this copy lives in
+    # the pad, so it applies with no host process and no game integration.
+
+    def trigger_effect(self, side):
+        """(mode, params) for one trigger's stored effect."""
+        base = OFF_FORCE_TRIGGER + self._side(side) * 20
+        return self.blob[base], list(self.blob[base + 10 : base + 20])
+
+    def set_trigger_effect(self, side, mode, params=()):
+        base = OFF_FORCE_TRIGGER + self._side(side) * 20
+        self.blob[base] = mode & 0xFF
+        values = list(params)[:10] + [0] * max(0, 10 - len(params))
+        self.blob[base + 10 : base + 20] = bytes(
+            max(0, min(255, int(v))) for v in values)
+
+    def trigger_curve(self, side):
+        """(type, zero, point1, point2, end) -- where the trigger's travel maps."""
+        base = OFF_TRIGGER_CURVE + self._side(side) * 7
+        return {
+            "type": self.blob[base],
+            "zero": self.blob[base + 1],
+            "point1": (self.blob[base + 2], self.blob[base + 3]),
+            "point2": (self.blob[base + 4], self.blob[base + 5]),
+            "end": self.blob[base + 6],
+        }
+
+    def set_trigger_curve(self, side, zero=None, end=None):
+        base = OFF_TRIGGER_CURVE + self._side(side) * 7
+        if zero is not None:
+            self.blob[base + 1] = max(0, min(255, zero))
+        if end is not None:
+            self.blob[base + 6] = max(0, min(255, end))
+
+    def trigger_motor(self, side):
+        """(enabled, min, max, scale) for one trigger's own vibration motor."""
+        base = OFF_TRIGGER_MOTOR + 1 + self._side(side) * 14
+        return (self.blob[OFF_TRIGGER_MOTOR] == ENABLED, self.blob[base + 1],
+                self.blob[base + 2], self.blob[base + 5])
+
+    def set_trigger_motor(self, side, enabled=None, minimum=None, maximum=None,
+                          scale=None):
+        base = OFF_TRIGGER_MOTOR + 1 + self._side(side) * 14
+        if enabled is not None:
+            self.blob[OFF_TRIGGER_MOTOR] = ENABLED if enabled else DISABLED
+        if minimum is not None:
+            self.blob[base + 1] = max(0, min(255, minimum))
+        if maximum is not None:
+            self.blob[base + 2] = max(0, min(255, maximum))
+        if scale is not None:
+            self.blob[base + 5] = max(0, min(255, scale))
+
+    @staticmethod
+    def _side(side):
+        if isinstance(side, str):
+            return SIDES.index(side)
+        return SIDE_RIGHT if side else SIDE_LEFT
 
     def __repr__(self):
         version = f"{self.proto_version >> 8}.{self.proto_version & 0xF}"
