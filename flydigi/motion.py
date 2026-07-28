@@ -122,6 +122,115 @@ def parse_info(data):
     }
 
 
+# Seven separately-flashed components, two BCD bytes each, packed after the chip
+# types in the same command-1 reply. Each nibble is one version field, so
+# `0x70 0x45` is 7.0.4.5. All-zero means "not present" rather than version zero
+# -- Space Station nulls them -- which is how a wired pad reports no dongle, and
+# how an Apex 5 reports no ADC chip (that one is a Vader 4 part).
+VERSION_NAMES = ("main", "dongle", "switch", "trigger", "screen", "adc",
+                 "nearlink")
+VERSION_OFFSET = 16            # raw index; body[15] once the report id is gone
+
+
+def parse_versions(data):
+    """The firmware versions in a command-1 reply, or None if it is not one."""
+    if len(data) < VERSION_OFFSET + 2 * len(VERSION_NAMES):
+        return None
+    if data[0] != INPUT_REPORT_ID or data[3] != CMD_GET_INFO:
+        return None
+    versions = {}
+    for index, name in enumerate(VERSION_NAMES):
+        hi, lo = data[VERSION_OFFSET + 2 * index : VERSION_OFFSET + 2 * index + 2]
+        parts = (hi >> 4, hi & 0xF, lo >> 4, lo & 0xF)
+        versions[name] = None if not any(parts) else ".".join(map(str, parts))
+    return versions
+
+
+def read_versions(ctrl, wait=0.6):
+    """Ask the pad which firmware it is running. None if it is asleep."""
+    buf = build(CMD_GET_INFO)
+    buf[4] = 2
+    buf[5] = checksum(buf, 3, 3 + buf[4])
+    for reply in ctrl.send(buf, wait=wait):
+        versions = parse_versions(reply)
+        if versions:
+            return versions
+    return None
+
+
+def version_at_least(version, minimum):
+    """Compare dotted versions numerically. False for a missing version.
+
+    Deliberately **not** what Flydigi does. `DeviceUtil.CompareVersion` is
+    `string.Compare(new, old, Ordinal) >= 0` -- an ordinal string comparison --
+    so their own gate rejects firmware 7.0.10.0 against a minimum of 7.0.3.0,
+    because "1" sorts below "3". Comparing numerically differs from them only
+    where they are wrong.
+    """
+    if not version:
+        return False
+
+    def parts(text):
+        out = []
+        for piece in str(text).split("."):
+            try:
+                out.append(int(piece))
+            except ValueError:
+                return None
+        return out
+
+    have, want = parts(version), parts(minimum)
+    if have is None or want is None:
+        return False
+    # Pad the shorter one so 7.0 and 7.0.0.0 compare equal.
+    length = max(len(have), len(want))
+    have += [0] * (length - len(have))
+    want += [0] * (length - len(want))
+    return have >= want
+
+
+CMD_READ_TRANSPORT = 16
+
+# Firmware below this does not offer third-party control on an Apex 5.
+# ControllerBusinessService gates it per device code: "k5" wants 7.0.3.0 and
+# "f5" wants 7.1.4.1.
+THIRD_PARTY_MIN_FIRMWARE = {"k5": "7.0.3.0", "f5": "7.1.4.1"}
+
+
+def parse_transport(data):
+    """Decode a command-16 reply: what the pad is transporting, and to whom."""
+    if len(data) < 30 or data[0] != INPUT_REPORT_ID or data[3] != CMD_READ_TRANSPORT:
+        return None
+    # `control_by` is the same 20-byte ASCII tag the cooperative-lock command
+    # carries, so this answers "is something else driving the pad" *and* "what"
+    # in one read -- worth more to a UI than the bare flag.
+    holder = bytes(data[11:31]).split(b"\x00", 1)[0]
+    return {
+        "controller_data": data[6] == 1,
+        "raw_data": data[7] == 1,
+        "keyboard": data[8] == 1,
+        "mouse": data[9] == 1,
+        "third_party": data[10] == 1,
+        "control_by": holder.decode("ascii", "replace"),
+    }
+
+
+def read_transport(ctrl, wait=0.6):
+    """Read the transport flags and the third-party takeover state.
+
+    The counterpart to `set_raw_data`, which has always been write-only -- so
+    nothing could show the user what the pad currently believes.
+    """
+    buf = build(CMD_READ_TRANSPORT)
+    buf[4] = 2
+    buf[5] = checksum(buf, 3, 3 + buf[4])
+    for reply in ctrl.send(buf, wait=wait):
+        state = parse_transport(reply)
+        if state:
+            return state
+    return None
+
+
 def request_info(ctrl):
     """Send command 1. The reply arrives on the same stream as motion data."""
     buf = build(CMD_GET_INFO)

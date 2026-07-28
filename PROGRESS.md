@@ -533,6 +533,51 @@ Station's own words:
 > opened, the controller mapping will be taken over, and all Space Station settings will be invalid
 > at this time.
 
+**Verified on hardware, and it does more than the wording suggests.** Space Station describes this
+as "third-party apps take over the mapping", which reads like a conflict-resolution setting. What it
+actually gates is whether the pad will **hand itself to another driver at all**. Reading command 16
+before and after flipping it:
+
+```
+before   third_party=False  control_by=''      Steam shows "generic XInput controller"
+after    third_party=True   control_by='SDL'   Steam shows "Apex 5 connected"
+```
+
+Three things fall out of that run:
+
+  * **SDL claims the pad the instant it is allowed to.** `control_by` is the same 20-byte ASCII tag
+    the cooperative-lock command carries, and it filled in with `SDL` by itself. Steam Input has a
+    native Flydigi driver; this flag is what stands between it and the pad.
+  * **SDL then reconfigures the transport on its own.** `controller_data` went True→False and
+    `raw_data` False→True, and *we did not ask for that* — both were sent as 0xFF, "leave alone". So
+    the new holder switched the pad into raw-report mode, which is what its own driver reads.
+  * **Nothing re-enumerates.** Same bus address, same evdev names, same VID/PID. So Steam's native
+    recognition comes from the acquire, not from any change of USB identity — which is why the
+    earlier guess that this was about descriptors or double-remapping was wrong.
+
+**Steam then lists the pad twice, and that is not our bug.** Reported on Windows as well as here.
+Both paths are legitimately supported and Steam does not merge them:
+
+```
+xpad on 3-4:1.0  -> event-joystick -> "generic XInput controller"
+Steam hidapi     -> hidraw4        -> "Apex 5"
+```
+
+`steamwebhelper` holds both hidraw nodes open while this is on. Nothing sent to the pad changes it;
+the toggle only makes the second path exist. The decisive local fix is to remove the first —
+`echo -n "3-4:1.0" | sudo tee /sys/bus/usb/drivers/xpad/unbind` — which leaves only the native
+Apex 5 and does not persist across a wake, since re-enumeration rebinds xpad.
+
+**Do not make that permanent with a udev rule.** The evdev node is where everything else in this
+project reads sticks and buttons: `tools/flydigi-ds5` relays them into the virtual DualSense, and
+`joystick-curve-probe` and `stick-feel` both depend on it — the entire stick-curve validation would
+have been impossible with xpad unbound.
+
+**Consequence worth stating in any UI**: this is not a preference, it is a handover. With it on,
+Steam drives the pad and our own onboard mapping stops being what the host sees. With
+`controller_data` switched off by the new holder, anything reading the ordinary gamepad path may get
+nothing — check that before recommending it as a default.
+
 **Correction — it is command 17, and we already have the writer.**
 `ControllerRepository.cs:1542` calls `ControllerSdk.EnableRawDataInput(..., enableThirdPartyControl, ...)`,
 which is `EnableRawDataTransportInCommandFactory` — **17**, `[4]=7`, `[5]`=controllerData,
