@@ -625,14 +625,21 @@ requires Steam Input *off* — Steam Input masks the pad and breaks DualSense se
 whole point of the toggle is to let Steam take the pad over. They conflict a level above the input
 source, so changing where the relay reads sticks from cannot reconcile them.
 
-What it is actually worth:
+**And the M1-M4 case is narrower than it looks.** In the default mapping those buttons already
+reach the host: the pad remaps them onto real XInput buttons itself, onboard, with nothing running —
+which is what the Buttons page is for, and is the better mechanism for anything that needs to reach
+a game. Even the touchpad-click want does not need this stream: map M1 onboard onto a button you
+never otherwise press and have the relay treat *that* as touchpad click, leaving SELECT free to be
+Create. It costs a button, not a subsystem.
 
-  * **M1-M4 become readable at last**, and this is the real prize. They have no XInput equivalent so
-    they never reach evdev at all — this stream is the only place they exist, which is what
-    "M1 → touchpad click, freeing SELECT to be Create" has always been waiting on.
-  * The relay stops depending on xpad binding, so it survives an unbound or absent xpad rather than
-    failing with no obvious cause.
-  * One input source instead of two straddled ones, with no cross-source sync to get wrong.
+So the one thing this buys that onboard remapping cannot is **a pad button the game never sees**.
+Anything mapped onboard arrives as a real button, so it cannot be a profile-switch or relay-toggle
+key without also firing something in-game. Reading the raw stream is the only way to have a
+host-side hotkey. That is a real capability and a narrow one — **not a priority**, and not a reason
+to rework the relay's input on its own.
+
+The remaining honest benefits are small: the relay would stop depending on xpad binding, and it
+would read one source instead of two straddled ones.
 
 **Consequence worth stating in any UI**: this is not a preference, it is a handover. With it on,
 Steam drives the pad and our own onboard mapping stops being what the host sees. With
