@@ -135,17 +135,124 @@ correct. With those gone it immediately found a real bug: `pageStack.currentItem
 
 Agreed feature list, roughly in the order it came up. Each is a fresh-context-sized piece of work.
 
+### The profile blob has more in it than we edit
+
+Everything in this section is **already carried through** by `flydigi/mapping.py` — we read and
+write the whole 840-byte blob, so these are accessors and a page, not new commands and not new
+risk. Offsets from `MappingConfigParser.cs`, struct names from `data.model.config/`.
+
+**J1. Joystick dead zones, curves, circularity.** The single most-wanted controller setting, and the
+one Linux has no other tool for. Two blocks:
+
+  * **offset 109**, 7 bytes per stick (left 109, right 116):
+    `type, center, p1.x, p1.y, p2.x, p2.y, end`.
+    `type` is `JoystickSensitivityType {Default=0, Quick=1, Slow=2, Custom=3}`. `center` and `end`
+    use a sign convention: a value above 127 decodes as `127 - value`, i.e. a negative offset.
+  * **offset 790**, 12 bytes per stick (left 790, right 802), `m_fdg_macro_joy_extra_v2_struct_t`:
+    `type, bank[9], isRound, end` — a 9-point custom curve plus
+    `JoystickCircularityType {Rectangle=0, Circular=1}`.
+
+**J2. Gyro mapped to a stick, on the pad.** Works in any game with nothing running, which on Linux
+is otherwise Steam Input only. **Offset 137**, 8 bytes, `m_fdg_macro_motion_mapping_struct_t`:
+`type, keyid, method, zero, sensity_x, sensity_y, mode, keyid_ext`, where `type` is
+`MotionMapType {Off=0, LeftJoystick=1, RightJoystick=2, Mouse=3}` and `mode` is
+`MotionUseMode {FPS=0, Racer=1}`. Smoothing curve at **offset 830**, 6 bytes. The pad's own UI warns
+that enabling this lowers the polling rate. `MotionMapType.Mouse` is not a pad feature — see below.
+
+**J3. Finish the trigger travel block.** **Offset 123**, 7 bytes per trigger, same shape as the
+joystick core block. `mapping.trigger_curve()` already *reads* all seven fields;
+`set_trigger_curve()` writes only `zero` and `end`, so `type` and both curve points are read-only
+today. Two more parameters on an existing setter.
+
+**J4. Persist the vibration bind — and an open question, answered.** PROGRESS.md used to say the
+profile's force-trigger `bind` sub-struct "may be" the stored form of command 82 but "the counts do
+not match". They do. `ParseTriggerConfigToArray` writes, at **offset 185** + 20 per side:
+`Type, bind.Type, bind.Filter, bind.Scale, bind.Param[5], MixedBorder, Param[10]`. Live 82 takes
+3 + 4 parameters; the stored form is 3 + **5** — the same structure with one spare byte. And the
+writer sets `bind.Type = (Type == 5) ? 2 : 0`, so bind type 2 appears exactly when the stored effect
+is `Vibration`. The per-game preset *is* effect type 5 and can be made to survive a sleep instead of
+needing re-application. `set_trigger_effect()` writes `[+0]` and `[+10..+20]` and leaves the bind
+alone, so that is the gap.
+
+**J5. The second trigger-motor gear.** **Offset 154**: master enable, then per side two 7-byte
+gears (linear and micro), `m_fdg_motor_trig_setting_struct_t = {type, min, max, filter, vibr_limit,
+scale, time_limit}`. `mapping.trigger_motor()` reads `min/max/scale` of the linear gear only. Trivial
+in code; what `filter`, `vibr_limit` and `time_limit` do needs a bench sweep.
+
+### Small commands worth having
+
+**S1. Reset one profile slot to factory** — `ResetMappingConfigByCfgIdCommandFactory`, **175**,
+`[4]=3, [5]=cfgId, [6]=crc`. A 10 s timeout like the save, so it is a flash operation. Gated on
+`ResetAllMappingUsable`, which the SDK sets unconditionally in the NewXInput branch — our mode.
+Gives us the stock app's "Restore default". Destructive: test on slot 4 or the fake pad first.
+
+**S2. Controller nickname** — write `UpdateNicknameCommandFactory` **24**, read
+`ReadNicknameCommandFactory` **2**. Self-verifying, and it makes a two-pad setup legible. Note the
+decompiled writer puts the CRC at `[6]`, which would overwrite the second name byte — assume it
+belongs at `5 + len`.
+
+**S3. Cooperative lock** — `AcquireControllerCommandFactory` **28**, `[5]=acquire`, `[6..25]` an
+ASCII tag; read the current holder from command **16**. Advisory only. **This also closes an open
+question in PROTOCOL.md §5:** it is *not* a precondition for trigger commands — the SDK never calls
+it before `SetForceTrigger`, and our hardware tests already prove 81/82 work without it.
+
+**S4. Device settings — the sub-command map.** Command **19** is a generic "set feature N":
+`[4]=4, [5]=subId, [6]=value, [7]=crc`, ACK matched on `data[2]==19 && data[5]==subId`.
+
+| sub | feature | sub | feature |
+|---|---|---|---|
+| 1 | **Quick-switch config** — `FN + A/B/X/Y` picks a profile, on the pad, nothing running | 6 | joystick auto-calibration |
+| 2 | Xbox home button (XInput-gated; unreachable in our mode) | 7 | joystick rebound |
+| 3 | motion debounce | 8 | status bar always on |
+| 4 | mapping switch (no UI string; *not* the third-party toggle) | 9 | off screen |
+| 5 | joystick debounce | 10 | audio (gated on the `AudioUsable` bit from command 3) |
+
+Standalone, all `[4]=3, [5]=value, [6]=crc`: **20** report rate `{1000=1, 500=2, 250=4, 125=8}`,
+**21** joystick precision, **22** joystick sensitivity, **23** sleep time in minutes, **29** restart.
+
+**Do sub-ID 1 first** — quick-switch is the only one here that gives a Linux user something
+otherwise unobtainable: switching profiles from the pad with nothing running.
+
+### Ruled out, so nobody looks again
+
+  * **Keyboard and mouse remapping is not a pad feature.** `KeyMapType.Keyboard` and `MultiFunction`
+    both serialise to the single byte `254`, with no key code anywhere in the blob. The injection is
+    host-side, in `KeyboardMouseInjectRunner.cs`. Same for `MotionMapType.Mouse`. On Linux that is a
+    uinput daemon, not a config feature.
+  * **ADC / stick calibration is Vader 4 only** — command 240 exists, but `HasAdcChip` is set on
+    exactly one controller in the whole factory, and it is not ours.
+  * **The K6 trigger family is Apex 6.** Commands 83/85/87 belong to `DeviceCode == "k6"`. The Apex 5
+    is `k5` and `SetForceTrigger` is its family — which **closes the other open question in
+    PROTOCOL.md §5**. `K6TriggerMode.Local` is not a route to autonomous effects on this pad.
+  * **`EnableDS5Data` (232) is dead code** — DInput builder only, no callers anywhere. It looks like
+    it would replace our whole virtual-DualSense tier. It would not.
+  * **Wheel block (183..185), usage counters, `DeviceMask`** — no NewXInput builder, or no capability
+    flag on the Apex 5. Carry the bytes through; build no UI.
+  * **`TestRecoverFactoryCommand` (253)** is a factory reset with no confirmation flow. Do not send it.
+
+**Mode switch (27)** — `BluetoothMode {Switch=1, Xbox=2, Flashplay=3, DInput=4}` — is real and
+`IsSupportNs` is true, but it changes the report descriptor and probably the hidraw node. Treat as a
+one-way trip until proven otherwise; it is the one item here where a bad guess costs the session.
+
 **1. Screen image / GIF upload.** `UploadPic2K2Start/Data/End/Finish`, `UploadPicCommandK1/K2`,
 `TestScreen`, `OffScreen`, `ReadScreenSetting`. Note Space Station only offers this **over a wired
 connection** — worth assuming the dongle cannot carry it, and testing wired first rather than
 debugging a dongle failure that is by design. The image encoding may live in the Electron layer
 rather than the SDK, so check `asar/` as well as `decompiled/`.
 
-**2. A real battery reading.** Currently `motion.parse_info` takes `data[12] & 0x0F` and reports
-x/8, which is what the pad's own nibble gives. Somewhere better is likely:
-`HeartBeatCommandFactory.cs` carries more device state (it is where `CurrentConfigId` comes from at
-`data[3]` / `data[27]`), and a voltage or percentage field may be in the same reply. Start there
-before assuming 8 steps is all the hardware exposes.
+**2. ~~A real battery reading.~~ Settled: there is not one, in this SDK.** Every path resolves to
+the same 4-bit nibble. `HeartBeatCommandFactory`'s NewXInput branch is
+`Battery = (data[i] >> 4 == 1) ? 6 : (data[i] & 0xF)`, and the XInput and DInput branches do the
+identical thing at `data[23]` and `data[10]`. `ExtraInfoCommandFactory` carries no battery field at
+all. The only richer variant is a `DeviceCode == "f4"` special case remapping raw 3→2 and 5→6. So
+x/8 is what Space Station itself shows; if a percentage exists it is in the dongle or the input
+report, not the command set, and that is where to look.
+
+What the same multi-packet reply *does* carry, in order after device type and connect type: MAC
+(4 bytes, reversed), the battery nibble, chip type, motion chip type, then seven BCD firmware
+versions — main, dongle, switch/SI, trigger, screen, ADC, NearLink. `IsAckFinished` is
+`data[4] > data[3] || data[4] == data[3] - 1`, so it is fragmented. That is a better device page
+than the one we have, at no protocol risk.
 
 **3. Charging dock, and syncing it with the pad.** `Flydigi.ChargerSdk.dll` and
 `Flydigi.CoolerSdk.dll` are in `bundle/` and **not yet decompiled** — that is step one
@@ -162,11 +269,20 @@ Station's own words:
 > opened, the controller mapping will be taken over, and all Space Station settings will be invalid
 > at this time.
 
-The likely command is `EnableMappingSwitchCommandFactory`, NewXInput **19**, payload
-`[4]=4, [5]=4, [6]=enable`, crc at `[7]` — the `[5]=4` looks like a sub-function selector, so 19 is
-probably a generic "enable feature N". **Unconfirmed**: the flag it sets is called `MappingSwitch`,
-which might instead mean the Menu-button profile switching. Read the state back with command 3
-(below), toggle, and read again to find out which bit moves — that settles it in one test.
+**Correction — it is command 17, and we already have the writer.**
+`ControllerRepository.cs:1542` calls `ControllerSdk.EnableRawDataInput(..., enableThirdPartyControl, ...)`,
+which is `EnableRawDataTransportInCommandFactory` — **17**, `[4]=7`, `[5]`=controllerData,
+`[6]`=rawData, `[7]`=keyboard, `[8]`=mouse, **`[9]`=thirdPartyControl**, `[10]`=crc, with `0xFF`
+meaning "leave alone". `flydigi/motion.py:34` `set_raw_data(..., third_party=...)` already sends it.
+What is missing is the reader — command **16**, `ReadRawDataReportStatusCommandFactory`, which
+decodes `data[5..8]` as the four transport flags and `data[9]` as the third-party flag — plus a UI
+toggle.
+
+**One gate to honour.** `ControllerBusinessService.cs:1128` only offers this for `DeviceCode == "k5"`
+when the firmware is at or above **7.0.3.0**. Below that, hide it.
+
+`EnableMappingSwitchCommandFactory` (19 sub-function 4) is something else entirely and has no
+English UI string at all — the earlier guess that it was this feature was wrong.
 
 Also relevant to the "extra buttons and gyro" part: `DeviceMaskCommandFactory` (**16**) takes
 `maskController`, `maskMedia`, `maskGyro`, which is how the pad decides what to expose to the host.
