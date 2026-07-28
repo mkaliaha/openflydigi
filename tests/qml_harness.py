@@ -37,6 +37,14 @@ QML_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 SYSTEM_QML_PATHS = ("/usr/lib64/qt6/qml", "/usr/lib/qt6/qml", "/usr/lib/qml")
 
 
+def as_dict(entry):
+    """A real Python dict, whatever QML handed us."""
+    to_variant = getattr(entry, "toVariant", None)
+    if to_variant is not None:
+        entry = to_variant()
+    return {str(k): v for k, v in dict(entry).items()}
+
+
 class TestPad(FakePad):
     """A fake pad that also answers status and device info.
 
@@ -49,12 +57,25 @@ class TestPad(FakePad):
         super().__init__()
         self.switches = []
         self.reads = []
+        self.binds = []
         self.battery = battery
         self.charging = charging
         self.wired = wired
 
     def send(self, buf, wait=0.3):
         buf = bytes(buf)
+        # Answered before the checksum test, like CMD_GET_INFO: `bind_grip`
+        # builds a command-82 packet without a trailing checksum -- Flydigi's
+        # own NewXInput builder does not set one -- so FakePad's unconditional
+        # check would reject a perfectly correct packet.
+        if buf[3] == flydigi_device.CMD_SET_FORCE_TRIGGER_GRIP:
+            self.binds.append(list(buf[5:13]))
+            body = bytearray(32)
+            body[0] = 0x04
+            body[1], body[2] = flydigi_device.MAGIC1, flydigi_device.MAGIC2
+            body[3] = flydigi_device.CMD_SET_FORCE_TRIGGER_GRIP
+            body[6] = 1                          # ack_ok reads body[5] after the report id
+            return [bytes(body)]
         if buf[3] == motion.CMD_GET_INFO:
             body = bytearray(32)
             body[0] = motion.INPUT_REPORT_ID
@@ -78,6 +99,13 @@ class TestPad(FakePad):
         if buf[3] == mapping.CMD_APPLY:
             self.switches.append(buf[5])
         return super().send(buf, wait)
+
+    # `bind_grip` calls this on the controller to read an ack. It is a static
+    # method on the real Controller, and FakePad never grew one -- so applying
+    # a game preset raised AttributeError, which is not in DeviceWorker's
+    # except tuple. It escaped the slot silently: no binding, no `failed`, no
+    # status, nothing on screen.
+    ack_ok = staticmethod(flydigi_device.Controller.ack_ok)
 
     def close(self):
         pass
@@ -116,6 +144,11 @@ class PadProbe(QObject):
     def active(self):
         return self._pad.active
 
+    @Property("QVariantList", notify=changed)
+    def binds(self):
+        """Each rumble-to-trigger binding the pad was sent, as raw payloads."""
+        return [list(b) for b in self._pad.binds]
+
     @Slot()
     def reset(self):
         """Put the pad back to factory state, blobs included.
@@ -143,6 +176,7 @@ class PadProbe(QObject):
         self._pad.saved = {}
         self._pad.reads.clear()
         self._pad.switches.clear()
+        self._pad.binds.clear()
         self._pad.bad_checksums = 0
         self.changed.emit()
 
@@ -240,8 +274,16 @@ class Fixture(QObject):
 
     @Slot("QVariantList")
     def seedGames(self, entries):
-        """Replace the gamelist, so a test does not depend on a downloaded one."""
-        self._app.games.sourceModel().setGames(list(entries))
+        """Replace the gamelist, so a test does not depend on a downloaded one.
+
+        Each entry is copied into a real Python dict first. What arrives from a
+        QML array is not one, and `App.requestVibration` is a `Signal(dict)`
+        delivered across a thread boundary -- an entry Qt cannot marshal makes
+        the queued call vanish silently: the signal emits, the worker slot never
+        runs, and nothing is reported. The application itself is unaffected,
+        because it loads the gamelist with json.load.
+        """
+        self._app.games.sourceModel().setGames([as_dict(e) for e in entries])
 
     @Slot()
     def clearGames(self):

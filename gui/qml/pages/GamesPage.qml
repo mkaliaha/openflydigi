@@ -64,6 +64,10 @@ Kirigami.ScrollablePage {
 
     footer: Controls.ToolBar {
         position: Controls.ToolBar.Footer
+        // Fixed height. The detail line swaps a few words for a paragraph when
+        // a game is selected, and letting the footer grow with it moves the
+        // button out from under the pointer mid-click.
+        implicitHeight: Kirigami.Units.gridUnit * 4
 
         contentItem: RowLayout {
             spacing: Kirigami.Units.largeSpacing
@@ -74,7 +78,9 @@ Kirigami.ScrollablePage {
                 wrapMode: Text.WordWrap
                 maximumLineCount: 3
                 elide: Text.ElideRight
+                verticalAlignment: Text.AlignVCenter
                 Layout.fillWidth: true
+                Layout.fillHeight: true
                 // Selecting a game swaps a short line for a long explanation.
                 // Zero preferred width keeps that out of the layout's sizing,
                 // so the button beside it does not move under the cursor.

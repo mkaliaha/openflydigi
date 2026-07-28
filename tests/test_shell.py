@@ -201,12 +201,21 @@ def test_a_game_list_update_that_fails_is_reported(qt_app):
     app_object, engine, window = load_shell(qt_app, pad)
     pump(qt_app, rounds=10)
 
+    # Seed a known list first. Comparing against whatever happened to be on
+    # disk makes the "left alone" check vacuous on a machine with no cached
+    # gamelist -- as the tautology this replaces was.
+    app_object._fetched([{"enGameName": "Silksong", "isVibration": True},
+                         {"enGameName": "Deathloop", "isPS5": True}], "")
+    before = app_object.games.count
+    check("the seeded list is there to be disturbed", before == 2, str(before))
+
     app_object._fetched(None, "Name or service not known")
     check("a failed update is reported",
           "Could not update the game list" in app_object.device.error,
           app_object.device.error)
-    check("a failed update leaves the list alone", app_object.games.count == 0
-          or app_object.games.count > 0)
+    check("a failed update leaves the list alone",
+          app_object.games.count == before,
+          f"{before} -> {app_object.games.count}")
     check("the app is not left thinking it is still fetching",
           not app_object.fetchingGames)
     app_object.shutdown()

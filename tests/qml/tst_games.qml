@@ -25,7 +25,15 @@ TestCase {
         {"enGameName": "Forza Horizon 6", "modDownLoadUrl": "x",
          "modName": "ForzaDualSense.exe", "processGameNames": ["forza.exe"]},
         {"enGameName": "Deathloop", "isPS5": true},
-        {"enGameName": "Silksong", "isVibration": true}
+        // Real preset numbers. Without vibParams, effects.apply_game skips both
+        // sides and the pad is never spoken to -- which is how the "loading a
+        // preset reaches the pad" case below used to pass without a preset ever
+        // reaching the pad.
+        {"enGameName": "Silksong", "isVibration": true,
+         "vibType": 1, "vibFilter": 2, "pwmScal": 3,
+         "vibParams": "10,20,30,40",
+         "vibFilterRight": 5, "pwmScalRight": 6,
+         "vibParamsRight": "50,60,70,80"}
     ]
 
     Component {
@@ -108,10 +116,18 @@ TestCase {
 
         Pad.resetCounters();
         mouseClick(apply);
-        // The binding is written straight to the pad, so the only thing to
-        // wait for is the pad having been spoken to without complaint.
-        wait(400);
+        // Wait for the binds themselves. Asserting only that badChecksums is
+        // still zero proves nothing -- resetCounters had just zeroed it, and
+        // it stays zero when the pad is never spoken to at all.
+        tryVerify(() => Pad.binds.length === 2, 5000,
+                  "the preset never reached the pad: " + Pad.binds.length + " binds");
+
+        // payload = [side, bindType, filter, scale, stroke, pressure, strength, frequency]
+        compare(Pad.binds[0], [1, 1, 2, 3, 10, 20, 30, 40], "left bind is wrong");
+        compare(Pad.binds[1], [2, 1, 5, 6, 50, 60, 70, 80], "right bind is wrong");
         compare(Pad.badChecksums, 0, "the pad rejected a packet");
+        tryVerify(() => App.device.status.indexOf("left, right") >= 0, 2000,
+                  "both sides should be reported applied: " + App.device.status);
     }
 
     function test_the_wording_does_not_oversell_the_preset() {
