@@ -457,12 +457,34 @@ Recoil resists and gives way, Sniper vibrates past the travel point. Every one A
 its own parameters back* — `[success=1][mode][params…]`, side dropped — so the pad parses the
 payload rather than merely acknowledging the command id.
 
-**Mode 5 corrected.** This entry first claimed mode 5 "has Sniper's shape and no rumble binding at
-all", meaning it would buzz on its own. It does not: with the grips still it does nothing however
-far the trigger is pulled, and it comes alive the instant the motors are driven. Sniper, with
-byte-identical parameters, buzzes unaided. So mode 5 *is* the rumble-to-trigger bind, minus command
-82's bind type, filter and scale — which is presumably why Flydigi never sends it and turns the
-stored Vibration effect into 82 instead. 82 stays the one to use when the binding matters.
+**Mode 5 does nothing, and the reason it took three attempts to establish is worth more than the
+result.** This entry claimed first that mode 5 buzzes on its own, then — after that was disproved by
+feel — that mode 5 *is* the rumble-to-trigger bind. Both were inferred from a pad that was binding
+rumble to its triggers the whole time, unasked.
+
+**This pad carries a `SyncWithGrip` bind at rest.** The factory profile ships
+`bind.Filter=10, bind.Scale=10, bind.Param=[100, 1, 255, 70, 0]` with `Type=0`, and the consequence
+is that the triggers buzz on plain rumble *with no effect set at all* — confirmed by feel. So any
+trigger-haptics test that does not suppress the bind first will credit whatever effect it just sent
+with the bind's work, which is exactly what happened twice.
+
+Suppressed (`82` with filter 255, scale 0, zero params) and re-run with byte-identical parameters on
+both triggers — `stroke 30, pressure 10, strength 200, frequency 60`:
+
+| Phase | Effect | Rumble | Result |
+|---|---|---|---|
+| 1 | mode 5, both triggers | 12s | **nothing**, beyond a brief seat as the effect applied |
+| 2 | mode 2, both triggers | none | **vibrates on press** |
+
+Phase 2 is the control that makes phase 1 mean anything: the vibration path is demonstrably alive
+with the bind zeroed. So mode 5 is *applied and inert* rather than rejected — the ACK echoes its
+parameters and the triggers visibly seat themselves — and `82` is the way to bind rumble. Flydigi's
+own software never sends mode 5 either. Not ruled out: some other parameter combination doing
+something; two were tried, differing in pressure.
+
+**The method, since it generalises to every effect on this pad**: suppress the standing bind, prove
+the path is still alive with a known-good effect, then test the one in question — and put the same
+bytes in both so the mode byte is the only variable.
 
 The original question, answered: PROGRESS.md used to say the
 profile's force-trigger `bind` sub-struct "may be" the stored form of command 82 but "the counts do
@@ -1108,10 +1130,15 @@ What this settles without a single guess:
   * **Never match a game process by cmdline alone** — Steam/Proton wrappers (`reaper`, `bwrap`,
     `pv-adverb`, `steam.exe`) all carry the game's path. Require the PE to be mapped.
   * **Effects persist in controller state** until changed; there is no timeout.
-  * **`Sniper` (2) and `Vibration` (5) send byte-identical parameters and are different effects.**
-    Sniper vibrates unaided; mode 5 does nothing at all until the grip motors run, then follows
-    them. The mode byte is the whole difference, so a mode-5 effect that "does not work" is
-    probably working and waiting for rumble.
+  * **The pad binds rumble to its triggers at rest.** The factory profile carries a `SyncWithGrip`
+    bind (`filter 10, scale 10, params [100, 1, 255, 70, 0]`), so the triggers buzz on plain rumble
+    with no effect set. Suppress it with `82` (filter 255, scale 0, zero params) before testing any
+    trigger effect, or the bind's work gets credited to whatever was just sent — it fooled this
+    project twice.
+  * **`Sniper` (2) and `Vibration` (5) send byte-identical parameters; mode 2 works and mode 5 does
+    nothing.** With the bind suppressed, mode 2 vibrates on press and mode 5 stays silent through
+    twelve seconds of rumble. Mode 5 is applied rather than rejected — it ACKs and the triggers seat
+    themselves briefly — so "the pad took it" is not evidence that it does anything.
   * **hidraw replies go to every reader of the node.** An ACK you receive is not necessarily an
     answer to anything you sent — hence `Controller.claim()` and the drain before each write.
   * **`flock` attaches to the open file description, not the fd or the process.** A `dup`'d handle

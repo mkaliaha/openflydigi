@@ -107,6 +107,10 @@ EFFECTS = (
                        "Travel the trigger is allowed before it stops",
                        20, 200, 60),
            )),
+    # Not the same thing as the live mode-5 command, which does nothing -- see
+    # `vibration()`. Stored type 5 is delivered as SyncWithGrip (82), which is
+    # what actually binds rumble to the triggers, and the pad ships carrying
+    # one of these whether or not anyone asked for it.
     Effect(MODE_VIBRATION, "vibration", "Vibration",
            "The game's own rumble, routed into the trigger", (
                _number("scale", "Intensity coefficient",
@@ -284,18 +288,24 @@ def lock(ctrl, side, stroke, strength=255, match_stroke=True):
 
 def vibration(ctrl, side, stroke, pressure, strength, frequency,
               match_stroke=True):
-    """Pass the grips' rumble through to the trigger, past a travel point.
+    """Mode 5. **Accepted by the pad and does nothing you can feel.** Use
+    `bind_grip` (command 82) for rumble in the triggers, or `sniper` for a
+    vibration of their own.
 
-    Confirmed by feel: with the grips still this does nothing, however far the
-    trigger is pulled, and it comes alive the moment the motors are driven --
-    which is what separates it from `sniper`, whose parameters are identical
-    and which buzzes on its own.
+    Tested against `sniper` with byte-identical parameters and the pad's
+    standing 82 bind suppressed, which is what it takes to see this at all:
+    mode 2 vibrates on press with no rumble anywhere, mode 5 stays silent
+    through twelve seconds of grip rumble. The pad does act on it -- the
+    triggers seat themselves for a moment as the effect is applied, and the
+    ACK echoes the parameters -- so this is "applied and inert", not ignored.
 
-    So this is the rumble bind that `bind_grip` (command 82) does, minus 82's
-    bind type, filter and scale. Flydigi's own software always sends 82 for
-    the stored Vibration effect and never sends mode 5, so what the pad does
-    with a filter it was never given is not known -- 82 is the one to use when
-    the binding matters.
+    Every buzz once credited to mode 5 was that standing bind, which the
+    factory profile ships populated; suppress it and mode 5 has nothing left.
+    Flydigi's own software never sends mode 5, which fits.
+
+    Kept because the command is real and the parameters are known. What has
+    not been ruled out is some other parameter combination doing something --
+    two were tried, differing in pressure.
     """
     payload = [1, side, MODE_VIBRATION, stroke, _least_one(pressure),
                _least_one(strength), _least_one(frequency),

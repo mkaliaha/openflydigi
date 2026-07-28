@@ -117,17 +117,25 @@ The mode numbers are `AdapterTriggerType`, and the same six are the first byte o
 per-profile block (§3c). `Race` is the racing-throttle resistance effect — the Forza Horizon
 case. **All six are confirmed by feel on an Apex 5** — see §7.
 
-**`Sniper` and `Vibration` take identical parameters and behave differently.** Mode 2 vibrates
-on its own once the trigger is held past the travel point. Mode 5 does nothing at all with the
-grips still, however far the trigger is pulled, and comes alive the moment the grip motors are
-driven — so it is the rumble-to-trigger bind, minus command 82's bind type, filter and scale.
-Both were felt with the same numbers, which is what makes the pair a real distinction and not a
-difference in tuning.
+**`Sniper` and `Vibration` take identical parameters. Mode 2 works; mode 5 does nothing.** Sent
+with the same bytes (`stroke 30, pressure 10, strength 200, frequency 60`) to both triggers and
+the pad's standing `SyncWithGrip` bind suppressed, mode 2 vibrates on press with no rumble
+anywhere, while mode 5 stays silent through twelve seconds of grip rumble. The pad does act on
+it — the triggers seat themselves for a moment as it is applied, and the ACK echoes the
+parameters back — so mode 5 is *applied and inert*, not rejected.
 
-Flydigi's software never sends mode 5: `ControllerRepository.CreateForceAdapterConfig` turns the
-stored Vibration effect into `SyncWithGrip` instead. Since 82 carries a filter and a scale that
-mode 5 has no field for, 82 remains the one to use when the binding matters; what the pad does
-with a filter it was never given is untested.
+**Suppressing the bind first is what it takes to see this**, and not doing so is how mode 5 got
+written up wrong twice here. This pad carries a rumble-to-trigger bind at rest: the factory
+profile ships `bind.Filter=10, bind.Scale=10, bind.Param=[100, 1, 255, 70, 0]` with `Type=0`,
+so **the triggers buzz on plain rumble with no effect set at all**. Any trigger-haptics test
+that skips the suppression will credit whatever effect it just sent with the bind's work.
+Suppress with `82` (filter 255, scale 0, zero params), confirm the path is still alive with a
+known-good effect such as `Sniper`, and only then read the result.
+
+Flydigi's software never sends mode 5 either: `ControllerRepository.CreateForceAdapterConfig`
+turns the stored Vibration effect into `SyncWithGrip`. So `82` is the way to bind rumble to the
+triggers, and mode 5 has no known use. Not ruled out: some other parameter combination doing
+something — two were tried, differing in pressure.
 
 ### 3c. The same effects, stored in a profile
 
@@ -261,7 +269,7 @@ Decoding as `ParseAckData` does (strip report-ID byte, then index): `data[2]` = 
 | `81` | SetForceTrigger — `Sniper` | ACK + **felt**: vibrates on its own past the travel point |
 | `81` | SetForceTrigger — `Recoil` | ACK + **felt**: resists, then gives way |
 | `81` | SetForceTrigger — `Lock` | ACK + **felt**: trigger stops dead at the position |
-| `81` | SetForceTrigger — `Vibration` | ACK + **felt**, but only while the grips are running |
+| `81` | SetForceTrigger — `Vibration` | ACK, and **nothing felt** with the standing bind suppressed |
 | `82` (`0x52`) | SyncWithGrip (Tier-1 vibration bind) | ACK + **physically confirmed** |
 | `0x12` | Rumble (SDL framing) | ACK, drives motors |
 

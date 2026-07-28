@@ -200,15 +200,18 @@ def cmd_lock(fd, args):
 
 
 def cmd_vibrate(fd, args):
-    """SetForceTrigger: Vibration (mode 5) -- the grips' rumble, in the trigger.
+    """SetForceTrigger: Vibration (mode 5). **Does nothing on an Apex 5.**
 
-    Felt nothing? Nothing is wrong: this one does nothing with the grips still,
-    so drive them while holding the trigger --
+    Kept for protocol work, not because it is useful. The pad ACKs it and the
+    triggers seat themselves as it applies, but nothing follows -- tested
+    against `sniper`, whose parameters are byte-identical, with the pad's
+    standing rumble bind suppressed. Use `bind` for rumble in the triggers and
+    `sniper` for a vibration of their own.
 
-        flydigi_cmd.py vibrate left && flydigi_cmd.py rumble --seconds 15
+    Note that testing this without suppressing the bind first will look like it
+    works, because the pad binds rumble to its triggers at rest:
 
-    which is exactly what separates it from `sniper`, whose parameters are the
-    same and which buzzes unaided.
+        flydigi_cmd.py bind both --filter 255 --scale 0 --params "0,0,0,0"
     """
     params = bytes([SIDE[args.side], 5, args.stroke, max(1, args.pressure),
                     max(1, args.strength), max(1, args.frequency),
