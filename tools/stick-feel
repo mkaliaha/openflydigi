@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
+"""Feel a stick curve through the pad's own motors, without watching a screen.
+
+Verifying a dead zone normally means staring at a gamepad tester while somebody
+else reads numbers out of a terminal. This closes the loop on the pad instead:
+it reads the stick's *output* off evdev and drives the grip motors in
+proportion, so the buzz in your hands is the number. Move the stick and you feel
+what the pad is sending.
+
+Which makes a dead zone obvious rather than plausible. With one applied, the
+first part of the travel is silent -- you are moving the stick and the pad is
+sending nothing -- and then the rumble comes in. Without one it starts buzzing
+the moment the stick leaves centre.
+
+It runs an A/B: normal, then the curve under test, then normal again, so the
+difference is felt back to back rather than remembered. Phase changes are
+announced with rumble pulses, because the whole point is not needing the screen:
+
+    one short pulse    normal curve, this is the reference
+    two short pulses   the curve under test is applied
+    three short pulses done, and the profile has been put back
+
+Nothing is committed to flash -- there is no save here. The profile is restored
+before exit, and an applied-but-unsaved config dies at the pad's next sleep
+anyway, so even a kill -9 leaves nothing behind for long.
+
+    tools/stick-feel --dead-zone 60
+    tools/stick-feel --dead-zone 60 --side right
+"""
+import argparse
+import os
+import select
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from flydigi import device, effects, evdev, mapping
+
+# Below this the stick is at rest and the motors should be too, or the pad buzzes
+# continuously from centre noise and the dead zone cannot be felt at all.
+NOISE_FLOOR = 0.04
+
+# The small motor alone. It responds fastest, which matters when the buzz is
+# meant to track the stick rather than trail it.
+MOTOR_MAX = 200
+
+
+def pulse(ctrl, count):
+    """Say something through the motors, since the screen is not being read."""
+    for _ in range(count):
+        effects.rumble(ctrl, 0, 160, wait=0.0)
+        time.sleep(0.12)
+        effects.rumble(ctrl, 0, 0, wait=0.0)
+        time.sleep(0.12)
+    time.sleep(0.35)
+
+
+def drive(ctrl, reader, codes, seconds):
+    """Rumble in proportion to what the stick is reporting. Returns peak output."""
+    peak = 0.0
+    last = None
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        select.select([reader], [], [], 0.02)
+        reader.read()
+        x = reader.axis(codes[0], -1.0, 1.0)
+        y = reader.axis(codes[1], -1.0, 1.0)
+        magnitude = min(1.0, (x * x + y * y) ** 0.5)
+        if magnitude < NOISE_FLOOR:
+            magnitude = 0.0
+        peak = max(peak, magnitude)
+        level = int(magnitude * MOTOR_MAX)
+        # Only on a change, and never with an ACK wait: a rumble update per
+        # sample with a 100 ms wait puts the motors seconds behind the hand.
+        if level != last:
+            effects.rumble(ctrl, 0, level, wait=0.0)
+            last = level
+    effects.rumble(ctrl, 0, 0, wait=0.0)
+    return peak
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--dead-zone", type=int, default=60,
+                    help="the dead zone to apply for the B phase, in percent. "
+                         "Large on purpose: this is meant to be unmistakable, "
+                         "not realistic")
+    ap.add_argument("--side", choices=("left", "right"), default="left")
+    ap.add_argument("--seconds", type=float, default=12.0,
+                    help="how long each phase lasts")
+    args = ap.parse_args()
+
+    path, name = evdev.find_device(vendor=device.VID)
+    if path is None:
+        sys.exit("no Flydigi gamepad on evdev -- press a button to wake the pad")
+    codes = ((evdev.ABS_X, evdev.ABS_Y) if args.side == "left"
+             else (evdev.ABS_RX, evdev.ABS_RY))
+
+    ctrl = device.Controller()
+    status = mapping.read_status(ctrl)
+    if status is None:
+        sys.exit("the pad did not answer -- press a button to wake it")
+    cfg_id = status["active"]
+    original = mapping.read_config(ctrl, cfg_id)
+
+    edited = original.copy()
+    edited.set_stick(args.side, center=args.dead_zone)
+    print(f"{name}: {args.side} stick, dead zone {args.dead_zone}%")
+    print(f"  normal bank: {original.stick(args.side)['bank']}")
+    print(f"  tested bank: {edited.stick(args.side)['bank']}")
+
+    reader = evdev.Reader(path)
+    try:
+        pulse(ctrl, 1)
+        normal_peak = drive(ctrl, reader, codes, args.seconds)
+
+        mapping.write_config(ctrl, cfg_id, edited, old=original)
+        time.sleep(0.2)
+        pulse(ctrl, 2)
+        tested_peak = drive(ctrl, reader, codes, args.seconds)
+    finally:
+        mapping.write_config(ctrl, cfg_id, original,
+                             old=mapping.read_config(ctrl, cfg_id))
+        effects.rumble(ctrl, 0, 0, wait=0.0)
+        pulse(ctrl, 3)
+        reader.close()
+
+    print(f"\npeak output -- normal {normal_peak * 100:.0f}%, "
+          f"with the dead zone {tested_peak * 100:.0f}%")
+    print("both phases should still reach ~100%: a dead zone costs travel at the "
+          "bottom, not range at the top")
+    print(f"profile {cfg_id + 1} restored")
+    ctrl.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
