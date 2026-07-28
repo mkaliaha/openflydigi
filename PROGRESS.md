@@ -5,10 +5,12 @@ now covers five delivery mechanisms plus a virtual DualSense.
 
 ## Read this first
 
-**Status: adaptive triggers are done and validated in real games, and the desktop app now covers
-profiles, button remapping, vibration, per-profile trigger config and RGB lighting.** What remains
-is the screen/GIF upload, a real battery reading, the charging dock, the third-party-app mapping
-toggle, macros, the device settings, and a daemon that picks the right tier per game — see "Next".
+**Status: adaptive triggers are done and validated in real games, and the desktop app — now QML on
+Kirigami — covers profiles, button remapping, vibration, per-profile trigger config and RGB
+lighting.** What remains is the screen/GIF upload, the charging dock, the third-party-app mapping
+toggle, macros, the device settings, a daemon that picks the right tier per game, and the joystick
+and gyro blocks the profile already carries — see "Next". Two known UI bugs are listed in the
+runbook at the end.
 
 | Tier | Games | Validated in |
 |---|---|---|
@@ -859,6 +861,57 @@ Start by reading this file and `PROTOCOL.md`. Everything gitignored is reproduci
 `tools/fetch-configs --monitor-configs --all-mods` restores `gamelist.json`, `configs/` and `mods/`.
 The decompile toolchain lives in the `wine-arch` distrobox (see Environment above); the decompiled
 sources under `decompiled/` are only needed for new protocol work, not to run anything.
+
+### Where the desktop app stands
+
+Everything is committed and green. To check:
+
+```bash
+distrobox enter apex-dev -- bash -lc 'cd ~/Projects/ApexExperiments && \
+  python3 tests/test_models.py && python3 tests/test_shell.py && python3 tests/test_qml.py'
+for t in tests/test_{dsx,forza,mapping,monitor,relay}.py; do python3 "$t"; done   # no Qt needed
+tools/generate-qmltypes && qmllint -I . -I /usr/lib64/qt6/qml gui/qml/Main.qml gui/qml/*/*.qml
+```
+
+141 model tests, 48 shell, 58 QML, 158 backend; qmllint and `reuse lint` clean.
+
+**Known bugs, found by review, not yet fixed.** Both are real and evidenced; neither is urgent.
+
+  * **The Buttons and Games placeholders can never render.** Each is a sibling of a `ListView`
+    inside a `Kirigami.ScrollablePage`, and `ScrollablePage.qml` reparents *only* the Flickable
+    child then sets `scrollingArea.visible = false` — the placeholder stays in the hidden subtree.
+    So a pad asleep at startup gives a blank Buttons page under a footer saying "Reading this
+    profile from the pad…". On Games it is worse than cold start: `App.games.count` is the
+    *filtered* count, so a search matching nothing also shows nothing. Fix: nest each placeholder
+    inside its `ListView`, which lands it in the flickable's contentItem. On Buttons do **not**
+    simply drop `visible: App.profile.loaded` — `KeyMapModel.rowCount` is a constant 23 and `_row()`
+    fabricates an identity mapping when there is no config, so an unhidden list renders 23 fake
+    editable rows. Use `model: App.profile.loaded ? App.profile.keys : null`.
+  * **`read_config_preserving` has no `try/finally`.** A read that raises after the pad has already
+    paged the config in leaves the pad on the browsed profile, and the retry launders it: the second
+    `read_status` truthfully reports that slot as active, so the restore is skipped by design and
+    the call reports success. Backend-only now — the desktop app stopped using it when opening a
+    profile became how you switch to it — but `tools/flydigi-mapping` still can. Decide `previous`
+    before the read and restore in a `finally`.
+
+**Not settleable by reading; needs the pad.** Whether the firmware accepts 164/165 aimed at a slot
+it is not running (the app now sidesteps this by always editing the running profile), and what
+`filter` / `vibr_limit` / `time_limit` do in the trigger-motor gears.
+
+### Working on the GUI
+
+`gui/README.md` has the detail. Three things that will cost an hour each if rediscovered:
+
+  * **The venv cannot load Kirigami.** Wheel Qt tags private symbols `Qt_6_PRIVATE_API`, Fedora's
+    tags them `Qt_6.11_PRIVATE_API`, and it is mutual. Work in the `apex-dev` distrobox.
+  * **`tryVerify` over a QML binding never updates.** `tryVerify(() => !button.enabled)` sits until
+    it times out on work that already succeeded. Use `tryCompare(App.profile, "dirty", false)` —
+    a closure over a binding has no notify signal to watch.
+  * **PySide6 cannot see delegate-created items**, and recursing `QObject.children()` over QML
+    objects aborts the interpreter. That is why UI tests are QtQuickTest and live in QML.
+
+When a QML symptom makes no sense, reproduce it in plain Python before theorising — that is what
+finally found `FakePad` missing `ack_ok`, after three wrong guesses about layout and click delivery.
 
 ### Deathloop — validates Tier 4 (virtual DualSense, 15 games)
 
