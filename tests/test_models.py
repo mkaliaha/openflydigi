@@ -354,7 +354,8 @@ def test_trigger_fields_are_independent():
     # The motor enable is a single shared byte, so it lives on TriggerModel
     # rather than on a side -- see the dedicated test below.
     profile.triggers.motorEnabled = True
-    check("motor reaches the config", profile.config.trigger_motor("right")[0])
+    check("motor reaches the config",
+          profile.config.trigger_motor("right")["enabled"])
     check("the model reads back its own effect index", right.effect == 1)
     check("editing a trigger marks dirty", profile.dirty)
 
@@ -409,6 +410,48 @@ def test_an_unknown_knob_is_refused_rather_than_stored():
           bytes(profile.config.blob) == before)
 
 
+def test_the_motor_strength_and_threshold_go_to_both_triggers():
+    """Stored per side, edited as one number -- Space Station syncs them and
+    says so in its own tooltip. A per-side control would be a guess about
+    firmware nobody has tested."""
+    profile, _ = make_profile()
+    triggers = profile.triggers
+    triggers.motorStrength = 55
+    triggers.motorThreshold = 40
+
+    for side in ("left", "right"):
+        motor = profile.config.trigger_motor(side)
+        check(f"{side}: strength was written", motor["scale"] == 55, str(motor))
+        check(f"{side}: threshold was written", motor["block"] == 40, str(motor))
+    check("strength reads back", triggers.motorStrength == 55)
+    check("threshold reads back", triggers.motorThreshold == 40)
+    check("the strength slider stops where the field does",
+          triggers.motorStrengthMax == mapping.TRIGGER_MOTOR_SCALE_MAX,
+          str(triggers.motorStrengthMax))
+    check("editing the motors is a change", profile.dirty)
+
+    # No per-side property for either, for the same reason as the enable.
+    for name in ("motorStrength", "motorThreshold"):
+        check(f"no per-side {name}", not hasattr(triggers.side("left"), name))
+
+
+def test_the_amplitude_window_is_per_side():
+    """The one part of the motor block Flydigi does not sync."""
+    profile, _ = make_profile()
+    left, right = profile.triggers.side("left"), profile.triggers.side("right")
+    left.amplitudeMin = 20
+    left.amplitudeMax = 180
+    check("the left window is stored", (left.amplitudeMin, left.amplitudeMax)
+          == (20, 180), f"{left.amplitudeMin} {left.amplitudeMax}")
+    check("and the right trigger did not follow it",
+          (right.amplitudeMin, right.amplitudeMax) != (20, 180),
+          f"{right.amplitudeMin} {right.amplitudeMax}")
+
+    left.amplitudeMin = 250                      # past its own maximum
+    check("an inverted window is corrected", left.amplitudeMin <= left.amplitudeMax,
+          f"{left.amplitudeMin} {left.amplitudeMax}")
+
+
 def test_the_trigger_motors_share_one_enable():
     """One byte on the pad, so one switch -- not one per trigger.
 
@@ -424,8 +467,8 @@ def test_the_trigger_motors_share_one_enable():
 
     profile.triggers.motorEnabled = True
     check("both sides report it on",
-          profile.config.trigger_motor("left")[0]
-          and profile.config.trigger_motor("right")[0])
+          profile.config.trigger_motor("left")["enabled"]
+          and profile.config.trigger_motor("right")["enabled"])
     # The pad's switches are inverted -- 0 is on -- so this is ENABLED, not a
     # truthiness test.
     check("and it is the one shared byte",
@@ -991,6 +1034,8 @@ def main():
                  test_each_effect_offers_its_own_controls,
                  test_an_effect_remembers_its_numbers_across_a_switch,
                  test_an_unknown_knob_is_refused_rather_than_stored,
+                 test_the_motor_strength_and_threshold_go_to_both_triggers,
+                 test_the_amplitude_window_is_per_side,
                  test_the_trigger_motors_share_one_enable,
                  test_a_stick_edit_recompiles_the_bank,
                  test_a_stick_edit_moves_the_curve_to_custom,

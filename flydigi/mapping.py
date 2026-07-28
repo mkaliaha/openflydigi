@@ -75,6 +75,11 @@ OFF_TITLE = 770
 OFF_JOYSTICK_EXTRA = 790   # 2 x 12: the 9-point bank, circularity and edge
 TITLE_BYTES = 20
 
+# The trigger motor's strength byte holds the percentage Flydigi's own slider
+# shows (`SaveTriggerVibrationConfig` assigns it straight across), unlike the
+# amplitude pair beside it, which is that slider's percent scaled to 0..255.
+TRIGGER_MOTOR_SCALE_MAX = 100
+
 CURVE_ENTRY = 7            # type, zero, p1.x, p1.y, p2.x, p2.y, end
 JOYSTICK_EXTRA_ENTRY = 12  # type, bank[9], isRound, end
 BANK_POINTS = 9
@@ -819,20 +824,41 @@ class MappingConfig:
         return value
 
     def trigger_motor(self, side):
-        """(enabled, min, max, scale) for one trigger's own vibration motor.
+        """One trigger's own vibration motor, as a dict.
+
+        The block holds two 7-byte gears per side -- `type, min, max, filter,
+        min_start, scale, min_time` -- of which Flydigi's software writes four
+        fields of the first (`SaveTriggerVibrationConfig`) and never touches
+        the second. Those four are what this exposes:
+
+            enabled    the master switch
+            minimum    ) the amplitude window: grip rumble above `maximum` acts
+            maximum    ) as `maximum` and below `minimum` acts as `minimum`
+            scale      overall strength, stored 1..100 rather than 0..255
+            block      rumble below this leaves the trigger still
 
         `enabled` is **shared**: it comes from the single byte at
         OFF_TRIGGER_MOTOR, not from this side's block, so both triggers report
-        and set the same switch. min/max/scale really are per side. A UI that
-        draws one enable per trigger will show two switches over one byte and
-        let someone ask for left-on/right-off, which the pad cannot do.
+        and set the same switch. A UI that draws one enable per trigger will
+        show two switches over one byte and let someone ask for left-on/
+        right-off, which the pad cannot do.
+
+        The other four are stored per side. Space Station edits `scale` and
+        `filter` as one number and writes it to both sides -- its own tooltip
+        says "adjusting one trigger syncs the other" -- so whether this pad's
+        firmware reads the right side's copy at all is untested.
         """
         base = OFF_TRIGGER_MOTOR + 1 + self._side(side) * 14
-        return (self.blob[OFF_TRIGGER_MOTOR] == ENABLED, self.blob[base + 1],
-                self.blob[base + 2], self.blob[base + 5])
+        return {
+            "enabled": self.blob[OFF_TRIGGER_MOTOR] == ENABLED,
+            "minimum": self.blob[base + 1],
+            "maximum": self.blob[base + 2],
+            "block": self.blob[base + 3],
+            "scale": self.blob[base + 5],
+        }
 
     def set_trigger_motor(self, side, enabled=None, minimum=None, maximum=None,
-                          scale=None):
+                          scale=None, block=None):
         base = OFF_TRIGGER_MOTOR + 1 + self._side(side) * 14
         if enabled is not None:
             self.blob[OFF_TRIGGER_MOTOR] = ENABLED if enabled else DISABLED
@@ -840,8 +866,19 @@ class MappingConfig:
             self.blob[base + 1] = max(0, min(255, minimum))
         if maximum is not None:
             self.blob[base + 2] = max(0, min(255, maximum))
+        if block is not None:
+            self.blob[base + 3] = max(0, min(255, block))
         if scale is not None:
-            self.blob[base + 5] = max(0, min(255, scale))
+            # 1..100, not 0..255: Flydigi stores this one as the percentage
+            # their slider shows, while min/max are the same slider's percent
+            # scaled to a byte. Clamping it at 255 would offer a range that is
+            # two and a half times what the field means.
+            self.blob[base + 5] = max(0, min(TRIGGER_MOTOR_SCALE_MAX, scale))
+        # The window is read as a pair, so keep it the right way round rather
+        # than letting a slider produce an inverted one -- as set_vibration does.
+        if self.blob[base + 1] > self.blob[base + 2]:
+            self.blob[base + 1], self.blob[base + 2] = (
+                self.blob[base + 2], self.blob[base + 1])
 
     @staticmethod
     def _side(side):

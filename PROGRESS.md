@@ -62,7 +62,7 @@ QML. See `gui/README.md`.
 | Profiles → Vibration | master switch, per-grip enable, min/max window, strength |
 | Controller → Other software | let Steam and similar take the pad over, and who currently holds it |
 | Profiles → Sticks | dead zone, outer dead zone, sensitivity curve presets, circular range |
-| Profiles → Triggers | stored effect — all six of Flydigi's, each with its own controls — dead zone, trigger motor |
+| Profiles → Triggers | stored effect — all six of Flydigi's, each with its own controls — dead zone, trigger motors with strength, threshold and a per-side amplitude window |
 | Adaptive triggers | all 94 games, searchable, filtered by route; vibration presets load onto the pad from here; per-game **Auto** toggle and a route picker for the nine multi-route games |
 | Setup | the daemon's unit, "running now" and "start at login" as separate switches, the application-menu entry, and the udev rules behind one authentication prompt |
 | Lighting | effect, up to 5 colours, brightness, cycle time, react-to-rumble |
@@ -426,6 +426,16 @@ Station never shows this block at all — `IsSupportForceTrigger` routes the sam
 the force-trigger block at 195/215 instead — so anything we write into 123..137 survives every
 subsequent edit in their app, and the only repair is a whole-profile "Restore default".
 
+**Where those two numbers land, exactly**, found while filling in the effect vocabulary: 195 and 215
+are `Param[0]` and `Param[1]` of each side's force-trigger block, and the protobuf record for them
+is `AdapterTriggerTypeNormal { Start, End }` — the *General* effect's two parameters are the stroke
+window. So the Triggers page's "Dead zone", which writes the curve block at 123, is very likely
+writing somewhere this pad does not read, and the control Space Station calls "Stroke Setting" is
+missing from ours. Not yet done, and worth doing as one piece: a start/end pair on General, and
+either verifying the dead zone by feel or dropping it. This is also why `effects.stored()` returns
+no parameters for General rather than zeroing them — clearing those slots would wipe the stroke
+window every time someone switched an effect off.
+
 **J4. Persist the vibration bind — done, along with the four effects that were missing.** The page
 offered two of the six effects the pad has, because only `Normal` and `Race` had a mode number
 written down; `Sniper`, `Recoil`, `Lock` and `Vibration` are all in
@@ -464,10 +474,26 @@ is `Vibration`. The per-game preset *is* effect type 5 and can be made to surviv
 needing re-application — that last part is still not wired up: the Games page applies a preset with
 live command 82, which the pad forgets on sleep, rather than storing it in a profile.
 
-**J5. The second trigger-motor gear.** **Offset 154**: master enable, then per side two 7-byte
-gears (linear and micro), `m_fdg_motor_trig_setting_struct_t = {type, min, max, filter, vibr_limit,
-scale, time_limit}`. `mapping.trigger_motor()` reads `min/max/scale` of the linear gear only. Trivial
-in code; what `filter`, `vibr_limit` and `time_limit` do needs a bench sweep.
+**J5. The trigger-motor block — the four fields Flydigi writes are done; the rest is theirs to
+explain.** **Offset 154**: master enable, then per side two 7-byte gears (linear and micro),
+`m_fdg_motor_trig_setting_struct_t = {type, min, max, filter, vibr_limit, scale, time_limit}`.
+
+`SaveTriggerVibrationConfig` writes exactly four fields of the *linear* gear and never touches the
+micro one, so those four are what the page now offers: `min`/`max` as an amplitude window (grip
+rumble above the ceiling acts as the ceiling, below the floor as the floor), `scale` as strength and
+`filter` as a threshold below which the trigger stays still.
+
+Two things worth knowing before touching this again. **`scale` is stored as the percentage their
+slider shows** — `configBean.Scale = config.Level`, 1..100 — while `min`/`max` beside it are that
+same slider's percent scaled to a byte (`floor(pct * 255 / 100)`), so a UI offering 0..255 for
+strength offers two and a half times the field. And **Space Station syncs `scale` and `filter`
+across both triggers** while leaving the amplitude per side; its own tooltip says so. That is
+followed here rather than second-guessed, which leaves an untested question: the bytes are per side,
+so does this firmware read the right trigger's copy at all? A bench answer would be to set the left
+gear's scale to 100 and the right's to 1 and feel which trigger obeys.
+
+Still unexplained, and still needing a bench sweep: `vibr_limit`, `time_limit`, the gear `type`
+byte, and the whole micro gear.
 
 ### Small commands worth having
 

@@ -32,17 +32,45 @@ Kirigami.ScrollablePage {
             explanation: "Pick a profile on the Controller page."
         }
 
+        FormCard.FormHeader {
+            visible: App.profile.loaded
+            title: "Trigger vibration motors"
+        }
+
         FormCard.FormCard {
             visible: App.profile.loaded
 
             FormCard.FormSwitchDelegate {
                 objectName: "triggerMotor"
-                text: "Trigger vibration motors"
-                // One switch, because the pad has one byte for it -- both
-                // triggers share the enable, only the levels are per side.
+                text: "Enabled"
+                // One switch, because the pad has one byte for it.
                 description: "Shared by both triggers"
                 checked: App.profile.triggers.motorEnabled
                 onToggled: App.profile.triggers.motorEnabled = checked
+            }
+
+            FormCard.FormDelegateSeparator {}
+
+            SliderRow {
+                objectName: "motorStrength"
+                label: "Strength"
+                // Stored as a percentage, unlike every other level here.
+                description: "Shared by both triggers"
+                enabled: App.profile.triggers.motorEnabled
+                to: App.profile.triggers.motorStrengthMax
+                value: App.profile.triggers.motorStrength
+                onMoved: (newValue) => App.profile.triggers.motorStrength = newValue
+            }
+
+            FormCard.FormDelegateSeparator {}
+
+            SliderRow {
+                objectName: "motorThreshold"
+                label: "Threshold"
+                description: "Rumble below this leaves the triggers still"
+                enabled: App.profile.triggers.motorEnabled
+                value: App.profile.triggers.motorThreshold
+                onMoved: (newValue) => App.profile.triggers.motorThreshold = newValue
             }
         }
 

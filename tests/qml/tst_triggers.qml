@@ -125,6 +125,34 @@ TestCase {
         verify(App.profile.dirty, "editing a trigger is a change");
     }
 
+    function test_the_motor_levels_write_through() {
+        // Strength and threshold are drawn once, on the page, because Space
+        // Station edits them as one number for both triggers.
+        findChild(page, "motorStrength").moved(55);
+        findChild(page, "motorThreshold").moved(40);
+        compare(App.profile.triggers.motorStrength, 55, "strength was lost");
+        compare(App.profile.triggers.motorThreshold, 40, "threshold was lost");
+
+        // The amplitude window is per side, and is the only part that is.
+        findChild(page, "amplitudeMin_left").moved(30);
+        compare(App.profile.triggers.left.amplitudeMin, 30, "floor was lost");
+        verify(App.profile.triggers.right.amplitudeMin !== 30,
+               "the right trigger should not have followed");
+    }
+
+    function test_the_motor_levels_wait_for_the_motors() {
+        verify(!findChild(page, "motorStrength").enabled,
+               "a strength means nothing with the motors off");
+        verify(!findChild(page, "amplitudeMin_left").enabled,
+               "nor does an amplitude");
+
+        let motor = findChild(page, "triggerMotor");
+        motor.checked = true;
+        motor.toggled();
+        tryVerify(() => findChild(page, "motorStrength").enabled, 2000,
+                  "turning the motors on should enable their levels");
+    }
+
     function test_the_motors_share_one_switch() {
         // The pad has a single byte for this -- see MappingConfig.trigger_motor.
         // Two switches over one byte would let someone ask for left-on/

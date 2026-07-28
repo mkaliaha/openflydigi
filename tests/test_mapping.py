@@ -228,10 +228,62 @@ def test_trigger_effect_and_curve():
     config.set_trigger_curve("left", zero=25)
     check("dead zone round-trips", config.trigger_curve("left")["zero"] == 25)
 
-    config.set_trigger_motor("left", enabled=True, minimum=10, maximum=90, scale=70)
+    config.set_trigger_motor("left", enabled=True, minimum=10, maximum=90,
+                             scale=70, block=25)
     check("trigger motor round-trips",
-          config.trigger_motor("left") == (True, 10, 90, 70),
+          config.trigger_motor("left") == {"enabled": True, "minimum": 10,
+                                           "maximum": 90, "scale": 70,
+                                           "block": 25},
           str(config.trigger_motor("left")))
+
+
+def test_the_trigger_motor_fields_land_where_flydigi_puts_them():
+    """Four of the seven bytes in the first gear, at their own offsets.
+
+    Getting one of these wrong is invisible in a round trip -- read and write
+    would agree with each other and disagree with the pad -- so this asserts
+    against the layout `ParseTriggerConfigToArray` writes.
+    """
+    config = mapping.MappingConfig(blank_blob())
+    config.set_trigger_motor("right", enabled=True, minimum=20, maximum=200,
+                             scale=60, block=30)
+    base = mapping.OFF_TRIGGER_MOTOR + 1 + 14        # right side's first gear
+    check("the enable is the one shared byte, not a per-side one",
+          config.blob[mapping.OFF_TRIGGER_MOTOR] == mapping.ENABLED)
+    check("min, max, filter and scale are at +1, +2, +3 and +5",
+          [config.blob[base + 1], config.blob[base + 2], config.blob[base + 3],
+           config.blob[base + 5]] == [20, 200, 30, 60],
+          str(list(config.blob[base : base + 7])))
+    check("the second gear is untouched -- Flydigi never writes it either",
+          set(config.blob[base + 7 : base + 14]) == {0xFF},
+          str(list(config.blob[base + 7 : base + 14])))
+    check("and the left trigger's block is untouched",
+          config.trigger_motor("left")["scale"] == 0xFF,
+          str(config.trigger_motor("left")))
+
+
+def test_the_motor_strength_is_a_percentage_not_a_byte():
+    """`SaveTriggerVibrationConfig` assigns the slider's 1..100 straight in,
+    while the amplitude pair beside it is that slider's percent scaled to a
+    byte. Clamping strength at 255 would offer two and a half times the field."""
+    config = mapping.MappingConfig(blank_blob())
+    config.set_trigger_motor("left", scale=200, minimum=200)
+    check("strength is clamped to its own maximum",
+          config.trigger_motor("left")["scale"] == mapping.TRIGGER_MOTOR_SCALE_MAX,
+          str(config.trigger_motor("left")["scale"]))
+    check("the amplitude beside it is not",
+          config.trigger_motor("left")["minimum"] == 200,
+          str(config.trigger_motor("left")["minimum"]))
+
+
+def test_the_amplitude_window_cannot_be_inverted():
+    config = mapping.MappingConfig(blank_blob())
+    config.set_trigger_motor("left", minimum=30, maximum=200)
+    config.set_trigger_motor("left", minimum=250)
+    motor = config.trigger_motor("left")
+    check("an inverted window is put back the right way round",
+          motor["minimum"] <= motor["maximum"],
+          f"min {motor['minimum']} max {motor['maximum']}")
 
 
 def test_every_effect_round_trips_through_the_profile():
@@ -822,6 +874,9 @@ def main():
                  test_switching_to_general_keeps_the_numbers,
                  test_an_effect_reads_its_own_defaults_out_of_a_foreign_slot,
                  test_live_effect_payloads_match_the_command_builders,
+                 test_the_trigger_motor_fields_land_where_flydigi_puts_them,
+                 test_the_motor_strength_is_a_percentage_not_a_byte,
+                 test_the_amplitude_window_cannot_be_inverted,
                  test_the_factory_curves_are_the_identity_line,
                  test_moving_the_trigger_window_moves_its_points,
                  test_the_joystick_type_is_written_into_both_blocks,
