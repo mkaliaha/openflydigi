@@ -597,11 +597,10 @@ buttons from evdev into the virtual DualSense, and `joystick-curve-probe` and `s
 same node — none of them work while the flag is on. Tier 4 needed Steam Input off anyway, so the two
 were already mutually exclusive in practice; this makes it explicit.
 
-**A way out, and it is shovel-ready.** `raw_data` is switched *on* by the acquirer, and the vendor
-stream carries sticks and triggers as well as the IMU. Measured in that exact state — third-party on,
-`controller_data` off — the stream delivered **3870 operator-data reports in 4 seconds** (~970 Hz),
-decoding to gyro ≈ 0 at rest and accel Z ≈ 4096, i.e. the 1 g already verified. So the input we
-would need is fully alive precisely when evdev is dead.
+**Recorded because it was measured, not because anything should be built on it.** In the exact
+state above — third-party on, `controller_data` off — the vendor operator-data stream was still
+delivering **3870 reports in 4 seconds** (~970 Hz), decoding to gyro ≈ 0 at rest and accel Z ≈ 4096,
+the 1 g already verified. So the vendor stream stays alive precisely when evdev dies.
 
 Offsets from `OperatorDataParser`, NewXInput branch, **+1 for the report-id byte we keep**:
 
@@ -615,31 +614,17 @@ raw 17      right trigger   linear, one byte
 raw 18..29  gyro and accel  already implemented and hardware-verified
 ```
 
-That last line is the corroboration: their `data[17]`/`data[23]` are our proven `GYRO_OFFSET = 18`
-and `ACCEL_OFFSET = 24`, so the +1 shift is established and the stick offsets inherit its
-confidence. Buttons are in the same report but their offset is **not yet located** — the parser's
-key handling is elsewhere in the file.
+Their `data[17]`/`data[23]` land on our proven `GYRO_OFFSET`/`ACCEL_OFFSET`, so the +1 shift is
+established and the stick offsets inherit that confidence. Buttons are in the same report, offset
+not yet located.
 
-**It does not un-conflict Tier 4 and the toggle, and it is not worth pretending otherwise.** Tier 4
-requires Steam Input *off* — Steam Input masks the pad and breaks DualSense semantics — while the
-whole point of the toggle is to let Steam take the pad over. They conflict a level above the input
-source, so changing where the relay reads sticks from cannot reconcile them.
-
-**And the M1-M4 case is narrower than it looks.** In the default mapping those buttons already
-reach the host: the pad remaps them onto real XInput buttons itself, onboard, with nothing running —
-which is what the Buttons page is for, and is the better mechanism for anything that needs to reach
-a game. Even the touchpad-click want does not need this stream: map M1 onboard onto a button you
-never otherwise press and have the relay treat *that* as touchpad click, leaving SELECT free to be
-Create. It costs a button, not a subsystem.
-
-So the one thing this buys that onboard remapping cannot is **a pad button the game never sees**.
-Anything mapped onboard arrives as a real button, so it cannot be a profile-switch or relay-toggle
-key without also firing something in-game. Reading the raw stream is the only way to have a
-host-side hotkey. That is a real capability and a narrow one — **not a priority**, and not a reason
-to rework the relay's input on its own.
-
-The remaining honest benefits are small: the relay would stop depending on xpad binding, and it
-would read one source instead of two straddled ones.
+**There is no plan attached to this, and an earlier draft of this section wrongly implied one.**
+Reading sticks from here instead of from evdev was proposed to stop Tier 4 conflicting with the
+third-party toggle — but Tier 4 requires Steam Input *off* and the toggle exists to let Steam take
+over, so they conflict a level above the input source and were never going to be used together.
+M1-M4 do not justify it either: the pad already remaps them onto real XInput buttons onboard, with
+nothing running. The only thing left that onboard remapping cannot do is a pad button the game never
+sees, for a host-side hotkey. Narrow, and not a reason to rework the relay.
 
 **Consequence worth stating in any UI**: this is not a preference, it is a handover. With it on,
 Steam drives the pad and our own onboard mapping stops being what the host sees. With
