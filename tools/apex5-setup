@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
+"""Check and perform the system setup: udev rules and the daemon's unit.
+
+The desktop app drives the same functions in-process, so this is the CLI half
+of one implementation rather than a second one. Run without arguments for the
+checklist:
+
+    tools/apex5-setup
+
+Everything except `install-rules` is unprivileged. `install-rules` re-runs
+itself through pkexec -- via host-spawn when we are in the distrobox, since
+there is no system bus in there for polkit to answer on.
+"""
+import argparse
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from flydigi import setup  # noqa: E402
+
+MARK = {setup.OK: "ok", setup.FAIL: "FAIL", setup.SKIP: "--", setup.UNKNOWN: "?"}
+
+
+def show():
+    checks = setup.checks()
+    width = max(len(c.label) for c in checks)
+    for c in checks:
+        print(f"  [{MARK[c.state]:>4}]  {c.label:<{width}}  {c.detail}")
+    failed = [c for c in checks if c.state == setup.FAIL]
+    if failed:
+        fixes = sorted({c.fix for c in failed if c.fix})
+        print("\n" + f"{len(failed)} problem(s). Fix with: "
+              + ", ".join(f"apex5-setup {f}" for f in fixes))
+        return 1
+    print("\nnothing failing")
+    return 0
+
+
+def install_rules():
+    """Copy the rules into /etc, escalating first if we are not root."""
+    if os.geteuid() != 0:
+        argv = setup.escalation("install-rules")
+        print("escalating: " + " ".join(argv))
+        try:
+            return subprocess.run(argv).returncode
+        except OSError as exc:
+            print(f"could not escalate ({exc}).\nRun this on the host instead:\n"
+                  f"  sudo cp {setup.RULES_SOURCE} {setup.RULES_TARGET}\n"
+                  f"  sudo udevadm control --reload && sudo udevadm trigger")
+            return 1
+    print(f"installed {setup.install_rules()}")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd")
+    for name, help_text in (
+            ("check", "report what is set up and what is not (default)"),
+            ("install-unit", "write the daemon's systemd unit and reload"),
+            ("remove-unit", "stop, disable and delete the unit"),
+            ("enable", "start the daemon at login"),
+            ("disable", "stop starting the daemon at login"),
+            ("start", "start the daemon now"),
+            ("stop", "stop the daemon now"),
+            ("install-rules", "copy the udev rules into /etc (needs root)"),
+    ):
+        sub.add_parser(name, help=help_text)
+    args = ap.parse_args()
+
+    cmd = args.cmd or "check"
+    if cmd == "check":
+        return show()
+    if cmd == "install-unit":
+        print(f"wrote {setup.install_unit()}")
+        return 0
+    if cmd == "remove-unit":
+        setup.remove_unit()
+        print("unit removed")
+        return 0
+    if cmd in ("enable", "disable"):
+        state = setup.set_enabled(cmd == "enable")
+        print("start at login: " + ("on" if state else "off"))
+        return 0
+    if cmd in ("start", "stop"):
+        state = setup.set_running(cmd == "start")
+        print("daemon: " + ("running" if state else "stopped"))
+        return 0 if state == (cmd == "start") else 1
+    if cmd == "install-rules":
+        return install_rules()
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
