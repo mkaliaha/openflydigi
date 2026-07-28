@@ -402,6 +402,59 @@ def test_a_dead_zone_reaches_the_bank():
               str(curve))
 
 
+def test_a_big_dead_zone_does_not_invert_the_curve():
+    """The bug this guards produced full output exactly where silence belonged.
+
+    The interior breakpoints sit around x=50 on the 0..100 scale, so a dead zone
+    past that puts the start node to their right, the segment between them runs
+    backwards, and the lerp comes out inverted: `stick_bank(center=60)` returned
+    150 -- full output -- for the first half of the travel. Flydigi avoids it by
+    remapping the breakpoints into the span the ends leave, which is what
+    `stick_nodes` now does.
+    """
+    for center in range(0, 101, 5):
+        bank = mapping.stick_bank(center=center)
+        check(f"a dead zone of {center} rises, never falls",
+              all(bank[i] <= bank[i + 1] for i in range(mapping.BANK_POINTS - 1)),
+              str(bank))
+        check(f"a dead zone of {center} stays a legal byte",
+              all(0 <= v <= 150 for v in bank), str(bank))
+
+    for edge in range(0, 101, 5):
+        bank = mapping.stick_bank(edge=edge)
+        check(f"an outer dead zone of {edge} rises, never falls",
+              all(bank[i] <= bank[i + 1] for i in range(mapping.BANK_POINTS - 1)),
+              str(bank))
+
+    # A dead zone bigger than the first breakpoint has to silence the bottom of
+    # the travel, which is the case that used to do the exact opposite.
+    # Stored values are biased by 50, so anything at or below 50 is silence.
+    big = mapping.stick_bank(center=60)
+    check("a 60% dead zone is silent for the first half",
+          all(v <= 50 for v in big[:4]), str(big))
+    check("and still reaches full output", big[-1] == 150, str(big))
+
+    # Fully collapsed: no span at all for the curve to rise across.
+    whole = mapping.stick_bank(center=100)
+    check("a dead zone of everything is silent throughout",
+          all(v <= 50 for v in whole[:-1]), str(whole))
+    check("and still reaches full at the stop", whole[-1] == 150, str(whole))
+
+
+def test_the_two_dead_zones_cannot_eat_more_travel_than_exists():
+    config = mapping.MappingConfig(blank_blob())
+    config.set_stick("left", center=60)
+    config.set_stick("left", edge=60)
+    stick = config.stick("left")
+    check("the second one gives way", stick["center"] + stick["edge"] <= 100,
+          f"center {stick['center']} edge {stick['edge']}")
+    check("and the one already set is not moved behind the user's back",
+          stick["center"] == 60, str(stick["center"]))
+    check("the curve is still usable",
+          all(stick["bank"][i] <= stick["bank"][i + 1] for i in range(8)),
+          str(stick["bank"]))
+
+
 def test_the_presets_compile_to_different_curves():
     banks = {name: mapping.stick_bank(point1=mapping.STICK_PRESETS[name][0],
                                       point2=mapping.STICK_PRESETS[name][1])
@@ -609,6 +662,8 @@ def main():
                  test_a_stick_mapped_to_something_else_is_not_a_dead_zone_of_127,
                  test_the_compiler_reproduces_the_pads_own_bank,
                  test_a_dead_zone_reaches_the_bank,
+                 test_a_big_dead_zone_does_not_invert_the_curve,
+                 test_the_two_dead_zones_cannot_eat_more_travel_than_exists,
                  test_the_presets_compile_to_different_curves,
                  test_editing_a_stick_writes_the_bank_too,
                  test_choosing_a_preset_restores_its_whole_shape,

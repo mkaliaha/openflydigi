@@ -186,14 +186,32 @@ def stick_nodes(center=0, edge=0, point1=(63, 63), point2=(127, 127)):
 
     Straight segments, not a Bezier: Space Station's editor draws three `<line>`
     elements and samples them with a plain lerp.
+
+    The interior points' x is remapped into whatever span the two ends leave,
+    which is what Flydigi's `CalculatePoint` does:
+    `center + (100 - center) * x / 100`. Without it the nodes stop being ordered
+    as soon as the dead zone passes the first breakpoint -- a dead zone of 60
+    puts the start node at x=60 while point1 sits at x=49.6, the segment between
+    them runs backwards, and the lerp inverts: the curve comes out at *full*
+    output exactly where it should be silent. With no dead zone the remap is the
+    identity, so this changes nothing for the common case.
     """
     start = (center, 0) if center > 0 else (0, -center)
     end = (100 - edge, 100) if edge > 0 else (100, 100 + edge)
     scale = 100.0 / 127.0
-    return [start,
-            (point1[0] * scale, point1[1] * scale),
-            (point2[0] * scale, point2[1] * scale),
-            end]
+    span = end[0] - start[0]
+
+    if span <= 0:
+        # Nothing left for the curve to happen across, so the breakpoints have
+        # nowhere to be: what remains is a step from silent to full. Keeping
+        # them would leave their y values stranded on a vertical segment and
+        # answer for the whole travel.
+        return [start, end]
+
+    def interior(point):
+        return (start[0] + span * (point[0] * scale) / 100.0, point[1] * scale)
+
+    return [start, interior(point1), interior(point2), end]
 
 
 def _along(nodes, x):
@@ -204,7 +222,12 @@ def _along(nodes, x):
         # catches everything to its left, so a curve whose start node has been
         # pushed inward still has a value at x=0.
         if x <= x1 or index == len(nodes) - 2:
-            return y1 if x0 == x1 else y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+            if x0 == x1:
+                # A vertical segment is a step, so which side of it x falls on
+                # is the whole answer. Returning y1 unconditionally made a dead
+                # zone of 100 report full output across the entire travel.
+                return y0 if x < x0 else y1
+            return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
     return nodes[-1][1]
 
 
@@ -715,6 +738,19 @@ class MappingConfig:
                 point1, point2 = STICK_PRESETS[curve_type]
                 center = 0 if center is None else center
                 edge = 0 if edge is None else edge
+
+        # The two dead zones eat the same travel, so they cannot add up to more
+        # than there is -- Space Station cross-clamps them the same way. Without
+        # it, 60 and 60 leave the curve no span at all to rise across, and what
+        # the pad gets is a step instead of a curve. Whichever is being set now
+        # gives way, so moving one slider never silently moves the other.
+        current = self.stick(side)
+        if center is not None:
+            held = current["edge"] if current["edge"] <= BIPOLAR_MAX else 0
+            center = min(int(center), BIPOLAR_MAX - held)
+        if edge is not None:
+            held = current["center"] if current["is_stick"] else 0
+            edge = min(int(edge), BIPOLAR_MAX - held)
 
         self.set_joystick_curve(side, curve_type=curve_type, center=center,
                                 point1=point1, point2=point2)
