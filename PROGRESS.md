@@ -164,7 +164,10 @@ dead zone compiled to `[0, 0, 0, 0, 26, 56, 87, 118, 150]`, and the bottom of th
 audibly, tangibly silent before the rumble came in. Compiler → bank → firmware → hand, with nothing
 assumed in between.
 
-Two caveats recorded from that run, because the dead zone felt *smaller* than 60%:
+The dead zone read as somewhat smaller than 60% by feel, which is expected rather than suspicious --
+eyeballing what fraction of a stick's throw you have used is not something a hand is good at. Two
+real effects push the same way, and both are worth knowing before anyone reads too much into a
+felt measurement:
 
   * **A circle is not a constant magnitude in Rectangle mode.** The diagonal reaches 1.19 where the
     axes reach 1.00, so tracing a physical circle just under the threshold pokes over it at the 45°
