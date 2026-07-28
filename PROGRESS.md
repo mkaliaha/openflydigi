@@ -88,7 +88,8 @@ kirigami-addons are already installed, and PySide6-Essentials ships QtQuick. The
 Phase 1 (extract view-agnostic models, keep the widgets, port the tests down onto the models) is
 worth shipping on its own even if the QML work stalls. Phase 0 settles whether the venv's bundled
 Qt can load the system's Kirigami QML modules — that answer decides the install story, so it comes
-before any UI work.
+before any UI work. Interaction tests survive the move: `PySide6.QtQuickTest` and `PySide6.QtTest`
+are both present, so QML can be clicked and asserted on much like widgets.
 
 **1. Screen image / GIF upload.** `UploadPic2K2Start/Data/End/Finish`, `UploadPicCommandK1/K2`,
 `TestScreen`, `OffScreen`, `ReadScreenSetting`. Note Space Station only offers this **over a wired

@@ -110,15 +110,36 @@ and `PROGRESS.md`.
 
 ## Testing after the rewrite
 
-Three layers, replacing the current 24 widget tests:
+Nothing is lost. An earlier draft of this plan claimed QML could not be driven the way widgets can,
+which is false — all of the following is available on this machine:
 
-  1. **Model tests, headless, no QML** — the bulk of it, and where the current assertions move.
+  * **`PySide6.QtQuickTest`** — the official framework. `TestCase` in QML with `mouseClick`,
+    `keyClick`, `tryCompare` and `SignalSpy`, launched from Python. Tests are written in QML/JS.
+  * **`PySide6.QtTest`** — `QTest.mouseClick`, `QTest.keyClicks`, `QSignalSpy`. Load the page, find
+    an item with `rootObject().findChild(QObject, "applyButton")`, click it, assert. Keeps the
+    tests in Python beside the existing ones, which is the cheaper continuation.
+  * the system ships the `QtTest` QML plugin, so `import QtTest` resolves in QML
+  * `dogtail` over AT-SPI is the nearest true Selenium analogue, since QML exposes accessibility;
+    heavier and more brittle, worth knowing exists rather than reaching for
+
+Four layers:
+
+  1. **Model tests, headless, no QML** — the bulk, and where most current assertions move. Fast,
+     no display, no rendering.
   2. **A QML load test** — instantiate each page with `QQmlApplicationEngine`, assert no errors and
-     a root object. Catches typos, missing imports, bad property names, which are the QML failure
-     modes that hurt.
-  3. Optionally `qmltestrunner`/QtQuickTest for interaction later. Not required to reach parity.
+     a root object. Catches typos, missing imports and bad property names cheaply.
+  3. **Interaction tests** via `QtTest` from Python, replacing the widget-poking the current suite
+     does. This is the layer the earlier draft wrongly wrote off.
+  4. `qmllint` in CI — static type checking for QML, which has no widget equivalent, so the rewrite
+     actually gains a check here.
 
-Behaviour coverage is preserved; what is genuinely lost is widget-wiring coverage, replaced by (2).
+**Design requirement that follows:** give every interactive element an `objectName`. Python can only
+find items by that or by exported properties, and retrofitting names across a finished UI is
+tedious. Do it while writing each component.
+
+Headless gotcha: rendering QML under `QT_QPA_PLATFORM=offscreen` may also need
+`QT_QUICK_BACKEND=software` and `QSG_RENDER_LOOP=basic`. Settle that during Phase 0's spike, since
+every later test run depends on it.
 
 ## What must not change
 
