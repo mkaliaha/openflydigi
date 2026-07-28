@@ -81,6 +81,20 @@ CURVE_DEFAULT, CURVE_QUICK, CURVE_SLOW, CURVE_CUSTOM = 0, 1, 2, 3
 # JoystickCircularityType.
 SHAPE_RECTANGLE, SHAPE_CIRCULAR = 0, 1
 
+# The interior breakpoints each preset stands for, from Space Station's own
+# renderer. Custom is absent on purpose: picking it keeps whatever is there.
+#
+# Default's (63, 63) is the pad's value, not the app's -- their JavaScript
+# hardcodes (64, 64) for every device that is not a k2. Both are the identity
+# line, so the compiled bank is the same either way; 63 is used so a profile we
+# reset matches a factory one byte for byte.
+STICK_PRESETS = {
+    CURVE_DEFAULT: ((63, 63), (127, 127)),
+    CURVE_QUICK: ((64, 96), (127, 127)),      # Space Station labels it "Instant"
+    CURVE_SLOW: ((64, 32), (127, 127)),       # ... and this one "Delay"
+    CURVE_CUSTOM: None,
+}
+
 # A stick's `center` byte is forced to exactly this when the stick is mapped to
 # something that is not a stick -- keyboard, mouse or d-pad. So 127 there is a
 # sentinel meaning "not a joystick", not a dead zone of 127, and a UI that draws
@@ -161,6 +175,66 @@ APEX5_KEYS = [
 # reads as "A stopped working".
 EXTRA_KEYS = ["c", "z", "m1", "m2", "m3", "m4"]
 XINPUT_TARGETS = [key for key in APEX5_KEYS if key not in EXTRA_KEYS]
+
+
+def stick_nodes(center=0, edge=0, point1=(63, 63), point2=(127, 127)):
+    """The four-node polyline a stick curve really is, in percent.
+
+    `center` and `edge` position the two ends, and the sign picks which axis the
+    node slides along -- see BIPOLAR_MAX. `point1` and `point2` are the interior
+    breakpoints, stored on the blob's 0..127 scale and used here as percent.
+
+    Straight segments, not a Bezier: Space Station's editor draws three `<line>`
+    elements and samples them with a plain lerp.
+    """
+    start = (center, 0) if center > 0 else (0, -center)
+    end = (100 - edge, 100) if edge > 0 else (100, 100 + edge)
+    scale = 100.0 / 127.0
+    return [start,
+            (point1[0] * scale, point1[1] * scale),
+            (point2[0] * scale, point2[1] * scale),
+            end]
+
+
+def _along(nodes, x):
+    """Where the polyline is at `x`, extrapolating past either end."""
+    for index in range(len(nodes) - 1):
+        (x0, y0), (x1, y1) = nodes[index], nodes[index + 1]
+        # The last segment catches everything to its right, and the first
+        # catches everything to its left, so a curve whose start node has been
+        # pushed inward still has a value at x=0.
+        if x <= x1 or index == len(nodes) - 2:
+            return y1 if x0 == x1 else y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+    return nodes[-1][1]
+
+
+def stick_bank(center=0, edge=0, point1=(63, 63), point2=(127, 127)):
+    """Compile a stick curve into the nine points the pad actually plays.
+
+    **This is the whole reason a stick UI cannot just write the fields it edits.**
+    The pad has no curve evaluator: it plays the nine-point bank at offset 790
+    and ignores the polyline at 109 entirely, which is confirmed on hardware --
+    flattening the bank silences the stick, while flattening the polyline changes
+    nothing at all. So `center`, `edge` and the two points are the *source form*,
+    and this is the compiler that turns them into something the firmware acts on.
+    Writing them without this is a slider that moves and does nothing.
+
+    Nine samples at evenly spaced travel, biased by 50: the stored byte is
+    `output_percent + 50`, so 50 is no output and 150 is full.
+
+    Truncation, not rounding, and that is checked against the hardware rather
+    than assumed: an untouched Apex 5 holds `50 62 75 87 100 112 125 137 150`,
+    which this reproduces exactly. Space Station's own JavaScript rounds, and
+    would write `50 63 75 88 ...` for the same curve -- so their app and the
+    factory firmware disagree by a unit on four of the nine points. Matching the
+    pad is what keeps "reset to default" from showing up as a change.
+    """
+    nodes = stick_nodes(center, edge, point1, point2)
+    bank = []
+    for index in range(BANK_POINTS):
+        value = _along(nodes, 100.0 * index / (BANK_POINTS - 1))
+        bank.append(int(max(-50, min(100, value))) + 50)
+    return bank
 
 
 def read_status(ctrl, wait=1.0, slots=4):
@@ -599,6 +673,62 @@ class MappingConfig:
             self.blob[base + 10] = SHAPE_CIRCULAR if circular else SHAPE_RECTANGLE
         if edge is not None:
             self.blob[base + 11] = self._bipolar("edge", edge)
+
+    def stick(self, side):
+        """Everything about one stick, both blocks, as one dict."""
+        curve = self.joystick_curve(side)
+        shape = self.joystick_shape(side) or {}
+        return {
+            "type": curve["type"],
+            "center": curve["center"],
+            "is_stick": curve["is_stick"],
+            "point1": curve["point1"],
+            "point2": curve["point2"],
+            "end": curve["end"],
+            "bank": shape.get("bank", []),
+            "circular": shape.get("circular", False),
+            "edge": shape.get("edge", 0),
+        }
+
+    def set_stick(self, side, curve_type=None, center=None, edge=None,
+                  point1=None, point2=None, circular=None):
+        """Edit a stick and recompile the bank from the result.
+
+        The one entry point a UI should use. Both blocks are written: the bank
+        because it is the only part of the curve the pad plays, and the polyline
+        because it is the source form -- Space Station reads it back to redraw
+        its own editor, and a profile carrying a bank with no matching polyline
+        would open there showing a curve nobody drew.
+
+        Editing any node moves the type to Custom, which is what Space Station
+        does: a curve that no longer matches a preset must not go on claiming to
+        be one. Pass `curve_type` to pick a preset instead, and its points are
+        applied for you.
+        """
+        if curve_type is not None:
+            curve_type = int(curve_type)
+            if curve_type not in STICK_PRESETS:
+                raise ValueError(f"no sensitivity curve preset {curve_type}")
+            if curve_type != CURVE_CUSTOM:
+                # Selecting a preset is selecting its whole shape, ends included
+                # -- which is why Space Station zeroes both when you pick one.
+                point1, point2 = STICK_PRESETS[curve_type]
+                center = 0 if center is None else center
+                edge = 0 if edge is None else edge
+
+        self.set_joystick_curve(side, curve_type=curve_type, center=center,
+                                point1=point1, point2=point2)
+        if edge is not None or circular is not None:
+            self.set_joystick_shape(side, circular=circular, edge=edge)
+        if curve_type is None and (center is not None or edge is not None
+                                   or point1 is not None or point2 is not None):
+            self.set_joystick_curve(side, curve_type=CURVE_CUSTOM)
+
+        current = self.stick(side)
+        self.set_joystick_shape(side, bank=stick_bank(
+            center=current["center"] if current["is_stick"] else 0,
+            edge=current["edge"] if current["edge"] <= BIPOLAR_MAX else 0,
+            point1=current["point1"], point2=current["point2"]))
 
     @staticmethod
     def _bipolar(what, value):

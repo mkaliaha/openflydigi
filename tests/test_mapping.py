@@ -363,6 +363,94 @@ def test_a_stick_mapped_to_something_else_is_not_a_dead_zone_of_127():
           config.joystick_curve("right")["is_stick"] is True)
 
 
+FACTORY_BANK = [50, 62, 75, 87, 100, 112, 125, 137, 150]
+
+
+def test_the_compiler_reproduces_the_pads_own_bank():
+    """The whole model, checked against nine bytes read off real hardware.
+
+    If the node maths, the 0..127 scaling, the sample positions or the rounding
+    were wrong, this would miss. It is the only ground truth we have for any of
+    them, so it is worth more than the rest of this file put together.
+    """
+    check("the identity curve compiles to the factory bank",
+          mapping.stick_bank() == FACTORY_BANK, str(mapping.stick_bank()))
+
+    # Rounding, specifically: their JavaScript would put 63/88/113/138 here.
+    rounded = [50, 63, 75, 88, 100, 113, 125, 138, 150]
+    check("and not to what Space Station would write",
+          mapping.stick_bank() != rounded)
+
+
+def test_a_dead_zone_reaches_the_bank():
+    flat = mapping.stick_bank()
+    dead = mapping.stick_bank(center=25)
+    check("a dead zone changes the curve", dead != flat, str(dead))
+    check("it still ends at full output", dead[-1] == 150, str(dead))
+    check("and it starts below the line", dead[0] < flat[0], str(dead))
+
+    # Offset is the other half of the same field: the smallest input already
+    # produces real output, so the curve starts above the line rather than below.
+    offset = mapping.stick_bank(center=-25)
+    check("an offset lifts the start instead", offset[0] > flat[0], str(offset))
+    check("the two are opposites", offset[0] > flat[0] > dead[0])
+
+    # Values stay in range whatever is asked for.
+    for curve in (mapping.stick_bank(center=100), mapping.stick_bank(center=-100),
+                  mapping.stick_bank(edge=100), mapping.stick_bank(edge=-100)):
+        check("bank stays a legal byte", all(0 <= v <= 150 for v in curve),
+              str(curve))
+
+
+def test_the_presets_compile_to_different_curves():
+    banks = {name: mapping.stick_bank(point1=mapping.STICK_PRESETS[name][0],
+                                      point2=mapping.STICK_PRESETS[name][1])
+             for name in (mapping.CURVE_DEFAULT, mapping.CURVE_QUICK,
+                          mapping.CURVE_SLOW)}
+    check("default is the straight line",
+          banks[mapping.CURVE_DEFAULT] == FACTORY_BANK)
+    # Instant is faster off centre, Delay slower -- so at the halfway point they
+    # sit either side of the straight line, which is the whole point of them.
+    check("instant is above the line at half travel",
+          banks[mapping.CURVE_QUICK][4] > banks[mapping.CURVE_DEFAULT][4],
+          str(banks[mapping.CURVE_QUICK]))
+    check("delay is below it",
+          banks[mapping.CURVE_SLOW][4] < banks[mapping.CURVE_DEFAULT][4],
+          str(banks[mapping.CURVE_SLOW]))
+    check("all three still reach full output",
+          all(bank[-1] == 150 for bank in banks.values()))
+
+
+def test_editing_a_stick_writes_the_bank_too():
+    """A UI that only wrote what it edited would change nothing on the pad."""
+    config = mapping.MappingConfig(blank_blob())
+    config.set_stick("left", center=30)
+    stick = config.stick("left")
+    check("the source form is stored", stick["center"] == 30)
+    check("the bank was recompiled", stick["bank"] == mapping.stick_bank(center=30),
+          str(stick["bank"]))
+    check("and it is no longer the factory one", stick["bank"] != FACTORY_BANK)
+    check("editing a node makes the curve Custom",
+          stick["type"] == mapping.CURVE_CUSTOM, str(stick["type"]))
+    check("the right stick is untouched",
+          config.stick("right")["bank"] == FACTORY_BANK)
+
+
+def test_choosing_a_preset_restores_its_whole_shape():
+    config = mapping.MappingConfig(blank_blob())
+    config.set_stick("left", center=40, circular=True)
+    check("the edit took", config.stick("left")["center"] == 40)
+
+    config.set_stick("left", curve_type=mapping.CURVE_DEFAULT)
+    stick = config.stick("left")
+    check("the preset is stored as itself, not as Custom",
+          stick["type"] == mapping.CURVE_DEFAULT, str(stick["type"]))
+    check("picking a preset clears the dead zone", stick["center"] == 0)
+    check("and restores the factory bank exactly", stick["bank"] == FACTORY_BANK,
+          str(stick["bank"]))
+    check("circularity is not a curve setting and survives", stick["circular"] is True)
+
+
 def test_editing_extras_does_not_disturb_buttons():
     """The blob holds everything, so an edit must stay in its own bytes."""
     config = mapping.MappingConfig(blank_blob())
@@ -519,6 +607,11 @@ def main():
                  test_the_bank_is_exactly_nine_points,
                  test_the_negative_half_of_center_and_edge_is_refused,
                  test_a_stick_mapped_to_something_else_is_not_a_dead_zone_of_127,
+                 test_the_compiler_reproduces_the_pads_own_bank,
+                 test_a_dead_zone_reaches_the_bank,
+                 test_the_presets_compile_to_different_curves,
+                 test_editing_a_stick_writes_the_bank_too,
+                 test_choosing_a_preset_restores_its_whole_shape,
                  test_editing_extras_does_not_disturb_buttons,
                  test_targets_exclude_buttons_xinput_cannot_send,
                  test_lighting_round_trip, test_lighting_brightness_is_clamped,
