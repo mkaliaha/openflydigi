@@ -86,9 +86,23 @@ The label is spelled out rather than "Apply & save": a bare `&` in a button labe
 mnemonic, swallowed, and drawn as an underline on the next character. The widget app escaped it as
 `&&`; in QML it is simpler to avoid the ampersand.
 
-Still unverified: that 166 itself works. It has only ever run against the fake pad, and nothing has
-yet confirmed a saved change surviving a sleep. The pad being attached now makes that a cheap
-experiment: rename a profile, press "Apply and save", let the pad idle out, reconnect and re-read.
+**166 is now verified on hardware.** Slot 4 (factory, `data_version` 65535) was renamed to
+`SAVETEST`, written with 164/165 and committed with 166; the pad was then switched off at its own
+power switch, observed leaving the USB bus for 16 seconds, and woken with the logo button. The title
+read back as `SAVETEST`. So the whole write path — apply, commit, survive a power cut — is proven
+end to end, and the slot was restored from backup afterwards.
+
+Two things fell out of that run:
+
+  * **The active slot survives a power cycle too.** The pad came back running slot 4, the one it was
+    switched to for the test, not slot 1. So "which profile is live" is itself flash state.
+  * **The version tag did not move.** `read_status` reported `[23224, 65078, 65535, 65535]` before
+    and after. We pass the config's own `data_version` precisely so the tag is left alone — which
+    means it stays 65535 across a save, and `read_status`'s per-slot version cannot be used to spot
+    a config we changed ourselves. Whether the firmware takes the tag from the command payload or
+    from the blob's own field at 225..227 is not distinguishable from this run, because the write
+    carried the same value in both. To make the tag useful as a cache key, something has to write a
+    *new* one; presumably that is what Space Station's random-looking values are.
 
 ### Tests, and how to run them without hardware
 
@@ -143,16 +157,160 @@ Everything in this section is **already carried through** by `flydigi/mapping.py
 write the whole 840-byte blob, so these are accessors and a page, not new commands and not new
 risk. Offsets from `MappingConfigParser.cs`, struct names from `data.model.config/`.
 
-**J1. Joystick dead zones, curves, circularity.** The single most-wanted controller setting, and the
-one Linux has no other tool for. Two blocks:
+**J1. Joystick dead zones, curves, circularity. — backend done; no GUI yet.**
+`joystick_curve()` / `set_joystick_curve()` and `joystick_shape()` / `set_joystick_shape()` are in
+`flydigi/mapping.py`, tested, and verified against a blob dumped off the pad. What remains is a
+model and a page. Two blocks:
 
   * **offset 109**, 7 bytes per stick (left 109, right 116):
-    `type, center, p1.x, p1.y, p2.x, p2.y, end`.
-    `type` is `JoystickSensitivityType {Default=0, Quick=1, Slow=2, Custom=3}`. `center` and `end`
-    use a sign convention: a value above 127 decodes as `127 - value`, i.e. a negative offset.
+    `type, center, p1.x, p1.y, p2.x, p2.y, end`, on a **0..127** scale.
+    `type` is `JoystickSensitivityType {Default=0, Quick=1, Slow=2, Custom=3}` — labelled
+    Default / **Instant** / **Delay** / Custom in the UI. p1/p2 are the interior breakpoints of a
+    four-node **polyline**, not Bezier controls; the editor draws three straight segments and
+    samples with a plain lerp.
   * **offset 790**, 12 bytes per stick (left 790, right 802), `m_fdg_macro_joy_extra_v2_struct_t`:
-    `type, bank[9], isRound, end` — a 9-point custom curve plus
-    `JoystickCircularityType {Rectangle=0, Circular=1}`.
+    `type, bank[9], isRound, end` — the same curve resampled to nine evenly spaced points, plus
+    `JoystickCircularityType {Rectangle=0, Circular=1}`. Bank values are **biased by 50**: 50 is no
+    output, 150 is full, and a straight line is evenly spaced between them.
+
+**The pad plays the nine-point bank, and nothing else in either block.** Established on hardware
+with `tools/joystick-curve-probe`, which writes a value that ought to silence the stick and watches
+evdev to see whether it does. Five runs against a baseline, each proving somebody was working the
+pad — see "the liveness trap" below:
+
+| what was written | stick output |
+|---|---|
+| nothing (baseline) | normal, 6778 deflections, reaches 100% |
+| **bank at 790+1..9 flattened to all 50** | **completely silent** |
+| core polyline at 109 flattened, **and type set to Custom** | normal, reaches 100% |
+| `edge` byte at 801 = 236 | normal, reaches 100% |
+| `edge` byte at 801 = 90 | normal, reaches 100% |
+| `edge` byte at 801 = 100, a degenerate step | normal, reaches 100%, smooth from 2.3% |
+
+**"Maybe the pad applies it and then recalibrates, opaquely?"** A fair objection, and not an idle
+one — command 3 reports stick auto-calibration and the rebound algorithm both *enabled*, so there
+really is a normalisation stage in there. It is ruled out, and the last two rows are why. The tests
+that matter are not the ones that nudge the curve but the ones that make it **degenerate**:
+`--flat-core` sets the polyline to zero output across the whole range, and `edge = 100` collapses
+the end node onto the start node. No renormalisation can rescue either — rescaling a constant zero
+gives zero, and rescaling a step function gives a step function, not the smooth sweep from 2.3%
+upward that both runs actually produced. Whereas the flat *bank* silenced the stick and nothing
+rescued that, which is the same argument in reverse. Nudge tests would have been ambiguous here;
+degenerate ones are not.
+
+So the core polyline, the type byte, `center` and `edge` are **the source form the bank is compiled
+from** — not leftovers. The renderer builds a four-node polyline out of them and samples it, and the
+bank is that sampled output. This is the same architecture as the lighting config: the pad has no
+curve evaluator any more than it has an animation generator, and in both cases the host computes and
+the pad plays.
+
+**The compiler, straight out of `index-DM6mSbRo.js`** (constants `Pe=127, Ie=100, ze=50, V=9,
+ce=-50`), which is what a GUI has to reimplement rather than invent:
+
+```js
+Ke(start,end,p1,p2) = [start, p1, p2, end]        // the node list
+c={x:0,y:0}, y={x:100,y:100};
+center > 0 ? c.x = center : c.y = -center;         // start node: dead zone, or Offset
+edge   > 0 ? y.x = 100-edge : y.y = 100+edge;      // end node: outer dead zone, or ceiling
+qe(x0,y0,x1,y1,x) = y0 + (y1-y0)*(x-x0)/(x1-x0)    // plain lerp, three straight segments
+for X in 0..8:  bank[X] = clamp(round(sample(100*X/8)), -50, 100) + 50
+```
+
+Everything is in 0..100 percent, including `center` and `edge`; `p1`/`p2` are stored as 0..127 and
+converted with `×100/127`. `type` is only a preset picker for `p1`/`p2` — Default (64,64), Instant
+(64,96), Delay (64,32), all with `p2 = (127,127)` — and any manual edit to a node forces it to
+Custom.
+
+Note what this does *not* tell you, and why the hardware runs above were still needed: Space Station
+writes both blocks unconditionally, so nothing in the app reveals which one the pad reads. The app
+answers "what is computed from what"; only the pad answers "what does it act on".
+
+Two consequences worth the space:
+
+  * **A GUI must compute the bank.** Offering a dead-zone slider that writes `center` would move a
+    number, dirty the profile, write successfully — and change nothing the hand can feel. Whatever
+    curve the UI offers has to be sampled into nine points the way Space Station samples it:
+    `clamp(round(output_percent), -50, 100) + 50` at x = 0, 12.5, … 100.
+  * **It makes the sign question much less urgent.** `center` and `edge` are the two fields whose
+    negative encoding is ambiguous, and neither reaches the firmware. They matter for what Space
+    Station *displays* if someone opens a profile we wrote, not for how the pad behaves.
+
+**`isRound` is the exception, and it is firmware-side.** Predicted, then measured: circularity is a
+two-dimensional property and the bank is a one-dimensional magnitude curve, so the bank *cannot*
+express it and something in the pad has to. Rolling the stick around its rim and into all four
+diagonal corners:
+
+| `isRound` | furthest corner | per-axis |
+|---|---|---|
+| 0, Rectangle (factory) | magnitude **1.19** | 1.00, 1.00 |
+| 1, Circular | magnitude **1.00** | 1.00, 1.00 |
+
+Rectangle lets the diagonal run past the unit circle; Circular pins it to exactly 1.00, i.e. about
+0.71 per axis. **That is a user-visible bug generator, and it has bitten in practice**: a game that
+tests each axis against a threshold — "run if |x| > 0.8" — sees 0.71 on the diagonal and stops the
+character running diagonally while the stick is hard over. Report it as a trade-off in any UI rather
+than as a neutral preference.
+
+Note the measurement, because the textbook number is wrong: a true square output region would put
+the diagonal at **1.41**, but the stick's own gate is octagonal and never reaches it — Rectangle
+tops out around **1.19** in practice. What separates the two modes is only whether the diagonal is
+allowed past the unit circle at all. A probe thresholding at 1.25 reports both modes as round, which
+this one did until it was corrected.
+
+So the live/inert map for the two blocks is complete: **bank and `isRound` reach the firmware; the
+core polyline, the type byte, `center` and `edge` do not.**
+
+**The liveness trap, which cost two runs.** A stick nobody is touching and a stick the pad has
+silenced produce byte-identical evdev traces: nothing at all, because evdev is event-driven. The
+first two silencing runs were therefore unreadable — the answer looked like a result and was
+indistinguishable from an empty room. The probe now starts on a button press and counts button
+events throughout the window; buttons are an input no stick curve can suppress, so zero axis events
+*alongside* live button events is proof. Any future hardware probe with a "nothing happened"
+outcome needs the same treatment.
+
+Four things the implementation had to get right, none of them guessable from the offsets:
+
+  * **`center` is a sentinel as well as a number.** The firmware forces it to exactly **127** when
+    the stick is mapped to keyboard, mouse or d-pad — so 127 means "this is not a stick", not "a
+    dead zone of 127". `joystick_curve()` reports `is_stick` rather than handing a UI a number to
+    draw. Space Station's renderer guards identically, zeroing anything over 100.
+  * **`center` and `edge` are not dead zones — each is two controls in one byte, chosen by sign.**
+    They position the curve's start and end nodes, and the sign says which *axis* the node slides
+    along (`index-DM6mSbRo.js`: `r>0?c.x=r:c.y=-r, n>0?y.x=100-n:y.y=100+n`). Positive `center`
+    moves the start node along x, so input below it produces nothing — a dead zone. Negative moves
+    it up y, so the smallest input already produces `-center`: Space Station labels that end of the
+    slider **"Offset"**, and it exists to cancel a *game's* dead zone rather than add one. Likewise
+    positive `edge` is an outer dead zone; negative lowers the end node so full travel only reaches
+    `100+edge`, an output ceiling. The two locale keys behind the one slider are literally
+    `"deadzone": "Dead zone"` and `"compensastion": "Offset"` (their typo).
+
+    So there is no negative dead zone, and both halves are wanted — Offset especially, since
+    cancelling a game's built-in dead zone is a thing Linux has no other tool for. **We write only
+    the positive half**, because the SDK's reader folds a byte over 127 to `127 - byte` at four
+    sites while every one of its writers emits a plain two's-complement cast: −20 is written as 236
+    and reads back as −109. Positive values encode identically under both readings, so
+    `set_joystick_curve` accepts 0..100 and raises on the rest rather than picking one of two
+    incompatible encodings.
+
+    **Settling it does not need Space Station.** What matters is how the *firmware* decodes the
+    byte, not what their app writes — and the pad will answer directly. Write 236 to byte 110 with
+    apply-and-no-save, then sweep the stick and watch evdev: an Offset of 20 shows up as the axis
+    jumping straight to ~20% on the smallest deflection, where −109 would pin it near full and an
+    unsigned 236 would swallow most of the travel. Repeat with 147. The three outcomes are
+    unmistakable, and leaving the save off means the pad forgets the experiment the next time it
+    sleeps.
+  * **Core `end` is not the UI's "Edge" and is left read-only.** Edge writes the *extra* block's
+    trailing byte, a different protobuf field. Nothing in Flydigi's application ever assigns core
+    `end`, and their reader corrupts it above 127. The pad ships with 127 there.
+  * **The bank must be exactly nine.** Flydigi's writer loops over however many points it is given
+    with no bound, so a tenth lands on `isRound`, an eleventh on `edge`, and a thirteenth starts
+    overwriting the other stick. `set_joystick_shape` refuses instead.
+
+The type byte is written into **both** blocks, because the SDK regenerates the extra block's copy
+from the core one on every write and a blob where they disagree is a state no vendor tool produces.
+Whether the *firmware* branches on it at all, or whether it is a UI label and the bank is what
+actually plays, is still unknown — testable by writing a bank that sharply disagrees with the 109
+curve and feeling the stick.
 
 **J2. Gyro mapped to a stick, on the pad.** Works in any game with nothing running, which on Linux
 is otherwise Steam Input only. **Offset 137**, 8 bytes, `m_fdg_macro_motion_mapping_struct_t`:
@@ -161,10 +319,25 @@ is otherwise Steam Input only. **Offset 137**, 8 bytes, `m_fdg_macro_motion_mapp
 `MotionUseMode {FPS=0, Racer=1}`. Smoothing curve at **offset 830**, 6 bytes. The pad's own UI warns
 that enabling this lowers the polling rate. `MotionMapType.Mouse` is not a pad feature — see below.
 
-**J3. Finish the trigger travel block.** **Offset 123**, 7 bytes per trigger, same shape as the
-joystick core block. `mapping.trigger_curve()` already *reads* all seven fields;
-`set_trigger_curve()` writes only `zero` and `end`, so `type` and both curve points are read-only
-today. Two more parameters on an existing setter.
+**J3. Finish the trigger travel block. — done, and it was a bug, not a gap.** **Offset 123**,
+7 bytes per trigger, same 7-byte struct as the joystick core block but on a **0..255** scale, and
+with no sign convention at all — the parser reads `zero` and `end` raw where the joystick folds
+them.
+
+The old `set_trigger_curve()` wrote `zero` and `end` and left the two points where they were, which
+produces a blob no vendor tool would ever emit: breakpoints stranded outside the window they are
+meant to bound. Flydigi writes six bytes from two numbers —
+`Point1 = (Start, Start)`, `Point2 = (End, End)` in `ControllerRepository.cs:885-890` — and the
+factory blob agrees exactly: `0 0 0 0 255 255 255`. The setter now mirrors by default, sorts the
+pair, and allows them to be equal, since Space Station's range slider passes neither `pushable` nor
+`allowCross` and dragging one handle onto the other is reachable. `mirror_points=False` is there for
+a caller deliberately shaping the curve.
+
+`type` stays read-only: it is a bare `int32` the SDK round-trips and never decodes, it reaches no
+UI, and the pad ships with 0. **And a warning before building any UI for this**: on an Apex 5 Space
+Station never shows this block at all — `IsSupportForceTrigger` routes the same two UI numbers into
+the force-trigger block at 195/215 instead — so anything we write into 123..137 survives every
+subsequent edit in their app, and the only repair is a whole-profile "Restore default".
 
 **J4. Persist the vibration bind — and an open question, answered.** PROGRESS.md used to say the
 profile's force-trigger `bind` sub-struct "may be" the stored form of command 82 but "the counts do
@@ -347,6 +520,60 @@ data[11] stick precision   data[12] stick sensitivity
 
 So sleep time is readable as well as writable — worth reading before `UpdateSleepTime` writes it.
 
+**Run on hardware, and the layout above is right.** Command 3 answered first try on a wired Apex 5:
+
+```
+reply  90 165   3   1   0 251 123   1   0  15   0   2  17 ...
+```
+
+| bit | supported | enabled |  | bit | supported | enabled |
+|---|---|---|---|---|---|---|
+| quick-switch config | yes | **on** | | stick debounce | yes | on |
+| Xbox home button | yes | on | | stick auto-calibration | yes | on |
+| motion debounce | **no** | — | | stick rebound | yes | on |
+| mapping switch | yes | on | | status bar always on | yes | **off** |
+| off screen | yes | off | | audio | **no** | — |
+
+sleep time **15** (minutes), report rate **0**, stick precision **2**, stick sensitivity **17**.
+
+Three things to note. `audio` is unsupported, which matches `AudioUsable` being gated — so the
+audio sub-command is dead on this pad. `motion debounce` is unsupported too, so sub-id 3 is not
+worth a UI. And **report rate reads 0**, which is not in the documented `{1000=1, 500=2, 250=4,
+125=8}` map — either 0 means "default/unset" or the map is incomplete. Do not write that field
+until a read on a pad whose rate has actually been set says which.
+
+**Decoding the two numeric fields — and a trap in one of them.** Both are enums in
+`Flydigi.SharedResources`, and neither is the number it looks like:
+
+```
+JoystickPrecision   None, 8Bit, 10Bit, 12Bit, 9Bit, 11Bit, 14Bit, 16Bit    (declaration order!)
+JoystickSensitivity None=0, Highest=14, High=15, MiddleHigh=16,
+                    Middle=17, LowMiddle=18, Low=19, Lowest=20
+```
+
+`JoystickPrecision` is ordered as it was **written**, not by bit depth: 9-bit and 11-bit were added
+after 8/10/12, and 14/16 later still. So our pad's `precision = 2` is **10 bit**, and any mapping
+that assumes the value climbs with resolution is wrong. `sensitivity = 17` is **Middle** — the
+"Center sensitivity: Fast / Medium / Slow" control, which has seven wire values behind three UI
+choices.
+
+**Which debounce is which.** Three settings look alike and only two exist on a k5:
+
+| Setting | sub-id | on this pad | English UI string |
+|---|---|---|---|
+| Joystick debounce | 5 | supported, on | "Joystick debounce" — off makes sticks read subtle movement better but jitter at rest, and **disables auto-calibration** |
+| Rebound algorithm | 7 | supported, on | "Rebounce algorithm" — filters the reverse spike a stick's inertia produces on release |
+| Motion debounce | 3 | **unsupported** | none, in any of the ten locales — only a dangling `IpcCommandEnum_EnableMotionDebounce` |
+
+So Space Station's debounce toggle is sub-id 5. Sub-id 3 needs no UI.
+
+**Precision is device state, not profile state**, so it does not make the profile's curve bytes
+multi-scale: 21 and 22 are standalone commands read back through command 3, while the control points
+live in the 840-byte blob, and all four factory profiles carry identical ones. The stick's 0..127
+and the trigger's 0..255 therefore read as two fixed normalisations of the stored format, with
+bitness changing only how finely the output is quantised. Assumed, not proven — falsifiable in a
+minute by writing a different precision and re-reading a profile.
+
 **4b. An editor for the vibration bind.** Tier 1 is one bind — game rumble drives the trigger
 motors — and each "supported game" is a **preset** of numbers for it: `vibType`, `vibFilter`,
 `pwmScal`, and `vibParams` (stroke, pressure, strength, frequency per side). That is a sensible
@@ -406,10 +633,11 @@ One thing that will bite:
     Auto has to know which to start; the storage exists, the UI does not.
 
 **Small and worth doing first:**
-  * **verify command 166 on hardware** — apply, save, let the pad sleep, read back. It is the last
-    unknown in the write path and takes minutes.
-  * `UpdateSleepTimeCommandFactory` — raising the sleep timeout would stop the pad dropping out
-    mid-session, which has interrupted nearly every test.
+  * ~~verify command 166 on hardware~~ — **done, it works**; see "Apply vs save" above.
+  * `UpdateSleepTimeCommandFactory` (**23**) — the pad ships at **15 minutes**, read straight off
+    command 3. Raising it would stop the pad dropping out mid-session, which has interrupted nearly
+    every test; and since sleeping means leaving the USB bus entirely, the drop-out is not a nuisance
+    to work around but a disconnect to recover from.
   * macros (`ReadMacroConfig`, `WriteMarcoConfig`, `SetHardwareMacroEnable`); the profile blob at
     230..768 is already carried through untouched.
 
@@ -450,6 +678,50 @@ Lighting, 380 bytes (19 packets of 20):
 
 Config structures for mapping/macro/RGB are already decompiled as `m_fdg_*_struct_t` types.
 
+### Factory defaults, read off the pad
+
+All four slots of an untouched Apex 5, byte for byte. Far more use than the fake pad's `0xFF` fill
+when writing accessors for a block, because it shows what a *valid* value looks like — and all four
+slots are identical, so anything here is the factory shape rather than one profile's taste.
+
+```
+109 joystick core   0   0  63  63 127 127 127   |   0   0  63  63 127 127 127
+                    type zero p1x p1y p2x p2y end        (same, right stick)
+123 trigger travel  0   0   0   0 255 255 255   |   0   0   0   0 255 255 255
+137 motion          0  12   0   4  25  20   0   0
+145 grip vibration  0 | 0  60 255  50 | 0  80 255  50
+154 trigger motors  0 | 1 30 80 5 1 50 0 · 255 40 120 5 0 50 0 | (same, right)
+183 wheel           0   0
+185 force trigger   0   0  10  10 100   1 255  70   0 | 0 0 0 0 0 0 0 0 0 0
+790 joy extra L     0 | 50 62 75 87 100 112 125 137 150 | 0 | 0
+802 joy extra R     0 | 50 62 75 87 100 112 125 137 150 | 0 | 0
+814 macro cycle     255 255 255 255 255 255   3   3   3   3   3 255 255 255 255 255
+830 motion curve    0  63  63 127 127 127
+836 padding         255 255 255 255
+```
+
+What this settles without a single guess:
+
+  * **Sticks and triggers do not share a scale.** A stick's curve runs to **127** (`p2 = 127,127`,
+    `end = 127`), a trigger's to **255**. A single "0-100%" slider mapped to bytes would be half
+    range on one of them.
+  * **The trigger's p1/p2 are `0,0` and `255,255`** — the identity line — where the stick's are
+    `63,63` and `127,127`, again the identity line on its own scale. So both are genuinely curve
+    control points, and the factory setting of both is "no curve".
+  * **The motion smoothing block at 830 is the joystick block minus its type byte**: `zero, p1.x,
+    p1.y, p2.x, p2.y, end`, and it carries the identical `0 63 63 127 127 127`. Same code can read
+    all three.
+  * **The trigger-motor gears are two 7-byte structs per side**, and the second one leads with
+    **255**, not 1 — so `type` there is an enable flag stored inverted, like every other switch in
+    this blob. `trigger_motor()` reads the first gear only, which is the enabled one.
+  * **The force-trigger bind is populated at rest**: `bind.Filter = 10, bind.Scale = 10,
+    bind.Param = [100, 1, 255, 70, 0]` with `Type = 0` and `bind.Type = 0`. So J4's claim that the
+    stored bind mirrors live command 82 has real numbers behind it to diff against.
+  * **`joy extra`'s bank[9] is a preset curve, not a blank.** `50 62 75 87 100 112 125 137 150` is
+    evenly spaced, i.e. the straight line, with 100 at the centre point — so 100 reads as unity and
+    the bank is a gain per zone rather than an output level. `isRound = 0` is Rectangle.
+
+
 ## Hard-won facts worth not rediscovering
 
   * **Report id is `0x03`** on the vendor interface, not the `6` the decompiled
@@ -465,7 +737,11 @@ Config structures for mapping/macro/RGB are already decompiled as `m_fdg_*_struc
   * **`effects.rumble()` must use `wait=0`** when driven continuously, or the 100 ms ACK wait puts
     the motors far behind.
   * **Steam Input must be off** for Tier 4 — it masks the pad and breaks DualSense semantics.
-  * The Apex 5 sleeps on idle and its hidraw/evdev node numbers change on reconnect. Resolve by
+  * **A sleeping Apex 5 leaves the USB bus.** It does not go quiet on HID — it disconnects, wired
+    included: `usb 3-4: USB disconnect, device number 27` with no matching connect, no `37d7:2501`
+    in `lsusb`, no hidraw node. So "the pad is asleep" and "the cable is dead" are the same symptom
+    at this level, and `find_device` raises `DeviceNotFound` rather than any read timing out.
+    Pressing a button re-enumerates it, which is why node numbers change on reconnect — resolve by
     name/descriptor, never by path.
   * **Reading a mapping config switches the pad to it.** The firmware pages it in as the live one,
     audibly re-seating the trigger motors — that noise is the tell. Confirmed: after reading config
@@ -873,26 +1149,34 @@ for t in tests/test_{dsx,forza,mapping,monitor,relay}.py; do python3 "$t"; done 
 tools/generate-qmltypes && qmllint -I . -I /usr/lib64/qt6/qml gui/qml/Main.qml gui/qml/*/*.qml
 ```
 
-141 model tests, 48 shell, 58 QML, 158 backend; qmllint and `reuse lint` clean.
+141 model tests, 48 shell, 62 QML, 170 backend; qmllint and `reuse lint` clean.
 
-**Known bugs, found by review, not yet fixed.** Both are real and evidenced; neither is urgent.
+**Both known bugs are fixed**, each with a test that fails without the fix.
 
-  * **The Buttons and Games placeholders can never render.** Each is a sibling of a `ListView`
+  * **The Buttons and Games placeholders could never render.** Each was a sibling of a `ListView`
     inside a `Kirigami.ScrollablePage`, and `ScrollablePage.qml` reparents *only* the Flickable
-    child then sets `scrollingArea.visible = false` — the placeholder stays in the hidden subtree.
-    So a pad asleep at startup gives a blank Buttons page under a footer saying "Reading this
-    profile from the pad…". On Games it is worse than cold start: `App.games.count` is the
-    *filtered* count, so a search matching nothing also shows nothing. Fix: nest each placeholder
-    inside its `ListView`, which lands it in the flickable's contentItem. On Buttons do **not**
-    simply drop `visible: App.profile.loaded` — `KeyMapModel.rowCount` is a constant 23 and `_row()`
-    fabricates an identity mapping when there is no config, so an unhidden list renders 23 fake
-    editable rows. Use `model: App.profile.loaded ? App.profile.keys : null`.
-  * **`read_config_preserving` has no `try/finally`.** A read that raises after the pad has already
-    paged the config in leaves the pad on the browsed profile, and the retry launders it: the second
-    `read_status` truthfully reports that slot as active, so the restore is skipped by design and
-    the call reports success. Backend-only now — the desktop app stopped using it when opening a
-    profile became how you switch to it — but `tools/flydigi-mapping` still can. Decide `previous`
-    before the read and restore in a `finally`.
+    child then sets `scrollingArea.visible = false` (line 362) — the placeholder stayed in the
+    hidden subtree. Both now sit *inside* their `ListView`, which is KDE's own idiom
+    (`kirigami/dialogs/SearchDialog.qml:250`) and works because an empty view leaves `contentHeight`
+    at zero, which sizes the content item to the viewport, so centring in it centres on screen.
+    Buttons additionally takes `model: App.profile.loaded ? App.profile.keys : null`, because
+    `KeyMapModel.rowCount` is a constant 23 and `_row()` fabricates an identity mapping with no
+    config — merely un-hiding the list would have drawn 23 rows of fiction. Games grew
+    `GameFilterModel.total` so "never downloaded the list" and "your search matched nothing" stop
+    looking identical; the second offers to clear the filters rather than to re-download Flydigi's
+    list because someone mistyped a game's name.
+
+    Testing this needed a way to say *would this be drawn*, which `visible` does not answer: an
+    explicit binding overrides the value a hidden ancestor propagates, so an item stranded in a
+    hidden subtree still reports `visible === true`. Both suites walk the parent chain instead. The
+    Buttons case reproduces the original symptom exactly — `Pad.failReads` makes the fake pad go
+    silent the way a sleeping one does, and the page must then say so rather than showing nothing.
+  * **`read_config_preserving` now restores in a `finally`**, and decides where to go back to before
+    the read rather than after. The pad switches on the first read packet, so a read that raises has
+    still moved it — and the retry laundered that: the next `read_status` truthfully reported the
+    browsed slot as active, the restore was skipped as unnecessary, and the call reported success.
+    `tests/fake_pad.py` now models switch-on-read and can be told to answer nothing, because code
+    that avoids disturbing the pad can only be tested by a fake that actually gets disturbed.
 
 **Not settleable by reading; needs the pad.** Whether the firmware accepts 164/165 aimed at a slot
 it is not running (the app now sidesteps this by always editing the running profile), and what
@@ -988,6 +1272,24 @@ Target features and the commands already recovered for them (all in `decompiled/
 | Macros | `ReadMacroConfig`, `WriteMarcoConfig`, `SetHardwareMacroEnable` |
 | Device settings | 22 in `command.setting/`: report rate, stick sensitivity/precision, debounce, rebound, auto-calibration, motion debounce, sleep time, dock smart stop, mode switch, nickname |
 | Dock / cooler | `Flydigi.ChargerSdk.dll`, `Flydigi.CoolerSdk.dll` (in `bundle/`, not yet decompiled) |
+
+**What a source survey settles, and what it does not.** Worth knowing before sending anything else
+to read `decompiled/`. Structure has been reliable every single time: offsets, field order, sizes
+and stride taken from `MappingConfigParser` have matched the hardware without exception, and the one
+early discrepancy (report id `6` vs `0x03`) came from the HID descriptor, not the C#. Semantics and
+defaults have not. Three examples, all found the same afternoon:
+
+  * a survey listed command 21 as "joystick precision" without noting that `JoystickPrecision` is in
+    **declaration order** — so the pad's `2` is 10-bit, not 12;
+  * command 3 was documented down to the bit, but never run, so nothing knew that motion debounce
+    and audio are *unsupported* on a k5 and their sub-ids are dead UI;
+  * a reader deriving the factory stick curve from the Electron JS produced
+    `[50, 63, 75, 88, 100, 113, 125, 138, 150]` via `Math.round`; the pad holds
+    `[50, 62, 75, 87, 100, 112, 125, 137, 150]`. Truncation, not rounding — and that value would
+    have become "reset to linear".
+
+So: read the source for layout, read the *device* for meaning. A blob dump costs five seconds and
+settles arguments no amount of decompiled C# can.
 
 **On needing Windows USB capture:** probably not required. Every layout taken from the decompiled
 source has been correct on hardware; the one discrepancy (report id `6` vs `0x03`) was resolved from
