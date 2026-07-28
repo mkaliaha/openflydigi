@@ -33,7 +33,8 @@ Kirigami.ApplicationWindow {
         {name: "Vibration", icon: "media-playback-start", url: "pages/VibrationPage.qml"},
         {name: "Triggers", icon: "input-gamepad", url: "pages/TriggersPage.qml"},
         {name: "Lighting", icon: "color-management", url: "pages/LightingPage.qml"},
-        {name: "Games", icon: "applications-games", url: "pages/GamesPage.qml"}
+        {name: "Games", icon: "applications-games", url: "pages/GamesPage.qml"},
+        {name: "Setup", icon: "configure", url: "pages/SetupPage.qml"}
     ]
 
     property int currentSection: -1
@@ -156,6 +157,14 @@ Kirigami.ApplicationWindow {
                 checkable: true
                 checked: root.currentSection === 6
                 onTriggered: root.openSection(6)
+            },
+            Kirigami.Action {
+                objectName: "sectionSetup"
+                text: root.sections[7].name
+                icon.name: root.sections[7].icon
+                checkable: true
+                checked: root.currentSection === 7
+                onTriggered: root.openSection(7)
             }
         ]
     }

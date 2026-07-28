@@ -12,7 +12,7 @@ from PySide6.QtCore import (Property, QAbstractListModel, QModelIndex,
                             QSortFilterProxyModel, Qt, Signal, Slot)
 from PySide6.QtQml import QmlElement
 
-from flydigi import games
+from flydigi import games, prefs
 
 # See gui/models/device.py for what these two names do.
 QML_IMPORT_NAME = "Apex5"
@@ -37,6 +37,21 @@ VIBRATION_DETAIL = (
     "The pad drives the triggers from this game's own rumble — nothing runs "
     "alongside it. This entry is a preset for that bind: travel, strength and "
     "filtering, tuned for this game. Loading it replaces the current bind.")
+
+# Short enough to sit in a combo box. TIER_LABELS says what each route needs,
+# which is the wrong length for a control the width of a game's name.
+ROUTE_NAMES = {
+    "vibration": "Pad preset",
+    "telemetry": "Telemetry",
+    "monitor": "Game memory",
+    "ps5": "DualSense",
+    "bespoke": "Third-party mod",
+    "unknown": "None",
+}
+
+
+def route_name(route):
+    return ROUTE_NAMES.get(route, route)
 
 
 def game_name(game):
@@ -64,12 +79,22 @@ class GameListModel(QAbstractListModel):
     CanApplyRole = Qt.UserRole + 4
     DetailRole = Qt.UserRole + 5
     GameRole = Qt.UserRole + 6
+    AutoRole = Qt.UserRole + 7
+    RouteChoicesRole = Qt.UserRole + 8
+    ChosenRouteIndexRole = Qt.UserRole + 9
 
     countChanged = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, settings=None):
         super().__init__(parent)
         self._games = []
+        # The same file the daemon reads, and it re-reads on change, so a
+        # toggle here reaches a running daemon within its next poll.
+        #
+        # Injectable only so a test can be given a temporary file: the default
+        # is the real one, and a test that forgot would rewrite the
+        # preferences of whoever ran it.
+        self._prefs = settings if settings is not None else prefs.Prefs()
 
     def roleNames(self):
         return {
@@ -78,6 +103,9 @@ class GameListModel(QAbstractListModel):
             self.RouteLabelRole: b"routeLabel",
             self.CanApplyRole: b"canApply",
             self.DetailRole: b"detail",
+            self.AutoRole: b"auto",
+            self.RouteChoicesRole: b"routeChoices",
+            self.ChosenRouteIndexRole: b"chosenRouteIndex",
         }
 
     def rowCount(self, parent=QModelIndex()):
@@ -87,7 +115,10 @@ class GameListModel(QAbstractListModel):
         if not 0 <= index.row() < len(self._games):
             return None
         game = self._games[index.row()]
-        route = games.tier(game)
+        # The chosen route, not the tier: nine games support more than one, and
+        # a row that still said "Game memory" after being switched to DualSense
+        # would be describing something that is no longer going to happen.
+        route = self._prefs.route(game)
         if role in (self.NameRole, Qt.DisplayRole):
             return game_name(game)
         if role == self.RouteRole:
@@ -100,7 +131,47 @@ class GameListModel(QAbstractListModel):
             return route_detail(game, route)
         if role == self.GameRole:
             return game
+        if role == self.AutoRole:
+            return self._prefs.auto(game)
+        if role == self.RouteChoicesRole:
+            return [route_name(r) for r in prefs.routes(game)]
+        if role == self.ChosenRouteIndexRole:
+            return prefs.routes(game).index(route)
         return None
+
+    # -- per-game auto mode ------------------------------------------------
+
+    def prefs(self):
+        return self._prefs
+
+    def setAuto(self, row, value):
+        game = self.game(row)
+        if game is None:
+            return
+        self._prefs.set_auto(game, value)
+        self._changed(row)
+
+    def setRouteIndex(self, row, choice):
+        """Pick a route by its position in this row's `routeChoices`.
+
+        Indexed rather than named so the view never has to hold a route
+        identifier, and so the combo box it came from cannot pick one the game
+        does not offer.
+        """
+        game = self.game(row)
+        if game is None:
+            return
+        available = prefs.routes(game)
+        if not 0 <= choice < len(available):
+            return
+        self._prefs.set_route(game, available[choice])
+        self._changed(row)
+
+    def _changed(self, row):
+        """Save and tell the view. Every role: the route drives most of them."""
+        self._prefs.save()
+        index = self.index(row, 0)
+        self.dataChanged.emit(index, index)
 
     @Property(int, notify=countChanged)
     def count(self):
@@ -204,16 +275,21 @@ class GameFilterModel(QSortFilterProxyModel):
         # one: the list is bilingual and people search in either language.
         if self._search and self._search not in games.names(game).lower():
             return False
-        if self._route != ALL_ROUTES and games.tier(game) != self._route:
+        # Filter on the chosen route, so a game switched to another route moves
+        # to that filter rather than staying under the one it no longer takes.
+        if self._route != ALL_ROUTES and source.prefs().route(game) != self._route:
             return False
         return True
+
+    def _sourceRow(self, row):
+        return self.mapToSource(self.index(row, 0)).row()
 
     def game(self, row):
         """Map a proxy row back to the underlying gamelist entry."""
         source = self.sourceModel()
         if source is None:
             return None
-        return source.game(self.mapToSource(self.index(row, 0)).row())
+        return source.game(self._sourceRow(row))
 
     # Row lookups for a selection, so a view never has to name a role number.
 
@@ -227,9 +303,25 @@ class GameFilterModel(QSortFilterProxyModel):
         game = self.game(row)
         if game is None:
             return ""
-        return route_detail(game, games.tier(game))
+        return route_detail(game, self.sourceModel().prefs().route(game))
 
     @Slot(int, result=bool)
     def canApplyAt(self, row):
         game = self.game(row)
-        return game is not None and games.tier(game) == APPLIABLE_ROUTE
+        if game is None:
+            return False
+        return self.sourceModel().prefs().route(game) == APPLIABLE_ROUTE
+
+    # -- per-game auto mode, addressed by proxy row ------------------------
+
+    @Slot(int, bool)
+    def setAutoAt(self, row, value):
+        source = self.sourceModel()
+        if source is not None:
+            source.setAuto(self._sourceRow(row), value)
+
+    @Slot(int, int)
+    def setRouteIndexAt(self, row, choice):
+        source = self.sourceModel()
+        if source is not None:
+            source.setRouteIndex(self._sourceRow(row), choice)

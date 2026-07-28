@@ -2,11 +2,13 @@
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Games with adaptive-trigger support, and which route each takes.
+// Games with adaptive-trigger support, which route each takes, and whether it
+// acts on its own.
 //
-// Only the pad-side route can be pushed onto the hardware from here. The others
-// need a helper process running alongside the game, which this app names but
-// does not start -- there is no daemon picking one automatically yet.
+// Only the pad-side route can be pushed onto the hardware from here; the others
+// need a helper process running alongside the game. The Auto switch hands that
+// decision to the daemon instead, which is installed from the Setup page and
+// re-reads these toggles about a second after they change.
 
 pragma ComponentBehavior: Bound
 
@@ -161,6 +163,9 @@ Kirigami.ScrollablePage {
             required property string name
             required property string routeLabel
             required property bool canApply
+            required property bool auto
+            required property var routeChoices
+            required property int chosenRouteIndex
 
             objectName: "gameRow" + index
             width: ListView.view.width
@@ -196,23 +201,29 @@ Kirigami.ScrollablePage {
                     text: "pad-side"
                 }
 
-                // Says out loud what is not built yet. Every route except the
-                // pad-side one needs a helper started next to the game, and
-                // nothing here starts one -- there is no daemon watching for a
-                // game to launch.
-                Controls.Label {
-                    text: "auto: not yet"
-                    font: Kirigami.Theme.smallFont
-                    color: Kirigami.Theme.disabledTextColor
+                // Only the nine games that support more than one route get a
+                // choice; for the rest the combo would be a control with one
+                // option, which is furniture rather than information.
+                Controls.ComboBox {
+                    objectName: "routeChoice" + gameRow.index
+                    visible: gameRow.routeChoices.length > 1
+                    model: gameRow.routeChoices
+                    currentIndex: gameRow.chosenRouteIndex
+                    implicitWidth: Kirigami.Units.gridUnit * 9
+                    // `activated` rather than `currentIndexChanged`: the latter
+                    // also fires when the model reassigns the index after a
+                    // save, which would write the value back and loop.
+                    onActivated: App.games.setRouteIndexAt(gameRow.index, currentIndex)
+                }
+
+                Controls.Switch {
+                    objectName: "autoSwitch" + gameRow.index
+                    checked: gameRow.auto
+                    onToggled: App.games.setAutoAt(gameRow.index, checked)
 
                     Controls.ToolTip.visible: hovered
-                    Controls.ToolTip.text: "Starting the right helper when a "
-                                           + "game launches is not implemented yet"
-
-                    HoverHandler {
-                        id: autoHover
-                    }
-                    property bool hovered: autoHover.hovered
+                    Controls.ToolTip.text: "Act on this game by itself when it "
+                                           + "starts. Needs the daemon — see Setup."
                 }
             }
         }

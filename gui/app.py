@@ -22,7 +22,7 @@ from PySide6.QtQml import QmlElement, QmlSingleton
 from flydigi import games
 
 from .models import (DeviceModel, GameFilterModel, GameListModel,
-                     LightingModel, ProfileModel)
+                     LightingModel, ProfileModel, SetupModel)
 from .worker import DeviceThread
 
 # See gui/models/device.py for what these two names do.
@@ -73,6 +73,11 @@ class App(QObject):
         self._lighting = LightingModel(self)
         self._games = GameListModel(self)
         self._games_view = GameFilterModel(self._games, self)
+        self._setup = SetupModel(self)
+        # A failed setup action is the same kind of news as a failed device
+        # one, so it goes to the same inline message rather than a second
+        # channel the user has to learn to look at.
+        self._setup.failed.connect(self._setup_failed)
 
         self._profile.setSlotCount(PROFILE_COUNT)
         self._games.load()
@@ -125,6 +130,10 @@ class App(QObject):
 
     @Slot()
     def shutdown(self):
+        # Same reason as the fetch thread below: a running QThread that loses
+        # its last reference is a qFatal, and installing rules can be sitting
+        # on an authentication prompt when someone closes the window.
+        self._setup.wait(5000)
         if self._fetch is not None:
             # Bounded because flydigi.games.fetch_gamelist has its own timeout;
             # dropping the last reference to a running QThread is a qFatal.
@@ -154,6 +163,10 @@ class App(QObject):
     @Property(GameFilterModel, constant=True)
     def games(self):
         return self._games_view
+
+    @Property(SetupModel, constant=True)
+    def setup(self):
+        return self._setup
 
     # -- actions -----------------------------------------------------------
 
@@ -212,6 +225,9 @@ class App(QObject):
 
     def _status(self, message):
         self._device.status = message
+
+    def _setup_failed(self, message):
+        self._device.error = message
 
     def _written(self, cfg_id, packets, saved):
         self._profile.confirmWritten(cfg_id, saved)

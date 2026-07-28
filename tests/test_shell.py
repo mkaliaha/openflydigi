@@ -48,7 +48,7 @@ STARTED = []
 
 # The sections the global drawer offers, in order.
 SECTIONS = ["Controller", "Buttons", "Sticks", "Vibration", "Triggers",
-            "Lighting", "Games"]
+            "Lighting", "Games", "Setup"]
 
 
 def check(name, condition, detail=""):

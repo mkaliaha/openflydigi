@@ -8,8 +8,9 @@ now covers five delivery mechanisms plus a virtual DualSense.
 **Status: adaptive triggers are done and validated in real games, and the desktop app — now QML on
 Kirigami — covers profiles, button remapping, vibration, per-profile trigger config and RGB
 lighting.** What remains is the screen/GIF upload, the charging dock, macros, the device
-settings, a daemon that picks the right tier per game, and the gyro block the profile already
-carries — see "Next". The joystick block and the third-party takeover toggle are both done, and both
+settings, and the gyro block the profile already carries — see "Next". The daemon now detects a
+game and applies the pad-side route by itself, with a per-game Auto toggle and a Setup page to
+install it; supervising a helper process for the other routes is still to do. The joystick block and the third-party takeover toggle are both done, and both
 known UI bugs are fixed.
 
 | Tier | Games | Validated in |
@@ -62,7 +63,8 @@ QML. See `gui/README.md`.
 | Controller → Other software | let Steam and similar take the pad over, and who currently holds it |
 | Profiles → Sticks | dead zone, outer dead zone, sensitivity curve presets, circular range |
 | Profiles → Triggers | stored effect (off / constant resistance), dead zone, trigger motor |
-| Adaptive triggers | all 94 games, searchable, filtered by route; vibration presets load onto the pad from here |
+| Adaptive triggers | all 94 games, searchable, filtered by route; vibration presets load onto the pad from here; per-game **Auto** toggle and a route picker for the nine multi-route games |
+| Setup | the daemon's unit, "running now" and "start at login" as separate switches, and the udev rules behind one authentication prompt |
 | Lighting | effect, up to 5 colours, brightness, cycle time, react-to-rumble |
 
 **Everything device-facing runs on a worker thread** (`gui/worker.py`) and requests cross as
@@ -765,9 +767,29 @@ the right thing for it without me*. Concretely, on detecting the game:
   * telemetry / monitor / ps5 / bespoke → start `flydigi-forza`, `flydigi-monitor`, `flydigi-ds5`
     or `flydigi-dsx`, and stop it again when the game exits
 
-`flydigid` already does detect-and-apply for the vibration route, so the work is generalising it to
-launch and supervise the other four, plus a UI toggle and somewhere to persist it
-(`gui/triggers.py` already writes `~/.config/flydigi/games.json`).
+**Done, except the supervising.** The toggle exists (`prefs.py`, the Games tab's Auto switch,
+`tools/flydigi-auto`), the daemon reads it and re-reads it about a second after it changes, and the
+pad-side route works end to end. What is left is starting and stopping a helper process for the
+other four routes.
+
+Two things fell out of building it.
+
+**The daemon belongs on the host, and the app cannot spawn it there — but does not need to.**
+It has to see the host's process table, which a Flatpak build never will, so it is not something
+this app can contain. It turned out not to matter: distrobox shares `/run/user`, so `systemctl
+--user` from inside the container drives the *host's* user manager and the unit runs in the host's
+mount namespace. Verified by starting a transient unit from the container and comparing
+`/proc/<pid>/ns/mnt`. So the app writes the unit into the shared home and calls systemctl, with no
+container-specific path. The udev rules are the one exception — there is no system bus in the
+container, so pkexec cannot reach polkit from in there, and `setup.escalation()` goes through
+host-spawn.
+
+**A 1 Hz sweep of `/proc` is not free.** Reading `comm` and `cmdline` for every process every
+second cost 15.4s of CPU over 10 minutes on an idle desktop of ~590 processes — 2.4% of a core,
+almost all of it re-reading processes already ruled out. That was tolerable when the daemon was
+something you started for a session and is not once it starts at login. Examining each process once
+and remembering the result brings it to 0.28%, measured over two minutes. Space Station's 5-second
+cache is the same instinct, arrived at from the other direction.
 
 **How Space Station does it**, from `AdapterTriggerRunner.CheckGameRunning` — worth knowing before
 inventing something cleverer, because it is deliberately dull:
@@ -977,6 +999,10 @@ What this settles without a single guess:
 | `tests/test_forza.py` | Self-test for the parser and rule engine (no hardware needed) |
 | `configs/forza.json` | Flydigi's own 15-rule Forza config, reused verbatim |
 | `tools/flydigid` | Polling daemon — auto-detects a running game and applies its config |
+| `tools/apex5-setup` | Setup checklist: udev rules, the daemon's unit, start at login |
+| `tools/flydigi-auto` | Per-game auto mode and route — `list`, `on`, `off`, `reset`, `route` |
+| `flydigi/setup.py` | What the two above share: checks, unit generation, escalation |
+| `flydigi/prefs.py` | Per-game preferences in `~/.config/flydigi/games.json` |
 | `tools/flydigi-run` | Steam launch wrapper — `flydigi-run "<name>" -- %command%` |
 | `tools/hid_probe.py` | Passive HID descriptor dump (writes nothing) |
 | `tools/flydigi_cmd.py` | Manual command tool — `info`, `race`, `normal`, `bind`, `rumble`, `game`, `k6*`, `raw` |
@@ -1337,11 +1363,11 @@ Everything is committed and green. To check:
 ```bash
 distrobox enter apex-dev -- bash -lc 'cd ~/Projects/ApexExperiments && \
   python3 tests/test_models.py && python3 tests/test_shell.py && python3 tests/test_qml.py'
-for t in tests/test_{dsx,forza,mapping,monitor,relay}.py; do python3 "$t"; done   # no Qt needed
+for t in tests/test_{dsx,forza,games,mapping,monitor,prefs,relay}.py; do python3 "$t"; done  # no Qt
 tools/generate-qmltypes && qmllint -I . -I /usr/lib64/qt6/qml gui/qml/Main.qml gui/qml/*/*.qml
 ```
 
-172 model tests, 50 shell, 71 QML, 299 backend; qmllint and `reuse lint` clean.
+201 model tests, 52 shell, 71 QML, 340 backend; qmllint and `reuse lint` clean.
 
 **Both known bugs are fixed**, each with a test that fails without the fix.
 

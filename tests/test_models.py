@@ -18,6 +18,7 @@ dependency-free.
 """
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -28,7 +29,8 @@ except ImportError:
     sys.exit(0)
 
 from flydigi import lighting as led
-from flydigi import mapping
+from flydigi import mapping, prefs
+from flydigi import setup as system_setup
 from gui import models
 from tests.fake_pad import FakePad, blank_blob
 
@@ -616,22 +618,31 @@ def test_lighting_write_and_confirm():
 # -- games -----------------------------------------------------------------
 
 GAMES = [
-    {"enGameName": "Forza Horizon 6", "modDownLoadUrl": "x",
+    {"id": 1, "enGameName": "Forza Horizon 6", "modDownLoadUrl": "x",
      "modName": "ForzaDualSense.exe", "processGameNames": ["forza.exe"]},
-    {"enGameName": "Deathloop", "isPS5": True},
-    {"enGameName": "Silksong", "isVibration": True},
+    {"id": 2, "enGameName": "Deathloop", "isPS5": True},
+    {"id": 3, "enGameName": "Silksong", "isVibration": True},
+    # Both flags, like Apex Legends and Uncharted: Lost Legacy -- the case that
+    # makes the route a choice rather than a label.
+    {"id": 4, "enGameName": "Two Ways", "isVibration": True, "isPS5": True},
 ]
 
 
 def make_games():
-    source = models.GameListModel()
+    """Always against a throwaway preferences file.
+
+    The model's default is the real ~/.config/flydigi/games.json, so a test
+    that toggled anything would rewrite the preferences of whoever ran it.
+    """
+    settings = prefs.Prefs(os.path.join(tempfile.mkdtemp(), "games.json"))
+    source = models.GameListModel(settings=settings)
     source.setGames(GAMES)
     return source, models.GameFilterModel(source)
 
 
 def test_game_list_and_filters():
     source, view = make_games()
-    check("every game is listed", view.count == 3, str(view.count))
+    check("every game is listed", view.count == 4, str(view.count))
 
     view.search = "death"
     check("search filters", view.count == 1, str(view.count))
@@ -640,14 +651,15 @@ def test_game_list_and_filters():
 
     view.search = ""
     view.route = "vibration"
-    check("route filter works", view.count == 1, str(view.count))
+    # Two: Silksong, and the two-route game while it is still on its tier.
+    check("route filter works", view.count == 2, str(view.count))
     check("route filter picks the pad-side game",
           role(view, 0, b"name") == "Silksong", str(role(view, 0, b"name")))
     check("the filtered row maps back to its entry",
           view.game(0)["enGameName"] == "Silksong")
 
     view.route = models.ALL_ROUTES
-    check("clearing the filter restores the list", view.count == 3,
+    check("clearing the filter restores the list", view.count == 4,
           str(view.count))
 
 
@@ -672,6 +684,143 @@ def test_route_wording_does_not_oversell_the_preset():
     check("a helper route names what to start",
           "start it alongside" in role(view, 0, b"detail"),
           str(role(view, 0, b"detail")))
+
+
+# -- per-game auto mode ----------------------------------------------------
+
+def row_for(view, name):
+    for row in range(view.count):
+        if role(view, row, b"name") == name:
+            return row
+    return -1
+
+
+def test_auto_defaults_follow_the_route():
+    source, view = make_games()
+    auto = {role(view, row, b"name"): role(view, row, b"auto")
+            for row in range(view.count)}
+    check("the pad-side route acts by default", auto["Silksong"] is True,
+          str(auto))
+    check("a route that takes the pad over does not",
+          auto["Deathloop"] is False, str(auto))
+    check("nor does one that runs a helper", auto["Forza Horizon 6"] is False,
+          str(auto))
+
+
+def test_toggling_auto_is_saved_and_announced():
+    source, view = make_games()
+    row = row_for(view, "Silksong")
+    seen = []
+    source.dataChanged.connect(lambda *args: seen.append(args))
+
+    view.setAutoAt(row, False)
+    check("the toggle reaches the model", role(view, row, b"auto") is False)
+    check("the view is told the row changed", len(seen) == 1, str(len(seen)))
+
+    # The file is what the daemon reads, so it is the thing that must change.
+    reloaded = prefs.Prefs(source.prefs().path)
+    check("the choice is on disk", reloaded.auto(GAMES[2]) is False)
+    check("and reads as deliberate", reloaded.is_explicit(GAMES[2]))
+
+
+def test_only_multi_route_games_offer_a_choice():
+    source, view = make_games()
+    choices = {role(view, row, b"name"): role(view, row, b"routeChoices")
+               for row in range(view.count)}
+    check("a single-route game offers one", len(choices["Silksong"]) == 1,
+          str(choices["Silksong"]))
+    check("a two-route game offers two", len(choices["Two Ways"]) == 2,
+          str(choices["Two Ways"]))
+    check("the choices are readable names",
+          "Pad preset" in choices["Two Ways"], str(choices["Two Ways"]))
+
+
+def test_choosing_a_route_changes_what_the_row_says():
+    source, view = make_games()
+    row = row_for(view, "Two Ways")
+    check("it starts on its tier", role(view, row, b"route") == "vibration",
+          str(role(view, row, b"route")))
+    check("so it can be applied from here", role(view, row, b"canApply") is True)
+    check("and the chosen index points at it",
+          role(view, row, b"chosenRouteIndex") == 0)
+
+    view.setRouteIndexAt(row, 1)
+    check("choosing the other route takes effect",
+          role(view, row, b"route") == "ps5", str(role(view, row, b"route")))
+    check("the row stops offering to load a preset",
+          role(view, row, b"canApply") is False)
+    check("its description follows the choice",
+          "start it alongside" in role(view, row, b"detail"),
+          str(role(view, row, b"detail")))
+    check("and auto withdraws with it", role(view, row, b"auto") is False)
+
+    # A route the game does not have must not be reachable from a view.
+    view.setRouteIndexAt(row, 7)
+    check("an out-of-range choice is ignored",
+          role(view, row, b"route") == "ps5", str(role(view, row, b"route")))
+
+
+def test_the_route_filter_follows_the_chosen_route():
+    source, view = make_games()
+    view.route = "ps5"
+    check("the two-route game is not there under its tier",
+          row_for(view, "Two Ways") < 0, str(view.count))
+
+    view.route = models.ALL_ROUTES
+    view.setRouteIndexAt(row_for(view, "Two Ways"), 1)
+    view.route = "ps5"
+    check("after choosing, it filters as the route it now takes",
+          row_for(view, "Two Ways") >= 0, str(view.count))
+
+
+# -- setup -----------------------------------------------------------------
+
+def make_setup(*checks):
+    model = models.SetupModel()
+    model._checks.setChecks(checks)
+    model._loaded = True
+    return model
+
+
+def ok(check_id):
+    return system_setup.Check(check_id, check_id, system_setup.OK, "", None)
+
+
+def failing(check_id):
+    return system_setup.Check(check_id, check_id, system_setup.FAIL, "", "fix")
+
+
+def test_setup_reports_ready_only_when_nothing_fails():
+    model = make_setup(ok("hidraw"), ok("uhid"), ok("input"), ok("rules"),
+                       ok("unit"))
+    check("all green reads as ready", model.ready)
+
+    model = make_setup(ok("hidraw"), failing("unit"))
+    check("a failure is not ready", not model.ready)
+
+    # A skipped check is a state, not a fault: an unplugged pad and a rules
+    # file nobody needs both report as skipped.
+    model = make_setup(system_setup.Check("hidraw", "", system_setup.SKIP,
+                                          "", None))
+    check("a skipped check does not block ready", model.ready)
+
+
+def test_setup_asks_for_root_only_when_something_needs_it():
+    model = make_setup(ok("hidraw"), ok("uhid"), ok("input"), ok("rules"))
+    check("nothing broken means no password prompt", not model.rulesNeeded)
+
+    model = make_setup(failing("hidraw"))
+    check("an unreachable device asks for the rules", model.rulesNeeded)
+
+
+def test_setup_keeps_running_and_starting_at_login_apart():
+    model = make_setup(ok("unit"), ok("running"))
+    check("running is read from its own check", model.running)
+    check("start-at-login is not implied by running", not model.startAtLogin)
+
+    model = make_setup(ok("unit"), ok("enabled"))
+    check("start-at-login is read from its own check", model.startAtLogin)
+    check("and does not imply it is running now", not model.running)
 
 
 # -- device ----------------------------------------------------------------
@@ -809,6 +958,14 @@ def main():
                  test_game_list_and_filters,
                  test_only_the_pad_side_route_can_be_applied,
                  test_route_wording_does_not_oversell_the_preset,
+                 test_auto_defaults_follow_the_route,
+                 test_toggling_auto_is_saved_and_announced,
+                 test_only_multi_route_games_offer_a_choice,
+                 test_choosing_a_route_changes_what_the_row_says,
+                 test_the_route_filter_follows_the_chosen_route,
+                 test_setup_reports_ready_only_when_nothing_fails,
+                 test_setup_asks_for_root_only_when_something_needs_it,
+                 test_setup_keeps_running_and_starting_at_login_apart,
                  test_device_folds_in_an_info_reply,
                  test_the_third_party_gate_follows_firmware,
                  test_the_holder_is_reported_separately_from_the_switch,
