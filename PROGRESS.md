@@ -783,12 +783,23 @@ inventing something cleverer, because it is deliberately dull:
 
 **Detection covers every game.** All 94 entries carry a process name — 72 have only the singular
 `processGameName` with an empty `processGameNames` list, which is why `games.process_index()` reads
-both. The plural list is for one game shipping several executables — typically one per graphics API —
-not per-store variants: Apex Legends (`r5apex` / `r5apex_dx12`) is the only entry genuinely using
-it, 21 others merely repeat
-the singular, and most multi-store titles have none because their executable name is the same
+both. Most multi-store titles have no plural list at all, their executable being named the same
 everywhere. Polling can reach the whole list, so `flydigi-run` is a convenience (instant, no 1 Hz lag,
 survives a renamed process) rather than a requirement for coverage.
+
+**The plural list is not just graphics-API variants**, as this section claimed while Apex Legends
+(`r5apex` / `r5apex_dx12`) was taken to be the only entry really using it. Nine entries add names
+beyond their singular, and they are three different things: API variants (Apex Legends, Forza
+Motorsport), *sibling titles* under one entry (Call of Duty carries six `*-cod` executables; both
+Uncharted entries list both `u4` and `tll`), and — for OVERWATCH — two other games' executables,
+`HorizonForbiddenWest` and `RiftApart`, which look like editing debris.
+
+That makes four process names claimed by two entries each, so **the singular name has to win**.
+`process_index()` now claims singulars in a first pass and fills plural-only names in a second.
+Before that, first-wins-by-file-order gave `tll` to *A Thief's End*: starting Lost Legacy ran the
+wrong game's memory config, and its own entry — a different route entirely — was unreachable.
+Verified after the fix by running a process named `tll` with the daemon up; it applied Lost
+Legacy's vibration preset and cleared it on exit. `tests/test_games.py` guards all four clashes.
 
 So 1 Hz is enough and `flydigid`'s approach is already the right one. Two things they do not have
 to deal with that we do: Proton wrappers carrying the game's path in their cmdline (see
@@ -1139,10 +1150,22 @@ stored per game as `MapMode`):
     Death Stranding DC      Spider-Man: Miles Morales
     Jedi Survivor           Uncharted 4
 
-We expose no equivalent choice — `tools/flydigi-ds5` and `tools/flydigi-monitor` are run manually.
-A per-game mode preference belongs in the daemon (and in the GUI later). Note the tradeoff differs
-per mode: PS5 mode gives the game full DualSense semantics including battery reporting, while
-Flydigi mode uses their hand-tuned per-game effects.
+Note the tradeoff differs per mode: PS5 mode gives the game full DualSense semantics including
+battery reporting, while Flydigi mode uses their hand-tuned per-game effects.
+
+**But `MapMode` is not the whole story — nine games have a choice, not six.** Counting capability
+flags across the gamelist rather than assuming Space Station's pair was exhaustive turns up three
+more, because `games.tier()` returns only the winner of its priority chain and hides the rest:
+
+| Combination | Count | Games |
+|---|---|---|
+| `XGameMonitor` + `isPS5` | 6 | the `MapMode` six above |
+| vibration + `isPS5` | 2 | Apex Legends, Uncharted: Lost Legacy |
+| mod + vibration | 1 | Fallout 4 |
+
+So the preference is a **route chosen from a list**, not a binary mode: `prefs.routes()` returns
+everything a game supports with its tier first, and a stored choice the gamelist no longer offers
+is ignored rather than honoured, since the list is refetched from Flydigi's API.
 
 Also worth knowing: **battery already reaches the desktop**. `hid-playstation` turns the virtual
 pad's reported battery into a power-supply device, so it appears in KDE's battery widget as
