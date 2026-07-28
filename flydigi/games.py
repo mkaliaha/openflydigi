@@ -65,31 +65,47 @@ def tier(game):
     return "unknown"
 
 
+def _claim(index, name, game):
+    """Record a process name for a game, without displacing an earlier claim."""
+    name = (name or "").strip().lower()
+    if not name:
+        return
+    index.setdefault(name, game)
+    if name.endswith(".exe"):
+        index.setdefault(name[:-4], game)
+
+
 def process_index(games=None):
     """Map lowercased process name -> game, for detection.
 
     All 94 entries carry a name: 72 have only the singular `processGameName`
     and an empty `processGameNames` list, which is why both are indexed here.
-    An earlier version of this note claimed some games were undetectable -- that
-    was reading the empty plural field as "no name", and it is not true.
 
-    The plural list is for one game shipping several executables -- typically
-    one per graphics API -- rather than per-store variants. Apex Legends is the
-    only entry that really uses it (`r5apex` and `r5apex_dx12`), and the other
-    21 just repeat the singular name. Multi-store titles mostly have no plural list
-    at all, their executables being named the same everywhere.
+    **The singular name is authoritative and is claimed first.** Nine entries
+    put names in the plural list that are not their own singular, and four
+    process names are claimed by two entries each -- so a single pass with
+    `setdefault` resolved them by position in the file, which is to say by
+    accident. Two passes make the entry that calls a process *its own* win:
+
+      * `u4` and `tll` are both listed by both Uncharted entries. They are one
+        Steam app (1659420) shipping two executables, and Flydigi splits them
+        into two entries taking different routes -- A Thief's End reads memory,
+        Lost Legacy uses a vibration preset. First-wins gave `tll` to A Thief's
+        End, so starting Lost Legacy ran the wrong game's memory config.
+      * OVERWATCH's plural list contains `HorizonForbiddenWest` and `RiftApart`,
+        which belong to two other entries. Those two resolved correctly only
+        because they happened to come first.
+
+    So the plural list is not merely "one executable per graphics API" as this
+    note previously claimed: it also carries sibling titles (both Uncharted
+    entries, six Call of Duty executables under one entry) and, for OVERWATCH,
+    names that look like editing debris.
     """
     games = games if games is not None else load()
     index = {}
     for g in games:
-        procs = list(g.get("processGameNames") or [])
-        if g.get("processGameName"):
-            procs.append(g["processGameName"])
-        for p in procs:
-            p = (p or "").strip().lower()
-            if not p:
-                continue
-            index.setdefault(p, g)
-            if p.endswith(".exe"):
-                index.setdefault(p[:-4], g)
+        _claim(index, g.get("processGameName"), g)
+    for g in games:
+        for p in (g.get("processGameNames") or []):
+            _claim(index, p, g)
     return index
