@@ -82,6 +82,14 @@ dependency-free.
 
 Agreed feature list, roughly in the order it came up. Each is a fresh-context-sized piece of work.
 
+**0. Rewrite the GUI in QML/Kirigami** — [docs/gui-kirigami-plan.md](docs/gui-kirigami-plan.md).
+The current app is QtWidgets with default layouts and looks a decade old; Kirigami 6.28 and
+kirigami-addons are already installed, and PySide6-Essentials ships QtQuick. The plan is phased so
+Phase 1 (extract view-agnostic models, keep the widgets, port the tests down onto the models) is
+worth shipping on its own even if the QML work stalls. Phase 0 settles whether the venv's bundled
+Qt can load the system's Kirigami QML modules — that answer decides the install story, so it comes
+before any UI work.
+
 **1. Screen image / GIF upload.** `UploadPic2K2Start/Data/End/Finish`, `UploadPicCommandK1/K2`,
 `TestScreen`, `OffScreen`, `ReadScreenSetting`. Note Space Station only offers this **over a wired
 connection** — worth assuming the dongle cannot carry it, and testing wired first rather than
