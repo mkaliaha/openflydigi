@@ -597,10 +597,36 @@ buttons from evdev into the virtual DualSense, and `joystick-curve-probe` and `s
 same node — none of them work while the flag is on. Tier 4 needed Steam Input off anyway, so the two
 were already mutually exclusive in practice; this makes it explicit.
 
-**A way out, worth building later.** `raw_data` is switched *on* by the acquirer, and the vendor
-stream carries sticks and buttons as well as the IMU (`OperatorDataParser`). A relay that read them
-from there instead of from evdev would work in both modes, and would drop the xpad dependency
-entirely. That is a real improvement to Tier 4 rather than a workaround.
+**A way out, and it is shovel-ready.** `raw_data` is switched *on* by the acquirer, and the vendor
+stream carries sticks and triggers as well as the IMU. Measured in that exact state — third-party on,
+`controller_data` off — the stream delivered **3870 operator-data reports in 4 seconds** (~970 Hz),
+decoding to gyro ≈ 0 at rest and accel Z ≈ 4096, i.e. the 1 g already verified. So the input we
+would need is fully alive precisely when evdev is dead.
+
+Offsets from `OperatorDataParser`, NewXInput branch, **+1 for the report-id byte we keep**:
+
+```
+raw  4,5    left stick X    little-endian 16-bit, subtract 65535 if over 32767
+raw  6,7    left stick Y    same, then negate
+raw  8,9    right stick X
+raw 10,11   right stick Y   negate
+raw 16      left trigger    linear, one byte
+raw 17      right trigger   linear, one byte
+raw 18..29  gyro and accel  already implemented and hardware-verified
+```
+
+That last line is the corroboration: their `data[17]`/`data[23]` are our proven `GYRO_OFFSET = 18`
+and `ACCEL_OFFSET = 24`, so the +1 shift is established and the stick offsets inherit its
+confidence. Buttons are in the same report but their offset is **not yet located** — the parser's
+key handling is elsewhere in the file.
+
+Doing this buys three things, not one:
+
+  * the relay stops needing xpad, so **Tier 4 and the third-party toggle stop being exclusive**;
+  * **M1-M4 become readable at last.** They have no XInput equivalent so they never reach evdev at
+    all — this stream is the only place they exist, which is what "M1 → touchpad click, freeing
+    SELECT to be Create" has always been waiting on;
+  * one input source instead of two straddled ones, with no cross-source sync to get wrong.
 
 **Consequence worth stating in any UI**: this is not a preference, it is a handover. With it on,
 Steam drives the pad and our own onboard mapping stops being what the host sees. With
