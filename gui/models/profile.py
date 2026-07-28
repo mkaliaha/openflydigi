@@ -260,20 +260,6 @@ class TriggerSideModel(QObject):
         self.changed.emit()
         self._profile.markChanged()
 
-    @Property(bool, notify=changed)
-    def motor(self):
-        config = self._profile.config
-        return bool(config.trigger_motor(self._side)[0]) if config is not None else False
-
-    @motor.setter
-    def motor(self, value):
-        config = self._profile.config
-        if config is None:
-            return
-        config.set_trigger_motor(self._side, enabled=bool(value))
-        self.changed.emit()
-        self._profile.markChanged()
-
     def refresh(self):
         self.changed.emit()
 
@@ -282,9 +268,32 @@ class TriggerSideModel(QObject):
 class TriggerModel(QObject):
     """The two triggers' per-profile settings."""
 
+    motorEnabledChanged = Signal()
+
     def __init__(self, profile):
         super().__init__(profile)
+        self._profile = profile
         self._sides = {side: TriggerSideModel(profile, side) for side in mapping.SIDES}
+
+    @Property(bool, notify=motorEnabledChanged)
+    def motorEnabled(self):
+        """The trigger motors' single switch, shared by both sides.
+
+        One byte on the pad -- see MappingConfig.trigger_motor. Drawn once here
+        rather than once per trigger, because two switches over one byte let
+        someone ask for left-on/right-off, watch the UI agree, and get both.
+        """
+        config = self._profile.config
+        return bool(config.trigger_motor("left")[0]) if config is not None else False
+
+    @motorEnabled.setter
+    def motorEnabled(self, value):
+        config = self._profile.config
+        if config is None:
+            return
+        config.set_trigger_motor("left", enabled=bool(value))
+        self.motorEnabledChanged.emit()
+        self._profile.markChanged()
 
     @Property("QStringList", constant=True)
     def effectNames(self):
@@ -302,6 +311,7 @@ class TriggerModel(QObject):
         return self._sides[name]
 
     def refresh(self):
+        self.motorEnabledChanged.emit()
         for side in self._sides.values():
             side.refresh()
 
@@ -739,6 +749,18 @@ class ProfileModel(QObject):
     def select(self, cfg_id):
         cfg_id = int(cfg_id)
         if cfg_id < 0:
+            return
+        # Re-selecting the open profile would rebuild it from the cached blob
+        # and throw away every unsaved edit -- silently, with no device traffic
+        # to hint at it. A radio delegate emits clicked() even for the row that
+        # is already checked, and the keyboard reaches it too, so this is one
+        # stray click away rather than a corner case.
+        #
+        # The "is it cached" test is load-bearing: `forget()` clears the cache
+        # and then re-selects the same id on purpose, and a bare id comparison
+        # would turn "Reload from pad" into a no-op.
+        if (cfg_id == self._cfg_id and self._edited is not None
+                and self._slots.stored(cfg_id) is not None):
             return
         self._cfg_id = cfg_id
         self._slots.setCurrent(cfg_id)

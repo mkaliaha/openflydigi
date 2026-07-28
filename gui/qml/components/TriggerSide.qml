@@ -53,13 +53,4 @@ FormCard.FormCard {
         value: root.side.deadZone
         onMoved: (newValue) => root.side.deadZone = newValue
     }
-
-    FormCard.FormDelegateSeparator {}
-
-    FormCard.FormSwitchDelegate {
-        objectName: "motor_" + root.sideName
-        text: "Trigger vibration motor"
-        checked: root.side.motor
-        onToggled: root.side.motor = checked
-    }
 }

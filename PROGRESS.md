@@ -213,22 +213,59 @@ Standalone, all `[4]=3, [5]=value, [6]=crc`: **20** report rate `{1000=1, 500=2,
 **Do sub-ID 1 first** — quick-switch is the only one here that gives a Linux user something
 otherwise unobtainable: switching profiles from the pad with nothing running.
 
+### Belongs to another pad, not to this one
+
+Not dead — just gated on a device we do not drive yet. A Vader 4 Pro is to hand, so the ADC item in
+particular is testable the moment multi-pad support exists; see "Multiple pads" below.
+
+  * **ADC / stick calibration** — `CalibrationAdcCommandFactory`, command **240**,
+    `[5] = start ? 1 : 2`, and a NewXInput builder does exist. `HasAdcChip` is set on exactly one
+    controller in the whole factory: `GenerateControllerVader4`. So this is a **Vader 4 feature**,
+    and a good one — recalibrating stick centres is the classic fix for drift. Sending it to an
+    Apex 5 is probably a harmless no-op, but there is no reason to.
+  * **The K6 trigger family** — commands 83/85/87 belong to `DeviceCode == "k6"`, the Apex 6. The
+    Apex 5 is `k5` and `SetForceTrigger` is its family, which **closes the other open question in
+    PROTOCOL.md §5**. `K6TriggerMode.Local` is not a route to autonomous effects on *this* pad.
+  * **The wheel block (183..185)** — `m_fdg_macro_lunpan_struct_t {type, rev}`. `IsSupportWheel` is
+    never set for the Apex 5. Keep carrying the bytes; build UI only for a pad that declares it.
+
 ### Ruled out, so nobody looks again
 
-  * **Keyboard and mouse remapping is not a pad feature.** `KeyMapType.Keyboard` and `MultiFunction`
-    both serialise to the single byte `254`, with no key code anywhere in the blob. The injection is
-    host-side, in `KeyboardMouseInjectRunner.cs`. Same for `MotionMapType.Mouse`. On Linux that is a
-    uinput daemon, not a config feature.
-  * **ADC / stick calibration is Vader 4 only** — command 240 exists, but `HasAdcChip` is set on
-    exactly one controller in the whole factory, and it is not ours.
-  * **The K6 trigger family is Apex 6.** Commands 83/85/87 belong to `DeviceCode == "k6"`. The Apex 5
-    is `k5` and `SetForceTrigger` is its family — which **closes the other open question in
-    PROTOCOL.md §5**. `K6TriggerMode.Local` is not a route to autonomous effects on this pad.
-  * **`EnableDS5Data` (232) is dead code** — DInput builder only, no callers anywhere. It looks like
-    it would replace our whole virtual-DualSense tier. It would not.
-  * **Wheel block (183..185), usage counters, `DeviceMask`** — no NewXInput builder, or no capability
-    flag on the Apex 5. Carry the bytes through; build no UI.
+  * **Keyboard and mouse remapping is not a pad feature on any of them.** `KeyMapType.Keyboard` and
+    `MultiFunction` both serialise to the single byte `254`, with no key code anywhere in the blob.
+    The injection is host-side, in `KeyboardMouseInjectRunner.cs`. Same for `MotionMapType.Mouse`.
+    On Linux that is a uinput daemon, and a different project from configuring a pad.
+  * **`EnableDS5Data` (232) is dead code** — DInput builder only, no callers anywhere in
+    `SpaceStationService`. It looks like it would replace our whole virtual-DualSense tier. It would
+    not.
+  * **Usage counters and `DeviceMask`** — XInput and DInput builders only, no NewXInput path, so
+    they are unreachable in the mode we use.
   * **`TestRecoverFactoryCommand` (253)** is a factory reset with no confirmation flow. Do not send it.
+
+### Multiple pads
+
+Wanted later, not now. A Vader 4 Pro is on the desk, and the two are closer than "fewer features"
+suggests: the SDK gives Vader 4 26 keys to the Apex 5's 27, with the same six extra buttons placed
+differently. What actually differs is the trigger technology —
+
+```
+GenerateControllerVader4 ("f4")        GenerateControllerApex5 ("k5")
+  IsSupportTriggerVibration = true       IsSupportForceTrigger = true
+  HasAdcChip = true                      IsSupportScreen       = true
+```
+
+— impulse-style trigger vibration on one, adaptive force resistance plus a screen on the other. Both
+have trigger haptics; the Apex 5 reaches them *through* the force-trigger subsystem (command 82's
+`SyncWithGrip`, which is our tier 1), so the commands differ even where the capability overlaps.
+
+Scope for this is **config only** — writing settings to the pad. Driving impulse triggers during a
+game is explicitly not wanted: on Linux there is no XInput to carry it, and almost nothing but Forza
+uses it.
+
+The work would be almost entirely in `flydigi/`: per-model key tables, offsets and capability flags.
+`gui/models/` only knows `mapping.APEX5_KEYS`. The prerequisite is the device-type guard — see
+`flydigi/device.py`, which today matches on vendor id alone and would happily write an Apex 5 config
+to a Vader 4.
 
 **Mode switch (27)** — `BluetoothMode {Switch=1, Xbox=2, Flashplay=3, DInput=4}` — is real and
 `IsSupportNs` is true, but it changes the report descriptor and probably the hidraw node. Treat as a
@@ -254,7 +291,9 @@ versions — main, dongle, switch/SI, trigger, screen, ADC, NearLink. `IsAckFini
 `data[4] > data[3] || data[4] == data[3] - 1`, so it is fragmented. That is a better device page
 than the one we have, at no protocol risk.
 
-**3. Charging dock, and syncing it with the pad.** `Flydigi.ChargerSdk.dll` and
+**3. Charging dock, and syncing it with the pad.** **The newer Apex 5 dock is on the desk**, so this
+is blocked only on decompiling the DLL, not on hardware. (The Vader 4's older dock is probably a
+dumb USB hub with a charger — do not assume it speaks anything.) `Flydigi.ChargerSdk.dll` and
 `Flydigi.CoolerSdk.dll` are in `bundle/` and **not yet decompiled** — that is step one
 (`~/.dotnet/tools/ilspycmd -o decompiled/Flydigi.ChargerSdk bundle/Flydigi.ChargerSdk.dll` in the
 `wine-arch` distrobox). The Electron locales already show what the feature looks like:

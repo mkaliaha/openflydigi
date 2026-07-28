@@ -406,7 +406,14 @@ class MappingConfig:
             self.blob[base + 6] = max(0, min(255, end))
 
     def trigger_motor(self, side):
-        """(enabled, min, max, scale) for one trigger's own vibration motor."""
+        """(enabled, min, max, scale) for one trigger's own vibration motor.
+
+        `enabled` is **shared**: it comes from the single byte at
+        OFF_TRIGGER_MOTOR, not from this side's block, so both triggers report
+        and set the same switch. min/max/scale really are per side. A UI that
+        draws one enable per trigger will show two switches over one byte and
+        let someone ask for left-on/right-off, which the pad cannot do.
+        """
         base = OFF_TRIGGER_MOTOR + 1 + self._side(side) * 14
         return (self.blob[OFF_TRIGGER_MOTOR] == ENABLED, self.blob[base + 1],
                 self.blob[base + 2], self.blob[base + 5])

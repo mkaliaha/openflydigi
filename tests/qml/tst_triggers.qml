@@ -51,7 +51,6 @@ TestCase {
             verify(findChild(page, "start_" + side), "no start control for " + side);
             verify(findChild(page, "strength_" + side), "no resistance for " + side);
             verify(findChild(page, "deadZone_" + side), "no dead zone for " + side);
-            verify(findChild(page, "motor_" + side), "no motor switch for " + side);
         }
     }
 
@@ -86,15 +85,29 @@ TestCase {
         compare(App.profile.triggers.right.strength, 200, "strength was lost");
     }
 
-    function test_dead_zone_and_motor_write_through() {
+    function test_dead_zone_writes_through() {
         findChild(page, "deadZone_left").moved(15);
         compare(App.profile.triggers.left.deadZone, 15);
+        verify(App.profile.dirty, "editing a trigger is a change");
+    }
 
-        let motor = findChild(page, "motor_left");
+    function test_the_motors_share_one_switch() {
+        // The pad has a single byte for this -- see MappingConfig.trigger_motor.
+        // Two switches over one byte would let someone ask for left-on/
+        // right-off, watch the UI agree, and get both.
+        for (const side of ["left", "right"])
+            verify(!findChild(page, "motor_" + side),
+                   "there should be no per-side motor switch for " + side);
+
+        let motor = findChild(page, "triggerMotor");
+        verify(motor, "no trigger motor switch at all");
+        verify(!App.profile.triggers.motorEnabled, "should start off");
+
         motor.checked = true;
         motor.toggled();
-        verify(App.profile.triggers.left.motor, "the motor switch did not write through");
-        verify(App.profile.dirty, "editing a trigger is a change");
+        verify(App.profile.triggers.motorEnabled,
+               "the motor switch did not write through");
+        verify(App.profile.dirty, "toggling the motors is a change");
     }
 
     function test_an_edit_can_be_applied_to_the_pad() {

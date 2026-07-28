@@ -32,6 +32,20 @@ Kirigami.ScrollablePage {
             explanation: "Pick a profile on the Controller page."
         }
 
+        FormCard.FormCard {
+            visible: App.profile.loaded
+
+            FormCard.FormSwitchDelegate {
+                objectName: "triggerMotor"
+                text: "Trigger vibration motors"
+                // One switch, because the pad has one byte for it -- both
+                // triggers share the enable, only the levels are per side.
+                description: "Shared by both triggers"
+                checked: App.profile.triggers.motorEnabled
+                onToggled: App.profile.triggers.motorEnabled = checked
+            }
+        }
+
         FormCard.FormHeader {
             visible: App.profile.loaded
             title: "Left trigger"

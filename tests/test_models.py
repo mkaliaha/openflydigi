@@ -204,6 +204,30 @@ def test_saving_a_profile_the_pad_is_not_running_is_refused():
           str(writes))
 
 
+def test_reselecting_the_open_profile_keeps_unsaved_edits():
+    """A radio delegate fires clicked() on the row that is already checked."""
+    profile, _ = make_profile()
+    profile.title = "Racing"
+    profile.keys.setTarget(profile.keys.rowForKey("m1"), models.TARGETS.index("a"))
+    check("the edits are there", profile.dirty)
+
+    profile.select(0)                          # the row it is already on
+    check("re-selecting keeps the edits", profile.dirty,
+          "the edits were silently discarded")
+    check("and keeps the new name", profile.title == "Racing", profile.title)
+    check("and the remap", profile.config.remapped() == {"m1": ("a", 0, 0)},
+          str(profile.config.remapped()))
+
+
+def test_reloading_still_re_reads_the_open_profile():
+    """The guard above must not make "Reload from pad" a no-op."""
+    profile, requested = make_profile()
+    before = list(requested)
+    profile.forget()
+    check("reload asks the pad again", requested == before + [0], str(requested))
+    check("and the profile is closed until it arrives", not profile.loaded)
+
+
 def test_selecting_an_unread_profile_clears_the_title():
     """Otherwise the name field goes on showing the profile you left."""
     profile, _ = make_profile()
@@ -317,7 +341,6 @@ def test_trigger_fields_are_independent():
     right.start = 60
     right.strength = 200
     right.deadZone = 15
-    right.motor = True
 
     mode, params = profile.config.trigger_effect("right")
     check("trigger effect reaches the config",
@@ -326,9 +349,37 @@ def test_trigger_fields_are_independent():
           str(params[:2]))
     check("dead zone reaches the curve",
           profile.config.trigger_curve("right")["zero"] == 15)
+    # The motor enable is a single shared byte, so it lives on TriggerModel
+    # rather than on a side -- see the dedicated test below.
+    profile.triggers.motorEnabled = True
     check("motor reaches the config", profile.config.trigger_motor("right")[0])
     check("the model reads back its own effect index", right.effect == 1)
     check("editing a trigger marks dirty", profile.dirty)
+
+
+def test_the_trigger_motors_share_one_enable():
+    """One byte on the pad, so one switch -- not one per trigger.
+
+    MappingConfig.trigger_motor computes a side-indexed base for min/max/scale
+    but reads the enable from the un-indexed byte at OFF_TRIGGER_MOTOR. A
+    per-side property over that would let a caller ask for left-on/right-off,
+    read back agreement, and send both.
+    """
+    profile, _ = make_profile()
+    check("the motors start off", not profile.triggers.motorEnabled)
+    check("no per-side motor property exists",
+          not hasattr(profile.triggers.side("left"), "motor"))
+
+    profile.triggers.motorEnabled = True
+    check("both sides report it on",
+          profile.config.trigger_motor("left")[0]
+          and profile.config.trigger_motor("right")[0])
+    # The pad's switches are inverted -- 0 is on -- so this is ENABLED, not a
+    # truthiness test.
+    check("and it is the one shared byte",
+          profile.config.blob[mapping.OFF_TRIGGER_MOTOR] == mapping.ENABLED,
+          str(profile.config.blob[mapping.OFF_TRIGGER_MOTOR]))
+    check("turning it on is a change", profile.dirty)
 
 
 def test_restore_refuses_a_wrong_sized_file(tmp="/tmp"):
@@ -608,6 +659,8 @@ def main():
                  test_confirming_a_write_clears_dirty,
                  test_applying_without_saving_still_offers_a_save,
                  test_saving_a_profile_the_pad_is_not_running_is_refused,
+                 test_reselecting_the_open_profile_keeps_unsaved_edits,
+                 test_reloading_still_re_reads_the_open_profile,
                  test_selecting_an_unread_profile_clears_the_title,
                  test_lighting_applying_without_saving_still_offers_a_save,
                  test_reset_all_clears_every_remap,
@@ -616,6 +669,7 @@ def main():
                  test_vibration_writes_through_to_the_blob,
                  test_vibration_keeps_min_below_max,
                  test_trigger_fields_are_independent,
+                 test_the_trigger_motors_share_one_enable,
                  test_restore_refuses_a_wrong_sized_file,
                  test_backup_then_restore_round_trips,
                  test_slot_list_tracks_active_and_current,
