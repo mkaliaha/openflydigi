@@ -75,23 +75,24 @@ class DeviceWorker(QObject):
 
     @Slot(int)
     def load_profile(self, cfg_id):
-        """Read a single profile.
+        """Read a single profile, leaving the pad on it.
+
+        Reading switches the pad, and that is the intended effect: opening a
+        profile is how you switch to it, the way Space Station does it. The
+        pad then runs what is on screen, which is also what makes saving
+        correct -- the save command commits whichever profile is running.
 
         Reading is not free: the pad audibly re-seats its trigger motors on
-        every config read, so pulling all four at startup makes it clatter four
-        times for data the user has not asked to see. Profiles are fetched when
-        first opened instead.
+        every config read, so profiles are fetched one at a time, when first
+        opened, never all four to fill a list.
         """
         self.status.emit(f"Reading profile {cfg_id + 1}…")
-        result = self._attempt(
-            lambda ctrl: mapping.read_config_preserving(ctrl, cfg_id),
-            f"reading profile {cfg_id + 1}")
-        if result is None:
+        config = self._attempt(lambda ctrl: mapping.read_config(ctrl, cfg_id),
+                               f"reading profile {cfg_id + 1}")
+        if config is None:
             return
-        config, restored = result
         self.profile_loaded.emit(cfg_id, bytes(config.blob), config.title)
-        if restored is not None:
-            self.active_changed.emit(restored)
+        self.active_changed.emit(cfg_id)
         self.status.emit(f"Profile {cfg_id + 1} read")
 
     @Slot()

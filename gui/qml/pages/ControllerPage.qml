@@ -163,16 +163,6 @@ Kirigami.ScrollablePage {
             FormCard.FormDelegateSeparator {}
 
             FormCard.FormButtonDelegate {
-                objectName: "activateButton"
-                text: "Switch pad to this profile"
-                icon.name: "dialog-ok-apply"
-                enabled: App.profile.canActivate
-                onClicked: App.profile.activate()
-            }
-
-            FormCard.FormDelegateSeparator {}
-
-            FormCard.FormButtonDelegate {
                 objectName: "backupButton"
                 text: "Back up this profile…"
                 icon.name: "document-save-as"

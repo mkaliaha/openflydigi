@@ -373,11 +373,8 @@ def test_slot_list_tracks_active_and_current():
     check("an unread slot reports itself unloaded",
           not role(profile.slots, 2, b"loaded"))
     check("the read slot reports itself loaded", role(profile.slots, 0, b"loaded"))
-    check("switching is offered when the pad is elsewhere", profile.canActivate)
-
     profile.setActive(0)
-    check("switching is not offered for the running profile",
-          not profile.canActivate)
+    check("the open profile is the one the pad runs", profile.canSaveToFlash)
 
 
 def test_dirty_is_reported_on_the_slot_row():

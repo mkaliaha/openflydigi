@@ -95,12 +95,14 @@ TestCase {
                 "the title was not capped: " + App.profile.title);
     }
 
-    function test_switching_is_offered_only_for_another_profile() {
-        let activate = findChild(page, "activateButton");
-        verify(activate, "no switch button");
-        // Slot 0 is open and the pad is already running it.
-        compare(App.profile.slots.active, 0);
-        verify(!activate.enabled, "the running profile cannot be switched to");
+    function test_opening_a_profile_leaves_the_pad_running_it() {
+        // Reading switches the pad, and that is the point: the profile on
+        // screen is the one in use, which is also what makes saving correct.
+        compare(App.profile.slots.active, App.profile.cfgId,
+                "the pad is not running the profile being edited");
+        verify(App.profile.canSaveToFlash, "saving should be available");
+        verify(!findChild(page, "activateButton"),
+               "the switch button is redundant now and should be gone");
     }
 
     function test_saving_is_still_offered_after_applying() {

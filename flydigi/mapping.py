@@ -166,6 +166,12 @@ def read_config_preserving(ctrl, cfg_id, wait=1.5):
     Reading switches the pad, which is not what someone browsing their profiles
     asked for. Returns (config, restored_to) so the caller can say what
     happened; restored_to is None when no restore was needed or possible.
+
+    The desktop app deliberately does not use this. Command 166 commits
+    whichever profile the pad is running, so an app that browses without
+    switching cannot save what it is showing; it opens profiles the way Space
+    Station does instead, leaving the pad on the one being edited. This stays
+    for callers that really do want to look without disturbing anything.
     """
     status = read_status(ctrl)
     config = read_config(ctrl, cfg_id, wait=wait)

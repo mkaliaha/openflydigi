@@ -108,11 +108,18 @@ def test_startup_reads_only_the_open_profile(qt_app):
 
     # Every config read makes the pad audibly re-seat its trigger motors, so
     # filling the slot list must not read all four.
-    check("startup reads exactly one profile", pad.reads == [0], str(pad.reads))
-    # Reading switches the pad, so the app has to switch it back.
-    check("the pad is put back on the profile it was running",
-          pad.switches == [1], str(pad.switches))
-    check("the pad ends where it started", pad.active == 1, str(pad.active))
+    check("startup reads exactly one profile", len(pad.reads) == 1,
+          str(pad.reads))
+    # And it reads the one already running, which costs no switch at all --
+    # opening slot 0 by default would switch the pad away and back for nothing.
+    check("startup reads the profile the pad is running", pad.reads == [1],
+          str(pad.reads))
+    check("startup switches the pad not at all", pad.switches == [],
+          str(pad.switches))
+    check("the pad is still on the profile it started on", pad.active == 1,
+          str(pad.active))
+    check("the open profile is the running one",
+          app_object.profile.cfgId == 1, str(app_object.profile.cfgId))
     check("all four slots are listed", app_object.profile.slots.count == 4)
     app_object.shutdown()
 

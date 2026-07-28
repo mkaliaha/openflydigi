@@ -616,7 +616,6 @@ class ProfileModel(QObject):
     # straight connect with no adapter in between.
     writeRequested = Signal(int, bytes, bytes, bool)   # cfg_id, blob, previous, save
     loadRequested = Signal(int)
-    applyRequested = Signal(int)
     restoreFailed = Signal(str)
     saveRefused = Signal(str)
 
@@ -692,10 +691,6 @@ class ProfileModel(QObject):
         you had just applied.
         """
         return self._edited is not None and not self._saved
-
-    @Property(bool, notify=cfgIdChanged)
-    def canActivate(self):
-        return self._cfg_id >= 0 and self._cfg_id != self._slots.active
 
     @Property(str, notify=titleChanged)
     def title(self):
@@ -778,8 +773,17 @@ class ProfileModel(QObject):
 
     @Slot()
     def forget(self):
+        """Drop the cache so the open profile is re-read from the pad.
+
+        Nothing is selected when neither a profile nor the pad's active slot is
+        known yet -- on a cold start that arrives moments later from the status
+        read, and `setActive` opens it. Falling back to slot 0 here would read
+        the wrong profile and switch the pad away from the one in use.
+        """
         self._slots.forget()
-        self.select(self._cfg_id if self._cfg_id >= 0 else 0)
+        target = self._cfg_id if self._cfg_id >= 0 else self._slots.active
+        if target >= 0:
+            self.select(target)
 
     @Slot(int, bytes, str)
     def profileLoaded(self, cfg_id, blob, title):
@@ -791,6 +795,12 @@ class ProfileModel(QObject):
     def setActive(self, cfg_id):
         self._slots.setActive(cfg_id)
         self.cfgIdChanged.emit()
+        # The first time we learn what the pad is running, open that one. It is
+        # already loaded on the pad, so reading it switches nothing -- whereas
+        # opening slot 0 by default would switch the pad away from the profile
+        # in use and back again, for nothing.
+        if self._cfg_id < 0 and cfg_id >= 0:
+            self.select(cfg_id)
 
     # -- editing -----------------------------------------------------------
 
@@ -807,11 +817,6 @@ class ProfileModel(QObject):
             self._edited.set_mapping(key, None)
         self._keys.refresh()
         self.markChanged()
-
-    @Slot()
-    def activate(self):
-        if self._cfg_id >= 0:
-            self.applyRequested.emit(self._cfg_id)
 
     @Slot(bool)
     def write(self, save):

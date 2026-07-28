@@ -55,7 +55,7 @@ QML. See `gui/README.md`.
 
 | Tab | What works |
 |---|---|
-| Profiles → Buttons | remap, turbo + hold/toggle, rename, switch active, back up / restore to file |
+| Profiles → Buttons | remap, turbo + hold/toggle, rename, back up / restore to file |
 | Profiles → Vibration | master switch, per-grip enable, min/max window, strength |
 | Profiles → Triggers | stored effect (off / constant resistance), dead zone, trigger motor |
 | Adaptive triggers | all 94 games, searchable, filtered by route; vibration presets load onto the pad from here |
@@ -312,8 +312,12 @@ Config structures for mapping/macro/RGB are already decompiled as `m_fdg_*_struc
     name/descriptor, never by path.
   * **Reading a mapping config switches the pad to it.** The firmware pages it in as the live one,
     audibly re-seating the trigger motors — that noise is the tell. Confirmed: after reading config
-    2, `read_status` reports 2 as active. Use `read_config_preserving`, and prefer command **161**,
-    which reports the active slot and a version id per slot with no side effect at all.
+    2, `read_status` reports 2 as active. The desktop app leans on this rather than fighting it:
+    opening a profile is how you switch to it, as Space Station does, so the profile on screen is
+    always the one running. That also keeps saving correct, since command 166 commits whichever
+    profile is live. `read_config_preserving` restores the previous slot instead, for a caller that
+    genuinely wants to peek; prefer command **161**, which reports the active slot and a version id
+    per slot with no side effect at all.
   * **The config commands are checksummed and the trigger-effect commands are not.** A mapping or
     lighting packet with a bad checksum gets no reply — the pad stays silent rather than erroring.
   * **Lighting effects are frame data, not a mode byte.** The pad has no animation generator; it

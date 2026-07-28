@@ -101,7 +101,6 @@ class App(QObject):
         self.requestLighting.connect(worker.load_lighting)
         self.requestVibration.connect(worker.apply_vibration)
         self._profile.loadRequested.connect(worker.load_profile)
-        self._profile.applyRequested.connect(worker.apply_profile)
         self._profile.writeRequested.connect(worker.write_profile)
         self._lighting.writeRequested.connect(worker.write_lighting)
 
