@@ -7,10 +7,10 @@ now covers five delivery mechanisms plus a virtual DualSense.
 
 **Status: adaptive triggers are done and validated in real games, and the desktop app — now QML on
 Kirigami — covers profiles, button remapping, vibration, per-profile trigger config and RGB
-lighting.** What remains is the screen/GIF upload, the charging dock, the third-party-app mapping
-toggle, macros, the device settings, a daemon that picks the right tier per game, and the gyro block
-the profile already carries — see "Next". The joystick block is done, and both known UI bugs are
-fixed.
+lighting.** What remains is the screen/GIF upload, the charging dock, macros, the device
+settings, a daemon that picks the right tier per game, and the gyro block the profile already
+carries — see "Next". The joystick block and the third-party takeover toggle are both done, and both
+known UI bugs are fixed.
 
 | Tier | Games | Validated in |
 |---|---|---|
@@ -527,7 +527,9 @@ dumb USB hub with a charger — do not assume it speaks anything.) `Flydigi.Char
 and `cd2_led_sync` — "Keep the lighting mode of the controller and dock in sync". So the dock has
 its own effect set plus a sync toggle, which is the integration the user wants.
 
-**4. "Allow third-party apps to take over mappings"** — a pad-side setting, not Steam's. Space
+**4. "Allow third-party apps to take over mappings" — DONE, and it is what makes Steam recognise
+the pad.** Command 16 reads it, command 17 writes it, and the switch is on the Controller page
+behind the firmware gate. A pad-side setting, not Steam's. Space
 Station's own words:
 
 > When the switch is turned on and a third-party application (such as Steam, reWASD, etc.) is
