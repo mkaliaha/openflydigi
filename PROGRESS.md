@@ -690,6 +690,19 @@ worth a UI. And **report rate reads 0**, which is not in the documented `{1000=1
 125=8}` map — either 0 means "default/unset" or the map is incomplete. Do not write that field
 until a read on a pad whose rate has actually been set says which.
 
+**The endpoint descriptors argue for "default".** Both input endpoints poll at the USB minimum:
+
+```
+3-4:1.0  xpad    ep_81 IN  interrupt  interval=1ms    the gamepad
+3-4:1.2  usbhid  ep_83 IN  interrupt  interval=1ms    the vendor interface
+```
+
+The pad is full-speed (12 Mbit/s), where 1 ms is the shortest frame, so 1000 Hz is the ceiling for
+both and the pad is already at it. A setting of 0 alongside a 1 ms endpoint reads as "default =
+1000" rather than "unset". Note the two paths differ in *delivery*, not in rate: evdev is
+event-driven and emits nothing while a stick is still, whereas the vendor stream sends regardless —
+measured at ~970 Hz, essentially saturating its endpoint.
+
 **Decoding the two numeric fields — and a trap in one of them.** Both are enums in
 `Flydigi.SharedResources`, and neither is the number it looks like:
 
