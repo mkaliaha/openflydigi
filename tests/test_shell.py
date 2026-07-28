@@ -72,8 +72,13 @@ def load_shell(qt_app, pad):
     app_object = gui_main.app_singleton(engine)
     STARTED.append(app_object)
     app_object.start(False)
-    app_object.thread.worker._drop()
-    app_object.thread.worker._controller = lambda: pad
+    worker = app_object.thread.worker
+    worker._drop()
+    # Both: the lambda so a reconnect after `_drop` finds the fake again rather
+    # than opening real hardware, and `_ctrl` so the shutdown path really does
+    # call close() on it -- which is the thing worth testing about shutdown.
+    worker._controller = lambda: pad
+    worker._ctrl = pad
 
     engine.load(QUrl.fromLocalFile(os.path.join(gui_main.QML_DIR, "Main.qml")))
     roots = engine.rootObjects()
@@ -244,6 +249,59 @@ def test_a_game_list_update_that_succeeds_replaces_the_list(qt_app):
     app_object.shutdown()
 
 
+def test_an_unexpected_worker_error_is_reported(qt_app):
+    """A bug in a worker slot used to vanish without a trace.
+
+    `_attempt` caught only OSError, DeviceNotFound and ProtocolError. Anything
+    else escaped the slot: no reply signal, no `failed`, nothing on screen, and
+    the UI waiting forever. A method missing from the fake pad hid an entire
+    untested code path that way.
+    """
+    class BrokenPad(TestPad):
+        def send(self, buf, wait=0.3):
+            raise AttributeError("no such thing")
+
+    pad = BrokenPad()
+    app_object, engine, window = load_shell(qt_app, pad)
+    pump(qt_app)
+
+    check("an unexpected failure reaches the user",
+          app_object.device.error != "", repr(app_object.device.error))
+    check("and it says what actually went wrong",
+          "no such thing" in app_object.device.error, app_object.device.error)
+    app_object.shutdown()
+
+
+def test_shutdown_stops_the_thread_before_closing_the_device(qt_app):
+    """Closing the descriptor early is a race against the worker's own reads."""
+    holder = {}
+
+    class WatchfulPad(TestPad):
+        def close(self):
+            thread = holder.get("thread")
+            holder["finished_when_closed"] = (thread is not None
+                                              and thread.isFinished())
+
+    pad = WatchfulPad()
+    app_object, engine, window = load_shell(qt_app, pad)
+    pump(qt_app)
+    holder["thread"] = app_object.thread.thread
+
+    finished = app_object.thread.stop()
+    check("the thread finished within the timeout", finished)
+    check("the thread is really done", app_object.thread.thread.isFinished())
+    check("the handle was closed", "finished_when_closed" in holder,
+          "close() was never called")
+    # os.close on the calling thread while the worker is blocked in select() on
+    # that same descriptor is undefined, and the fd number can be reused.
+    check("and only once the thread had stopped",
+          holder.get("finished_when_closed") is True,
+          str(holder.get("finished_when_closed")))
+
+    app_object.thread = None
+    app_object.shutdown()
+
+
 def test_loading_the_window_is_warning_free(qt_app):
     """The engine must not report anything while bringing the app up."""
     check("no QML warnings while loading the window", not WARNINGS,
@@ -262,6 +320,8 @@ def main():
                      test_the_i18n_functions_are_installed,
                      test_a_game_list_update_that_fails_is_reported,
                      test_a_game_list_update_that_succeeds_replaces_the_list,
+                     test_an_unexpected_worker_error_is_reported,
+                     test_shutdown_stops_the_thread_before_closing_the_device,
                      test_loading_the_window_is_warning_free):
             try:
                 test(qt_app)

@@ -120,9 +120,17 @@ class App(QObject):
 
     @Slot()
     def shutdown(self):
+        if self._fetch is not None:
+            # Bounded because flydigi.games.fetch_gamelist has its own timeout;
+            # dropping the last reference to a running QThread is a qFatal.
+            self._fetch.wait(5000)
+            self._fetch = None
         if self.thread is not None:
-            self.thread.stop()
-            self.thread = None
+            # Keep the reference when the thread did not finish. Dropping it
+            # destroys a running QThread, which Qt turns into qFatal and a core
+            # dump -- an ugly way to end an otherwise ordinary quit.
+            if self.thread.stop():
+                self.thread = None
 
     # -- what QML binds to -------------------------------------------------
 

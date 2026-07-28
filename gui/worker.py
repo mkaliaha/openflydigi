@@ -35,6 +35,16 @@ class DeviceWorker(QObject):
     def __init__(self):
         super().__init__()
         self._ctrl = None
+        self._stopping = False
+
+    def request_stop(self):
+        """Stop retrying. Called from the owning thread as the app quits.
+
+        Only ever set, never cleared, and read as a plain bool -- so no lock is
+        needed for it to do its job, which is to keep shutdown from waiting out
+        a second full attempt.
+        """
+        self._stopping = True
 
     def _controller(self):
         if self._ctrl is None:
@@ -56,9 +66,18 @@ class DeviceWorker(QObject):
                 return work(self._controller())
             except (OSError, device.DeviceNotFound, blobs.ProtocolError) as exc:
                 self._drop()
-                if attempt == 2:
+                if attempt == 2 or self._stopping:
                     self.failed.emit(f"{what}: {exc}")
                     return None
+            except Exception as exc:
+                # Anything not in the tuple above is a bug rather than a sulking
+                # pad, and used to escape the slot in silence: no reply, no
+                # `failed`, nothing on screen, and the UI waiting forever. A
+                # missing method on the fake pad hid a whole untested code path
+                # this way. Report it and stop -- retrying a bug just repeats it.
+                self._drop()
+                self.failed.emit(f"{what}: {exc!r}")
+                return None
         return None
 
     @Slot()
@@ -176,6 +195,12 @@ class DeviceWorker(QObject):
 class DeviceThread:
     """Owns the worker and its thread, so callers do not have to."""
 
+    # Long enough for any single exchange to finish. A save waits 2 s, a config
+    # read up to three attempts of 1.5 s, and a from-scratch 42-packet write
+    # rather longer -- `Controller.send` never breaks its deadline loop early,
+    # so each exchange burns its full wait.
+    STOP_TIMEOUT_MS = 10_000
+
     def __init__(self):
         self.thread = QThread()
         self.worker = DeviceWorker()
@@ -183,6 +208,24 @@ class DeviceThread:
         self.thread.start()
 
     def stop(self):
-        self.worker.shutdown()
+        """Shut the worker down. True if the thread finished in time.
+
+        Order matters. `worker.shutdown()` is a plain Python call -- @Slot only
+        adds a metaobject entry -- so calling it first ran `os.close(fd)` on the
+        *caller's* thread while the worker could be blocked in `select()` on
+        that same descriptor. `Controller.send` re-reads `self.fd` every
+        iteration, so it would then either select on None (TypeError, which
+        `_attempt` does not catch, escaping the slot silently) or read from a
+        descriptor number the kernel had already handed to someone else.
+
+        So: ask the thread to finish, wait for it, and only close once nothing
+        can be using it. If the wait times out the handle is deliberately left
+        open -- the process is going away and the kernel will reclaim it, which
+        is cheaper than corrupting an unrelated fd.
+        """
+        self.worker.request_stop()
         self.thread.quit()
-        self.thread.wait(2000)
+        finished = self.thread.wait(self.STOP_TIMEOUT_MS)
+        if finished:
+            self.worker.shutdown()
+        return finished
