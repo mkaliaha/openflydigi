@@ -59,6 +59,7 @@ QML. See `gui/README.md`.
 |---|---|
 | Profiles → Buttons | remap, turbo + hold/toggle, rename, back up / restore to file |
 | Profiles → Vibration | master switch, per-grip enable, min/max window, strength |
+| Controller → Other software | let Steam and similar take the pad over, and who currently holds it |
 | Profiles → Sticks | dead zone, outer dead zone, sensitivity curve presets, circular range |
 | Profiles → Triggers | stored effect (off / constant resistance), dead zone, trigger motor |
 | Adaptive triggers | all 94 games, searchable, filtered by route; vibration presets load onto the pad from here |
@@ -564,14 +565,25 @@ Steam hidapi     -> hidraw4        -> "Apex 5"
 ```
 
 `steamwebhelper` holds both hidraw nodes open while this is on. Nothing sent to the pad changes it;
-the toggle only makes the second path exist. The decisive local fix is to remove the first —
-`echo -n "3-4:1.0" | sudo tee /sys/bus/usb/drivers/xpad/unbind` — which leaves only the native
-Apex 5 and does not persist across a wake, since re-enumeration rebinds xpad.
+the toggle only makes the second path exist.
 
-**Do not make that permanent with a udev rule.** The evdev node is where everything else in this
-project reads sticks and buttons: `tools/flydigi-ds5` relays them into the virtual DualSense, and
-`joystick-curve-probe` and `stick-feel` both depend on it — the entire stick-curve validation would
-have been impossible with xpad unbound.
+**Mostly cosmetic, though.** Enabling Steam Input for the pad makes Steam grab the physical device
+and hand the game a single virtual controller, so the duplicate is visible in Steam's settings list
+and not to anything launched through Steam. It matters for games started outside Steam, and it
+matters if Steam Input is off — which is exactly the state Tier 4 requires.
+
+If it does need removing, unbinding xpad is the local fix
+(`echo -n "3-4:1.0" | sudo tee /sys/bus/usb/drivers/xpad/unbind`), and it does not survive a wake
+since re-enumeration rebinds. **Do not make it permanent with a udev rule**: the evdev node is where
+everything else here reads sticks and buttons — `tools/flydigi-ds5` relays them into the virtual
+DualSense, and `joystick-curve-probe` and `stick-feel` both depend on it.
+
+**Untested and important: whether this breaks Tier 4 and our own tools.** When SDL acquired the pad
+it set `controller_data` to False, and if that stops the standard controller report then the xpad
+evdev node goes quiet — which would take the DS5 relay, the stick probes and every evdev consumer
+with it. Nobody has checked. Test by enabling the flag and sweeping a stick under
+`tools/joystick-curve-probe --baseline`: events mean the two paths coexist, silence means the toggle
+and Tier 4 are mutually exclusive and the UI has to say so.
 
 **Consequence worth stating in any UI**: this is not a preference, it is a handover. With it on,
 Steam drives the pad and our own onboard mapping stops being what the host sees. With
@@ -1244,7 +1256,7 @@ for t in tests/test_{dsx,forza,mapping,monitor,relay}.py; do python3 "$t"; done 
 tools/generate-qmltypes && qmllint -I . -I /usr/lib64/qt6/qml gui/qml/Main.qml gui/qml/*/*.qml
 ```
 
-159 model tests, 50 shell, 69 QML, 229 backend; qmllint and `reuse lint` clean.
+172 model tests, 50 shell, 71 QML, 299 backend; qmllint and `reuse lint` clean.
 
 **Both known bugs are fixed**, each with a test that fails without the fix.
 

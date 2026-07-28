@@ -26,6 +26,8 @@ class DeviceWorker(QObject):
     profile_loaded = Signal(int, bytes, str)   # cfg_id, blob, title
     profile_written = Signal(int, int, bool)   # cfg_id, packets, saved to flash
     vibration_applied = Signal(str, str)       # game name, sides applied
+    transport_changed = Signal(dict)     # third-party flag + who holds the pad
+    versions_changed = Signal(dict)      # the seven firmware components
     lighting_loaded = Signal(bytes)
     lighting_written = Signal(int, bool)
     active_changed = Signal(int)
@@ -113,6 +115,40 @@ class DeviceWorker(QObject):
         self.profile_loaded.emit(cfg_id, bytes(config.blob), config.title)
         self.active_changed.emit(cfg_id)
         self.status.emit(f"Profile {cfg_id + 1} read")
+
+    @Slot()
+    def refresh_transport(self):
+        """Who holds the pad, and whether it is allowed to be held.
+
+        Read rather than assumed: the holder reconfigures the transport flags
+        itself once it acquires, so what the pad reports afterwards is not what
+        anyone asked for.
+        """
+        state = self._attempt(motion.read_transport, "reading the transport state")
+        if state:
+            self.transport_changed.emit(state)
+        versions = self._attempt(motion.read_versions, "reading the firmware version")
+        if versions:
+            self.versions_changed.emit(versions)
+
+    @Slot(bool)
+    def set_third_party(self, enabled):
+        """Allow or refuse another driver taking the pad over.
+
+        Only this flag is sent; the other four go as 0xFF, "leave alone". They
+        still move, because whoever acquires next sets them to suit itself.
+        """
+        def work(ctrl):
+            motion.set_raw_data(ctrl, third_party=1 if enabled else 0)
+            return motion.read_transport(ctrl)
+
+        state = self._attempt(work, "changing third-party control")
+        if state:
+            self.transport_changed.emit(state)
+            holder = state.get("control_by") or "nothing"
+            self.status.emit(
+                f"Third-party control {'on' if state['third_party'] else 'off'}"
+                f" — held by {holder}")
 
     @Slot()
     def refresh_status(self):

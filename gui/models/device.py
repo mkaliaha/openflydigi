@@ -11,6 +11,8 @@ reported state, and the only writer is the worker thread's info signal.
 from PySide6.QtCore import Property, QObject, Signal, Slot
 from PySide6.QtQml import QmlElement
 
+from flydigi import motion
+
 # Registers this class into the Apex5 QML module. The decorator reads these two
 # names out of the module's globals, so every file with a QmlElement needs
 # them. `tools/generate-qmltypes` turns the result into the type information
@@ -34,6 +36,10 @@ class DeviceModel(QObject):
     activeProfileChanged = Signal()
     statusChanged = Signal()
     errorChanged = Signal()
+    thirdPartyChanged = Signal()
+
+    # Asking the worker to flip it, since the write is blocking HID traffic.
+    thirdPartyRequested = Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -44,6 +50,10 @@ class DeviceModel(QObject):
         self._active_profile = -1
         self._status = ""
         self._error = ""
+        self._third_party = False
+        self._control_by = ""
+        self._third_party_available = False
+        self._firmware = ""
 
     @Property(bool, notify=connectedChanged)
     def connected(self):
@@ -137,6 +147,64 @@ class DeviceModel(QObject):
         if self._connection_type:
             return f"Apex 5 connected ({self._connection_type})"
         return "Apex 5 connected"
+
+    # -- third-party takeover ----------------------------------------------
+    #
+    # A device setting rather than a profile one, and a handover rather than a
+    # preference: with it on the pad lets another driver acquire it, and Steam's
+    # native Flydigi support is on the far side of that. Confirmed on hardware
+    # -- turning it on made `controlBy` fill in with "SDL" by itself, and Steam
+    # went from "generic XInput controller" to "Apex 5".
+
+    @Property(bool, notify=thirdPartyChanged)
+    def thirdParty(self):
+        return self._third_party
+
+    @thirdParty.setter
+    def thirdParty(self, value):
+        # Optimistic locally, then corrected by the read that follows the write:
+        # the new holder reconfigures the transport itself, so what the pad ends
+        # up reporting is not simply what we asked for.
+        value = bool(value)
+        if self._third_party != value:
+            self._third_party = value
+            self.thirdPartyChanged.emit()
+        self.thirdPartyRequested.emit(value)
+
+    @Property(str, notify=thirdPartyChanged)
+    def controlBy(self):
+        """Who currently holds the pad, or "" for nobody.
+
+        Worth showing rather than hiding: it is the difference between "this
+        setting is on" and "this setting is on and Steam has taken you up on it".
+        """
+        return self._control_by
+
+    @Property(bool, notify=thirdPartyChanged)
+    def thirdPartyAvailable(self):
+        """Whether this pad's firmware offers the feature at all.
+
+        Space Station hides it below 7.0.3.0 on a k5. We check numerically; see
+        motion.version_at_least for why not the way they do.
+        """
+        return self._third_party_available
+
+    @Property(str, notify=thirdPartyChanged)
+    def firmware(self):
+        return self._firmware
+
+    @Slot(dict)
+    def transportReceived(self, state):
+        self._third_party = bool(state.get("third_party"))
+        self._control_by = str(state.get("control_by") or "")
+        self.thirdPartyChanged.emit()
+
+    @Slot(dict)
+    def versionsReceived(self, versions):
+        self._firmware = str(versions.get("main") or "")
+        self._third_party_available = motion.version_at_least(
+            self._firmware, motion.THIRD_PARTY_MIN_FIRMWARE["k5"])
+        self.thirdPartyChanged.emit()
 
     # -- slots the worker's signals land on --------------------------------
 

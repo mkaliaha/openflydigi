@@ -53,7 +53,8 @@ class TestPad(FakePad):
     rather than being pushed down into it.
     """
 
-    def __init__(self, battery=5, charging=False, wired=True):
+    def __init__(self, battery=5, charging=False, wired=True,
+                 firmware=(0x70, 0x45), acquirer="SDL"):
         super().__init__()
         self.switches = []
         self.reads = []
@@ -61,6 +62,15 @@ class TestPad(FakePad):
         self.battery = battery
         self.charging = charging
         self.wired = wired
+        # Two BCD bytes: 0x70 0x45 is 7.0.4.5, which is what the pad on the desk
+        # runs and comfortably above the 7.0.3.0 the third-party toggle needs.
+        self.firmware = firmware
+        # Who takes the pad once it is allowed to be taken. Steam calls itself
+        # SDL; a test wanting "allowed but nobody wants it" sets this to "".
+        self.acquirer = acquirer
+        self.holder = ""
+        self.transport = {"controller_data": True, "raw_data": False,
+                          "keyboard": False, "mouse": False, "third_party": False}
 
     def send(self, buf, wait=0.3):
         buf = bytes(buf)
@@ -83,6 +93,40 @@ class TestPad(FakePad):
             body[6] = 0x59                       # device type
             body[7] = 1 if self.wired else 2
             body[12] = 0x10 if self.charging else (self.battery & 0x0F)
+            # Seven BCD firmware versions follow the chip types. Only the main
+            # one is populated: the rest read as all-zero, which is how a real
+            # pad reports a component it does not have.
+            body[16], body[17] = self.firmware
+            return [bytes(body)]
+        if buf[3] == motion.CMD_ENABLE_RAW:
+            # 0xFF means "leave alone", so only the flags actually named move.
+            for index, name in enumerate(("controller_data", "raw_data",
+                                          "keyboard", "mouse", "third_party")):
+                if buf[5 + index] != motion.UNCHANGED:
+                    self.transport[name] = buf[5 + index] == 1
+            # A real pad does not sit at the value you asked for: whoever is
+            # waiting to acquire does so the moment it is allowed, and then sets
+            # the transport to suit its own driver. The fake does the same, or
+            # nothing here would ever exercise that.
+            if self.transport["third_party"]:
+                self.transport.update(controller_data=False, raw_data=True)
+                self.holder = self.acquirer
+            else:
+                self.holder = ""
+            body = bytearray(32)
+            body[0] = motion.INPUT_REPORT_ID
+            body[3] = motion.CMD_ENABLE_RAW
+            body[6] = 1
+            return [bytes(body)]
+        if buf[3] == motion.CMD_READ_TRANSPORT:
+            body = bytearray(32)
+            body[0] = motion.INPUT_REPORT_ID
+            body[3] = motion.CMD_READ_TRANSPORT
+            for index, name in enumerate(("controller_data", "raw_data",
+                                          "keyboard", "mouse", "third_party")):
+                body[6 + index] = 1 if self.transport[name] else 0
+            tag = self.holder.encode("ascii")[:20]
+            body[11 : 11 + len(tag)] = tag
             return [bytes(body)]
         if buf[3] == mapping.CMD_READ:
             self.reads.append(buf[5])

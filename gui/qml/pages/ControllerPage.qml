@@ -180,6 +180,48 @@ Kirigami.ScrollablePage {
                 onClicked: restoreDialog.open()
             }
         }
+
+        // A device setting, not a profile one -- it survives switching profiles
+        // and is not part of any of them.
+        FormCard.FormHeader {
+            visible: App.device.thirdPartyAvailable
+            title: "Other software"
+        }
+
+        FormCard.FormCard {
+            // Hidden rather than disabled below the firmware this needs, which
+            // is what Space Station does: a switch that cannot work is worse
+            // than no switch.
+            visible: App.device.thirdPartyAvailable
+
+            FormCard.FormSwitchDelegate {
+                objectName: "thirdPartyToggle"
+                text: "Let other software take the pad over"
+                // Deliberately not sold as a preference. It is a handover: the
+                // pad hands itself to whoever asks, and Steam's native Flydigi
+                // support is on the far side of it -- with this off Steam sees
+                // a generic XInput pad, with it on an Apex 5. The cost is that
+                // the taker also reconfigures how the pad reports, and the
+                // remapping set up here stops being what games see.
+                description: "Steam and similar can then drive it directly and "
+                             + "will recognise it as an Apex 5. While they do, "
+                             + "the button mapping on this pad is theirs, not "
+                             + "the one set up here."
+                checked: App.device.thirdParty
+                onToggled: App.device.thirdParty = checked
+            }
+
+            FormCard.FormDelegateSeparator { visible: App.device.controlBy !== "" }
+
+            FormCard.FormTextDelegate {
+                objectName: "controlByLabel"
+                // The difference between "allowed" and "actually taken", which
+                // is not something the switch position can express.
+                visible: App.device.controlBy !== ""
+                text: "Currently driven by " + App.device.controlBy
+                description: "Steam identifies itself as SDL."
+            }
+        }
     }
 
     Dialogs.FileDialog {

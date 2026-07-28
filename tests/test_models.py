@@ -692,6 +692,56 @@ def test_device_folds_in_an_info_reply():
           device.summary)
 
 
+def test_the_third_party_gate_follows_firmware():
+    """Space Station hides this below 7.0.3.0 on a k5, so we do too."""
+    device = models.DeviceModel()
+    check("hidden before anything is known", not device.thirdPartyAvailable)
+
+    device.versionsReceived({"main": "7.0.2.9"})
+    check("hidden below the minimum", not device.thirdPartyAvailable)
+
+    device.versionsReceived({"main": "7.0.4.5"})
+    check("offered at or above it", device.thirdPartyAvailable)
+    check("and the version is reported", device.firmware == "7.0.4.5")
+
+    # The case Flydigi's own gate gets wrong. Their CompareVersion is an ordinal
+    # string compare, so "7.0.10.0" sorts below "7.0.3.0" and the feature would
+    # be hidden on firmware newer than the one that introduced it.
+    device.versionsReceived({"main": "7.0.10.0"})
+    check("a double-digit component still counts as newer",
+          device.thirdPartyAvailable)
+    check("which is where we differ from their string compare",
+          "7.0.10.0" < "7.0.3.0")
+
+
+def test_the_holder_is_reported_separately_from_the_switch():
+    """"Allowed" and "actually taken" are different, and the switch shows one."""
+    device = models.DeviceModel()
+    device.transportReceived({"third_party": False, "control_by": ""})
+    check("nobody holds it to begin with", device.controlBy == "")
+    check("and it is not allowed", not device.thirdParty)
+
+    device.transportReceived({"third_party": True, "control_by": "SDL"})
+    check("the flag is reported", device.thirdParty)
+    check("and so is who took it up", device.controlBy == "SDL",
+          device.controlBy)
+
+
+def test_flipping_the_switch_asks_the_worker():
+    device = models.DeviceModel()
+    asked = []
+    device.thirdPartyRequested.connect(asked.append)
+
+    device.thirdParty = True
+    check("the request reaches the worker", asked == [True], str(asked))
+    check("and the switch moves at once", device.thirdParty)
+
+    # The pad has the last word: the acquirer reconfigures things, so what comes
+    # back is not necessarily what was asked for.
+    device.transportReceived({"third_party": False, "control_by": ""})
+    check("a contrary read wins", not device.thirdParty)
+
+
 def test_device_reports_a_failure():
     device = models.DeviceModel()
     device.infoReceived({"battery_level": 3, "charging": True,
@@ -760,6 +810,9 @@ def main():
                  test_only_the_pad_side_route_can_be_applied,
                  test_route_wording_does_not_oversell_the_preset,
                  test_device_folds_in_an_info_reply,
+                 test_the_third_party_gate_follows_firmware,
+                 test_the_holder_is_reported_separately_from_the_switch,
+                 test_flipping_the_switch_asks_the_worker,
                  test_device_reports_a_failure,
                  test_battery_is_clamped,
                  test_models_pull_in_no_view_code):

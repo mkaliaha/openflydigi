@@ -60,6 +60,7 @@ class App(QObject):
     requestInfo = Signal()
     requestStatus = Signal()
     requestLighting = Signal()
+    requestTransport = Signal()
     requestVibration = Signal(dict)
     fetchingChanged = Signal()
 
@@ -99,6 +100,8 @@ class App(QObject):
         self.requestInfo.connect(worker.refresh_info)
         self.requestStatus.connect(worker.refresh_status)
         self.requestLighting.connect(worker.load_lighting)
+        self.requestTransport.connect(worker.refresh_transport)
+        self._device.thirdPartyRequested.connect(worker.set_third_party)
         self.requestVibration.connect(worker.apply_vibration)
         self._profile.loadRequested.connect(worker.load_profile)
         self._profile.writeRequested.connect(worker.write_profile)
@@ -111,6 +114,8 @@ class App(QObject):
         worker.active_changed.connect(self._profile.setActive)
         worker.profile_loaded.connect(self._profile.profileLoaded)
         worker.profile_written.connect(self._written)
+        worker.transport_changed.connect(self._device.transportReceived)
+        worker.versions_changed.connect(self._device.versionsReceived)
         worker.lighting_loaded.connect(self._lighting.configLoaded)
         worker.lighting_written.connect(self._lighting_written)
         worker.vibration_applied.connect(self._vibration_applied)
@@ -162,6 +167,7 @@ class App(QObject):
         self.requestInfo.emit()
         self.requestStatus.emit()
         self.requestLighting.emit()
+        self.requestTransport.emit()
         self._profile.forget()
 
     @Slot(int)

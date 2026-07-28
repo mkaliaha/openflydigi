@@ -154,4 +154,40 @@ TestCase {
         verify(findChild(page, "restoreButton").enabled,
                "a read profile can be restored over");
     }
+
+    function test_the_third_party_toggle_hands_the_pad_over() {
+        // Not a preference but a handover: the pad only lets another driver
+        // acquire it once this is on, and Steam's native Flydigi support is on
+        // the far side of that.
+        tryVerify(() => App.device.thirdPartyAvailable, 5000,
+                  "firmware 7.0.4.5 should offer this");
+        let toggle = findChild(page, "thirdPartyToggle");
+        verify(toggle, "no third-party toggle");
+        verify(!App.device.thirdParty, "should start off");
+        compare(App.device.controlBy, "", "nobody should hold it yet");
+
+        toggle.toggle();
+        toggle.toggled();
+        // The pad has the last word: whoever acquires reconfigures things, so
+        // wait for what it reports rather than trusting the switch.
+        tryCompare(App.device, "controlBy", "SDL", 5000,
+                   "nothing took the pad over");
+        verify(App.device.thirdParty, "the flag should be set on the pad");
+
+        toggle.toggle();
+        toggle.toggled();
+        tryCompare(App.device, "controlBy", "", 5000, "the holder should let go");
+        verify(!App.device.thirdParty, "the flag should be cleared");
+    }
+
+    function test_the_toggle_is_hidden_on_firmware_that_cannot_do_it() {
+        // Space Station hides it below 7.0.3.0; a switch that cannot work is
+        // worse than no switch.
+        App.device.versionsReceived({"main": "7.0.2.9"});
+        tryVerify(() => !App.device.thirdPartyAvailable, 2000);
+        verify(!findChild(page, "thirdPartyToggle").visible,
+               "the toggle should be hidden below the minimum firmware");
+        App.device.versionsReceived({"main": "7.0.4.5"});
+        tryVerify(() => App.device.thirdPartyAvailable, 2000);
+    }
 }
