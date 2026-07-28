@@ -620,13 +620,19 @@ and `ACCEL_OFFSET = 24`, so the +1 shift is established and the stick offsets in
 confidence. Buttons are in the same report but their offset is **not yet located** — the parser's
 key handling is elsewhere in the file.
 
-Doing this buys three things, not one:
+**It does not un-conflict Tier 4 and the toggle, and it is not worth pretending otherwise.** Tier 4
+requires Steam Input *off* — Steam Input masks the pad and breaks DualSense semantics — while the
+whole point of the toggle is to let Steam take the pad over. They conflict a level above the input
+source, so changing where the relay reads sticks from cannot reconcile them.
 
-  * the relay stops needing xpad, so **Tier 4 and the third-party toggle stop being exclusive**;
-  * **M1-M4 become readable at last.** They have no XInput equivalent so they never reach evdev at
-    all — this stream is the only place they exist, which is what "M1 → touchpad click, freeing
-    SELECT to be Create" has always been waiting on;
-  * one input source instead of two straddled ones, with no cross-source sync to get wrong.
+What it is actually worth:
+
+  * **M1-M4 become readable at last**, and this is the real prize. They have no XInput equivalent so
+    they never reach evdev at all — this stream is the only place they exist, which is what
+    "M1 → touchpad click, freeing SELECT to be Create" has always been waiting on.
+  * The relay stops depending on xpad binding, so it survives an unbound or absent xpad rather than
+    failing with no obvious cause.
+  * One input source instead of two straddled ones, with no cross-source sync to get wrong.
 
 **Consequence worth stating in any UI**: this is not a preference, it is a handover. With it on,
 Steam drives the pad and our own onboard mapping stops being what the host sees. With
