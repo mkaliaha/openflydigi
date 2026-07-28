@@ -52,14 +52,20 @@ Controls.ToolBar {
             text: "Apply and save"
             icon.name: "document-save"
             // Enabled for an applied-but-uncommitted change as well, not just
-            // an unapplied one. Otherwise pressing Apply immediately greys
+            // an unapplied one -- otherwise pressing Apply immediately greys
             // this out and there is no way to keep what you just applied.
-            enabled: App.profile.dirty || App.profile.saveNeeded
+            // And only when the pad is actually running this profile: the
+            // save command carries no slot id, so it would commit whichever
+            // one is running. See ProfileModel.canSaveToFlash.
+            enabled: (App.profile.dirty || App.profile.saveNeeded)
+                     && App.profile.canSaveToFlash
             onClicked: App.profile.write(true)
 
             Controls.ToolTip.visible: hovered
-            Controls.ToolTip.text: "Also commits to flash, so it survives sleep "
-                                   + "and a power cycle."
+            Controls.ToolTip.text: App.profile.canSaveToFlash
+                ? "Also commits to flash, so it survives sleep and a power cycle."
+                : "Switch the pad to this profile first — the pad commits "
+                  + "whichever profile it is running, not the one shown here."
         }
     }
 }

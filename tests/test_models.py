@@ -51,11 +51,19 @@ def role(model, row, role_name):
 
 # -- profile ---------------------------------------------------------------
 
-def make_profile(load=True):
+def make_profile(load=True, active=0):
+    """A profile model with slot 0 open and the pad running `active`.
+
+    The pad's active slot is set because the real app always learns it -- the
+    startup status read feeds `setActive` -- and saving depends on it: the save
+    command commits whichever profile is running, so a model that does not know
+    refuses to save at all.
+    """
     profile = models.ProfileModel()
     profile.setSlotCount(4)
     requested = []
     profile.loadRequested.connect(requested.append)
+    profile.setActive(active)
     profile.select(0)
     if load:
         profile.profileLoaded(0, bytes(blank_blob("Profile 1")), "Profile 1")
@@ -158,6 +166,42 @@ def test_applying_without_saving_still_offers_a_save():
     check("saving clears the pending save", not profile.saveNeeded)
     check("and the hint says it matches the pad",
           profile.hint == "Matches what is on the pad.", profile.hint)
+
+
+def test_saving_a_profile_the_pad_is_not_running_is_refused():
+    """The save command carries no slot id -- it commits whatever is running.
+
+    Command 166 sets only a version (SaveCurrentMappingConfigCommandFactory);
+    the slot-addressed variant is a different command. Browsing restores the
+    pad deliberately, so the edited profile is routinely not the running one,
+    and saving then would commit the wrong slot while reporting success.
+    """
+    profile, _ = make_profile()
+    profile.setActive(1)                       # pad runs slot 1, we edit slot 0
+    profile.keys.setTarget(profile.keys.rowForKey("m1"), models.TARGETS.index("a"))
+
+    check("saving the wrong slot is not offered", not profile.canSaveToFlash)
+    refusals, writes = [], []
+    profile.saveRefused.connect(refusals.append)
+    profile.writeRequested.connect(lambda *a: writes.append(a))
+
+    profile.write(True)
+    check("the save is refused", len(refusals) == 1, str(refusals))
+    check("and nothing is sent to the pad", writes == [], str(writes))
+    check("the refusal says what to do",
+          "Switch the pad to this profile" in refusals[0], refusals[0])
+    check("the hint explains why", "whichever profile it is running" in profile.hint,
+          profile.hint)
+
+    # Applying without saving is still fine: those packets carry the slot id.
+    profile.write(False)
+    check("applying is still allowed", len(writes) == 1, str(writes))
+
+    profile.setActive(0)                       # pad now runs the edited slot
+    check("saving is offered once the pad is on it", profile.canSaveToFlash)
+    profile.write(True)
+    check("and now it is sent", len(writes) == 2 and writes[1][3] is True,
+          str(writes))
 
 
 def test_selecting_an_unread_profile_clears_the_title():
@@ -566,6 +610,7 @@ def main():
                  test_write_carries_the_blob_and_the_previous_copy,
                  test_confirming_a_write_clears_dirty,
                  test_applying_without_saving_still_offers_a_save,
+                 test_saving_a_profile_the_pad_is_not_running_is_refused,
                  test_selecting_an_unread_profile_clears_the_title,
                  test_lighting_applying_without_saving_still_offers_a_save,
                  test_reset_all_clears_every_remap,

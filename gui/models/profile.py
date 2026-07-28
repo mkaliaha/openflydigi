@@ -618,6 +618,7 @@ class ProfileModel(QObject):
     loadRequested = Signal(int)
     applyRequested = Signal(int)
     restoreFailed = Signal(str)
+    saveRefused = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -666,6 +667,20 @@ class ProfileModel(QObject):
             return False
         return bytes(self._edited.blob) != self._slots.stored(self._cfg_id)
 
+    @Property(bool, notify=cfgIdChanged)
+    def canSaveToFlash(self):
+        """Whether committing to flash would reach the profile being edited.
+
+        Command 166 carries a version and nothing else -- the SDK's
+        SaveCurrentMappingConfigCommandFactory sets only array[5..6], while the
+        slot-addressed variant is a different command (171, array[7] = cfgId).
+        So 166 commits whichever config the pad is *running*. Browsing restores
+        the pad deliberately, so the profile being edited is routinely not the
+        one running, and saving then would write the wrong slot to flash while
+        reporting success.
+        """
+        return self._cfg_id >= 0 and self._cfg_id == self._slots.active
+
     @Property(bool, notify=dirtyChanged)
     def saveNeeded(self):
         """Applied to the pad's memory, but not committed to flash.
@@ -704,9 +719,17 @@ class ProfileModel(QObject):
         if self._edited is None:
             return "Reading this profile from the pad…"
         if self.dirty:
+            if not self.canSaveToFlash:
+                return ("Unsaved changes. Apply takes effect now. To save it, "
+                        "switch the pad to this profile first — the pad "
+                        "commits whichever profile it is running.")
             return ("Unsaved changes. Apply takes effect now; "
                     "saving also keeps it across a power cycle.")
         if self.saveNeeded:
+            if not self.canSaveToFlash:
+                return ("Applied, but only to the pad's memory. Switch the pad "
+                        "to this profile to save it — the pad commits whichever "
+                        "profile it is running.")
             return ("Applied, but only to the pad's memory — it will be lost "
                     "when the pad sleeps. Save to keep it.")
         return "Matches what is on the pad."
@@ -793,6 +816,16 @@ class ProfileModel(QObject):
     @Slot(bool)
     def write(self, save):
         if self._edited is None or self._cfg_id < 0:
+            return
+        # Refuse rather than commit the wrong slot -- see canSaveToFlash. The
+        # guard is here and not only in the view because `write` is a public
+        # slot; a view is not the last line of defence for something that
+        # writes flash.
+        if save and not self.canSaveToFlash:
+            self.saveRefused.emit(
+                "The pad commits whichever profile it is running, so this "
+                "would save the wrong one. Switch the pad to this profile "
+                "first, then save.")
             return
         self.writeRequested.emit(self._cfg_id, bytes(self._edited.blob),
                                  self._slots.stored(self._cfg_id) or b"",
