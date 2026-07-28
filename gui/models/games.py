@@ -182,6 +182,17 @@ class GameFilterModel(QSortFilterProxyModel):
     def count(self):
         return self.rowCount()
 
+    @Property(int, notify=countChanged)
+    def total(self):
+        """How many games there are before filtering.
+
+        `count` alone cannot tell "we have never downloaded the list" from "your
+        search matched nothing", and a view that treats both as empty offers to
+        re-download the list because someone mistyped a game's name.
+        """
+        source = self.sourceModel()
+        return source.rowCount() if source is not None else 0
+
     def filterAcceptsRow(self, row, parent):
         source = self.sourceModel()
         if source is None:

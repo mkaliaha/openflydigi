@@ -73,6 +73,55 @@ TestCase {
         combo.activated(wanted);          // the handler a real click reaches
     }
 
+    // Whether anything would actually be drawn, which `visible` on its own does
+    // not answer: an explicit binding overrides the value a hidden ancestor
+    // would otherwise propagate, so an item in a hidden subtree still reports
+    // visible === true. ScrollablePage builds exactly such a subtree -- it
+    // reparents its one Flickable child and hides the rest -- and both this
+    // page and the Games page had a placeholder stranded in it.
+    function drawable(item) {
+        for (let node = item.parent; node; node = node.parent) {
+            if (!node.visible)
+                return false;
+        }
+        return true;
+    }
+
+    function test_a_sleeping_pad_says_so_instead_of_showing_nothing() {
+        Pad.failReads = true;
+        Fixture.resetCounts();
+        App.profile.forget();
+        tryVerify(() => !App.profile.loaded, 5000,
+                  "the profile should not have loaded from a silent pad");
+
+        let placeholder = findChild(page, "buttonsPlaceholder");
+        verify(placeholder, "the page has no placeholder");
+        verify(placeholder.visible, "the placeholder should be showing");
+        verify(drawable(placeholder),
+               "the placeholder is in a subtree nothing draws");
+        verify(placeholder.width > 0 && placeholder.height > 0,
+               "the placeholder has no size");
+
+        let centre = placeholder.mapToItem(page, placeholder.width / 2,
+                                           placeholder.height / 2);
+        verify(centre.y > 0 && centre.y < page.height,
+               "the placeholder is off the page at y=" + centre.y);
+
+        // Not merely hidden: KeyMapModel has a fixed row count and fabricates an
+        // identity mapping with no config open, so a list left bound to it draws
+        // a full page of editable rows that mean nothing.
+        compare(findChild(page, "keyList").count, 0,
+                "an unloaded profile must not render fabricated rows");
+    }
+
+    function test_the_placeholder_goes_away_once_a_profile_opens() {
+        let placeholder = findChild(page, "buttonsPlaceholder");
+        verify(App.profile.loaded, "init should have opened a profile");
+        verify(!placeholder.visible, "nothing to say when a profile is open");
+        verify(findChild(page, "keyList").count > 20,
+               "the key list should be populated");
+    }
+
     function test_the_list_shows_every_key() {
         let list = findChild(page, "keyList");
         compare(list.count, App.profile.keys.count);

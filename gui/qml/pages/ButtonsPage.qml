@@ -35,25 +35,35 @@ Kirigami.ScrollablePage {
 
     footer: ProfileFooter {}
 
-    Kirigami.PlaceholderMessage {
-        objectName: "buttonsPlaceholder"
-        anchors.centerIn: parent
-        width: parent.width - Kirigami.Units.gridUnit * 4
-        visible: !App.profile.loaded
-        icon.name: "input-gaming"
-        text: "No profile open"
-        explanation: "Pick a profile on the Controller page. Reading one makes "
-                     + "the pad re-seat its trigger motors, so it only happens "
-                     + "when you ask."
-    }
-
     ListView {
         id: keyList
         objectName: "keyList"
-        model: App.profile.keys
-        visible: App.profile.loaded
+        // Null, not merely hidden. KeyMapModel reports a constant 23 rows and
+        // invents an identity mapping when no config is open, so a view bound
+        // to it with nothing to show renders 23 editable rows of fiction.
+        model: App.profile.loaded ? App.profile.keys : null
         currentIndex: -1
         reuseItems: true
+
+        // Inside the view rather than beside it. ScrollablePage reparents its
+        // one Flickable child into the ScrollView and hides everything else
+        // (`scrollingArea.visible = false`), so a placeholder that is a sibling
+        // of this list lives in the hidden half and can never be drawn -- which
+        // is what a pad asleep at startup used to get: a blank page under a
+        // footer saying it was reading. An empty view leaves contentHeight at
+        // zero, which sizes the content item to the viewport, so centring in it
+        // centres on screen.
+        Kirigami.PlaceholderMessage {
+            objectName: "buttonsPlaceholder"
+            anchors.centerIn: parent
+            width: parent.width - Kirigami.Units.gridUnit * 4
+            visible: !App.profile.loaded
+            icon.name: "input-gaming"
+            text: "No profile open"
+            explanation: "Pick a profile on the Controller page. Reading one "
+                         + "makes the pad re-seat its trigger motors, so it "
+                         + "only happens when you ask."
+        }
 
         section.property: "cluster"
         section.criteria: ViewSection.FullString

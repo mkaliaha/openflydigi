@@ -56,6 +56,61 @@ TestCase {
         waitForRendering(page);
     }
 
+    // See tst_buttons.qml for why `visible` alone does not answer this.
+    function drawable(item) {
+        for (let node = item.parent; node; node = node.parent) {
+            if (!node.visible)
+                return false;
+        }
+        return true;
+    }
+
+    function test_no_list_at_all_offers_to_fetch_one() {
+        Fixture.clearGames();
+        tryVerify(() => App.games.total === 0, 2000, "the list did not clear");
+
+        let placeholder = findChild(page, "gamesPlaceholder");
+        verify(placeholder, "the page has no placeholder");
+        verify(placeholder.visible, "an empty list should say so");
+        verify(drawable(placeholder),
+               "the placeholder is in a subtree nothing draws");
+        verify(placeholder.text.indexOf("No game list") >= 0,
+               "wrong message: " + placeholder.text);
+        verify(findChild(page, "updateListPlaceholderAction"),
+               "no way to fetch the list from the placeholder");
+
+        Fixture.seedGames(sampleGames);
+    }
+
+    function test_a_search_matching_nothing_is_not_a_missing_list() {
+        // `count` is the filtered count, so both cases look identical to the
+        // view. Offering to re-download Flydigi's list because someone mistyped
+        // a game's name points at the wrong problem entirely.
+        let search = findChild(page, "gameSearch");
+        search.text = "no game is called this";
+        tryVerify(() => App.games.count === 0, 2000,
+                  "the search left " + App.games.count + " games");
+
+        let placeholder = findChild(page, "gamesPlaceholder");
+        verify(placeholder.visible, "an empty result should say so");
+        verify(drawable(placeholder),
+               "the placeholder is in a subtree nothing draws");
+        verify(placeholder.text.indexOf("No game list") < 0,
+               "the list is not missing, the search matched nothing: "
+               + placeholder.text);
+        compare(App.games.total, sampleGames.length,
+                "the list itself is still there");
+        verify(placeholder.explanation.indexOf(String(sampleGames.length)) >= 0,
+               "should say how many games it searched: " + placeholder.explanation);
+
+        let clear = findChild(page, "clearFiltersAction");
+        verify(clear, "no way to clear the filters from the placeholder");
+        clear.trigger();
+        tryVerify(() => App.games.count === sampleGames.length, 2000,
+                  "clearing the filters did not restore the list");
+        compare(search.text, "", "the search field still shows the old text");
+    }
+
     function test_every_game_is_listed() {
         compare(App.games.count, 3);
         let list = findChild(page, "gameList");

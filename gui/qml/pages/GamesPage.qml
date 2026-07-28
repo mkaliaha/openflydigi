@@ -41,6 +41,7 @@ Kirigami.ScrollablePage {
             spacing: Kirigami.Units.largeSpacing
 
             Kirigami.SearchField {
+                id: searchField
                 objectName: "gameSearch"
                 placeholderText: "Search games…"
                 Layout.fillWidth: true
@@ -51,6 +52,7 @@ Kirigami.ScrollablePage {
             }
 
             Controls.ComboBox {
+                id: routeCombo
                 objectName: "routeFilter"
                 model: App.games.routeNames
                 Layout.minimumWidth: Kirigami.Units.gridUnit * 10
@@ -97,21 +99,34 @@ Kirigami.ScrollablePage {
         }
     }
 
-    Kirigami.PlaceholderMessage {
-        objectName: "gamesPlaceholder"
-        anchors.centerIn: parent
-        width: parent.width - Kirigami.Units.gridUnit * 4
-        visible: App.games.count === 0
-        icon.name: "applications-games"
-        text: "No game list yet"
-        explanation: "\"Update list\" fetches it from Flydigi's public API — "
-                     + "that is the only time this app contacts them."
-        helpfulAction: Kirigami.Action {
-            objectName: "updateListPlaceholderAction"
-            text: "Update list"
-            icon.name: "download"
-            enabled: !App.fetchingGames
-            onTriggered: App.fetchGameList()
+    // Two ways to have nothing to show, and they want different offers. No list
+    // at all is fixed by fetching one; a filter matching nothing is the user's
+    // own doing, and offering to re-download the list for a typo is a
+    // non-sequitur that also hides the real cause.
+    readonly property bool haveNoList: App.games.total === 0
+
+    Kirigami.Action {
+        id: fetchAction
+        objectName: "updateListPlaceholderAction"
+        text: "Update list"
+        icon.name: "download"
+        enabled: !App.fetchingGames
+        onTriggered: App.fetchGameList()
+    }
+
+    Kirigami.Action {
+        id: clearFiltersAction
+        objectName: "clearFiltersAction"
+        text: "Clear the filters"
+        icon.name: "edit-clear-all"
+        // The controls are the source of truth for what the filter is, so they
+        // are cleared and left to drive the model, rather than the model being
+        // reset behind a search field still showing the text that emptied it.
+        onTriggered: {
+            searchField.text = "";
+            routeCombo.currentIndex = 0;
+            App.games.route = App.games.routeNames[0];
+            page.selectedRow = -1;
         }
     }
 
@@ -120,7 +135,24 @@ Kirigami.ScrollablePage {
         objectName: "gameList"
         model: App.games
         currentIndex: page.selectedRow
-        visible: App.games.count > 0
+
+        // Inside the view: ScrollablePage reparents the Flickable and hides
+        // everything else, so a sibling placeholder is never drawn. See
+        // ButtonsPage for the full story.
+        Kirigami.PlaceholderMessage {
+            objectName: "gamesPlaceholder"
+            anchors.centerIn: parent
+            width: parent.width - Kirigami.Units.gridUnit * 4
+            visible: App.games.count === 0
+            icon.name: page.haveNoList ? "applications-games" : "edit-find"
+            text: page.haveNoList ? "No game list yet" : "Nothing matches"
+            explanation: page.haveNoList
+                ? "\"Update list\" fetches it from Flydigi's public API — "
+                  + "that is the only time this app contacts them."
+                : "None of the " + App.games.total + " games in the list match "
+                  + "the search and the route filter."
+            helpfulAction: page.haveNoList ? fetchAction : clearFiltersAction
+        }
 
         delegate: Controls.ItemDelegate {
             id: gameRow
