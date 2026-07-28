@@ -1129,6 +1129,11 @@ What this settles without a single guess:
   * **Never match a game process by cmdline alone** — Steam/Proton wrappers (`reaper`, `bwrap`,
     `pv-adverb`, `steam.exe`) all carry the game's path. Require the PE to be mapped.
   * **Effects persist in controller state** until changed; there is no timeout.
+  * **Trigger effects 2 and 3 are named the other way round by Flydigi's own UI.** The SDK enum
+    says `Sniper=2, Recoil=3`; Space Station's picker shows mode 2 as "Recoil" (zh 机枪, machine
+    gun) and mode 3 as "Sniper" (狙击), and the behaviour follows the label — 2 rattles, 3 breaks
+    through. Code and wire here use the enum name, the UI uses theirs, so that advice given for one
+    application lands on the same effect in the other.
   * **`bindType` is always 2.** Every `SyncWithGrip` Flydigi constructs passes 2, and all 34
     vibration games in the gamelist carry `vibType: 2`. Sending 0 is not a quieter bind, it appears
     to be no bind: with it set, neither `Normal` nor mode 5 produced anything under rumble.

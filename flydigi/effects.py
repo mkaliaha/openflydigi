@@ -76,7 +76,18 @@ EFFECTS = (
                _number("resistance", "Damping strength",
                        "How hard the trigger pushes back", 1, 255, 40),
            )),
-    Effect(MODE_SNIPER, "sniper", "Sniper",
+    # `key` is the SDK's enum name and `label` is what Space Station shows a
+    # user, and for modes 2 and 3 **those are crossed**. Their picker labels
+    # AdapterTriggerType_Sniper with `trigger_mode_K2_recoil` ("Recoil", zh 机枪
+    # "machine gun") and AdapterTriggerType_Recoil with `trigger_mode_K2_sniper`
+    # ("Sniper", zh 狙击). The behaviour follows the label, not the enum: mode 2
+    # rattles, mode 3 resists and breaks through, both confirmed by feel.
+    #
+    # So the labels below are deliberately not the enum names. Someone acting on
+    # a Flydigi recommendation to "use Sniper" must land on the same effect here
+    # that they would there, and the DualSense mapping agrees -- its
+    # vibration/automatic-gun effect maps to mode 2, the machine gun.
+    Effect(MODE_SNIPER, "sniper", "Recoil",
            "A vibration that begins once the trigger is held past a point", (
                _number("start", "Vibration start position",
                        "Travel that must be pressed before vibration begins",
@@ -90,7 +101,7 @@ EFFECTS = (
                        "How fast it vibrates", 1, 255, 20),
                _MATCH,
            )),
-    Effect(MODE_RECOIL, "recoil", "Recoil",
+    Effect(MODE_RECOIL, "recoil", "Sniper",
            "A resisting band that gives way, like a weapon's break point", (
                _number("start", "Breakthrough start position",
                        "Travel that must be pressed before the band begins",

@@ -171,7 +171,12 @@ def cmd_race(fd, args):
 
 
 def cmd_sniper(fd, args):
-    """SetForceTrigger: Sniper (vibrates once held past a point)."""
+    """SetForceTrigger mode 2 -- **Space Station calls this "Recoil"**.
+
+    Named for the SDK enum (`AdapterTriggerType.Sniper`), which is crossed with
+    their UI label: mode 2 rattles like a machine gun (their zh string is 机枪)
+    and mode 3 is the one they show as "Sniper". See PROTOCOL.md 3a.
+    """
     params = bytes([SIDE[args.side], 2, args.stroke, max(1, args.pressure),
                     max(1, args.strength), max(1, args.frequency),
                     1 if args.match_stroke else 0])
@@ -180,9 +185,12 @@ def cmd_sniper(fd, args):
 
 
 def cmd_recoil(fd, args):
-    """SetForceTrigger: Recoil (a band of resistance that gives way).
+    """SetForceTrigger mode 3 -- **Space Station calls this "Sniper"**.
 
-    The zero before the match flag is a slot Flydigi's builder leaves empty.
+    Named for the SDK enum (`AdapterTriggerType.Recoil`), crossed with their
+    label the same way `sniper` is. This is the breakthrough effect: resist,
+    then give way. The zero before the match flag is a slot Flydigi's builder
+    leaves empty.
     """
     params = bytes([SIDE[args.side], 3, args.stroke, args.travel,
                     max(1, args.resistance), 0, 1 if args.match_stroke else 0])

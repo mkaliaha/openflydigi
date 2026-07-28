@@ -107,6 +107,7 @@ Effect vocabulary — `params[0]`=side, `params[1]`=mode:
 | `Race` | 1 | `stroke, resistance(min 1), matchStroke` |
 | `Sniper` | 2 | `stroke, pressureLevel(min 1), strength(min 1), frequency(min 1), matchStroke` |
 | `Recoil` | 3 | `stroke, recoilStroke, strength(min 1), 0, matchStroke` |
+
 | `Lock` | 4 | `stroke, strength(255 in every call Flydigi makes), matchStroke` |
 | `Vibration` | 5 | `stroke, pressureLevel(min 1), strength(min 1), frequency(min 1), matchStroke` |
 | `SyncWithGrip` | cmd 82 | `bindType, filter, scale, stroke, pressureLevel, strength, frequency` |
@@ -114,6 +115,25 @@ Effect vocabulary — `params[0]`=side, `params[1]`=mode:
 `min 1` is the builder's own clamp: it raises a zero rather than refusing the packet, so a
 caller that sends 0 gets the weakest setting. `Recoil`'s fourth slot is genuinely empty — the
 builder emits a 0 there and `matchStroke` follows it.
+
+**Modes 2 and 3 are labelled the other way round in Space Station's UI, and the behaviour follows
+the label.** Their picker binds `AdapterTriggerType_Sniper` to `trigger_mode_K2_recoil` ("Recoil",
+zh 机枪 *machine gun*) and `AdapterTriggerType_Recoil` to `trigger_mode_K2_sniper` ("Sniper", zh
+狙击) — verified in the bundled `index-*.js`, and consistent with the parameter panels, which give
+mode 2 the `trigger_vibration_*` strings and mode 3 the `trigger_recoil_*` ones. Felt on hardware
+the same way: mode 2 rattles, mode 3 resists and breaks through. The DualSense mapping agrees, since
+its vibration/automatic-gun effect maps to mode 2.
+
+So an effect has two names, and which one is right depends on who you are talking to:
+
+| Mode | SDK enum | Space Station UI | Behaviour |
+|---|---|---|---|
+| 2 | `Sniper` | **Recoil** (机枪) | vibration/rattle |
+| 3 | `Recoil` | **Sniper** (狙击) | breakthrough resistance |
+
+This project uses the enum name in code and on the wire (`effects.sniper` is mode 2) and Space
+Station's label in the UI, so that a recommendation to "use Sniper" picks the same effect in both
+applications.
 
 The mode numbers are `AdapterTriggerType`, and the same six are the first byte of the
 per-profile block (§3c). `Race` is the racing-throttle resistance effect — the Forza Horizon

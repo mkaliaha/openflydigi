@@ -69,7 +69,7 @@ TestCase {
     }
 
     function test_the_controls_follow_the_chosen_effect() {
-        // Racing and Sniper share a start position and nothing else, so the
+        // Racing and mode 2 share a start position and nothing else, so the
         // rows have to be replaced rather than enabled and disabled.
         compare(App.profile.triggers.right.effect, 0, "should start on General");
         verify(!findChild(page, "param_start_right"),

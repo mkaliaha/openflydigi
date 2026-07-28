@@ -286,6 +286,24 @@ def test_the_amplitude_window_cannot_be_inverted():
           f"min {motor['minimum']} max {motor['maximum']}")
 
 
+def test_the_labels_follow_space_station_not_the_enum():
+    """Modes 2 and 3 are named the other way round by Flydigi's own UI, and the
+    behaviour follows the label -- 2 rattles, 3 breaks through. Locked down
+    because it reads like a bug: `effects.sniper` is the effect labelled
+    "Recoil", and correcting that to match the enum would send anyone following
+    a Flydigi recommendation to the wrong effect."""
+    labels = {e.mode: e.label for e in effects.EFFECTS}
+    keys = {e.mode: e.key for e in effects.EFFECTS}
+    check("mode 2 is keyed sniper and labelled Recoil",
+          (keys[2], labels[2]) == ("sniper", "Recoil"), str((keys[2], labels[2])))
+    check("mode 3 is keyed recoil and labelled Sniper",
+          (keys[3], labels[3]) == ("recoil", "Sniper"), str((keys[3], labels[3])))
+    check("the other four agree with themselves",
+          [labels[m] for m in (0, 1, 4, 5)]
+          == ["General", "Racing", "Trigger lock", "Vibration"],
+          str([labels[m] for m in (0, 1, 4, 5)]))
+
+
 def test_every_effect_round_trips_through_the_profile():
     """All six of Flydigi's effects, not just the two with obvious knobs."""
     for effect in effects.EFFECTS:
@@ -870,6 +888,7 @@ def main():
                  test_a_failed_browse_still_puts_the_pad_back,
                  test_bad_checksum_is_rejected, test_vibration_intensity,
                  test_trigger_effect_and_curve,
+                 test_the_labels_follow_space_station_not_the_enum,
                  test_every_effect_round_trips_through_the_profile,
                  test_the_effect_block_matches_flydigis_layout,
                  test_switching_to_general_keeps_the_numbers,

@@ -246,7 +246,7 @@ class TriggerSideModel(QObject):
         """The chosen effect's knobs, in order, each ready to draw as a row.
 
         A list rather than named properties because the knobs are not the same
-        from one effect to the next -- Racing has two, Sniper has five, General
+        from one effect to the next -- Racing has two, mode 2 has five, General
         has none -- and a fixed pair of "start"/"strength" properties could only
         describe one of them honestly.
         """
