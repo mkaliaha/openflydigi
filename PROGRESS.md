@@ -628,6 +628,12 @@ M1-M4 do not justify it either: the pad already remaps them onto real XInput but
 nothing running. The only thing left that onboard remapping cannot do is a pad button the game never
 sees, for a host-side hotkey. Narrow, and not a reason to rework the relay.
 
+**Reversible with the one flag, and nothing needs cleaning up.** Turning it off releases the holder
+and restores the transport by itself — `controller_data` back on, `raw_data` back off, `control_by`
+empty — even though only `third_party` was sent and the other four went as 0xFF, "leave alone". The
+flags follow the takeover symmetrically in both directions, so neither the UI nor a caller has to
+put them back.
+
 **Consequence worth stating in any UI**: this is not a preference, it is a handover. With it on,
 Steam drives the pad and our own onboard mapping stops being what the host sees. With
 `controller_data` switched off by the new holder, anything reading the ordinary gamepad path may get
