@@ -29,6 +29,7 @@ Kirigami.ApplicationWindow {
     readonly property var sections: [
         {name: "Controller", icon: "input-gaming", url: "pages/ControllerPage.qml"},
         {name: "Buttons", icon: "input-keyboard", url: "pages/ButtonsPage.qml"},
+        {name: "Sticks", icon: "input-gamepad-symbolic", url: "pages/SticksPage.qml"},
         {name: "Vibration", icon: "media-playback-start", url: "pages/VibrationPage.qml"},
         {name: "Triggers", icon: "input-gamepad", url: "pages/TriggersPage.qml"},
         {name: "Lighting", icon: "color-management", url: "pages/LightingPage.qml"},
@@ -117,7 +118,7 @@ Kirigami.ApplicationWindow {
                 onTriggered: root.openSection(1)
             },
             Kirigami.Action {
-                objectName: "sectionVibration"
+                objectName: "sectionSticks"
                 text: root.sections[2].name
                 icon.name: root.sections[2].icon
                 checkable: true
@@ -125,7 +126,7 @@ Kirigami.ApplicationWindow {
                 onTriggered: root.openSection(2)
             },
             Kirigami.Action {
-                objectName: "sectionTriggers"
+                objectName: "sectionVibration"
                 text: root.sections[3].name
                 icon.name: root.sections[3].icon
                 checkable: true
@@ -133,7 +134,7 @@ Kirigami.ApplicationWindow {
                 onTriggered: root.openSection(3)
             },
             Kirigami.Action {
-                objectName: "sectionLighting"
+                objectName: "sectionTriggers"
                 text: root.sections[4].name
                 icon.name: root.sections[4].icon
                 checkable: true
@@ -141,12 +142,20 @@ Kirigami.ApplicationWindow {
                 onTriggered: root.openSection(4)
             },
             Kirigami.Action {
-                objectName: "sectionGames"
+                objectName: "sectionLighting"
                 text: root.sections[5].name
                 icon.name: root.sections[5].icon
                 checkable: true
                 checked: root.currentSection === 5
                 onTriggered: root.openSection(5)
+            },
+            Kirigami.Action {
+                objectName: "sectionGames"
+                text: root.sections[6].name
+                icon.name: root.sections[6].icon
+                checkable: true
+                checked: root.currentSection === 6
+                onTriggered: root.openSection(6)
             }
         ]
     }

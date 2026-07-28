@@ -382,6 +382,76 @@ def test_the_trigger_motors_share_one_enable():
     check("turning it on is a change", profile.dirty)
 
 
+def test_a_stick_edit_recompiles_the_bank():
+    """The one thing this page cannot get away with not doing.
+
+    The pad has no curve evaluator -- confirmed on hardware, flattening the bank
+    silences the stick while flattening the polyline at 109 changes nothing. So
+    a model that stored what the user edited and stopped there would produce a
+    slider that moves, a profile that goes dirty, a write that succeeds, and no
+    change whatsoever in the hand.
+    """
+    profile, _ = make_profile()
+    left = profile.sticks.left
+    factory = list(left.bank)
+
+    left.center = 30
+    check("the source form is stored", profile.config.stick("left")["center"] == 30)
+    check("the bank moved with it", list(left.bank) != factory, str(left.bank))
+    check("and it is what the compiler produces",
+          list(left.bank) == mapping.stick_bank(center=30), str(left.bank))
+    check("editing a stick is a change", profile.dirty)
+    check("the other stick is untouched", list(profile.sticks.right.bank) == factory)
+
+
+def test_a_stick_edit_moves_the_curve_to_custom():
+    profile, _ = make_profile()
+    names = profile.sticks.presetNames
+    check("Custom is the last preset", names[-1] == "Custom", str(names))
+    check("a fresh profile is on Default", profile.sticks.left.curveType == 0)
+
+    profile.sticks.left.edge = 15
+    check("editing a node makes it Custom",
+          profile.sticks.left.curveType == len(names) - 1,
+          str(profile.sticks.left.curveType))
+
+    # And picking a preset again restores its whole shape, ends included.
+    profile.sticks.left.curveType = 0
+    check("the preset is stored as itself", profile.sticks.left.curveType == 0)
+    check("it cleared the outer dead zone", profile.sticks.left.edge == 0)
+
+
+def test_a_stick_bound_to_a_key_is_not_offered_a_curve():
+    """127 in the centre byte is a sentinel, not a dead zone of 127."""
+    profile, _ = make_profile()
+    check("a real stick says so", profile.sticks.left.isStick)
+
+    base = mapping.OFF_JOYSTICK_CURVE
+    profile.config.blob[base + 1] = mapping.CENTER_NOT_A_STICK
+    profile.sticks.refresh()
+    check("the sentinel is recognised", not profile.sticks.left.isStick)
+    check("and no impossible dead zone is reported",
+          profile.sticks.left.center == 0, str(profile.sticks.left.center))
+    check("the right stick is unaffected", profile.sticks.right.isStick)
+
+
+def test_circularity_is_not_part_of_the_curve():
+    """It is the one field in these blocks the firmware applies itself.
+
+    Which is also why picking a curve preset must not clear it: the preset is a
+    shape for the response curve, and circularity is not part of that shape.
+    """
+    profile, _ = make_profile()
+    check("rectangular by default", not profile.sticks.left.circular)
+
+    profile.sticks.left.circular = True
+    check("it round-trips", profile.sticks.left.circular)
+
+    profile.sticks.left.curveType = 0
+    check("picking a preset leaves it alone", profile.sticks.left.circular)
+    check("and the preset still took", profile.sticks.left.curveType == 0)
+
+
 def test_restore_refuses_a_wrong_sized_file(tmp="/tmp"):
     profile, _ = make_profile()
     path = os.path.join(tmp, "apex5-bad-profile.bin")
@@ -670,6 +740,10 @@ def main():
                  test_vibration_keeps_min_below_max,
                  test_trigger_fields_are_independent,
                  test_the_trigger_motors_share_one_enable,
+                 test_a_stick_edit_recompiles_the_bank,
+                 test_a_stick_edit_moves_the_curve_to_custom,
+                 test_a_stick_bound_to_a_key_is_not_offered_a_curve,
+                 test_circularity_is_not_part_of_the_curve,
                  test_restore_refuses_a_wrong_sized_file,
                  test_backup_then_restore_round_trips,
                  test_slot_list_tracks_active_and_current,

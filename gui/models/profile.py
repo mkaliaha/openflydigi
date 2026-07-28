@@ -316,6 +316,146 @@ class TriggerModel(QObject):
             side.refresh()
 
 
+# The curve presets, in the order a picker shows them. Space Station's own
+# labels: the enum calls the middle two Quick and Slow, the UI does not.
+CURVE_PRESETS = [("Default", mapping.CURVE_DEFAULT),
+                 ("Instant", mapping.CURVE_QUICK),
+                 ("Delay", mapping.CURVE_SLOW),
+                 ("Custom", mapping.CURVE_CUSTOM)]
+
+# Both are percentages, and both refuse their negative half -- see
+# mapping.BIPOLAR_MAX for why only one half has an encoding we trust.
+STICK_MAX = mapping.BIPOLAR_MAX
+
+
+@QmlElement
+class StickSideModel(QObject):
+    """One stick's response curve.
+
+    A single `changed` signal for the lot, because every field feeds the same
+    compiler: moving the dead zone recomputes the bank, and choosing a preset
+    moves the dead zone. Nothing here changes on its own.
+    """
+
+    changed = Signal()
+
+    def __init__(self, profile, side):
+        super().__init__(profile)
+        self._profile = profile
+        self._side = side
+
+    def _stick(self):
+        config = self._profile.config
+        if config is None:
+            return {"type": 0, "center": 0, "edge": 0, "circular": False,
+                    "bank": list(mapping.stick_bank()), "is_stick": True}
+        return config.stick(self._side)
+
+    def _set(self, **kwargs):
+        config = self._profile.config
+        if config is None:
+            return
+        config.set_stick(self._side, **kwargs)
+        self.changed.emit()
+        self._profile.markChanged()
+
+    @Property(int, notify=changed)
+    def curveType(self):
+        """Index into CURVE_PRESETS, not the stored id."""
+        stored = self._stick()["type"]
+        return next((i for i, (_l, v) in enumerate(CURVE_PRESETS) if v == stored),
+                    len(CURVE_PRESETS) - 1)
+
+    @curveType.setter
+    def curveType(self, value):
+        index = max(0, min(len(CURVE_PRESETS) - 1, int(value)))
+        self._set(curve_type=CURVE_PRESETS[index][1])
+
+    @Property(int, notify=changed)
+    def center(self):
+        stick = self._stick()
+        # 127 is the firmware's "this stick is mapped to something that is not a
+        # stick" sentinel. Reporting it as a dead zone of 127 would be a lie, and
+        # on a 0..100 slider an impossible one.
+        return stick["center"] if stick["is_stick"] else 0
+
+    @center.setter
+    def center(self, value):
+        self._set(center=max(0, min(STICK_MAX, int(value))))
+
+    @Property(int, notify=changed)
+    def edge(self):
+        edge = self._stick()["edge"]
+        return edge if edge <= STICK_MAX else 0
+
+    @edge.setter
+    def edge(self, value):
+        self._set(edge=max(0, min(STICK_MAX, int(value))))
+
+    @Property(bool, notify=changed)
+    def circular(self):
+        return bool(self._stick()["circular"])
+
+    @circular.setter
+    def circular(self, value):
+        self._set(circular=bool(value))
+
+    @Property("QVariantList", notify=changed)
+    def bank(self):
+        """The nine points the pad actually plays, for drawing the curve.
+
+        Exposed because this is the only honest thing to plot: the polyline is
+        what the user edits, but the bank is what the stick will do.
+        """
+        return [int(v) for v in self._stick()["bank"]]
+
+    @Property(bool, notify=changed)
+    def isStick(self):
+        """False when this stick is bound to keyboard, mouse or d-pad.
+
+        The curve fields mean nothing then, and the remapping that caused it is
+        not something this app can edit yet -- so the page says so rather than
+        offering controls that would write into a block the pad is ignoring.
+        """
+        return bool(self._stick()["is_stick"])
+
+    def refresh(self):
+        self.changed.emit()
+
+
+@QmlElement
+class StickModel(QObject):
+    """Both sticks."""
+
+    def __init__(self, profile):
+        super().__init__(profile)
+        self._sides = {side: StickSideModel(profile, side)
+                       for side in mapping.SIDES}
+
+    @Property(StickSideModel, constant=True)
+    def left(self):
+        return self._sides["left"]
+
+    @Property(StickSideModel, constant=True)
+    def right(self):
+        return self._sides["right"]
+
+    @Property("QStringList", constant=True)
+    def presetNames(self):
+        return [label for label, _value in CURVE_PRESETS]
+
+    @Property(int, constant=True)
+    def maximum(self):
+        return STICK_MAX
+
+    def side(self, name):
+        return self._sides[name]
+
+    def refresh(self):
+        for side in self._sides.values():
+            side.refresh()
+
+
 @QmlElement
 class KeyMapModel(QAbstractListModel):
     """One row per physical key: what it sends, and its turbo."""
@@ -638,6 +778,7 @@ class ProfileModel(QObject):
         self._keys = KeyMapModel(self)
         self._vibration = VibrationModel(self)
         self._triggers = TriggerModel(self)
+        self._sticks = StickModel(self)
 
     # `config` is a plain attribute, not a Q_PROPERTY: MappingConfig is not a
     # QObject and has no business crossing into QML. The sub-models reach it
@@ -661,6 +802,10 @@ class ProfileModel(QObject):
     @Property(TriggerModel, constant=True)
     def triggers(self):
         return self._triggers
+
+    @Property(StickModel, constant=True)
+    def sticks(self):
+        return self._sticks
 
     @Property(int, notify=cfgIdChanged)
     def cfgId(self):
@@ -791,6 +936,7 @@ class ProfileModel(QObject):
         self._keys.refresh()
         self._vibration.refresh()
         self._triggers.refresh()
+        self._sticks.refresh()
         self.markChanged()
 
     @Slot()
@@ -902,4 +1048,5 @@ class ProfileModel(QObject):
         self._keys.refresh()
         self._vibration.refresh()
         self._triggers.refresh()
+        self._sticks.refresh()
         self.markChanged()

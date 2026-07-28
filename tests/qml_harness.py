@@ -200,6 +200,26 @@ class PadProbe(QObject):
     def titleOf(self, cfg_id):
         return mapping.MappingConfig(self._pad.blobs[cfg_id]).title
 
+    @Slot(int, str, result="QVariantList")
+    def bankOf(self, cfg_id, side):
+        """The nine points the pad would actually play, out of its own blob.
+
+        The only assertion that proves a stick edit did anything: the polyline
+        the UI edits is not what the firmware reads.
+        """
+        config = mapping.MappingConfig(self._pad.blobs[cfg_id])
+        return [int(v) for v in config.joystick_shape(side)["bank"]]
+
+    @Slot(int, str, result=int)
+    def centerOf(self, cfg_id, side):
+        config = mapping.MappingConfig(self._pad.blobs[cfg_id])
+        return config.joystick_curve(side)["center"]
+
+    @Slot(int, str, result=bool)
+    def circularOf(self, cfg_id, side):
+        config = mapping.MappingConfig(self._pad.blobs[cfg_id])
+        return bool(config.joystick_shape(side)["circular"])
+
     @Slot(int, result=int)
     def remapCount(self, cfg_id):
         return len(mapping.MappingConfig(self._pad.blobs[cfg_id]).remapped())

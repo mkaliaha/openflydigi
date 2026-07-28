@@ -19,6 +19,10 @@ FormCard.AbstractFormDelegate {
     id: root
 
     property string label: ""
+    /// Optional second line under the label. Empty by default, and the label
+    /// keeps its original single-line shape when it is, so the rows on pages
+    /// that do not set one are unchanged.
+    property string description: ""
     property int from: 0
     property int to: 255
     property int value: 0
@@ -33,10 +37,25 @@ FormCard.AbstractFormDelegate {
     contentItem: RowLayout {
         spacing: Kirigami.Units.largeSpacing
 
-        Controls.Label {
-            text: root.label
-            elide: Text.ElideRight
+        ColumnLayout {
+            spacing: 0
             Layout.minimumWidth: Kirigami.Units.gridUnit * 7
+            Layout.maximumWidth: Kirigami.Units.gridUnit * 12
+
+            Controls.Label {
+                text: root.label
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+            }
+
+            Controls.Label {
+                text: root.description
+                visible: root.description !== ""
+                wrapMode: Text.WordWrap
+                font: Kirigami.Theme.smallFont
+                color: Kirigami.Theme.disabledTextColor
+                Layout.fillWidth: true
+            }
         }
 
         Controls.Slider {
