@@ -64,7 +64,7 @@ QML. See `gui/README.md`.
 | Profiles → Sticks | dead zone, outer dead zone, sensitivity curve presets, circular range |
 | Profiles → Triggers | stored effect (off / constant resistance), dead zone, trigger motor |
 | Adaptive triggers | all 94 games, searchable, filtered by route; vibration presets load onto the pad from here; per-game **Auto** toggle and a route picker for the nine multi-route games |
-| Setup | the daemon's unit, "running now" and "start at login" as separate switches, and the udev rules behind one authentication prompt |
+| Setup | the daemon's unit, "running now" and "start at login" as separate switches, the application-menu entry, and the udev rules behind one authentication prompt |
 | Lighting | effect, up to 5 colours, brightness, cycle time, react-to-rumble |
 
 **Everything device-facing runs on a worker thread** (`gui/worker.py`) and requests cross as
@@ -999,7 +999,7 @@ What this settles without a single guess:
 | `tests/test_forza.py` | Self-test for the parser and rule engine (no hardware needed) |
 | `configs/forza.json` | Flydigi's own 15-rule Forza config, reused verbatim |
 | `tools/flydigid` | Polling daemon — auto-detects a running game and applies its config |
-| `tools/apex5-setup` | Setup checklist: udev rules, the daemon's unit, start at login |
+| `tools/apex5-setup` | Setup checklist: udev rules, the daemon's unit, start at login, menu entry |
 | `tools/flydigi-auto` | Per-game auto mode and route — `list`, `on`, `off`, `reset`, `route` |
 | `flydigi/setup.py` | What the two above share: checks, unit generation, escalation |
 | `flydigi/prefs.py` | Per-game preferences in `~/.config/flydigi/games.json` |
@@ -1367,7 +1367,7 @@ for t in tests/test_{dsx,forza,games,mapping,monitor,prefs,relay}.py; do python3
 tools/generate-qmltypes && qmllint -I . -I /usr/lib64/qt6/qml gui/qml/Main.qml gui/qml/*/*.qml
 ```
 
-201 model tests, 52 shell, 71 QML, 340 backend; qmllint and `reuse lint` clean.
+201 model tests, 52 shell, 71 QML, 348 backend; qmllint and `reuse lint` clean.
 
 **Both known bugs are fixed**, each with a test that fails without the fix.
 

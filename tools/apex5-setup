@@ -67,6 +67,8 @@ def main():
             ("check", "report what is set up and what is not (default)"),
             ("install-unit", "write the daemon's systemd unit and reload"),
             ("remove-unit", "stop, disable and delete the unit"),
+            ("install-desktop", "add the app to the application menu"),
+            ("remove-desktop", "remove it from the application menu"),
             ("enable", "start the daemon at login"),
             ("disable", "stop starting the daemon at login"),
             ("start", "start the daemon now"),
@@ -85,6 +87,21 @@ def main():
     if cmd == "remove-unit":
         setup.remove_unit()
         print("unit removed")
+        return 0
+    if cmd == "install-desktop":
+        try:
+            path = setup.install_desktop()
+        except RuntimeError as exc:
+            # A refusal is a considered answer, not a crash; a traceback would
+            # bury the one sentence that says what to do instead.
+            print(exc)
+            return 1
+        print(f"wrote {path}")
+        print(f"  runs: {setup.desktop_exec()}")
+        return 0
+    if cmd == "remove-desktop":
+        setup.remove_desktop()
+        print("menu entry removed")
         return 0
     if cmd in ("enable", "disable"):
         state = setup.set_enabled(cmd == "enable")

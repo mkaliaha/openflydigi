@@ -40,6 +40,8 @@ ACTIONS = {
     "stop": lambda: setup.set_running(False),
     "enable": lambda: setup.set_enabled(True),
     "disable": lambda: setup.set_enabled(False),
+    "installDesktop": setup.install_desktop,
+    "removeDesktop": setup.remove_desktop,
 }
 
 
@@ -193,6 +195,20 @@ class SetupModel(QObject):
         return self._checks.state("enabled") == setup.OK
 
     @Property(bool, notify=changed)
+    def desktopInstalled(self):
+        return self._checks.state("desktop") == setup.OK
+
+    @Property(str, notify=changed)
+    def desktopCommand(self):
+        """What the menu entry would run, so it is visible before installing.
+
+        The app is normally started from a terminal here, and a launcher whose
+        command nobody can see is the kind of thing that quietly points at the
+        wrong checkout after a move.
+        """
+        return setup.desktop_exec()
+
+    @Property(bool, notify=changed)
     def rulesNeeded(self):
         """Whether anything actually calls for the privileged step.
 
@@ -228,6 +244,14 @@ class SetupModel(QObject):
     @Slot()
     def installRules(self):
         self._run("installRules")
+
+    @Slot()
+    def installDesktop(self):
+        self._run("installDesktop")
+
+    @Slot()
+    def removeDesktop(self):
+        self._run("removeDesktop")
 
     def _run(self, action):
         if self._thread is not None:

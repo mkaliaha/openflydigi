@@ -105,6 +105,43 @@ Kirigami.ScrollablePage {
 
             Kirigami.Separator {
                 Kirigami.FormData.isSection: true
+                Kirigami.FormData.label: "Application menu"
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: "Menu entry:"
+                spacing: Kirigami.Units.smallSpacing
+
+                Controls.Button {
+                    objectName: "installDesktopButton"
+                    text: App.setup.desktopInstalled ? "Reinstall" : "Add"
+                    icon.name: "list-add"
+                    enabled: !App.setup.busy
+                    onClicked: App.setup.installDesktop()
+                }
+
+                Controls.Button {
+                    objectName: "removeDesktopButton"
+                    text: "Remove"
+                    icon.name: "list-remove"
+                    enabled: !App.setup.busy
+                    visible: App.setup.desktopInstalled
+                    onClicked: App.setup.removeDesktop()
+                }
+            }
+
+            Controls.Label {
+                objectName: "desktopCommand"
+                Kirigami.FormData.label: "Runs:"
+                text: App.setup.desktopCommand
+                font: Kirigami.Theme.smallFont
+                color: Kirigami.Theme.disabledTextColor
+                wrapMode: Text.WrapAnywhere
+                Layout.maximumWidth: Kirigami.Units.gridUnit * 24
+            }
+
+            Kirigami.Separator {
+                Kirigami.FormData.isSection: true
                 Kirigami.FormData.label: "Device access"
             }
 

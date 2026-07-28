@@ -26,6 +26,18 @@ def check(name, ok, detail=""):
     return bool(ok)
 
 
+def _pyside_here():
+    """Whether this interpreter could start the UI. Not imported -- asked of a
+    subprocess, because the backend's test run must stay Qt-free."""
+    import subprocess
+    try:
+        subprocess.run([sys.executable, "-c", "import PySide6"],
+                       capture_output=True, timeout=60, check=True)
+    except Exception:
+        return False
+    return True
+
+
 def main():
     results = []
     all_games = games.load()
@@ -161,11 +173,46 @@ def main():
     # The unit has to name the host interpreter and the daemon, since it runs
     # on the host while this may be imported from inside the container.
     unit = setup.unit_text()
-    results.append(check("unit runs the host interpreter",
-                         "/usr/bin/python3" in unit))
+    interpreter = setup.host_python()
+    results.append(check("unit runs the host interpreter", interpreter in unit,
+                         interpreter))
+    results.append(check("the interpreter it names actually exists",
+                         os.path.exists(setup.host_path(interpreter)),
+                         interpreter))
     results.append(check("unit points at flydigid", "tools/flydigid" in unit))
     results.append(check("unit starts at login when enabled",
                          "WantedBy=default.target" in unit))
+
+    # The launcher is written into the shared home but run by the host's menu,
+    # so from inside a container it has to re-enter that container by name.
+    command = setup.desktop_exec()
+    box = setup.container_name()
+    results.append(check("the launcher changes directory first",
+                         f"cd {setup.ROOT}" in command, command))
+    results.append(check("the launcher starts the app module",
+                         command.endswith('-m gui"'), command))
+    if box:
+        results.append(check("inside a container it re-enters by name",
+                             box in command and (
+                                 "distrobox enter" in command
+                                 or "toolbox run" in command), command))
+    else:
+        results.append(check("natively it just runs a shell",
+                             command.startswith("bash -lc"), command))
+
+    # A launcher pointing at an interpreter that cannot load the UI is worse
+    # than no launcher: it fails with nothing on screen to say why.
+    results.append(check("the launcher is only offered when it would work",
+                         setup.desktop_target_runs_the_app() is bool(
+                             box or _pyside_here()), str(box)))
+
+    entry = setup.desktop_text()
+    results.append(check("the entry is named to match setDesktopFileName",
+                         setup.DESKTOP_NAME == "flydigi-apex5.desktop"))
+    results.append(check("the entry declares itself an application",
+                         "Type=Application" in entry))
+    results.append(check("the entry does not open a terminal",
+                         "Terminal=false" in entry))
 
     print(f"\n{sum(results)}/{len(results)} passed")
     return 0 if all(results) else 1
