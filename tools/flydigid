@@ -19,7 +19,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flydigi import effects, games  # noqa: E402
+from flydigi import effects, games, prefs  # noqa: E402
 from flydigi.device import Controller, DeviceNotFound  # noqa: E402
 
 
@@ -56,24 +56,61 @@ def candidate_names(pid):
     return out
 
 
-def scan(index):
-    """Return (game, pid) for the first running known game, else (None, None)."""
-    for entry in os.listdir("/proc"):
-        if not entry.isdigit():
-            continue
+class Scanner:
+    """Which known games are running, examining each process only once.
+
+    The first version re-read /proc/<pid>/comm and /proc/<pid>/cmdline for
+    every process every second. Measured on an idle desktop of ~590 processes
+    that cost 15.4s of CPU over 10 minutes -- about 2.5% of a core, spent
+    almost entirely re-reading processes already ruled out. It hardly mattered
+    when the daemon was something you started for a session; it matters once it
+    starts at login and never stops.
+
+    So processes are examined when they first appear and remembered after that.
+    Steady state is one readdir of /proc per second.
+
+    Recycled pids are not a hazard here: a pid is only skipped while it is
+    continuously present, so missing one would need the kernel to wrap all of
+    pid_max inside a single poll interval.
+    """
+
+    def __init__(self, index):
+        self.index = index
+        self.seen = set()
+        self.matches = {}
+
+    def _match(self, entry):
         for name in candidate_names(entry):
-            game = index.get(name)
+            game = self.index.get(name)
             if game is not None:
-                return game, int(entry)
-    return None, None
+                return game
+        return None
+
+    def refresh(self):
+        """Return {pid: game} for every known game currently running."""
+        current = {e for e in os.listdir("/proc") if e.isdigit()}
+        for entry in current - self.seen:
+            game = self._match(entry)
+            if game is not None:
+                self.matches[int(entry)] = game
+        for entry in self.seen - current:
+            self.matches.pop(int(entry), None)
+        self.seen = current
+        return self.matches
+
+    def reset(self):
+        """Re-examine every process on the next refresh.
+
+        Needed after a preferences change: turning auto on for a game that is
+        already running has to take effect now, and that process was examined
+        and filed away long ago.
+        """
+        self.seen.clear()
+        self.matches.clear()
 
 
-def pid_alive(pid):
-    return os.path.exists(f"/proc/{pid}")
-
-
-def apply_for(game):
-    tier = games.tier(game)
+def apply_for(game, tier=None):
+    tier = tier or games.tier(game)
     if tier != "vibration":
         log(f"{game.get('enGameName')}: tier '{tier}' not implemented, ignoring")
         return False
@@ -89,7 +126,8 @@ def apply_for(game):
         return False
 
 
-def reset():
+def clear_triggers():
+    """Put the triggers back. Named apart from Scanner.reset, which is unrelated."""
     try:
         with Controller() as ctrl:
             effects.clear_all(ctrl)
@@ -109,27 +147,52 @@ def main():
     index = games.process_index()
     log(f"watching for {len(index)} process names")
 
+    settings = prefs.Prefs()
+    settings_mtime = settings.mtime()
+
+    scanner = Scanner(index)
     active = None
     active_pid = None
     last_assert = 0.0
+    ignored = set()
 
     while True:
+        # The app edits this file while we run, so a toggle takes effect on the
+        # next poll rather than on the next login.
+        if settings.mtime() != settings_mtime:
+            settings = prefs.Prefs()
+            settings_mtime = settings.mtime()
+            ignored.clear()
+            scanner.reset()
+            log("preferences reloaded")
+
+        running = scanner.refresh()
+
+        if active_pid is not None and active_pid not in running:
+            log(f"{active.get('enGameName')} exited")
+            clear_triggers()
+            active, active_pid = None, None
+
         if active is None:
-            game, pid = scan(index)
-            if game is not None:
-                active, active_pid = game, pid
-                if apply_for(game):
+            # Sorted so the choice does not depend on directory order when two
+            # known games are up -- and unlike the old single-hit scan, a second
+            # game already running is still found after the first one exits.
+            for pid, game in sorted(running.items()):
+                if not settings.auto(game):
+                    # Logged once per process, or a declined title would say so
+                    # every second for as long as it runs.
+                    if pid not in ignored:
+                        ignored.add(pid)
+                        log(f"{game.get('enGameName')}: auto mode off, leaving it alone")
+                    continue
+                if apply_for(game, settings.route(game)):
+                    active, active_pid = game, pid
                     last_assert = time.time()
-                else:
-                    active, active_pid = None, None
-        else:
-            if not pid_alive(active_pid):
-                log(f"{active.get('enGameName')} exited")
-                reset()
-                active, active_pid = None, None
-            elif args.reassert and time.time() - last_assert >= args.reassert:
-                apply_for(active)
-                last_assert = time.time()
+                break
+        elif args.reassert and time.time() - last_assert >= args.reassert:
+            apply_for(active, settings.route(active))
+            last_assert = time.time()
+
         time.sleep(args.interval)
 
 
@@ -137,4 +200,4 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        reset()
+        clear_triggers()

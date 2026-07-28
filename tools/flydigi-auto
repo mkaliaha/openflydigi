@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
+"""Per-game auto mode: which games the daemon acts on by itself.
+
+    tools/flydigi-auto list                    # every game and its state
+    tools/flydigi-auto list --on               # only the ones that will act
+    tools/flydigi-auto on "Death Stranding"
+    tools/flydigi-auto off "Cyberpunk"
+    tools/flydigi-auto reset "Cyberpunk"       # back to the route default
+    tools/flydigi-auto route "Cyberpunk" ps5   # for the 9 multi-route games
+
+The daemon re-reads the file each poll, so a change here takes effect within a
+second -- no restart.
+"""
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from flydigi import games, prefs  # noqa: E402
+
+
+def state_of(settings, game):
+    on = settings.auto(game)
+    how = "set" if settings.is_explicit(game) else "default"
+    return f"{'on ' if on else 'off'} ({how})"
+
+
+def cmd_list(settings, all_games, args):
+    rows = []
+    for game in all_games:
+        on = settings.auto(game)
+        if args.on and not on:
+            continue
+        if args.off and on:
+            continue
+        available = prefs.routes(game)
+        rows.append((game.get("enGameName") or "?", settings.route(game),
+                     state_of(settings, game),
+                     "also: " + ", ".join(r for r in available
+                                          if r != settings.route(game))
+                     if len(available) > 1 else ""))
+    if not rows:
+        print("no games match")
+        return 0
+    width = max(len(r[0]) for r in rows)
+    route_width = max(len(r[1]) for r in rows)
+    for name, route, state, extra in sorted(rows):
+        print(f"  {name:<{width}}  {route:<{route_width}}  {state}  {extra}".rstrip())
+    print(f"\n{len(rows)} game(s)")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd")
+
+    p_list = sub.add_parser("list", help="show every game and whether it acts on its own")
+    p_list.add_argument("--on", action="store_true", help="only games with auto on")
+    p_list.add_argument("--off", action="store_true", help="only games with auto off")
+
+    for name, help_text in (("on", "act on this game automatically"),
+                            ("off", "leave this game alone"),
+                            ("reset", "drop the override, use the route default")):
+        p = sub.add_parser(name, help=help_text)
+        p.add_argument("game", help="substring of the game's name")
+
+    # The valid routes depend on the game, so they are checked after the
+    # lookup rather than declared here as a fixed set of choices.
+    p_route = sub.add_parser("route", help="pick the route for a multi-route game")
+    p_route.add_argument("game")
+    p_route.add_argument("route", help="one of the routes the game offers; `list` shows them")
+
+    args = ap.parse_args()
+    cmd = args.cmd or "list"
+
+    all_games = games.load()
+    settings = prefs.Prefs()
+
+    if cmd == "list":
+        if not hasattr(args, "on"):
+            args.on = args.off = False
+        return cmd_list(settings, all_games, args)
+
+    try:
+        game = games.find(args.game, all_games)
+    except KeyError as exc:
+        print(exc)
+        return 1
+
+    if cmd == "route":
+        if not prefs.has_choice(game):
+            print(f"{game.get('enGameName')} offers only {games.tier(game)} -- "
+                  "there is nothing to choose")
+            return 1
+        try:
+            settings.set_route(game, args.route)
+        except ValueError as exc:
+            print(exc)
+            return 1
+    elif cmd == "reset":
+        settings.clear(game)
+    else:
+        settings.set_auto(game, cmd == "on")
+
+    settings.save()
+    print(f"  {game.get('enGameName')}  {settings.route(game)}  {state_of(settings, game)}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
