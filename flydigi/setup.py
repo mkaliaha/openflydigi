@@ -52,9 +52,16 @@ DESKTOP_DIR = os.path.join(
     "applications")
 DESKTOP_PATH = os.path.join(DESKTOP_DIR, DESKTOP_NAME)
 
-RULES_NAME = "99-flydigi-apex5.rules"
+# 72, not 99. TAG+="uaccess" only sets a tag; systemd's 73-seat-late.rules is
+# what acts on it, so a file numbered above 73 tags devices nobody will look at
+# again. These rules were 99- and silently did nothing.
+RULES_NAME = "72-flydigi-apex5.rules"
 RULES_SOURCE = os.path.join(ROOT, "udev", RULES_NAME)
 RULES_TARGET = os.path.join("/etc/udev/rules.d", RULES_NAME)
+
+# The name it shipped under before. Installing removes it, or the two would
+# both be present and only one of them would mean anything.
+STALE_RULES = os.path.join("/etc/udev/rules.d", "99-flydigi-apex5.rules")
 
 DAEMON = os.path.join(ROOT, "tools", "flydigid")
 SETUP_CLI = os.path.join(ROOT, "tools", "apex5-setup")
@@ -310,11 +317,22 @@ StartupNotify=true
 
 
 def desktop_installed():
+    """Whether a menu entry is installed that launches *this* checkout.
+
+    Not a byte comparison against what this side would write. The entry is
+    generated differently depending on where it is generated from -- inside the
+    container it re-enters the box, on the host it does not -- so comparing
+    exactly made the host report a perfectly good entry, written from the
+    container, as out of date.
+    """
     try:
         with open(DESKTOP_PATH) as fh:
-            return fh.read() == desktop_text()
+            for line in fh:
+                if line.startswith("Exec="):
+                    return ROOT in line
     except OSError:
         return False
+    return False
 
 
 def desktop_target_runs_the_app():
@@ -400,6 +418,10 @@ def install_rules():
     with open(RULES_TARGET, "wb") as fh:
         fh.write(data)
     os.chmod(RULES_TARGET, 0o644)
+    try:
+        os.unlink(STALE_RULES)
+    except OSError:
+        pass
     for argv in (("udevadm", "control", "--reload"), ("udevadm", "trigger")):
         subprocess.run(argv, capture_output=True, timeout=60)
     return RULES_TARGET
@@ -492,7 +514,15 @@ def checks():
         out.append(Check("input", "DualSense input nodes", OK,
                          f"{len(nodes)} readable", None))
 
-    if rules_installed():
+    if os.path.exists(host_path(STALE_RULES)):
+        # Reported even when the new file is in place: the old one sorts after
+        # systemd's seat rules, so it never did anything, and leaving it around
+        # invites the same confusion again.
+        out.append(Check("rules", "udev rules", FAIL,
+                         "the old 99- rules are still installed and never "
+                         "applied — they sort after systemd's seat rules",
+                         "install-rules"))
+    elif rules_installed():
         out.append(Check("rules", "udev rules", OK, RULES_TARGET, None))
     elif os.path.exists(host_path(RULES_TARGET)):
         out.append(Check("rules", "udev rules", FAIL,

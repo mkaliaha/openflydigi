@@ -1480,7 +1480,7 @@ What to watch for:
 - Double input (both pads registering) → the SDL ignore variable is not taking effect.
 - Effects logged but not felt → EFFECT_MAP mapping is wrong, not the transport; the transport is
   the same cmd 81 that Forza already proved.
-- Touchpad-click is on the touchpad *sub-device*, which needs `udev/99-flydigi-apex5.rules`
+- Touchpad-click is on the touchpad *sub-device*, which needs `udev/72-flydigi-apex5.rules`
   installed or the node stays root-owned.
 
 ### Dark Souls: Remastered — VALIDATED

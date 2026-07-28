@@ -4,8 +4,20 @@
 
 # Access rules for the Flydigi Apex 5 and the virtual DualSense.
 #
-#   sudo cp udev/99-flydigi-apex5.rules /etc/udev/rules.d/
+#   sudo cp udev/72-flydigi-apex5.rules /etc/udev/rules.d/
 #   sudo udevadm control --reload && sudo udevadm trigger
+#
+# The number matters and 72 is not arbitrary. TAG+="uaccess" only sets a tag;
+# what acts on it is systemd's own /usr/lib/udev/rules.d/73-seat-late.rules:
+#
+#   TAG=="uaccess", ENV{MAJOR}!="", RUN{builtin}+="uaccess"
+#
+# This file was 99- for its whole life, which runs *after* that, so the tag was
+# set and nothing ever read it -- none of these three rules did anything.
+# Caught by creating a virtual DualSense and looking at the ACLs: the gamepad
+# node had one (from systemd's own 70-uaccess.rules, for joysticks) while the
+# touchpad, motion-sensor and headset nodes had none, which is exactly the
+# breakage the third rule below exists to prevent.
 #
 # On many systems none of this is needed -- check first. On Aurora/Fedora the
 # hidraw nodes are already world-accessible and the main gamepad node gets a
