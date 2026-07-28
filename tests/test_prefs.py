@@ -206,6 +206,41 @@ def main():
                          setup.desktop_target_runs_the_app() is bool(
                              box or _pyside_here()), str(box)))
 
+    # The entry records which box to re-enter at the moment it is written, so
+    # what it names has to be checked, not just that a file is there.
+    results.append(check("the box is read out of a distrobox Exec line",
+                         setup._named_container(
+                             'distrobox enter -n a-box -- bash -lc "x"') == "a-box"))
+    results.append(check("and out of a toolbox one",
+                         setup._named_container('toolbox run -c a-box bash -lc "x"')
+                         == "a-box"))
+    results.append(check("a native Exec line names no box",
+                         setup._named_container('bash -lc "x"') is None))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        real = setup.DESKTOP_PATH
+        try:
+            def entry_saying(line):
+                setup.DESKTOP_PATH = os.path.join(tmp, "e.desktop")
+                with open(setup.DESKTOP_PATH, "w") as fh:
+                    fh.write(f"[Desktop Entry]\nExec={line}\n")
+
+            entry_saying(f'bash -lc "cd {setup.ROOT} && exec python3 -m gui"')
+            results.append(check("an entry for this checkout counts as installed",
+                                 setup.desktop_installed()))
+
+            entry_saying('bash -lc "cd /somewhere/else && exec python3 -m gui"')
+            results.append(check("an entry for another checkout does not",
+                                 not setup.desktop_installed()))
+
+            if setup.container_name():
+                entry_saying(f'distrobox enter -n not-this-box -- bash -lc '
+                             f'"cd {setup.ROOT} && exec python3 -m gui"')
+                results.append(check("an entry naming another box does not",
+                                     not setup.desktop_installed()))
+        finally:
+            setup.DESKTOP_PATH = real
+
     entry = setup.desktop_text()
     results.append(check("the entry is named to match setDesktopFileName",
                          setup.DESKTOP_NAME == "flydigi-apex5.desktop"))

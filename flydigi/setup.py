@@ -316,23 +316,68 @@ StartupNotify=true
 """
 
 
-def desktop_installed():
-    """Whether a menu entry is installed that launches *this* checkout.
-
-    Not a byte comparison against what this side would write. The entry is
-    generated differently depending on where it is generated from -- inside the
-    container it re-enters the box, on the host it does not -- so comparing
-    exactly made the host report a perfectly good entry, written from the
-    container, as out of date.
-    """
+def desktop_exec_line():
+    """The installed entry's Exec line, or "" if there is no entry."""
     try:
         with open(DESKTOP_PATH) as fh:
             for line in fh:
                 if line.startswith("Exec="):
-                    return ROOT in line
+                    return line[len("Exec="):].strip()
     except OSError:
+        return ""
+    return ""
+
+
+def _named_container(exec_line):
+    """The container an Exec line re-enters, or None if it enters none."""
+    parts = exec_line.split()
+    for flag in ("-n", "-c"):
+        if flag in parts:
+            index = parts.index(flag) + 1
+            if index < len(parts):
+                return parts[index]
+    return None
+
+
+def container_exists(name):
+    """Whether a container by that name is still around.
+
+    Unknown counts as present: if podman cannot be asked, saying the launcher
+    is broken would be a guess, and a false alarm here sends someone to
+    reinstall something that works.
+    """
+    try:
+        proc = subprocess.run(("podman", "container", "exists", name),
+                              capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    return proc.returncode == 0
+
+
+def desktop_installed():
+    """Whether a menu entry is installed that would still start this checkout.
+
+    Not a byte comparison against what this side would write. The entry differs
+    by where it was written from -- inside the container it re-enters the box,
+    on the host it does not -- and comparing exactly made the host report a
+    perfectly good entry, written from the container, as out of date.
+
+    But the box name is frozen into the entry when it is written, so it is also
+    checked: rename or delete the distrobox and the launcher becomes an icon
+    that does nothing, which nobody would connect to a container they renamed
+    weeks earlier.
+    """
+    exec_line = desktop_exec_line()
+    if not exec_line or ROOT not in exec_line:
         return False
-    return False
+    box = _named_container(exec_line)
+    if box is None:
+        return True
+    here = container_name()
+    if here is not None:
+        # Inside a container we can answer without podman, which is not in here.
+        return box == here
+    return container_exists(box)
 
 
 def desktop_target_runs_the_app():
@@ -543,9 +588,14 @@ def checks():
     if desktop_installed():
         out.append(Check("desktop", "Menu entry", OK, DESKTOP_PATH, None))
     elif os.path.exists(DESKTOP_PATH):
-        out.append(Check("desktop", "Menu entry", FAIL,
-                         "out of date — it may point at the wrong path or box",
-                         "install-desktop"))
+        exec_line = desktop_exec_line()
+        box = _named_container(exec_line)
+        if box is not None and ROOT in exec_line:
+            detail = (f"points at the '{box}' container, which is not there any "
+                      f"more — reinstall it from where the app runs")
+        else:
+            detail = "points somewhere else — reinstall it from where the app runs"
+        out.append(Check("desktop", "Menu entry", FAIL, detail, "install-desktop"))
     else:
         out.append(Check("desktop", "Menu entry", SKIP,
                          "not installed — start it from a terminal instead",
