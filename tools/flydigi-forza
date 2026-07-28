@@ -28,6 +28,11 @@ DEFAULT_CONFIG = os.path.join(
 )
 
 
+# How long to wait before saying that no telemetry has arrived. Long enough to
+# cover loading into a session, short enough to notice before a race is over.
+SILENT_AFTER = 45.0
+
+
 def log(msg):
     print(f"[forza] {msg}", flush=True)
 
@@ -79,12 +84,25 @@ def main():
     packets = 0
     unknown = set()
     last_report = time.time()
+    started = time.time()
+    warned_silent = False
     try:
         while True:
             engine.flush_pending()
             try:
                 data, _ = sock.recvfrom(2048)
             except socket.timeout:
+                # A listener that has heard nothing looks exactly like one
+                # that is working. It matters more now that the daemon starts
+                # this unattended: nobody is watching a terminal, so silence
+                # has to announce itself once.
+                if (not warned_silent and packets == 0
+                        and time.time() - started > SILENT_AFTER):
+                    warned_silent = True
+                    log(f"nothing received in {SILENT_AFTER:.0f}s -- the game "
+                        f"has to be told to send it: Settings -> HUD and "
+                        f"Gameplay -> Data Out On, IP 127.0.0.1, port "
+                        f"{args.port}")
                 continue
             packet = forza.parse(data)
             if packet is None:

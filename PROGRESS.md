@@ -775,16 +775,24 @@ module base at `0x140000000`. The PS5 route is deliberately excluded: the virtua
 exist before the game enumerates pads, so reacting to a launch is already too late, and
 `tools/flydigi-run` stays the way in.
 
-**Which process is "the game" is not obvious, and getting it wrong fails silently.** Starting Dark
-Souls: Remastered produced **eight** processes matching its name — `reaper`,
-`steam-runtime-launcher`, two `bwrap`s, `pv-adverb`, a `python3`, `steam.exe`, and the game — since
-every Proton wrapper carries the game's path in its command line. The daemon took the lowest pid,
-which is `reaper`, the outermost wrapper. That is survivable for the pad-side route, where the
-preset is written once and nobody asks who asked. For the memory route it is fatal: a wrapper has
-no game memory in it, the pointer chain reads zero, and zero is what "no effect" looks like. The
-daemon now ranks candidates by whether the executable is actually mapped — the check
-`monitor.find_process` always made, now shared as `monitor.has_executable_mapped` rather than
-reimplemented. `comm` counts too, since native Linux games have no PE to look for.
+**"Is the game running" and "which process is the game" are different questions, and only one
+route asks the second.** Starting Dark Souls: Remastered produced **eight** processes matching its
+name — `reaper`, `steam-runtime-launcher`, two `bwrap`s, `pv-adverb`, a `python3`, `steam.exe`, and
+the game — since every Proton wrapper carries the game's path in its command line. For *which game
+is running* that is not a problem at all: every one of them agrees on the answer. None of the
+drivers is handed a pid either; `flydigi-monitor` looks the game up itself, and the two listeners
+do not care.
+
+So the daemon does not track a pid. A game is running while **any** of its processes is, which is
+also the honest end signal: the chain comes and goes around the game — `reaper` outlives it, inner
+wrappers exit before it — so watching one pid picks an arbitrary moment to call it over.
+
+Where the distinction does earn its keep is *when* to start the memory driver. `flydigi-monitor`
+gives up if the PE is not mapped yet, and an exited driver is deliberately not restarted, so
+starting it while only the launcher chain is up would make auto mode abandon a game that was merely
+still loading. The daemon therefore waits for a process that has really mapped the executable —
+`monitor.has_executable_mapped`, the check `find_process` always made, now shared rather than
+reimplemented. `comm` counts as evidence too, since native Linux games have no PE to look for.
 
 Two things fell out of building it.
 
@@ -797,7 +805,19 @@ though `stat` reports the same owner. Reading it needs PTRACE_MODE_READ across a
 boundary, with SELinux enforcing on top. So tier 3 is host-only by construction. An earlier note
 here claimed a daemon in the container "would work today, for all four routes" — that was inferred
 from the shared PID namespace and `ptrace_scope=0` without ever attempting a cross-process read,
-and it is wrong. It turned out not to matter: distrobox shares `/run/user`, so `systemctl
+and it is wrong.
+
+Measured per route, from inside the distrobox:
+
+| Route | Needs | From the container |
+|---|---|---|
+| vibration | write the vendor hidraw node | works |
+| telemetry | bind UDP 127.0.0.1:5300 | works — the network namespace is the host's |
+| bespoke | bind UDP 127.0.0.1:7878 | works |
+| ps5 | `/dev/uhid` | works, and **the host sees the device** — a HID node created inside the container appeared on the host as `hidraw7`, since there is no device namespacing. The full relay was not run from in there, as it would take the pad over |
+| monitor | read another process's memory | **denied** |
+
+So exactly one route is blocked, and it is the one that decides where the daemon lives. It turned out not to matter: distrobox shares `/run/user`, so `systemctl
 --user` from inside the container drives the *host's* user manager and the unit runs in the host's
 mount namespace. Verified by starting a transient unit from the container and comparing
 `/proc/<pid>/ns/mnt`. So the app writes the unit into the shared home and calls systemctl, with no

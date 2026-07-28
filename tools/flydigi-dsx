@@ -17,11 +17,16 @@ import argparse
 import os
 import socket
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flydigi import dsx, effects  # noqa: E402
 from flydigi.device import Controller, DeviceNotFound  # noqa: E402
+
+
+# See tools/flydigi-forza for why silence is reported at all.
+SILENT_AFTER = 45.0
 
 
 def log(msg):
@@ -62,11 +67,22 @@ def main():
         log(f"forwarding to 127.0.0.1:{args.forward}")
 
     total = applied = 0
+    started = time.time()
+    warned_silent = False
     try:
         while True:
             try:
                 data, _ = sock.recvfrom(65535)
             except socket.timeout:
+                # These packets come from a game-side mod, which this project
+                # does not ship. Started by the daemon, an empty listener is
+                # indistinguishable from a working one, so it says so once.
+                if (not warned_silent and total == 0
+                        and time.time() - started > SILENT_AFTER):
+                    warned_silent = True
+                    log(f"nothing received in {SILENT_AFTER:.0f}s -- these are "
+                        f"sent by a mod inside the game; check it is installed "
+                        f"and pointed at 127.0.0.1:{args.port}")
                 continue
             total += 1
             if args.dump:

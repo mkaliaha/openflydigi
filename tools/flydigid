@@ -144,17 +144,34 @@ class Scanner:
         self.seen = current
         return self.matches
 
-    def best(self):
-        """The likeliest (pid, game) among what is running, or (None, None).
+    def candidate(self):
+        """(game, pid-of-the-game-itself-or-None) for what appears to be running.
 
-        Highest confidence wins; ties go to the highest pid, because in a
-        wrapper chain the game is the last thing to start.
+        Two different questions, and only one of them is usually interesting.
+        *Which game is running* needs no ranking at all -- every process in the
+        chain agrees on that, which is the whole point of matching by name.
+
+        The pid is returned separately and only when a process has really
+        mapped the executable, because one route cares: `flydigi-monitor` looks
+        the game up itself and gives up if the PE is not there yet. Started
+        while only wrappers are up, it exits immediately -- and a driver that
+        exits on its own is deliberately not restarted, so auto mode would give
+        up on a game that was merely still loading.
         """
         if not self.matches:
             return None, None
-        pid, (game, _) = max(self.matches.items(),
-                             key=lambda kv: (kv[1][1], kv[0]))
-        return pid, game
+        pid, (game, confidence) = max(self.matches.items(),
+                                      key=lambda kv: (kv[1][1], kv[0]))
+        return game, (pid if confidence >= 2 else None)
+
+    def is_running(self, game):
+        """Whether any process still says this game is up.
+
+        The wrapper chain comes and goes around the game -- reaper outlives it,
+        inner wrappers exit before it -- so watching one pid picks an arbitrary
+        moment to call it over. Nothing running at all is the honest signal.
+        """
+        return any(found is game for found, _ in self.matches.values())
 
     def reset(self):
         """Re-examine every process on the next refresh.
@@ -166,6 +183,10 @@ class Scanner:
         self.seen.clear()
         self.matches.clear()
 
+
+# Routes whose driver looks the game up itself, so starting it before the game
+# has really launched makes it exit rather than wait.
+NEEDS_GAME_PROCESS = ("monitor",)
 
 TOOLS = os.path.join(ROOT, "tools")
 MONITOR_CONFIGS = os.path.join(ROOT, "configs", "monitor")
@@ -312,10 +333,10 @@ def main():
     scanner = Scanner(index)
     driver = Driver()
     active = None
-    active_pid = None
     last_assert = 0.0
     ignored = set()
     unsupported = set()
+    waiting = set()
 
     while True:
         # The app edits this file while we run, so a toggle takes effect on the
@@ -325,39 +346,55 @@ def main():
             settings_mtime = settings.mtime()
             ignored.clear()
             unsupported.clear()
+            waiting.clear()
             scanner.reset()
             log("preferences reloaded")
 
-        running = scanner.refresh()
+        scanner.refresh()
 
-        if active_pid is not None and active_pid not in running:
+        if active is not None and not scanner.is_running(active):
             log(f"{active.get('enGameName')} exited")
             driver.stop()
             clear_triggers()
-            active, active_pid = None, None
+            active = None
 
         if active is None:
-            pid, game = scanner.best()
+            game, game_pid = scanner.candidate()
+            # Keyed by game rather than pid: the pid is now deliberately absent
+            # until the game itself is up, and a set holding None would silence
+            # the next game as well.
+            key = prefs.key(game) if game is not None else None
             if game is None:
                 pass
             elif not settings.auto(game):
-                # Logged once per process, or a declined title would say so
-                # every second for as long as it runs.
-                if pid not in ignored:
-                    ignored.add(pid)
+                # Logged once, or a declined title would say so every second
+                # for as long as it runs.
+                if key not in ignored:
+                    ignored.add(key)
                     log(f"{game.get('enGameName')}: auto mode off, leaving it alone")
             else:
                 route = settings.route(game)
                 argv = driver_argv(game, route)
                 if route == "vibration":
+                    # Nothing to start by design: the pad drives itself once
+                    # the preset is written.
                     if apply_for(game, route):
-                        active, active_pid = game, pid
+                        active = game
                         last_assert = time.time()
                 elif argv is not None:
-                    if driver.start(game, argv):
-                        active, active_pid = game, pid
-                elif pid not in unsupported:
-                    unsupported.add(pid)
+                    if route in NEEDS_GAME_PROCESS and game_pid is None:
+                        # Only the launcher chain is up so far. Starting the
+                        # driver now would have it fail to find the game and
+                        # exit, and an exited driver is not restarted.
+                        if key not in waiting:
+                            waiting.add(key)
+                            log(f"{game.get('enGameName')}: launching — waiting "
+                                f"for the game itself before starting the driver")
+                    elif driver.start(game, argv):
+                        active = game
+                        waiting.discard(key)
+                elif key not in unsupported:
+                    unsupported.add(key)
                     # Says which part is missing. The drivers themselves are
                     # written and validated; what a route without an argv
                     # lacks is a way to start it *after* the game is up.
@@ -372,7 +409,7 @@ def main():
                 log(f"{active.get('enGameName')}: not restarting it — "
                     "run the driver by hand to see why")
                 clear_triggers()
-                active, active_pid = None, None
+                active = None
             elif args.reassert and time.time() - last_assert >= args.reassert:
                 apply_for(active, settings.route(active))
                 last_assert = time.time()
