@@ -155,6 +155,44 @@ correct. With those gone it immediately found a real bug: `pageStack.currentItem
 
 Agreed feature list, roughly in the order it came up. Each is a fresh-context-sized piece of work.
 
+### Two writers on one hidraw node — the arbitration gap
+
+**This is the one known-broken thing, and it has now been seen rather than predicted.** Nothing
+coordinates access to `/dev/hidraw4`. The desktop app holds it open and polls `Get info` every 30
+seconds; a memory-driven route (`flydigi-monitor`, `flydigi-forza`, `flydigi-dsx`) rewrites trigger
+effects as often as every 50 ms; both write whole 32-byte packets and then read.
+
+Two distinct failure modes, and only the first is obvious:
+
+1. **Interleaved writes.** Two packets can reach the pad in either order. For trigger effects that
+   is self-correcting — the next frame overwrites it — but a config write (164/165 streams a blob in
+   packets, 166 commits it) interleaved with anything else is not.
+2. **Misattributed replies.** Replies are *broadcast to every reader of the node*, so a process
+   receives ACKs for commands it never sent. Caught live while testing the new effects: a
+   `Get info` ACK belonging to the app's poll landed in `flydigi_cmd`'s read, which had sent a
+   rumble command:
+
+   ```
+   TX 03 5a a5 12 06 00 00 …          ← our rumble stop
+   RX 04 5a a5 01 01 00 80 01 …       ← command 0x01, nobody here asked
+   ```
+
+   `Controller.send()` collects every reply for 300 ms and `ack_ok()` matches on the command byte,
+   so an overlapping exchange can hand the wrong answer to the wrong caller. Today that means a
+   command reported as failed when it worked, or as succeeded when its own reply never came.
+
+**The fix is `flock(2)` on the open node** — an advisory whole-file lock, taken `LOCK_EX` around a
+write-and-read exchange and released after. Advisory means it binds only processes that ask for it,
+which is exactly the boundary here: everything in this repo goes through `flydigi/device.py`, so one
+context manager there covers the app, the daemon and every driver. Steam and SDL hold the same node
+open and will not take the lock — that contention stays a separate problem, and pretending otherwise
+would be the mistake.
+
+Sketched shape: `Controller.claim()` as a context manager around `send`/`command`; drivers hold it
+per update rather than for their lifetime, so the app is starved for microseconds and not for the
+length of a game. Worth pairing with draining stale input before a write, since a reply that arrived
+before we sent anything cannot be ours whatever its command byte says.
+
 ### The profile blob has more in it than we edit
 
 Everything in this section is **already carried through** by `flydigi/mapping.py` — we read and
@@ -1009,6 +1047,12 @@ What this settles without a single guess:
   * **Never match a game process by cmdline alone** — Steam/Proton wrappers (`reaper`, `bwrap`,
     `pv-adverb`, `steam.exe`) all carry the game's path. Require the PE to be mapped.
   * **Effects persist in controller state** until changed; there is no timeout.
+  * **`Sniper` (2) and `Vibration` (5) send byte-identical parameters and are different effects.**
+    Sniper vibrates unaided; mode 5 does nothing at all until the grip motors run, then follows
+    them. The mode byte is the whole difference, so a mode-5 effect that "does not work" is
+    probably working and waiting for rumble.
+  * **hidraw replies go to every reader of the node.** An ACK you receive is not necessarily an
+    answer to anything you sent — see the arbitration item under Next.
   * **The pad discards unsaved config when it sleeps.** Not just on a power cycle — idling out is
     enough, observed with lighting. Applying is working memory; command 166 is what makes it last.
   * **`effects.rumble()` must use `wait=0`** when driven continuously, or the 100 ms ACK wait puts
@@ -1421,7 +1465,9 @@ themselves are already parsed (`data[45..47]` of the DS5 output report).
   Flydigi's bundled `GameFinder.StoreHandlers.Steam` does.
 - **Steam not yet installed** (`flatpak install -y flathub com.valvesoftware.Steam`).
 - **Steam Input contention**: Steam/SDL also claim the hidraw node and send their own
-  acquire/heartbeat (`0x1C`). May need to disable Steam Input for the pad or tolerate it.
+  acquire/heartbeat (`0x1C`). May need to disable Steam Input for the pad or tolerate it. Distinct
+  from our own two-writer problem (see "Two writers on one hidraw node" under Next) — a lock fixes
+  ours and cannot fix theirs, since Steam will not take it.
 - Which command family the K6 path needs (`83`/`85`/`87`) — untested; `81`/`82` were sufficient so far.
 
 ## Next-session runbook
