@@ -446,6 +446,14 @@ particular is testable the moment multi-pad support exists; see "Multiple pads" 
     protocol that then flashes an image is **not in anything we have decompiled** — so a pad sent
     into upgrade mode by this project cannot be brought out of it by this project.
 
+    **And it multiplies per device, not just per chip.** There are three separate SDKs with their
+    own entry point — `ControllerRepository.cs:2192`, `ChargerRepository.cs:635` and
+    `CoolerRepository.cs:1083` each call their own `SwitchToFirmwareUpgradeMode` — so it is not one
+    updater with a chip argument. Times two pads with different silicon (the Vader 4 has an ADC chip
+    and no screen; the Apex 5 has a screen and force triggers), times their dongles, times two dock
+    generations. Comfortably a dozen independently flashable images, and we have the flashing
+    protocol for none of them.
+
     The scale is the other half of the argument. `ChipModule` is `{ChipMain, ChipScreen,
     ChipTrigger, ChipDongle}` — and the info reply carries ADC and NearLink versions too — across
     **two silicon vendors**, `ChipType.{Telink, Wch}`, with `ChipId.{WCH_582, WCH_547, WCH_571}`
