@@ -440,6 +440,24 @@ particular is testable the moment multi-pad support exists; see "Multiple pads" 
   * **Usage counters and `DeviceMask`** — XInput and DInput builders only, no NewXInput path, so
     they are unreachable in the mode we use.
   * **`TestRecoverFactoryCommand` (253)** is a factory reset with no confirmation flow. Do not send it.
+  * **Firmware update — deliberately not implemented, and command 31 must never be sent.**
+    `SwitchToFirmwareUpgradeModeCommandFactory` is **31**, `[4]=3, [5]=chipModule, [6]=crc`: three
+    bytes, trivially sendable, and a **one-way door**. It only puts a chip *into* upgrade mode. The
+    protocol that then flashes an image is **not in anything we have decompiled** — so a pad sent
+    into upgrade mode by this project cannot be brought out of it by this project.
+
+    The scale is the other half of the argument. `ChipModule` is `{ChipMain, ChipScreen,
+    ChipTrigger, ChipDongle}` — and the info reply carries ADC and NearLink versions too — across
+    **two silicon vendors**, `ChipType.{Telink, Wch}`, with `ChipId.{WCH_582, WCH_547, WCH_571}`
+    selecting among WCH parts. Implementing this means implementing two third-party bootloader
+    protocols correctly, first time, with no recovery when wrong. The payoff is a convenience wanted
+    perhaps twice in a pad's life. It is not worth one brick, and it would cost the hardware
+    everything here is validated against.
+
+    **If a firmware update is genuinely needed, use real Windows hardware — not a VM.** Flashing
+    drops the device off USB and brings it back as a bootloader with a different identity, and that
+    re-enumeration is precisely where USB passthrough loses a device: mid-flash. Whether the Apex 5
+    has a button-combination recovery mode is **unknown**, so assume it does not.
 
 ### Multiple pads
 
