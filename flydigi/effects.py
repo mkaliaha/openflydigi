@@ -7,7 +7,16 @@
 Two families exist (see PROTOCOL.md):
   * SetForceTrigger (81/82) -- effect based. Used by everything so far.
   * K6Trigger (83/85/87)    -- waveform/realtime. Untested on hardware.
+
+The six effects below are Flydigi's whole `AdapterTriggerType` vocabulary, and
+the same six appear twice: as the live command's `mode` byte and as the first
+byte of the 20-byte per-side block a profile carries. This module owns the
+vocabulary for both -- what each effect's knobs are called, what they are
+allowed to be, and which byte each one lands in -- so the profile editor and
+the live command cannot drift apart.
 """
+import collections
+
 from . import device
 from .device import (
     CMD_RUMBLE,
@@ -17,9 +26,201 @@ from .device import (
     SIDE_RIGHT,
 )
 
-# SetForceTrigger effect modes (params[1]). Only Normal and Race are confirmed.
+# SetForceTrigger effect modes (params[1]), Flydigi's AdapterTriggerType.
 MODE_NORMAL = 0
 MODE_RACE = 1
+MODE_SNIPER = 2
+MODE_RECOIL = 3
+MODE_LOCK = 4
+MODE_VIBRATION = 5
+
+# One knob of one effect. `minimum`/`maximum` are Space Station's own slider
+# bounds, not the byte range: a trigger's travel tops out at 192 of 255, and
+# several knobs are refused at 0 by the command builder, so a UI that offered
+# 0..255 everywhere would hand the pad values it quietly rewrites.
+#
+# `default` is ours, not Flydigi's -- their defaults live in whatever profile
+# is on the pad, so there is nothing to copy. They are deliberately gentle:
+# picking an effect for the first time should be felt, not fought.
+Param = collections.namedtuple(
+    "Param", "key label description minimum maximum default kind")
+
+
+def _number(key, label, description, minimum, maximum, default):
+    return Param(key, label, description, minimum, maximum, default, "number")
+
+
+def _switch(key, label, description, default=1):
+    return Param(key, label, description, 0, 1, default, "switch")
+
+
+Effect = collections.namedtuple("Effect", "mode key label description params")
+
+# `label` is Space Station's English string for the effect; the descriptions
+# are theirs too, shortened. "Match input" is their
+# trigger_*_start_output_data: with it on, the trigger reports 0 until it
+# reaches the start position and then covers the full range over what is left,
+# so the resistance point becomes the new zero rather than a bump mid-travel.
+_MATCH = _switch(
+    "match_input", "Match input to the start position",
+    "Report no input until the effect begins, then use the travel that is left")
+
+EFFECTS = (
+    Effect(MODE_NORMAL, "normal", "General",
+           "No added resistance -- the trigger's own travel", ()),
+    Effect(MODE_RACE, "race", "Racing",
+           "Constant resistance past a point, for a throttle", (
+               _number("start", "Damping start position",
+                       "Travel that must be pressed before damping begins",
+                       0, 192, 50),
+               _number("resistance", "Damping strength",
+                       "How hard the trigger pushes back", 1, 255, 40),
+           )),
+    Effect(MODE_SNIPER, "sniper", "Sniper",
+           "A vibration that begins once the trigger is held past a point", (
+               _number("start", "Vibration start position",
+                       "Travel that must be pressed before vibration begins",
+                       0, 192, 50),
+               _number("press", "Start pressure",
+                       "Pressure needed at that position to set it off",
+                       1, 255, 25),
+               _number("strength", "Vibration strength",
+                       "How hard the trigger vibrates", 1, 255, 20),
+               _number("frequency", "Vibration frequency",
+                       "How fast it vibrates", 1, 255, 20),
+               _MATCH,
+           )),
+    Effect(MODE_RECOIL, "recoil", "Recoil",
+           "A resisting band that gives way, like a weapon's break point", (
+               _number("start", "Breakthrough start position",
+                       "Travel that must be pressed before the band begins",
+                       0, 192, 50),
+               _number("travel", "Breakthrough travel",
+                       "How far the band lasts", 1, 255, 30),
+               _number("resistance", "Breakthrough resistance",
+                       "Pressure needed to push through it", 1, 255, 40),
+               _MATCH,
+           )),
+    Effect(MODE_LOCK, "lock", "Trigger lock",
+           "A hard stop -- the trigger will not travel past the point", (
+               _number("start", "Lock position",
+                       "Travel the trigger is allowed before it stops",
+                       20, 200, 60),
+           )),
+    Effect(MODE_VIBRATION, "vibration", "Vibration",
+           "The game's own rumble, routed into the trigger", (
+               _number("scale", "Intensity coefficient",
+                       "How strongly the trigger follows the grip", 0, 200, 50),
+               _number("block", "Vibration threshold",
+                       "Rumble below this leaves the trigger still", 1, 255, 10),
+               _number("stroke", "Travel range",
+                       "How far into the pull the vibration lasts", 1, 200, 50),
+               _number("frequency", "Vibration frequency",
+                       "How fast it vibrates", 1, 255, 20),
+           )),
+)
+
+BY_MODE = {effect.mode: effect for effect in EFFECTS}
+
+
+def effect(mode):
+    """The Effect for a stored mode byte, or General for anything unknown."""
+    return BY_MODE.get(int(mode), BY_MODE[MODE_NORMAL])
+
+
+def defaults(mode):
+    return {p.key: p.default for p in effect(mode).params}
+
+
+def _clamp(param, value):
+    """A stored byte as the UI should see it.
+
+    Out of range means the byte was never written for this effect -- a profile
+    carries all ten parameter slots whatever the mode is, so switching to an
+    effect for the first time reads whatever the previous one left there. That
+    is not a value to show, so it becomes the default rather than being clipped
+    into range: a frequency clipped up from 0 to 1 looks deliberate and is not.
+    """
+    value = int(value)
+    if not param.minimum <= value <= param.maximum:
+        return param.default
+    return value
+
+
+# Where each effect's knobs live in the profile's own storage. The 20-byte
+# per-side block is `[0]=mode, [1]=bind type, [2]=bind filter, [3]=bind scale,
+# [4..8]=bind params, [9]=mixed border, [10..19]=effect params`, and only the
+# Vibration effect reaches into the bind half -- see `stored()`.
+#
+# Slot order per effect, from Flydigi's ControllerRepository.SaveTriggerAdapterConfig:
+_SLOTS = {
+    MODE_RACE: ("start", "resistance", None, None, None),
+    MODE_SNIPER: ("start", "press", "strength", "frequency", "match_input"),
+    MODE_RECOIL: ("start", "travel", "resistance", None, "match_input"),
+    MODE_LOCK: ("start", None, None, None, None),
+}
+
+# Constants Flydigi writes into the slots an effect does not use. Lock's
+# strength and Vibration's pair are fixed in their software too -- the effect
+# has no control for them, so they are written rather than left over.
+_FIXED = {
+    MODE_LOCK: {1: 255, 2: 1},
+    MODE_VIBRATION: {2: 1, 3: 90},
+}
+
+
+def values(mode, params, bind=None):
+    """Named knob values for a stored effect, ready for a UI.
+
+    `params` is the 10-byte parameter half of the block and `bind` the
+    `(filter, scale, params)` triple from its first half, needed only by the
+    Vibration effect.
+    """
+    mode = effect(mode).mode
+    params = list(params) + [0] * max(0, 10 - len(params))
+    if mode == MODE_VIBRATION:
+        filt, scale, bind_params = bind if bind else (0, 0, [0] * 5)
+        bind_params = list(bind_params) + [0] * max(0, 5 - len(bind_params))
+        raw = {"scale": scale, "block": filt,
+               "stroke": bind_params[0], "frequency": bind_params[3]}
+    else:
+        slots = _SLOTS.get(mode, ())
+        raw = {key: params[slot] for slot, key in enumerate(slots) if key}
+    return {p.key: _clamp(p, raw.get(p.key, p.default))
+            for p in BY_MODE[mode].params}
+
+
+def stored(mode, named):
+    """`(params, bind)` to write for an effect, or `(None, None)` for General.
+
+    General is left alone deliberately. It has no knobs, so there is nothing to
+    write, and zeroing the slots would throw away the numbers someone tuned
+    before switching the effect off.
+    """
+    mode = effect(mode).mode
+    if mode == MODE_NORMAL:
+        return None, None
+    full = defaults(mode)
+    full.update({k: v for k, v in named.items() if k in full})
+    knobs = {p.key: max(p.minimum, min(p.maximum, int(full[p.key])))
+             for p in BY_MODE[mode].params}
+
+    params = [0] * 10
+    for slot, value in _FIXED.get(mode, {}).items():
+        params[slot] = value
+    if mode == MODE_VIBRATION:
+        params[0] = knobs["stroke"]
+        params[1] = knobs["frequency"]
+        # The live command Flydigi builds from this is SyncWithGrip, whose
+        # pressure and strength are these two 1s -- the effect's own strength
+        # is the scale, not a per-press level.
+        bind = (knobs["block"], knobs["scale"],
+                [knobs["stroke"], 1, 1, knobs["frequency"], 0])
+        return params, bind
+    for slot, key in enumerate(_SLOTS.get(mode, ())):
+        if key:
+            params[slot] = knobs[key]
+    return params, None
 
 
 def _apply(ctrl, cmd_id, payload):
@@ -40,6 +241,58 @@ def race(ctrl, side, stroke, resistance, match_stroke=True):
     """Constant resistance past a travel point -- the racing throttle effect."""
     resistance = max(1, min(255, resistance))
     payload = [1, side, MODE_RACE, stroke, resistance, 1 if match_stroke else 0]
+    return _apply(ctrl, CMD_SET_FORCE_TRIGGER, payload)
+
+
+def _least_one(value):
+    """The command builder's own clamp: 0 is refused, everything else stands.
+
+    Flydigi's builders raise a 0 to 1 rather than reject it, so a caller that
+    sends 0 gets the weakest setting instead of nothing at all.
+    """
+    return max(1, min(255, int(value)))
+
+
+def sniper(ctrl, side, stroke, pressure, strength, frequency, match_stroke=True):
+    """Vibrate once the trigger is held past a point under enough pressure."""
+    payload = [1, side, MODE_SNIPER, stroke, _least_one(pressure),
+               _least_one(strength), _least_one(frequency),
+               1 if match_stroke else 0]
+    return _apply(ctrl, CMD_SET_FORCE_TRIGGER, payload)
+
+
+def recoil(ctrl, side, stroke, recoil_stroke, strength, match_stroke=True):
+    """A band of resistance that gives way -- a weapon's break point.
+
+    The zero before `match_stroke` is a slot the builder leaves empty; it is
+    not a knob this effect has.
+    """
+    payload = [1, side, MODE_RECOIL, stroke, recoil_stroke,
+               _least_one(strength), 0, 1 if match_stroke else 0]
+    return _apply(ctrl, CMD_SET_FORCE_TRIGGER, payload)
+
+
+def lock(ctrl, side, stroke, strength=255, match_stroke=True):
+    """Stop the trigger dead at a travel point.
+
+    `strength` is 255 in every call Flydigi's own software makes -- the effect
+    is a stop, not a resistance -- but the packet carries it, so it is here.
+    """
+    payload = [1, side, MODE_LOCK, stroke, strength, 1 if match_stroke else 0]
+    return _apply(ctrl, CMD_SET_FORCE_TRIGGER, payload)
+
+
+def vibration(ctrl, side, stroke, pressure, strength, frequency,
+              match_stroke=True):
+    """Vibrate the trigger from a travel point, ignoring the game's rumble.
+
+    Not the same thing as the profile's Vibration effect, which Flydigi's
+    software delivers as `bind_grip` -- that one follows the game's rumble.
+    Mode 5 as a live command has Sniper's shape and no rumble binding at all.
+    """
+    payload = [1, side, MODE_VIBRATION, stroke, _least_one(pressure),
+               _least_one(strength), _least_one(frequency),
+               1 if match_stroke else 0]
     return _apply(ctrl, CMD_SET_FORCE_TRIGGER, payload)
 
 

@@ -99,17 +99,63 @@ Effect vocabulary — `params[0]`=side, `params[1]`=mode:
 
 `ForceTriggerSide { Left=1, Right=2, Both=3 }`
 
-| Effect | mode | params |
+| Effect | mode | params after `side, mode` |
 |---|---|---|
-| `Normal` | 0 | `[side, 0]` |
-| `Race` | 1 | `[side, 1, stroke, resistance(min 1), matchStroke]` |
-| `Sniper` | — | `side, stroke, pressureLevel, strength, frequency, matchStroke` |
-| `Recoil` | — | `side, stroke, recoilStroke, strength, matchStroke` |
-| `Lock` | — | `side, stroke, strength=255, matchStroke=true` |
-| `Vibration` | — | `side, stroke, pressureLevel, strength, frequency, matchStroke` |
-| `SyncWithGrip` | — | `side, bindType, filter, scale, stroke, pressureLevel, strength, frequency` |
+| `Normal` | 0 | — |
+| `Race` | 1 | `stroke, resistance(min 1), matchStroke` |
+| `Sniper` | 2 | `stroke, pressureLevel(min 1), strength(min 1), frequency(min 1), matchStroke` |
+| `Recoil` | 3 | `stroke, recoilStroke, strength(min 1), 0, matchStroke` |
+| `Lock` | 4 | `stroke, strength(255 in every call Flydigi makes), matchStroke` |
+| `Vibration` | 5 | `stroke, pressureLevel(min 1), strength(min 1), frequency(min 1), matchStroke` |
+| `SyncWithGrip` | cmd 82 | `bindType, filter, scale, stroke, pressureLevel, strength, frequency` |
 
-`Race` is the racing-throttle resistance effect — the Forza Horizon case.
+`min 1` is the builder's own clamp: it raises a zero rather than refusing the packet, so a
+caller that sends 0 gets the weakest setting. `Recoil`'s fourth slot is genuinely empty — the
+builder emits a 0 there and `matchStroke` follows it.
+
+The mode numbers are `AdapterTriggerType`, and the same six are the first byte of the
+per-profile block (§3c). `Race` is the racing-throttle resistance effect — the Forza Horizon
+case. Only `Normal` and `Race` are confirmed on hardware; 2–5 are built from
+`SetForceTriggerCommandFactory` and unfelt so far.
+
+**`Vibration` means two different things.** As mode 5 it has `Sniper`'s shape and no rumble
+binding: the trigger vibrates on its own from a travel point. As the *stored* effect type 5 it
+is the game's rumble routed into the trigger, and Flydigi's own software never sends mode 5 for
+it — `ControllerRepository.CreateForceAdapterConfig` turns stored type 5 into `SyncWithGrip`.
+
+### 3c. The same effects, stored in a profile
+
+A mapping config carries 20 bytes per trigger at offset 185, which is the same vocabulary
+sitting in the pad rather than on the wire — so it applies with no host process:
+
+```
+[0]      effect mode (AdapterTriggerType)
+[1]      bind type: 2 for the Vibration effect, 0 for every other
+[2]      bind filter          [3] bind scale
+[4..8]   bind params          [9] mixed border
+[10..19] effect params
+```
+
+Which effect uses which parameter slot (`ControllerRepository.SaveTriggerAdapterConfig`):
+
+| Effect | `[10]` | `[11]` | `[12]` | `[13]` | `[14]` |
+|---|---|---|---|---|---|
+| `Normal` | start | end | 0 | 0 | 0 |
+| `Race` | start | resistance | 0 | 0 | 0 |
+| `Sniper` | start | pressLevel | vibrationLevel | frequency | matchStart |
+| `Recoil` | start | end | resistance | 0 | matchStart |
+| `Lock` | start | 255 | 1 | 0 | 0 |
+| `Vibration` | stroke | frequency | 1 | 90 | 0 |
+
+`Vibration` is the one effect that reaches into the bind half: `filter` = its shielding value,
+`scale` = its intensity coefficient, bind params = `[stroke, 1, 1, frequency, 0]`. Slots the
+effect does not use are not free space — Lock's 255/1 and Vibration's 1/90 are constants
+Flydigi writes, and every effect shares all ten slots, so a slot holds whatever the last effect
+put there.
+
+Slider bounds, from Space Station's own UI (not the byte range): travel positions run 0–192,
+`Lock`'s position 20–200, `Vibration`'s intensity 0–200 and travel 1–200, everything else
+1–255.
 
 ### 3b. `K6Trigger*` — low-level / waveform (newer hardware generation)
 

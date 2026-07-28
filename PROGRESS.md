@@ -62,7 +62,7 @@ QML. See `gui/README.md`.
 | Profiles → Vibration | master switch, per-grip enable, min/max window, strength |
 | Controller → Other software | let Steam and similar take the pad over, and who currently holds it |
 | Profiles → Sticks | dead zone, outer dead zone, sensitivity curve presets, circular range |
-| Profiles → Triggers | stored effect (off / constant resistance), dead zone, trigger motor |
+| Profiles → Triggers | stored effect — all six of Flydigi's, each with its own controls — dead zone, trigger motor |
 | Adaptive triggers | all 94 games, searchable, filtered by route; vibration presets load onto the pad from here; per-game **Auto** toggle and a route picker for the nine multi-route games |
 | Setup | the daemon's unit, "running now" and "start at login" as separate switches, the application-menu entry, and the udev rules behind one authentication prompt |
 | Lighting | effect, up to 5 colours, brightness, cycle time, react-to-rumble |
@@ -366,15 +366,33 @@ Station never shows this block at all — `IsSupportForceTrigger` routes the sam
 the force-trigger block at 195/215 instead — so anything we write into 123..137 survives every
 subsequent edit in their app, and the only repair is a whole-profile "Restore default".
 
-**J4. Persist the vibration bind — and an open question, answered.** PROGRESS.md used to say the
+**J4. Persist the vibration bind — done, along with the four effects that were missing.** The page
+offered two of the six effects the pad has, because only `Normal` and `Race` had a mode number
+written down; `Sniper`, `Recoil`, `Lock` and `Vibration` are all in
+`SetForceTriggerCommandFactory` with their own parameters, and `SaveTriggerAdapterConfig` says
+which byte each one lands in. All six are now in `flydigi/effects.py` as one vocabulary — labels,
+Space Station's own slider bounds, and the slot map — which the profile editor, the live commands
+and `tools/flydigi_cmd.py` all read, so the wire form and the stored form cannot drift.
+
+Three things that only show up once all six exist. The ten parameter slots are **shared**: every
+effect writes into the same bytes, so switching effect reads back whatever the last one left, and a
+value out of the new effect's range is its default rather than a number clipped into range.
+Slots an effect does not use are **not** free space — Lock's 255/1 and Vibration's 1/90 are
+constants Flydigi's writer emits. And `Vibration` is two different things: as a live mode-5 command
+it has Sniper's shape and no rumble binding at all, while as stored type 5 it is the grip-rumble
+bind, which Flydigi sends as `SyncWithGrip` — `set_trigger_effect()` now writes that bind half, and
+the bind type byte, which is what this entry was originally about. **Unfelt on hardware:** modes
+2–5 ACK-clean by construction but nobody has pulled a trigger against them yet.
+
+The original question, answered: PROGRESS.md used to say the
 profile's force-trigger `bind` sub-struct "may be" the stored form of command 82 but "the counts do
 not match". They do. `ParseTriggerConfigToArray` writes, at **offset 185** + 20 per side:
 `Type, bind.Type, bind.Filter, bind.Scale, bind.Param[5], MixedBorder, Param[10]`. Live 82 takes
 3 + 4 parameters; the stored form is 3 + **5** — the same structure with one spare byte. And the
 writer sets `bind.Type = (Type == 5) ? 2 : 0`, so bind type 2 appears exactly when the stored effect
 is `Vibration`. The per-game preset *is* effect type 5 and can be made to survive a sleep instead of
-needing re-application. `set_trigger_effect()` writes `[+0]` and `[+10..+20]` and leaves the bind
-alone, so that is the gap.
+needing re-application — that last part is still not wired up: the Games page applies a preset with
+live command 82, which the pad forgets on sleep, rather than storing it in a profile.
 
 **J5. The second trigger-motor gear.** **Offset 154**: master enable, then per side two 7-byte
 gears (linear and micro), `m_fdg_motor_trig_setting_struct_t = {type, min, max, filter, vibr_limit,

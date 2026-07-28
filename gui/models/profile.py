@@ -17,7 +17,7 @@ from PySide6.QtCore import (Property, QAbstractListModel, QModelIndex, QObject,
                             Qt, QUrl, Signal, Slot)
 from PySide6.QtQml import QmlElement
 
-from flydigi import mapping
+from flydigi import effects, mapping
 
 # See gui/models/device.py for what these two names do.
 QML_IMPORT_NAME = "Apex5"
@@ -40,10 +40,10 @@ TURBO_MODES = [("While held", mapping.TURBO_WHILE_HELD),
                ("Toggle", mapping.TURBO_TOGGLE)]
 
 # Effect ids as stored in the profile, using the same vocabulary as the live
-# SetForceTrigger command. Only these two are confirmed on hardware; the rest
-# of the range is left out rather than guessed at in a UI.
-TRIGGER_MODES = [("Off — normal travel", 0),
-                 ("Constant resistance", 1)]
+# SetForceTrigger command. The whole of Flydigi's AdapterTriggerType, in their
+# order, so the combo box index is the stored mode byte -- see flydigi/effects.py
+# for what each one's parameters mean and where they land in the blob.
+TRIGGER_MODES = [(effect.label, effect.mode) for effect in effects.EFFECTS]
 
 TURBO_MAX_HZ = 40
 
@@ -200,51 +200,71 @@ class TriggerSideModel(QObject):
         self._profile = profile
         self._side = side
 
-    def _effect(self):
+    def _mode(self):
         config = self._profile.config
-        return config.trigger_effect(self._side) if config is not None else (0, [0] * 10)
+        return config.trigger_effect(self._side)[0] if config is not None else 0
 
-    def _set_effect(self, mode=None, start=None, strength=None):
+    def _values(self, mode=None):
+        """One effect's knobs by name, as the vocabulary reads them out of the
+        blob. `mode` defaults to the stored one; passing another asks what that
+        effect would make of the same bytes, which is how switching effects
+        keeps the numbers an earlier visit to it left behind."""
+        config = self._profile.config
+        if config is None:
+            return {}
+        stored_mode, params = config.trigger_effect(self._side)
+        return effects.values(stored_mode if mode is None else mode, params,
+                              config.trigger_bind(self._side))
+
+    def _store(self, mode, values):
         config = self._profile.config
         if config is None:
             return
-        current_mode, params = config.trigger_effect(self._side)
-        # Params mirror the live race effect: where resistance begins, then how
-        # hard it pushes back. Read-modify-write so setting one keeps the other.
-        config.set_trigger_effect(
-            self._side,
-            current_mode if mode is None else mode,
-            [params[0] if start is None else start,
-             params[1] if strength is None else strength])
+        params, bind = effects.stored(mode, values)
+        config.set_trigger_effect(self._side, mode, params, bind)
         self.changed.emit()
         self._profile.markChanged()
 
     @Property(int, notify=changed)
     def effect(self):
         """Index into TRIGGER_MODES, not the stored id."""
-        mode = self._effect()[0]
+        mode = self._mode()
         return next((i for i, (_l, m) in enumerate(TRIGGER_MODES) if m == mode), 0)
 
     @effect.setter
     def effect(self, value):
         index = max(0, min(len(TRIGGER_MODES) - 1, int(value)))
-        self._set_effect(mode=TRIGGER_MODES[index][1])
+        mode = TRIGGER_MODES[index][1]
+        # Written with what the new effect makes of the bytes already there:
+        # its own numbers if it was chosen before, its defaults where the last
+        # effect left something it cannot use. Writing the mode alone would
+        # leave a frequency of 0 in a field the pad refuses at 0.
+        self._store(mode, self._values(mode))
 
-    @Property(int, notify=changed)
-    def start(self):
-        return self._effect()[1][0]
+    @Property("QVariantList", notify=changed)
+    def effectParams(self):
+        """The chosen effect's knobs, in order, each ready to draw as a row.
 
-    @start.setter
-    def start(self, value):
-        self._set_effect(start=int(value))
+        A list rather than named properties because the knobs are not the same
+        from one effect to the next -- Racing has two, Sniper has five, General
+        has none -- and a fixed pair of "start"/"strength" properties could only
+        describe one of them honestly.
+        """
+        values = self._values()
+        return [{"key": p.key, "label": p.label, "description": p.description,
+                 "from": p.minimum, "to": p.maximum, "kind": p.kind,
+                 "value": values.get(p.key, p.default)}
+                for p in effects.effect(self._mode()).params]
 
-    @Property(int, notify=changed)
-    def strength(self):
-        return self._effect()[1][1]
-
-    @strength.setter
-    def strength(self, value):
-        self._set_effect(strength=int(value))
+    @Slot(str, int)
+    def setEffectParam(self, key, value):
+        """Move one knob, keeping the rest -- read-modify-write of the block."""
+        mode = self._mode()
+        values = self._values()
+        if key not in values:
+            return
+        values[key] = int(value)
+        self._store(mode, values)
 
     @Property(int, notify=changed)
     def deadZone(self):

@@ -65,6 +65,11 @@ OFF_TRIGGER_CURVE = 123    # 2 x 7: travel curve per trigger
 OFF_GRIP_VIBRATION = 145   # 1 + 2 x 4: the grip motors
 OFF_TRIGGER_MOTOR = 154    # 1 + 2 x 14: the trigger motors
 OFF_FORCE_TRIGGER = 185    # 2 x 20: the adaptive-trigger effect
+
+# The one effect that uses the block's rumble-binding half -- effects.py calls
+# it MODE_VIBRATION. Named here rather than imported so this module stays a
+# byte layout with no opinion about what the effects mean.
+FORCE_TRIGGER_BIND_MODE = 5
 OFF_DATA_VERSION = 225
 OFF_TITLE = 770
 OFF_JOYSTICK_EXTRA = 790   # 2 x 12: the 9-point bank, circularity and edge
@@ -519,22 +524,58 @@ class MappingConfig:
 
     # -- adaptive triggers, stored per profile ----------------------------
     #
-    # 20 bytes per side: effect type, an 8-byte rumble binding, a mixed border
-    # and 10 effect parameters. This is the same effect vocabulary the live
-    # SetForceTrigger command uses -- the difference is that this copy lives in
-    # the pad, so it applies with no host process and no game integration.
+    # 20 bytes per side, laid out as
+    #
+    #   [0]      effect mode          [4..8]  bind params
+    #   [1]      bind type            [9]     mixed border
+    #   [2]      bind filter          [10..19] effect params
+    #   [3]      bind scale
+    #
+    # This is the same effect vocabulary the live SetForceTrigger command uses
+    # -- the difference is that this copy lives in the pad, so it applies with
+    # no host process and no game integration. What each mode's parameters mean
+    # is in flydigi/effects.py; this pair only moves bytes.
+    #
+    # The bind half is the rumble-to-trigger binding, and only the Vibration
+    # effect uses it. It is kept across a mode change rather than cleared,
+    # which is what Flydigi's own writer does -- it re-emits the whole block
+    # from a record that held the old binding.
 
     def trigger_effect(self, side):
         """(mode, params) for one trigger's stored effect."""
         base = OFF_FORCE_TRIGGER + self._side(side) * 20
         return self.blob[base], list(self.blob[base + 10 : base + 20])
 
-    def set_trigger_effect(self, side, mode, params=()):
+    def trigger_bind(self, side):
+        """(filter, scale, params) -- the rumble binding half of the block."""
         base = OFF_FORCE_TRIGGER + self._side(side) * 20
-        self.blob[base] = mode & 0xFF
-        values = list(params)[:10] + [0] * max(0, 10 - len(params))
-        self.blob[base + 10 : base + 20] = bytes(
-            max(0, min(255, int(v))) for v in values)
+        return (self.blob[base + 2], self.blob[base + 3],
+                list(self.blob[base + 4 : base + 9]))
+
+    def set_trigger_effect(self, side, mode, params=None, bind=None):
+        """Store one trigger's effect.
+
+        `params` of None leaves the parameter slots alone -- switching to an
+        effect with no knobs should not throw away the numbers tuned for the
+        one before it.
+        """
+        base = OFF_FORCE_TRIGGER + self._side(side) * 20
+        mode = mode & 0xFF
+        self.blob[base] = mode
+        # Byte 1 is a bind type Flydigi writes as 2 for the Vibration effect
+        # and 0 for every other, rather than as a setting of its own.
+        self.blob[base + 1] = 2 if mode == FORCE_TRIGGER_BIND_MODE else 0
+        if params is not None:
+            values = list(params)[:10] + [0] * max(0, 10 - len(params))
+            self.blob[base + 10 : base + 20] = bytes(
+                max(0, min(255, int(v))) for v in values)
+        if bind is not None:
+            filt, scale, bind_params = bind
+            self.blob[base + 2] = max(0, min(255, int(filt)))
+            self.blob[base + 3] = max(0, min(255, int(scale)))
+            values = list(bind_params)[:5] + [0] * max(0, 5 - len(bind_params))
+            self.blob[base + 4 : base + 9] = bytes(
+                max(0, min(255, int(v))) for v in values)
 
     # -- travel and sensitivity curves ------------------------------------
     #

@@ -142,6 +142,48 @@ def cmd_race(fd, args):
     send(fd, build(CMD_SET_FORCE_TRIGGER, payload, args.report_id))
 
 
+def cmd_sniper(fd, args):
+    """SetForceTrigger: Sniper (vibrates once held past a point)."""
+    params = bytes([SIDE[args.side], 2, args.stroke, max(1, args.pressure),
+                    max(1, args.strength), max(1, args.frequency),
+                    1 if args.match_stroke else 0])
+    print(f"[force trigger: sniper] side={args.side} stroke={args.stroke}")
+    send(fd, build(CMD_SET_FORCE_TRIGGER, bytes([1]) + params, args.report_id))
+
+
+def cmd_recoil(fd, args):
+    """SetForceTrigger: Recoil (a band of resistance that gives way).
+
+    The zero before the match flag is a slot Flydigi's builder leaves empty.
+    """
+    params = bytes([SIDE[args.side], 3, args.stroke, args.travel,
+                    max(1, args.resistance), 0, 1 if args.match_stroke else 0])
+    print(f"[force trigger: recoil] side={args.side} stroke={args.stroke} "
+          f"travel={args.travel}")
+    send(fd, build(CMD_SET_FORCE_TRIGGER, bytes([1]) + params, args.report_id))
+
+
+def cmd_lock(fd, args):
+    """SetForceTrigger: Lock (a hard stop at a travel point)."""
+    params = bytes([SIDE[args.side], 4, args.stroke, args.strength,
+                    1 if args.match_stroke else 0])
+    print(f"[force trigger: lock] side={args.side} stroke={args.stroke}")
+    send(fd, build(CMD_SET_FORCE_TRIGGER, bytes([1]) + params, args.report_id))
+
+
+def cmd_vibrate(fd, args):
+    """SetForceTrigger: Vibration (mode 5).
+
+    Not the profile's Vibration effect, which Space Station sends as `bind`
+    (SyncWithGrip) instead -- this one has no rumble binding at all.
+    """
+    params = bytes([SIDE[args.side], 5, args.stroke, max(1, args.pressure),
+                    max(1, args.strength), max(1, args.frequency),
+                    1 if args.match_stroke else 0])
+    print(f"[force trigger: vibration] side={args.side} stroke={args.stroke}")
+    send(fd, build(CMD_SET_FORCE_TRIGGER, bytes([1]) + params, args.report_id))
+
+
 def cmd_k6mode(fd, args):
     """K6TriggerMode: set trigger + grip mode."""
     buf = build(CMD_K6_TRIGGER_MODE, b"", args.report_id)
@@ -280,6 +322,40 @@ def main():
     p.add_argument("--resistance", type=int, default=40)
     p.add_argument("--match-stroke", action="store_true", default=True)
     p.set_defaults(func=cmd_race)
+
+    # Defaults are the gentle ones the profile editor starts an effect on.
+    p = sub.add_parser("sniper")
+    p.add_argument("side", choices=SIDE)
+    p.add_argument("--stroke", type=int, default=50)
+    p.add_argument("--pressure", type=int, default=25)
+    p.add_argument("--strength", type=int, default=20)
+    p.add_argument("--frequency", type=int, default=20)
+    p.add_argument("--match-stroke", action="store_true", default=True)
+    p.set_defaults(func=cmd_sniper)
+
+    p = sub.add_parser("recoil")
+    p.add_argument("side", choices=SIDE)
+    p.add_argument("--stroke", type=int, default=50)
+    p.add_argument("--travel", type=int, default=30)
+    p.add_argument("--resistance", type=int, default=40)
+    p.add_argument("--match-stroke", action="store_true", default=True)
+    p.set_defaults(func=cmd_recoil)
+
+    p = sub.add_parser("lock")
+    p.add_argument("side", choices=SIDE)
+    p.add_argument("--stroke", type=int, default=60)
+    p.add_argument("--strength", type=int, default=255)
+    p.add_argument("--match-stroke", action="store_true", default=True)
+    p.set_defaults(func=cmd_lock)
+
+    p = sub.add_parser("vibrate")
+    p.add_argument("side", choices=SIDE)
+    p.add_argument("--stroke", type=int, default=50)
+    p.add_argument("--pressure", type=int, default=25)
+    p.add_argument("--strength", type=int, default=20)
+    p.add_argument("--frequency", type=int, default=20)
+    p.add_argument("--match-stroke", action="store_true", default=True)
+    p.set_defaults(func=cmd_vibrate)
 
     p = sub.add_parser("k6mode")
     p.add_argument("--trigger-mode", type=int, default=2, help="0=Local 1=BindGrip 2=Realtime")

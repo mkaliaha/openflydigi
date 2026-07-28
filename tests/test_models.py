@@ -29,7 +29,7 @@ except ImportError:
     sys.exit(0)
 
 from flydigi import lighting as led
-from flydigi import mapping, prefs
+from flydigi import effects, mapping, prefs
 from flydigi import setup as system_setup
 from gui import models
 from tests.fake_pad import FakePad, blank_blob
@@ -339,15 +339,15 @@ def test_vibration_keeps_min_below_max():
 def test_trigger_fields_are_independent():
     profile, _ = make_profile()
     right = profile.triggers.side("right")
-    right.effect = 1                     # constant resistance
-    right.start = 60
-    right.strength = 200
+    right.effect = 1                     # racing
+    right.setEffectParam("start", 60)
+    right.setEffectParam("resistance", 200)
     right.deadZone = 15
 
     mode, params = profile.config.trigger_effect("right")
     check("trigger effect reaches the config",
           mode == models.TRIGGER_MODES[1][1], str(mode))
-    check("start and strength are both kept", (params[0], params[1]) == (60, 200),
+    check("both knobs are kept", (params[0], params[1]) == (60, 200),
           str(params[:2]))
     check("dead zone reaches the curve",
           profile.config.trigger_curve("right")["zero"] == 15)
@@ -357,6 +357,56 @@ def test_trigger_fields_are_independent():
     check("motor reaches the config", profile.config.trigger_motor("right")[0])
     check("the model reads back its own effect index", right.effect == 1)
     check("editing a trigger marks dirty", profile.dirty)
+
+
+def test_each_effect_offers_its_own_controls():
+    """The knobs are not the same from one effect to the next, so the page
+    asks the model what to draw rather than drawing a fixed pair."""
+    profile, _ = make_profile()
+    right = profile.triggers.side("right")
+
+    check("all six effects are offered", len(profile.triggers.effectNames) == 6,
+          str(profile.triggers.effectNames))
+    check("General offers no controls at all",
+          right.effect == 0 and right.effectParams == [], str(right.effectParams))
+
+    for index, (label, mode) in enumerate(models.TRIGGER_MODES):
+        right.effect = index
+        keys = [row["key"] for row in right.effectParams]
+        check(f"{label}: the controls are the effect's own",
+              keys == [p.key for p in effects.effect(mode).params], str(keys))
+        check(f"{label}: every control is inside its own range",
+              all(row["from"] <= row["value"] <= row["to"]
+                  for row in right.effectParams), str(right.effectParams))
+        check(f"{label}: a switch is drawn as one",
+              all(row["kind"] in ("number", "switch") for row in right.effectParams))
+
+
+def test_an_effect_remembers_its_numbers_across_a_switch():
+    """All six share ten byte slots, so switching effect and back must not
+    silently retune the one you left."""
+    profile, _ = make_profile()
+    right = profile.triggers.side("right")
+    right.effect = 1                                    # racing
+    right.setEffectParam("start", 77)
+
+    right.effect = 4                                    # trigger lock
+    check("the lock has its own position",
+          right.effectParams[0]["key"] == "start", str(right.effectParams))
+    right.effect = 1
+    values = {row["key"]: row["value"] for row in right.effectParams}
+    check("racing kept the start it was given", values["start"] == 77,
+          str(values))
+
+
+def test_an_unknown_knob_is_refused_rather_than_stored():
+    profile, _ = make_profile()
+    right = profile.triggers.side("right")
+    right.effect = 4                                    # trigger lock
+    before = bytes(profile.config.blob)
+    right.setEffectParam("frequency", 200)              # lock has no frequency
+    check("a knob this effect does not have changes nothing",
+          bytes(profile.config.blob) == before)
 
 
 def test_the_trigger_motors_share_one_enable():
@@ -938,6 +988,9 @@ def main():
                  test_vibration_writes_through_to_the_blob,
                  test_vibration_keeps_min_below_max,
                  test_trigger_fields_are_independent,
+                 test_each_effect_offers_its_own_controls,
+                 test_an_effect_remembers_its_numbers_across_a_switch,
+                 test_an_unknown_knob_is_refused_rather_than_stored,
                  test_the_trigger_motors_share_one_enable,
                  test_a_stick_edit_recompiles_the_bank,
                  test_a_stick_edit_moves_the_curve_to_custom,

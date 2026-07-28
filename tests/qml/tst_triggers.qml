@@ -45,44 +45,78 @@ TestCase {
                   "a read was still arriving between cases");
     }
 
+    function pick(side, index) {
+        let combo = findChild(page, "effect_" + side);
+        combo.currentIndex = index;
+        combo.activated(index);
+    }
+
     function test_each_trigger_has_its_own_controls() {
         for (const side of ["left", "right"]) {
             verify(findChild(page, "effect_" + side), "no effect picker for " + side);
-            verify(findChild(page, "start_" + side), "no start control for " + side);
-            verify(findChild(page, "strength_" + side), "no resistance for " + side);
             verify(findChild(page, "deadZone_" + side), "no dead zone for " + side);
+            pick(side, 1);                       // racing
+            tryVerify(() => findChild(page, "param_start_" + side), 2000,
+                      "no start control for " + side);
+            verify(findChild(page, "param_resistance_" + side),
+                   "no resistance for " + side);
         }
     }
 
-    function test_only_the_two_confirmed_effects_are_offered() {
-        // The rest of the effect range is unverified on hardware and is left
-        // out rather than guessed at in a UI.
-        compare(App.profile.triggers.effectNames.length, 2,
+    function test_all_six_effects_are_offered() {
+        compare(App.profile.triggers.effectNames.length, 6,
                 String(App.profile.triggers.effectNames));
     }
 
-    function test_resistance_controls_wait_for_an_effect() {
-        let side = App.profile.triggers.right;
-        compare(side.effect, 0, "should start on 'off -- normal travel'");
-        verify(!findChild(page, "start_right").enabled,
-               "where resistance begins means nothing with no resistance");
+    function test_the_controls_follow_the_chosen_effect() {
+        // Racing and Sniper share a start position and nothing else, so the
+        // rows have to be replaced rather than enabled and disabled.
+        compare(App.profile.triggers.right.effect, 0, "should start on General");
+        verify(!findChild(page, "param_start_right"),
+               "General has no start position to show");
 
-        let combo = findChild(page, "effect_right");
-        combo.currentIndex = 1;
-        combo.activated(1);
-        tryVerify(() => findChild(page, "start_right").enabled, 2000,
-                  "choosing an effect should enable its parameters");
+        pick("right", 1);                        // racing
+        tryVerify(() => findChild(page, "param_resistance_right"), 2000,
+                  "racing brought no resistance control");
+        verify(!findChild(page, "param_frequency_right"),
+               "racing has no frequency");
+
+        pick("right", 2);                        // sniper
+        tryVerify(() => findChild(page, "param_frequency_right"), 2000,
+                  "sniper brought no frequency control");
+        verify(!findChild(page, "param_resistance_right"),
+               "sniper has no resistance");
+        verify(findChild(page, "param_match_input_right"),
+               "sniper's match-input switch is missing");
     }
 
-    function test_start_and_strength_are_independent() {
-        let combo = findChild(page, "effect_right");
-        combo.currentIndex = 1;
-        combo.activated(1);
+    function test_a_knob_writes_through_to_the_profile() {
+        pick("right", 2);                        // sniper
+        tryVerify(() => findChild(page, "param_frequency_right"), 2000);
 
-        findChild(page, "start_right").moved(60);
-        findChild(page, "strength_right").moved(200);
-        compare(App.profile.triggers.right.start, 60, "start was lost");
-        compare(App.profile.triggers.right.strength, 200, "strength was lost");
+        findChild(page, "param_start_right").moved(60);
+        findChild(page, "param_frequency_right").moved(120);
+
+        let values = {};
+        for (const row of App.profile.triggers.right.effectParams)
+            values[row.key] = row.value;
+        compare(values.start, 60, "start was lost");
+        compare(values.frequency, 120, "frequency was lost");
+    }
+
+    function test_a_switch_writes_through_too() {
+        pick("right", 3);                        // recoil
+        tryVerify(() => findChild(page, "param_match_input_right"), 2000);
+
+        let match = findChild(page, "param_match_input_right");
+        let before = match.checked;
+        match.checked = !before;
+        match.toggled();
+
+        let values = {};
+        for (const row of App.profile.triggers.right.effectParams)
+            values[row.key] = row.value;
+        compare(values.match_input, before ? 0 : 1, "the switch did not write through");
     }
 
     function test_dead_zone_writes_through() {

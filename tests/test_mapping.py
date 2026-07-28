@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flydigi import device, lighting, mapping
+from flydigi import device, effects, lighting, mapping
 from tests.fake_pad import BLOB_LEN, FakePad, blank_blob
 
 PASSED = []
@@ -232,6 +232,162 @@ def test_trigger_effect_and_curve():
     check("trigger motor round-trips",
           config.trigger_motor("left") == (True, 10, 90, 70),
           str(config.trigger_motor("left")))
+
+
+def test_every_effect_round_trips_through_the_profile():
+    """All six of Flydigi's effects, not just the two with obvious knobs."""
+    for effect in effects.EFFECTS:
+        config = mapping.MappingConfig(blank_blob())
+        untouched = (config.trigger_effect("left"), config.trigger_bind("left"))
+        wanted = effects.defaults(effect.mode)
+        params, bind = effects.stored(effect.mode, wanted)
+        config.set_trigger_effect("right", effect.mode, params, bind)
+
+        mode, stored_params = config.trigger_effect("right")
+        check(f"{effect.key}: mode round-trips", mode == effect.mode, str(mode))
+        got = effects.values(mode, stored_params, config.trigger_bind("right"))
+        check(f"{effect.key}: every knob round-trips", got == wanted,
+              f"{got} != {wanted}")
+        check(f"{effect.key}: the other trigger is untouched",
+              (config.trigger_effect("left"), config.trigger_bind("left"))
+              == untouched, str(config.trigger_bind("left")))
+
+
+def test_the_effect_block_matches_flydigis_layout():
+    """Byte for byte against ControllerRepository.SaveTriggerAdapterConfig.
+
+    The slots an effect does not use are not free space -- Lock's strength and
+    Vibration's pair are written as constants by Flydigi's own writer, and a
+    profile that leaves the previous effect's numbers there is not the profile
+    their software would have written.
+    """
+    config = mapping.MappingConfig(blank_blob())
+    base = mapping.OFF_FORCE_TRIGGER
+
+    config.set_trigger_effect("left", *(
+        (effects.MODE_SNIPER,) + effects.stored(effects.MODE_SNIPER, {
+            "start": 40, "press": 30, "strength": 20, "frequency": 10,
+            "match_input": 1})))
+    check("sniper fills five slots in order",
+          list(config.blob[base + 10 : base + 15]) == [40, 30, 20, 10, 1],
+          str(list(config.blob[base + 10 : base + 15])))
+
+    config.set_trigger_effect("left", *(
+        (effects.MODE_RECOIL,) + effects.stored(effects.MODE_RECOIL, {
+            "start": 40, "travel": 30, "resistance": 20, "match_input": 0})))
+    check("recoil leaves slot 3 empty and matches in slot 4",
+          list(config.blob[base + 10 : base + 15]) == [40, 30, 20, 0, 0],
+          str(list(config.blob[base + 10 : base + 15])))
+
+    config.set_trigger_effect("left", *(
+        (effects.MODE_LOCK,) + effects.stored(effects.MODE_LOCK, {"start": 90})))
+    check("lock writes its fixed strength and flag",
+          list(config.blob[base + 10 : base + 15]) == [90, 255, 1, 0, 0],
+          str(list(config.blob[base + 10 : base + 15])))
+
+    config.set_trigger_effect("left", *(
+        (effects.MODE_VIBRATION,) + effects.stored(effects.MODE_VIBRATION, {
+            "scale": 60, "block": 12, "stroke": 44, "frequency": 30})))
+    check("vibration marks the block as bound", config.blob[base + 1] == 2,
+          str(config.blob[base + 1]))
+    check("vibration fills the binding half",
+          config.trigger_bind("left") == (12, 60, [44, 1, 1, 30, 0]),
+          str(config.trigger_bind("left")))
+    check("vibration's own slots carry the stroke and frequency",
+          list(config.blob[base + 10 : base + 15]) == [44, 30, 1, 90, 0],
+          str(list(config.blob[base + 10 : base + 15])))
+
+    config.set_trigger_effect("left", effects.MODE_RACE, [50, 40])
+    check("leaving the vibration effect clears the bind marker",
+          config.blob[base + 1] == 0, str(config.blob[base + 1]))
+    check("but keeps the binding itself, as Flydigi's writer does",
+          config.trigger_bind("left") == (12, 60, [44, 1, 1, 30, 0]),
+          str(config.trigger_bind("left")))
+
+
+def test_switching_to_general_keeps_the_numbers():
+    """General has no knobs, so it has nothing to write -- zeroing the slots
+    would throw away a tuned effect for someone toggling it off and on."""
+    config = mapping.MappingConfig(blank_blob())
+    params, bind = effects.stored(effects.MODE_RACE,
+                                  {"start": 77, "resistance": 88})
+    config.set_trigger_effect("right", effects.MODE_RACE, params, bind)
+
+    none_params, none_bind = effects.stored(effects.MODE_NORMAL, {})
+    check("General asks for no parameters at all",
+          none_params is None and none_bind is None)
+    config.set_trigger_effect("right", effects.MODE_NORMAL, none_params, none_bind)
+    check("the effect really is off", config.trigger_effect("right")[0] == 0)
+    check("and the racing numbers survived",
+          config.trigger_effect("right")[1][:2] == [77, 88],
+          str(config.trigger_effect("right")[1][:2]))
+
+
+def test_an_effect_reads_its_own_defaults_out_of_a_foreign_slot():
+    """Every effect shares the same ten slots, so a slot the previous effect
+    used differently must not read back as a setting of this one.
+
+    Only a value out of range can be caught: Lock's fixed 1 in slot 2 is a
+    perfectly legal Sniper strength and survives as one. That is a limit of
+    the storage, not of the reading -- the pad keeps no record of which effect
+    wrote a slot.
+    """
+    config = mapping.MappingConfig(blank_blob())
+    config.set_trigger_effect("right", *(
+        (effects.MODE_LOCK,) + effects.stored(effects.MODE_LOCK, {"start": 90})))
+    _mode, params = config.trigger_effect("right")
+
+    got = effects.values(effects.MODE_SNIPER, params, config.trigger_bind("right"))
+    defaults = effects.defaults(effects.MODE_SNIPER)
+    check("a start position in range is kept", got["start"] == 90, str(got))
+    check("a frequency that was never written falls back to its default",
+          got["frequency"] == defaults["frequency"], str(got))
+    check("a travel of 255 is not offered as a start position",
+          effects.values(effects.MODE_RACE, [255] * 10)["start"]
+          == effects.defaults(effects.MODE_RACE)["start"],
+          str(effects.values(effects.MODE_RACE, [255] * 10)))
+
+
+def test_live_effect_payloads_match_the_command_builders():
+    """The wire form of each effect, against SetForceTriggerCommandFactory."""
+    class Recorder:
+        def __init__(self):
+            self.sent = []
+
+        def command(self, cmd_id, payload=b"", wait=0.3):
+            self.sent.append((cmd_id, list(payload)))
+            return []
+
+        def send(self, buf, wait=0.3):
+            self.sent.append((buf[3], list(buf[5 : 5 + buf[4]])))
+            return []
+
+        @staticmethod
+        def ack_ok(_reply, _cmd_id):
+            return True
+
+    pad = Recorder()
+    effects.sniper(pad, device.SIDE_RIGHT, 40, 30, 20, 10, match_stroke=True)
+    check("sniper's wire form", pad.sent[-1] == (81, [1, 2, 2, 40, 30, 20, 10, 1]),
+          str(pad.sent[-1]))
+
+    effects.recoil(pad, device.SIDE_RIGHT, 40, 30, 20, match_stroke=False)
+    check("recoil carries an empty slot before the match flag",
+          pad.sent[-1] == (81, [1, 2, 3, 40, 30, 20, 0, 0]), str(pad.sent[-1]))
+
+    effects.lock(pad, device.SIDE_LEFT, 90)
+    check("lock's wire form", pad.sent[-1] == (81, [1, 1, 4, 90, 255, 1]),
+          str(pad.sent[-1]))
+
+    effects.vibration(pad, device.SIDE_LEFT, 40, 30, 20, 10)
+    check("mode 5 has sniper's shape and no binding",
+          pad.sent[-1] == (81, [1, 1, 5, 40, 30, 20, 10, 1]), str(pad.sent[-1]))
+
+    # Flydigi's builders raise a zero to one rather than refusing the packet,
+    # so a caller that sends 0 gets the weakest setting, not silence.
+    effects.sniper(pad, device.SIDE_LEFT, 0, 0, 0, 0)
+    check("zero knobs come out as one",
+          pad.sent[-1] == (81, [1, 1, 2, 0, 1, 1, 1, 1]), str(pad.sent[-1]))
 
 
 def test_the_factory_curves_are_the_identity_line():
@@ -654,6 +810,11 @@ def main():
                  test_a_failed_browse_still_puts_the_pad_back,
                  test_bad_checksum_is_rejected, test_vibration_intensity,
                  test_trigger_effect_and_curve,
+                 test_every_effect_round_trips_through_the_profile,
+                 test_the_effect_block_matches_flydigis_layout,
+                 test_switching_to_general_keeps_the_numbers,
+                 test_an_effect_reads_its_own_defaults_out_of_a_foreign_slot,
+                 test_live_effect_payloads_match_the_command_builders,
                  test_the_factory_curves_are_the_identity_line,
                  test_moving_the_trigger_window_moves_its_points,
                  test_the_joystick_type_is_written_into_both_blocks,
