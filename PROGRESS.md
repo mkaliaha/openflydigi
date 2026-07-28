@@ -8,9 +8,9 @@ now covers five delivery mechanisms plus a virtual DualSense.
 **Status: adaptive triggers are done and validated in real games, and the desktop app — now QML on
 Kirigami — covers profiles, button remapping, vibration, per-profile trigger config and RGB
 lighting.** What remains is the screen/GIF upload, the charging dock, the third-party-app mapping
-toggle, macros, the device settings, a daemon that picks the right tier per game, and the joystick
-and gyro blocks the profile already carries — see "Next". Two known UI bugs are listed in the
-runbook at the end.
+toggle, macros, the device settings, a daemon that picks the right tier per game, and the gyro block
+the profile already carries — see "Next". The joystick block is done, and both known UI bugs are
+fixed.
 
 | Tier | Games | Validated in |
 |---|---|---|
@@ -59,6 +59,7 @@ QML. See `gui/README.md`.
 |---|---|
 | Profiles → Buttons | remap, turbo + hold/toggle, rename, back up / restore to file |
 | Profiles → Vibration | master switch, per-grip enable, min/max window, strength |
+| Profiles → Sticks | dead zone, outer dead zone, sensitivity curve presets, circular range |
 | Profiles → Triggers | stored effect (off / constant resistance), dead zone, trigger motor |
 | Adaptive triggers | all 94 games, searchable, filtered by route; vibration presets load onto the pad from here |
 | Lighting | effect, up to 5 colours, brightness, cycle time, react-to-rumble |
@@ -157,10 +158,10 @@ Everything in this section is **already carried through** by `flydigi/mapping.py
 write the whole 840-byte blob, so these are accessors and a page, not new commands and not new
 risk. Offsets from `MappingConfigParser.cs`, struct names from `data.model.config/`.
 
-**J1. Joystick dead zones, curves, circularity. — backend done; no GUI yet.**
-`joystick_curve()` / `set_joystick_curve()` and `joystick_shape()` / `set_joystick_shape()` are in
-`flydigi/mapping.py`, tested, and verified against a blob dumped off the pad. What remains is a
-model and a page. Two blocks:
+**J1. Joystick dead zones, curves, circularity. — DONE, backend and GUI.**
+`stick()` / `set_stick()` and the compiler `stick_bank()` are in `flydigi/mapping.py`; the page is
+`gui/qml/pages/SticksPage.qml`, over `StickModel` in `gui/models/profile.py`. Verified end to end on
+hardware: a 25% dead zone compiles, writes in two packets and reads back byte-identical. Two blocks:
 
   * **offset 109**, 7 bytes per stick (left 109, right 116):
     `type, center, p1.x, p1.y, p2.x, p2.y, end`, on a **0..127** scale.
@@ -1149,7 +1150,7 @@ for t in tests/test_{dsx,forza,mapping,monitor,relay}.py; do python3 "$t"; done 
 tools/generate-qmltypes && qmllint -I . -I /usr/lib64/qt6/qml gui/qml/Main.qml gui/qml/*/*.qml
 ```
 
-141 model tests, 48 shell, 62 QML, 170 backend; qmllint and `reuse lint` clean.
+159 model tests, 50 shell, 69 QML, 229 backend; qmllint and `reuse lint` clean.
 
 **Both known bugs are fixed**, each with a test that fails without the fix.
 
