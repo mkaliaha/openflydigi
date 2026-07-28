@@ -60,13 +60,55 @@ CMD_SAVE = 166
 OFF_PROTO_VERSION = 0
 OFF_PACKAGE_COUNT = 2
 OFF_KEY_TABLE = 13
+OFF_JOYSTICK_CURVE = 109   # 2 x 7: sensitivity curve per stick
 OFF_TRIGGER_CURVE = 123    # 2 x 7: travel curve per trigger
 OFF_GRIP_VIBRATION = 145   # 1 + 2 x 4: the grip motors
 OFF_TRIGGER_MOTOR = 154    # 1 + 2 x 14: the trigger motors
 OFF_FORCE_TRIGGER = 185    # 2 x 20: the adaptive-trigger effect
 OFF_DATA_VERSION = 225
 OFF_TITLE = 770
+OFF_JOYSTICK_EXTRA = 790   # 2 x 12: the 9-point bank, circularity and edge
 TITLE_BYTES = 20
+
+CURVE_ENTRY = 7            # type, zero, p1.x, p1.y, p2.x, p2.y, end
+JOYSTICK_EXTRA_ENTRY = 12  # type, bank[9], isRound, end
+BANK_POINTS = 9
+
+# JoystickSensitivityType. The last two are the enum's own names; Space Station
+# labels them "Instant" and "Delay", which is what a UI should say.
+CURVE_DEFAULT, CURVE_QUICK, CURVE_SLOW, CURVE_CUSTOM = 0, 1, 2, 3
+
+# JoystickCircularityType.
+SHAPE_RECTANGLE, SHAPE_CIRCULAR = 0, 1
+
+# A stick's `center` byte is forced to exactly this when the stick is mapped to
+# something that is not a stick -- keyboard, mouse or d-pad. So 127 there is a
+# sentinel meaning "not a joystick", not a dead zone of 127, and a UI that draws
+# it as a number is drawing a lie. Space Station's own renderer guards the same
+# way, treating anything over 100 as zero.
+CENTER_NOT_A_STICK = 127
+
+# `center` and `edge` each carry two opposite controls in one byte, and the sign
+# picks which. They position the curve's start and end nodes, and the sign says
+# which axis the node slides along:
+#
+#   center > 0  start node moves along x   input below it produces nothing
+#                                          -- a dead zone
+#   center < 0  start node moves up y      the smallest input already produces
+#                                          `-center` -- Space Station calls this
+#                                          "Offset", and it exists to cancel a
+#                                          *game's* dead zone rather than add one
+#   edge   > 0  end node pulls in along x  full output before full travel
+#   edge   < 0  end node drops along y     full travel only reaches 100+edge,
+#                                          i.e. an output ceiling
+#
+# So there is no such thing as a negative dead zone; the field simply is not a
+# dead-zone field. Both halves are wanted. We write only the positive one,
+# because the SDK's reader folds a byte over 127 to `127 - byte` while every one
+# of its writers emits a plain two's-complement cast -- so the two disagree, and
+# -20 written as 236 reads back as -109. Positive values encode identically
+# under both readings; the rest is refused rather than guessed at.
+BIPOLAR_MAX = 100
 
 # Enable flags in this config are stored inverted: 0 means on, 0xFF means off.
 ENABLED, DISABLED = 0, 0xFF
@@ -172,13 +214,23 @@ def read_config_preserving(ctrl, cfg_id, wait=1.5):
     switching cannot save what it is showing; it opens profiles the way Space
     Station does instead, leaving the pad on the one being edited. This stays
     for callers that really do want to look without disturbing anything.
+
+    The restore is in a `finally` because the pad switches on the *first* read
+    packet, before `read_blob` knows whether the whole config arrived -- so a
+    read that raises has still moved the pad. Worse, a retry then launders it:
+    the next `read_status` truthfully reports the browsed slot as active, the
+    restore is skipped as unnecessary, and the call reports success having left
+    the pad somewhere the caller never asked it to go. Which slot to go back to
+    is therefore decided before the read, not after it.
     """
     status = read_status(ctrl)
-    config = read_config(ctrl, cfg_id, wait=wait)
     previous = status["active"] if status else None
     if previous is None or previous == cfg_id:
-        return config, None
-    apply_config(ctrl, previous)
+        return read_config(ctrl, cfg_id, wait=wait), None
+    try:
+        config = read_config(ctrl, cfg_id, wait=wait)
+    finally:
+        apply_config(ctrl, previous)
     return config, previous
 
 
@@ -387,9 +439,17 @@ class MappingConfig:
         self.blob[base + 10 : base + 20] = bytes(
             max(0, min(255, int(v))) for v in values)
 
-    def trigger_curve(self, side):
-        """(type, zero, point1, point2, end) -- where the trigger's travel maps."""
-        base = OFF_TRIGGER_CURVE + self._side(side) * 7
+    # -- travel and sensitivity curves ------------------------------------
+    #
+    # Sticks and triggers share one 7-byte struct -- `type, zero, p1.x, p1.y,
+    # p2.x, p2.y, end` -- but not one scale. A stick's curve runs to 127 and a
+    # trigger's to 255, confirmed on hardware: the factory blob holds
+    # `0 0 63 63 127 127 127` per stick and `0 0 0 0 255 255 255` per trigger.
+    # Both are the identity line on their own scale, so a pad out of the box has
+    # no curve at all. A single "0-100%" control mapped to bytes would cover
+    # half the range on one of them.
+
+    def _curve(self, base):
         return {
             "type": self.blob[base],
             "zero": self.blob[base + 1],
@@ -398,12 +458,158 @@ class MappingConfig:
             "end": self.blob[base + 6],
         }
 
-    def set_trigger_curve(self, side, zero=None, end=None):
-        base = OFF_TRIGGER_CURVE + self._side(side) * 7
+    def trigger_curve(self, side):
+        """(type, zero, point1, point2, end) -- where the trigger's travel maps."""
+        return self._curve(OFF_TRIGGER_CURVE + self._side(side) * CURVE_ENTRY)
+
+    def set_trigger_curve(self, side, zero=None, end=None, mirror_points=True):
+        """Move the trigger's travel window.
+
+        `zero` is where the trigger starts registering and `end` where it reads
+        full -- Space Station calls the pair "Stroke Setting" and offers them as
+        one range slider.
+
+        The two control points are mirrored onto the window by default, because
+        that is the only combination Flydigi's own software produces:
+        `ControllerRepository` sets `Point1 = (Start, Start)` and
+        `Point2 = (End, End)` from the same two numbers, and the factory blob
+        agrees -- `0 0 0 0 255 255 255` is exactly zero, (zero, zero),
+        (end, end), end. Writing zero and end alone, which this used to do,
+        leaves the points where they were and produces a blob no vendor tool
+        would ever emit, with breakpoints stranded outside the window they are
+        supposed to bound. `mirror_points=False` is for a caller deliberately
+        shaping the curve rather than moving its ends.
+
+        The pad reads the pair as a window, so they are sorted rather than left
+        inverted. They are allowed to be equal: Space Station's range slider
+        passes neither `pushable` nor `allowCross`, so dragging one handle onto
+        the other is reachable and nothing downstream rejects it.
+        """
+        base = OFF_TRIGGER_CURVE + self._side(side) * CURVE_ENTRY
         if zero is not None:
-            self.blob[base + 1] = max(0, min(255, zero))
+            self.blob[base + 1] = max(0, min(255, int(zero)))
         if end is not None:
-            self.blob[base + 6] = max(0, min(255, end))
+            self.blob[base + 6] = max(0, min(255, int(end)))
+        if self.blob[base + 1] > self.blob[base + 6]:
+            self.blob[base + 1], self.blob[base + 6] = (
+                self.blob[base + 6], self.blob[base + 1])
+        if mirror_points:
+            low, high = self.blob[base + 1], self.blob[base + 6]
+            self.blob[base + 2] = self.blob[base + 3] = low
+            self.blob[base + 4] = self.blob[base + 5] = high
+
+    # -- joystick curves ---------------------------------------------------
+    #
+    # Two blocks describe one stick. The core block at 109 is the four-node
+    # polyline Space Station draws -- start, two breakpoints, end -- and the
+    # extra block at 790 is the same curve resampled to nine evenly spaced
+    # points, which is what a v3.1 pad actually plays. Flydigi writes both from
+    # one source and never reconciles them, so this reads both and says when
+    # they disagree rather than picking a winner.
+
+    def joystick_curve(self, side):
+        """The core curve block for one stick.
+
+        `center` is reported raw. Above 100 it is not a number at all: the
+        firmware stores exactly 127 there when the stick is mapped to keyboard,
+        mouse or d-pad, so `is_stick` says whether the rest means anything.
+
+        `end` is read-only -- see `set_joystick_curve`.
+        """
+        base = OFF_JOYSTICK_CURVE + self._side(side) * CURVE_ENTRY
+        curve = self._curve(base)
+        curve["center"] = curve.pop("zero")
+        curve["is_stick"] = curve["center"] <= BIPOLAR_MAX
+        return curve
+
+    def joystick_shape(self, side):
+        """The 9-point bank, circularity and edge for one stick.
+
+        Returns None on a protocol older than 3.1, where the block does not
+        exist. `bank` values are biased by 50, so 50 is no output and 150 is
+        full; a straight line is evenly spaced between them. 0xFF means that
+        point was never written -- unlike the core block, whose 7 bytes are
+        always emitted in full, this one is pre-filled with 0xFF and only as
+        many points as the host had are overwritten.
+        """
+        base = OFF_JOYSTICK_EXTRA + self._side(side) * JOYSTICK_EXTRA_ENTRY
+        if len(self.blob) < base + JOYSTICK_EXTRA_ENTRY:
+            return None
+        return {
+            "type": self.blob[base],
+            "bank": list(self.blob[base + 1 : base + 1 + BANK_POINTS]),
+            "circular": self.blob[base + 10] == SHAPE_CIRCULAR,
+            "edge": self.blob[base + 11],
+        }
+
+    def set_joystick_curve(self, side, curve_type=None, center=None,
+                           point1=None, point2=None):
+        """Edit the core curve. `end` is deliberately not settable.
+
+        Nothing in Flydigi's application ever assigns the core `end` byte -- the
+        UI's "Edge" slider writes the *extra* block's trailing byte instead, a
+        different protobuf field -- and their reader corrupts it above 127 by
+        folding it to `127 - value` and casting straight back. The factory value
+        is 127 on both sticks. So it is carried through untouched rather than
+        exposed as a control whose stock value we would have to guess.
+
+        Setting the type writes it into both blocks. The SDK regenerates the
+        extra block's copy from this one on every write, so a blob where they
+        disagree is a state no vendor tool produces.
+        """
+        base = OFF_JOYSTICK_CURVE + self._side(side) * CURVE_ENTRY
+        if curve_type is not None:
+            curve_type = int(curve_type)
+            if not CURVE_DEFAULT <= curve_type <= CURVE_CUSTOM:
+                raise ValueError(f"no sensitivity curve type {curve_type}")
+            self.blob[base] = curve_type
+            extra = OFF_JOYSTICK_EXTRA + self._side(side) * JOYSTICK_EXTRA_ENTRY
+            if len(self.blob) >= extra + JOYSTICK_EXTRA_ENTRY:
+                self.blob[extra] = curve_type
+        if center is not None:
+            self.blob[base + 1] = self._bipolar("center", center)
+        for offset, point in ((base + 2, point1), (base + 4, point2)):
+            if point is not None:
+                x, y = point
+                self.blob[offset] = max(0, min(127, int(x)))
+                self.blob[offset + 1] = max(0, min(127, int(y)))
+
+    def set_joystick_shape(self, side, bank=None, circular=None, edge=None):
+        """Edit the 9-point bank, circularity and the outer node.
+
+        `edge` is an outer dead zone only while it is positive -- see
+        BIPOLAR_MAX for what its other half means and why we refuse it.
+        """
+        base = OFF_JOYSTICK_EXTRA + self._side(side) * JOYSTICK_EXTRA_ENTRY
+        if len(self.blob) < base + JOYSTICK_EXTRA_ENTRY:
+            raise ProtocolError(
+                "this profile has no joystick extra block -- protocol 3.1 only")
+        if bank is not None:
+            bank = list(bank)
+            # Exactly nine. Flydigi's writer loops over however many points it
+            # was given with no bound, so a tenth lands on `isRound`, an
+            # eleventh on `edge`, and a thirteenth starts overwriting the other
+            # stick. Refusing is cheaper than reproducing that.
+            if len(bank) != BANK_POINTS:
+                raise ValueError(
+                    f"the bank is exactly {BANK_POINTS} points, got {len(bank)}")
+            self.blob[base + 1 : base + 1 + BANK_POINTS] = bytes(
+                max(0, min(150, int(v))) for v in bank)
+        if circular is not None:
+            self.blob[base + 10] = SHAPE_CIRCULAR if circular else SHAPE_RECTANGLE
+        if edge is not None:
+            self.blob[base + 11] = self._bipolar("edge", edge)
+
+    @staticmethod
+    def _bipolar(what, value):
+        """Range-check one of the two signed-looking fields. See BIPOLAR_MAX."""
+        value = int(value)
+        if not 0 <= value <= BIPOLAR_MAX:
+            raise ValueError(
+                f"{what} must be 0..{BIPOLAR_MAX}; the negative half is refused "
+                "because Flydigi's own reader and writer disagree about how to "
+                "encode it, so a negative value does not survive their round trip")
+        return value
 
     def trigger_motor(self, side):
         """(enabled, min, max, scale) for one trigger's own vibration motor.

@@ -46,7 +46,7 @@ def as_dict(entry):
 
 
 class TestPad(FakePad):
-    """A fake pad that also answers status and device info.
+    """A fake pad that also answers device info and the live trigger bind.
 
     `FakePad` covers the mapping and lighting protocol and is shared with the
     backend tests, so the two extra commands the desktop app asks for live here
@@ -83,16 +83,6 @@ class TestPad(FakePad):
             body[6] = 0x59                       # device type
             body[7] = 1 if self.wired else 2
             body[12] = 0x10 if self.charging else (self.battery & 0x0F)
-            return [bytes(body)]
-        if buf[3] == mapping.CMD_STATUS:
-            body = bytearray(32)
-            body[0], body[1], body[2] = (0x04, flydigi_device.MAGIC1,
-                                         flydigi_device.MAGIC2)
-            body[3] = mapping.CMD_STATUS
-            body[4] = 1
-            body[6] = self.active
-            for slot in range(4):
-                body[7 + 2 * slot] = slot + 1
             return [bytes(body)]
         if buf[3] == mapping.CMD_READ:
             self.reads.append(buf[5])
@@ -144,6 +134,20 @@ class PadProbe(QObject):
     def active(self):
         return self._pad.active
 
+    @Property(bool, notify=changed)
+    def failReads(self):
+        """Make config reads go unanswered, as a sleeping pad does.
+
+        The state the app is in at a cold start with the pad asleep, which is
+        where the Buttons page used to show nothing at all.
+        """
+        return self._pad.fail_reads
+
+    @failReads.setter
+    def failReads(self, value):
+        self._pad.fail_reads = bool(value)
+        self.changed.emit()
+
     @Property("QVariantList", notify=changed)
     def binds(self):
         """Each rumble-to-trigger binding the pad was sent, as raw payloads."""
@@ -162,6 +166,7 @@ class PadProbe(QObject):
         self._pad.blobs = {i: blank_blob(f"Profile {i + 1}") for i in range(4)}
         self._pad.led_blob = FakePad().led_blob
         self._pad.active = 0
+        self._pad.fail_reads = False
         self.resetCounters()
 
     @Slot()

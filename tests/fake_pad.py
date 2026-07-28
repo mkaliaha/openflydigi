@@ -26,6 +26,19 @@ def blank_blob(title="Profile"):
     for slot in range(mapping.KEY_SLOTS):
         offset = mapping.OFF_KEY_TABLE + slot * mapping.KEY_ENTRY
         blob[offset : offset + mapping.KEY_ENTRY] = bytes([mapping.TARGET_IDENTITY, 0, 0])
+    # The curve blocks carry what a real Apex 5 ships with, not 0xFF -- read off
+    # the hardware, see PROGRESS.md. It matters: each is the identity line on
+    # its own scale (sticks run to 127, triggers to 255), so an accessor tested
+    # against these is tested against a shape the pad would really hand it,
+    # rather than against a fill byte that happens to parse.
+    for side in range(2):
+        core = mapping.OFF_JOYSTICK_CURVE + side * mapping.CURVE_ENTRY
+        blob[core : core + 7] = bytes([0, 0, 63, 63, 127, 127, 127])
+        travel = mapping.OFF_TRIGGER_CURVE + side * mapping.CURVE_ENTRY
+        blob[travel : travel + 7] = bytes([0, 0, 0, 0, 255, 255, 255])
+        extra = mapping.OFF_JOYSTICK_EXTRA + side * mapping.JOYSTICK_EXTRA_ENTRY
+        blob[extra : extra + 12] = bytes(
+            [0, 50, 62, 75, 87, 100, 112, 125, 137, 150, 0, 0])
     config = mapping.MappingConfig(blob)
     config.title = title
     return bytearray(config.blob)
@@ -53,6 +66,11 @@ class FakePad:
         self.saved = {}
         self.packets_received = 0
         self.bad_checksums = 0
+        self.reads_answered = 0
+        # Set to make a read switch the pad and then go silent, which is what a
+        # dropped packet looks like from the host: the config is live, the
+        # caller gets an exception, and nothing says the two happened together.
+        self.fail_reads = False
         self._pending_write = None     # (cfg_id, start_index, count)
 
     # -- transport ---------------------------------------------------------
@@ -70,6 +88,7 @@ class FakePad:
             lighting.CMD_WRITE_START: self._write_start_led,
             lighting.CMD_WRITE_PACK: self._write_pack_led,
             mapping.CMD_READ: self._read,
+            mapping.CMD_STATUS: self._status,
             mapping.CMD_APPLY: self._apply,
             mapping.CMD_SAVE: self._save,
             mapping.CMD_WRITE_START: self._write_start,
@@ -96,7 +115,26 @@ class FakePad:
         blob = self.blobs.get(cfg_id)
         if blob is None:
             return []
+        # Reading pages the config in as the live one -- confirmed on hardware,
+        # audibly, by the trigger motors re-seating. Modelled here because code
+        # that tries to read without disturbing the pad is only exercised by a
+        # fake that actually gets disturbed.
+        self.active = cfg_id
+        self.reads_answered += 1
+        if self.fail_reads:
+            return []                  # switched anyway, then went quiet
         return self._stream(mapping.CMD_READ, blob, cfg_id, pkg_size)
+
+    def _status(self, _payload):
+        body = bytearray(32)
+        body[0] = 0x04
+        body[1], body[2] = device.MAGIC1, device.MAGIC2
+        body[3] = mapping.CMD_STATUS
+        body[4] = 1
+        body[6] = self.active
+        for slot in self.blobs:
+            body[7 + 2 * slot] = slot + 1
+        return [bytes(body)]
 
     def _stream(self, cmd, blob, cfg_id, pkg_size):
         total = len(blob) // pkg_size

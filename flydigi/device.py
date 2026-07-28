@@ -56,6 +56,11 @@ def find_device():
 
     Works in both wired and dongle mode -- the node number changes but the
     report descriptor prefix does not.
+
+    Confirmed on hardware: a sleeping Apex 5 does not merely stop answering,
+    it leaves the USB bus. `usb 3-4: USB disconnect` with no matching connect,
+    and nothing under /dev/hidraw* carrying the vendor id -- indistinguishable
+    from an unplugged cable at this level, which is why the message names both.
     """
     for path in sorted(glob.glob("/dev/hidraw*")):
         node = os.path.basename(path)
@@ -68,7 +73,9 @@ def find_device():
                     return path
         except OSError:
             continue
-    raise DeviceNotFound("no Flydigi vendor interface found")
+    raise DeviceNotFound(
+        "no Flydigi controller found -- press a button to wake the pad, since "
+        "it leaves the USB bus entirely when it sleeps, or check the cable")
 
 
 def build(cmd_id, payload=b""):

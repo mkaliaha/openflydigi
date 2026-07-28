@@ -125,6 +125,66 @@ def test_apply_and_save():
     check("save captures every slot", len(pad.saved) == 4)
 
 
+def test_reading_switches_the_pad():
+    """The fact the rest of this file's behaviour hangs off."""
+    pad = FakePad()
+    mapping.read_config(pad, 3)
+    check("a plain read leaves the pad on what it read", pad.active == 3,
+          f"active {pad.active}")
+    check("status agrees", mapping.read_status(pad)["active"] == 3)
+
+
+def test_browsing_puts_the_pad_back():
+    pad = FakePad()
+    mapping.apply_config(pad, 1)
+    config, restored = mapping.read_config_preserving(pad, 3)
+
+    check("the browsed config is the one returned", config.cfg_id == 3)
+    check("the pad is back where it was", pad.active == 1, f"active {pad.active}")
+    check("the restore is reported", restored == 1, str(restored))
+
+
+def test_browsing_the_running_profile_restores_nothing():
+    pad = FakePad()
+    mapping.apply_config(pad, 2)
+    _config, restored = mapping.read_config_preserving(pad, 2)
+    check("no restore when it was already running", restored is None, str(restored))
+    check("and the pad has not moved", pad.active == 2)
+
+
+def test_a_failed_browse_still_puts_the_pad_back():
+    """The bug this guards: the pad switches on the first read packet.
+
+    `read_blob` only raises once every retry has failed, by which time the pad
+    has been paged over to the browsed config three times. Without the restore
+    in a `finally` the caller gets an exception and the pad silently keeps the
+    profile it was only meant to peek at -- and a retry then launders it, since
+    the next status read truthfully reports that slot as active and the restore
+    is skipped as unnecessary.
+    """
+    pad = FakePad()
+    mapping.apply_config(pad, 1)
+    pad.fail_reads = True
+
+    raised = False
+    try:
+        mapping.read_config_preserving(pad, 3, wait=0.0)
+    except mapping.ProtocolError:
+        raised = True
+
+    check("a failed read is still an error", raised)
+    check("the read really did reach the pad", pad.reads_answered > 0,
+          f"{pad.reads_answered} reads")
+    check("the pad is back where it was", pad.active == 1, f"active {pad.active}")
+
+    # And the laundering it used to enable: a second attempt would find the pad
+    # already on the browsed slot and decide there was nothing to restore.
+    pad.fail_reads = False
+    _config, restored = mapping.read_config_preserving(pad, 3)
+    check("the retry still knows where to go back to", restored == 1, str(restored))
+    check("and goes there", pad.active == 1, f"active {pad.active}")
+
+
 def test_bad_checksum_is_rejected():
     """The fake pad refuses a bad checksum exactly as the real one does."""
     pad = FakePad()
@@ -172,6 +232,135 @@ def test_trigger_effect_and_curve():
     check("trigger motor round-trips",
           config.trigger_motor("left") == (True, 10, 90, 70),
           str(config.trigger_motor("left")))
+
+
+def test_the_factory_curves_are_the_identity_line():
+    """Both blocks ship as no-curve-at-all, on two different scales."""
+    config = mapping.MappingConfig(blank_blob())
+    stick = config.joystick_curve("left")
+    check("stick curve is default type", stick["type"] == mapping.CURVE_DEFAULT)
+    check("stick has no dead zone", stick["center"] == 0)
+    check("stick really is a stick", stick["is_stick"])
+    check("stick runs to 127", stick["end"] == 127 and stick["point2"] == (127, 127),
+          str(stick))
+
+    trigger = config.trigger_curve("right")
+    check("trigger runs to 255", trigger["end"] == 255 and trigger["point2"] == (255, 255),
+          str(trigger))
+    check("trigger points mirror its window",
+          trigger["point1"] == (trigger["zero"], trigger["zero"]), str(trigger))
+
+
+def test_moving_the_trigger_window_moves_its_points():
+    """The combination Flydigi's own software produces, and the only one."""
+    config = mapping.MappingConfig(blank_blob())
+    config.set_trigger_curve("left", zero=40, end=200)
+    curve = config.trigger_curve("left")
+    check("window round-trips", (curve["zero"], curve["end"]) == (40, 200), str(curve))
+    check("point1 followed the start", curve["point1"] == (40, 40), str(curve))
+    check("point2 followed the end", curve["point2"] == (200, 200), str(curve))
+    check("the other trigger is untouched",
+          config.trigger_curve("right")["end"] == 255)
+
+    # Inverted input is a window the pad cannot read, so it is sorted, not stored.
+    config.set_trigger_curve("right", zero=200, end=40)
+    curve = config.trigger_curve("right")
+    check("an inverted window is sorted", (curve["zero"], curve["end"]) == (40, 200),
+          str(curve))
+    check("and its points follow the sorted window",
+          curve["point1"] == (40, 40) and curve["point2"] == (200, 200), str(curve))
+
+    # Equal ends are reachable in Space Station's own UI, so they are allowed.
+    config.set_trigger_curve("left", zero=90, end=90)
+    check("a zero-width window is permitted",
+          config.trigger_curve("left")["zero"] == 90)
+
+    # And a caller shaping the curve deliberately can keep its breakpoints.
+    config.set_trigger_curve("left", zero=10, end=250, mirror_points=False)
+    check("opting out leaves the points alone",
+          config.trigger_curve("left")["point1"] == (90, 90),
+          str(config.trigger_curve("left")))
+
+
+def test_the_joystick_type_is_written_into_both_blocks():
+    config = mapping.MappingConfig(blank_blob())
+    config.set_joystick_curve("right", curve_type=mapping.CURVE_CUSTOM)
+    check("core block took the type",
+          config.joystick_curve("right")["type"] == mapping.CURVE_CUSTOM)
+    check("extra block agrees",
+          config.joystick_shape("right")["type"] == mapping.CURVE_CUSTOM)
+    check("the left stick is untouched",
+          config.joystick_curve("left")["type"] == mapping.CURVE_DEFAULT)
+
+    raised = False
+    try:
+        config.set_joystick_curve("left", curve_type=7)
+    except ValueError:
+        raised = True
+    check("an unknown curve type is refused", raised)
+
+
+def test_the_bank_is_exactly_nine_points():
+    """Flydigi's writer has no bound and walks into the next field."""
+    config = mapping.MappingConfig(blank_blob())
+    shape = config.joystick_shape("left")
+    check("factory bank is the straight line",
+          shape["bank"] == [50, 62, 75, 87, 100, 112, 125, 137, 150], str(shape["bank"]))
+    check("factory shape is rectangular", shape["circular"] is False)
+    check("factory edge is zero", shape["edge"] == 0)
+
+    config.set_joystick_shape("left", bank=[50] * 9, circular=True, edge=20)
+    shape = config.joystick_shape("left")
+    check("bank round-trips", shape["bank"] == [50] * 9, str(shape["bank"]))
+    check("circularity round-trips", shape["circular"] is True)
+    check("edge round-trips", shape["edge"] == 20)
+    check("the right stick is untouched",
+          config.joystick_shape("right")["bank"][1] == 62)
+
+    for wrong in ([50] * 8, [50] * 10):
+        raised = False
+        try:
+            config.set_joystick_shape("right", bank=wrong)
+        except ValueError:
+            raised = True
+        check(f"a bank of {len(wrong)} is refused", raised)
+    check("and the neighbouring fields survived the attempt",
+          config.joystick_shape("right")["edge"] == 0
+          and config.joystick_shape("right")["circular"] is False)
+
+
+def test_the_negative_half_of_center_and_edge_is_refused():
+    """Not "no negative dead zones" -- negative means a different control.
+
+    One byte carries two opposite settings and the sign picks which: positive
+    `center` is a dead zone, negative is Offset, which pushes the smallest input
+    straight to a real output so a game's own dead zone stops swallowing it.
+    Both halves are wanted; only the positive one has an encoding we are sure
+    of, because Flydigi's reader and writer disagree about the other.
+    """
+    config = mapping.MappingConfig(blank_blob())
+    for setter, kwargs in ((config.set_joystick_curve, {"center": -20}),
+                           (config.set_joystick_shape, {"edge": -20})):
+        raised = False
+        try:
+            setter("left", **kwargs)
+        except ValueError:
+            raised = True
+        check(f"negative {list(kwargs)[0]} is refused", raised)
+
+    config.set_joystick_curve("left", center=30)
+    check("a positive centre is accepted", config.joystick_curve("left")["center"] == 30)
+
+
+def test_a_stick_mapped_to_something_else_is_not_a_dead_zone_of_127():
+    config = mapping.MappingConfig(blank_blob())
+    base = mapping.OFF_JOYSTICK_CURVE
+    config.blob[base + 1] = mapping.CENTER_NOT_A_STICK
+    curve = config.joystick_curve("left")
+    check("the sentinel is reported raw", curve["center"] == 127)
+    check("but not as a stick", curve["is_stick"] is False)
+    check("a real centre still reads as a stick",
+          config.joystick_curve("right")["is_stick"] is True)
 
 
 def test_editing_extras_does_not_disturb_buttons():
@@ -319,8 +508,17 @@ def main():
                  test_title, test_read_write_round_trip,
                  test_write_without_baseline_sends_everything,
                  test_unchanged_write_sends_nothing, test_apply_and_save,
+                 test_reading_switches_the_pad, test_browsing_puts_the_pad_back,
+                 test_browsing_the_running_profile_restores_nothing,
+                 test_a_failed_browse_still_puts_the_pad_back,
                  test_bad_checksum_is_rejected, test_vibration_intensity,
                  test_trigger_effect_and_curve,
+                 test_the_factory_curves_are_the_identity_line,
+                 test_moving_the_trigger_window_moves_its_points,
+                 test_the_joystick_type_is_written_into_both_blocks,
+                 test_the_bank_is_exactly_nine_points,
+                 test_the_negative_half_of_center_and_edge_is_refused,
+                 test_a_stick_mapped_to_something_else_is_not_a_dead_zone_of_127,
                  test_editing_extras_does_not_disturb_buttons,
                  test_targets_exclude_buttons_xinput_cannot_send,
                  test_lighting_round_trip, test_lighting_brightness_is_clamped,
