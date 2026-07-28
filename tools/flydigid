@@ -14,12 +14,15 @@ use tools/flydigi-run for those.
 """
 import argparse
 import os
+import subprocess
+import signal
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
-from flydigi import effects, games, prefs  # noqa: E402
+from flydigi import effects, games, monitor, prefs  # noqa: E402
 from flydigi.device import Controller, DeviceNotFound  # noqa: E402
 
 
@@ -80,23 +83,78 @@ class Scanner:
         self.matches = {}
 
     def _match(self, entry):
+        """(game, confidence) for a pid, or None.
+
+        Confidence matters because under Proton a whole chain matches by name.
+        Starting Dark Souls: Remastered produced eight matching processes --
+        reaper, steam-runtime-launcher, two bwraps, pv-adverb, a python3,
+        steam.exe and the game -- because every wrapper carries the game's path
+        in its command line. Taking the first by pid takes `reaper`, the
+        outermost wrapper, since it starts first.
+
+        For the pad-side route that is survivable: the preset is written once
+        and no one asks which process asked for it. For the memory route it is
+        fatal and silent -- a wrapper has no game memory in it, the pointer
+        chain reads zero, and zero is indistinguishable from "no effect".
+
+        So a process that actually mapped the executable, or whose own name is
+        the game's, beats one that merely mentions it. `comm` counts because
+        native Linux games have no PE to look for at all.
+        """
         for name in candidate_names(entry):
             game = self.index.get(name)
             if game is not None:
-                return game
+                return game, self._confidence(entry, name)
         return None
 
+    @staticmethod
+    def _confidence(entry, matched):
+        """2 = it is the game, 1 = it calls itself that, 0 = it just mentions it."""
+        if monitor.has_executable_mapped(entry, matched):
+            return 2
+        try:
+            with open(f"/proc/{entry}/comm") as fh:
+                comm = fh.read().strip().lower()
+        except OSError:
+            return 0
+        # comm is truncated to 15 characters -- the real Dark Souls process is
+        # "DarkSoulsRemast" -- so a prefix is as much as can be asked for.
+        stem = matched[:-4] if matched.endswith(".exe") else matched
+        if comm and (stem.startswith(comm) or comm.startswith(stem)):
+            return 1
+        return 0
+
     def refresh(self):
-        """Return {pid: game} for every known game currently running."""
+        """Return {pid: (game, confidence)} for every known game running."""
         current = {e for e in os.listdir("/proc") if e.isdigit()}
         for entry in current - self.seen:
-            game = self._match(entry)
-            if game is not None:
-                self.matches[int(entry)] = game
+            found = self._match(entry)
+            if found is not None:
+                self.matches[int(entry)] = found
+        # A process can be in /proc before Wine has mapped the PE, so a match
+        # filed as weak is asked again. Only matched pids are re-examined --
+        # a handful, against the hundreds the first sweep looks at.
+        for pid, (game, confidence) in list(self.matches.items()):
+            if confidence < 2:
+                found = self._match(str(pid))
+                if found is not None:
+                    self.matches[pid] = found
         for entry in self.seen - current:
             self.matches.pop(int(entry), None)
         self.seen = current
         return self.matches
+
+    def best(self):
+        """The likeliest (pid, game) among what is running, or (None, None).
+
+        Highest confidence wins; ties go to the highest pid, because in a
+        wrapper chain the game is the last thing to start.
+        """
+        if not self.matches:
+            return None, None
+        pid, (game, _) = max(self.matches.items(),
+                             key=lambda kv: (kv[1][1], kv[0]))
+        return pid, game
 
     def reset(self):
         """Re-examine every process on the next refresh.
@@ -109,10 +167,57 @@ class Scanner:
         self.matches.clear()
 
 
+TOOLS = os.path.join(ROOT, "tools")
+MONITOR_CONFIGS = os.path.join(ROOT, "configs", "monitor")
+
+
+def monitor_config(game):
+    """The XGameMonitor config for a game, by process name.
+
+    `tools/fetch-configs` writes them as <ProcessName>.default.json, so the
+    lookup is by name rather than by a table that would have to be kept in step
+    with the 31 of them.
+    """
+    name = (game.get("processGameName") or "").strip().lower()
+    if not name:
+        return None
+    if name.endswith(".exe"):
+        name = name[:-4]
+    try:
+        entries = os.listdir(MONITOR_CONFIGS)
+    except OSError:
+        return None
+    for entry in entries:
+        if entry.lower().startswith(name + "."):
+            return os.path.join(MONITOR_CONFIGS, entry)
+    return None
+
+
+def driver_argv(game, route):
+    """The helper to run beside a game, or None when there is nothing to run.
+
+    These are the same drivers `tools/` already ships and that were each
+    validated by hand; the daemon only starts and stops them.
+    """
+    if route == "monitor":
+        config = monitor_config(game)
+        if config is None:
+            return None
+        return [sys.executable, os.path.join(TOOLS, "flydigi-monitor"),
+                config, "--quiet"]
+    if route == "telemetry":
+        return [sys.executable, os.path.join(TOOLS, "flydigi-forza"), "--quiet"]
+    if route == "bespoke":
+        return [sys.executable, os.path.join(TOOLS, "flydigi-dsx"), "--quiet"]
+    # Deliberately not ps5. The virtual DualSense has to exist before the game
+    # enumerates pads, so starting it on detection is already too late -- see
+    # tools/flydigi-run, which is the supported way in.
+    return None
+
+
 def apply_for(game, tier=None):
     tier = tier or games.tier(game)
     if tier != "vibration":
-        log(f"{game.get('enGameName')}: tier '{tier}' not implemented, ignoring")
         return False
     try:
         with Controller() as ctrl:
@@ -124,6 +229,60 @@ def apply_for(game, tier=None):
     except (DeviceNotFound, OSError) as exc:
         log(f"could not apply: {exc}")
         return False
+
+
+class Driver:
+    """The helper process running beside a game, if the route needs one.
+
+    The drivers hold the pad for the whole session -- the memory one rewrites
+    the trigger effects every 50ms -- so this is a lifetime to manage, not a
+    command to fire. Stopping is polite first: the drivers put the triggers
+    back on SIGINT, and killing outright would leave whatever was last written
+    on the pad.
+    """
+
+    def __init__(self):
+        self.proc = None
+        self.name = ""
+
+    def start(self, game, argv):
+        self.stop()
+        self.name = game.get("enGameName") or "?"
+        try:
+            self.proc = subprocess.Popen(argv)
+        except OSError as exc:
+            log(f"{self.name}: could not start {os.path.basename(argv[1])}: {exc}")
+            self.proc = None
+            return False
+        log(f"{self.name}: started {os.path.basename(argv[1])} (pid {self.proc.pid})")
+        return True
+
+    def stop(self):
+        if self.proc is None:
+            return
+        if self.proc.poll() is None:
+            self.proc.send_signal(signal.SIGINT)
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                log(f"{self.name}: driver did not stop, killing it")
+                self.proc.kill()
+                self.proc.wait(timeout=5)
+            log(f"{self.name}: driver stopped")
+        self.proc = None
+
+    def died(self):
+        """True once, when the driver has exited on its own."""
+        if self.proc is not None and self.proc.poll() is not None:
+            code = self.proc.returncode
+            log(f"{self.name}: driver exited on its own (status {code})")
+            self.proc = None
+            return True
+        return False
+
+    @property
+    def running(self):
+        return self.proc is not None and self.proc.poll() is None
 
 
 def clear_triggers():
@@ -151,10 +310,12 @@ def main():
     settings_mtime = settings.mtime()
 
     scanner = Scanner(index)
+    driver = Driver()
     active = None
     active_pid = None
     last_assert = 0.0
     ignored = set()
+    unsupported = set()
 
     while True:
         # The app edits this file while we run, so a toggle takes effect on the
@@ -163,6 +324,7 @@ def main():
             settings = prefs.Prefs()
             settings_mtime = settings.mtime()
             ignored.clear()
+            unsupported.clear()
             scanner.reset()
             log("preferences reloaded")
 
@@ -170,28 +332,50 @@ def main():
 
         if active_pid is not None and active_pid not in running:
             log(f"{active.get('enGameName')} exited")
+            driver.stop()
             clear_triggers()
             active, active_pid = None, None
 
         if active is None:
-            # Sorted so the choice does not depend on directory order when two
-            # known games are up -- and unlike the old single-hit scan, a second
-            # game already running is still found after the first one exits.
-            for pid, game in sorted(running.items()):
-                if not settings.auto(game):
-                    # Logged once per process, or a declined title would say so
-                    # every second for as long as it runs.
-                    if pid not in ignored:
-                        ignored.add(pid)
-                        log(f"{game.get('enGameName')}: auto mode off, leaving it alone")
-                    continue
-                if apply_for(game, settings.route(game)):
-                    active, active_pid = game, pid
-                    last_assert = time.time()
-                break
-        elif args.reassert and time.time() - last_assert >= args.reassert:
-            apply_for(active, settings.route(active))
-            last_assert = time.time()
+            pid, game = scanner.best()
+            if game is None:
+                pass
+            elif not settings.auto(game):
+                # Logged once per process, or a declined title would say so
+                # every second for as long as it runs.
+                if pid not in ignored:
+                    ignored.add(pid)
+                    log(f"{game.get('enGameName')}: auto mode off, leaving it alone")
+            else:
+                route = settings.route(game)
+                argv = driver_argv(game, route)
+                if route == "vibration":
+                    if apply_for(game, route):
+                        active, active_pid = game, pid
+                        last_assert = time.time()
+                elif argv is not None:
+                    if driver.start(game, argv):
+                        active, active_pid = game, pid
+                elif pid not in unsupported:
+                    unsupported.add(pid)
+                    # Says which part is missing. The drivers themselves are
+                    # written and validated; what a route without an argv
+                    # lacks is a way to start it *after* the game is up.
+                    log(f"{game.get('enGameName')}: nothing to start for the "
+                        f"'{route}' route — start it before the game "
+                        f"(see tools/flydigi-run)")
+        else:
+            if driver.died():
+                # The driver is gone but the game is not: do not restart it in
+                # a loop, since a config whose offsets a patch broke would fail
+                # the same way every second.
+                log(f"{active.get('enGameName')}: not restarting it — "
+                    "run the driver by hand to see why")
+                clear_triggers()
+                active, active_pid = None, None
+            elif args.reassert and time.time() - last_assert >= args.reassert:
+                apply_for(active, settings.route(active))
+                last_assert = time.time()
 
         time.sleep(args.interval)
 

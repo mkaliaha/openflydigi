@@ -102,6 +102,20 @@ def _maps_exe_base(pid, exe_name):
     return best
 
 
+def has_executable_mapped(pid, exe_name):
+    """Whether this process really is the game rather than a wrapper around it.
+
+    The public form of the check `find_process` makes, so the daemon can rank
+    candidates by the same rule instead of carrying its own idea of what counts
+    as the game. Reading another process's maps needs PTRACE_MODE_READ, which a
+    container does not get for host processes -- so this only ever answers
+    truthfully from the host, and that is why the daemon lives there.
+    """
+    if not exe_name.endswith(".exe"):
+        exe_name += ".exe"
+    return _maps_exe_base(pid, exe_name.lower()) is not None
+
+
 def find_process(process_name):
     """Find a running game by its configured process name.
 

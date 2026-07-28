@@ -767,16 +767,37 @@ the right thing for it without me*. Concretely, on detecting the game:
   * telemetry / monitor / ps5 / bespoke → start `flydigi-forza`, `flydigi-monitor`, `flydigi-ds5`
     or `flydigi-dsx`, and stop it again when the game exits
 
-**Done, except the supervising.** The toggle exists (`prefs.py`, the Games tab's Auto switch,
-`tools/flydigi-auto`), the daemon reads it and re-reads it about a second after it changes, and the
-pad-side route works end to end. What is left is starting and stopping a helper process for the
-other four routes.
+**Done.** The toggle exists (`prefs.py`, the Games tab's Auto switch, `tools/flydigi-auto`), the
+daemon reads it and re-reads it about a second after it changes, and it now starts and stops the
+right helper for the route: `flydigi-monitor`, `flydigi-forza` or `flydigi-dsx`. Validated live in
+Dark Souls: Remastered — the daemon started the driver, which attached to the game and resolved its
+module base at `0x140000000`. The PS5 route is deliberately excluded: the virtual DualSense has to
+exist before the game enumerates pads, so reacting to a launch is already too late, and
+`tools/flydigi-run` stays the way in.
+
+**Which process is "the game" is not obvious, and getting it wrong fails silently.** Starting Dark
+Souls: Remastered produced **eight** processes matching its name — `reaper`,
+`steam-runtime-launcher`, two `bwrap`s, `pv-adverb`, a `python3`, `steam.exe`, and the game — since
+every Proton wrapper carries the game's path in its command line. The daemon took the lowest pid,
+which is `reaper`, the outermost wrapper. That is survivable for the pad-side route, where the
+preset is written once and nobody asks who asked. For the memory route it is fatal: a wrapper has
+no game memory in it, the pointer chain reads zero, and zero is what "no effect" looks like. The
+daemon now ranks candidates by whether the executable is actually mapped — the check
+`monitor.find_process` always made, now shared as `monitor.has_executable_mapped` rather than
+reimplemented. `comm` counts too, since native Linux games have no PE to look for.
 
 Two things fell out of building it.
 
 **The daemon belongs on the host, and the app cannot spawn it there — but does not need to.**
 It has to see the host's process table, which a Flatpak build never will, so it is not something
-this app can contain. It turned out not to matter: distrobox shares `/run/user`, so `systemctl
+this app can contain. **And the memory route cannot run in a container at all**: from inside the
+distrobox, `/proc/<pid>/maps` of a host process is `Permission denied` — not only for a game inside
+pressure-vessel's sandbox but for an ordinary host process too, `flydigid` itself included, even
+though `stat` reports the same owner. Reading it needs PTRACE_MODE_READ across a user-namespace
+boundary, with SELinux enforcing on top. So tier 3 is host-only by construction. An earlier note
+here claimed a daemon in the container "would work today, for all four routes" — that was inferred
+from the shared PID namespace and `ptrace_scope=0` without ever attempting a cross-process read,
+and it is wrong. It turned out not to matter: distrobox shares `/run/user`, so `systemctl
 --user` from inside the container drives the *host's* user manager and the unit runs in the host's
 mount namespace. Verified by starting a transient unit from the container and comparing
 `/proc/<pid>/ns/mnt`. So the app writes the unit into the shared home and calls systemctl, with no
