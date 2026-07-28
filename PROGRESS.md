@@ -62,7 +62,7 @@ QML. See `gui/README.md`.
 | Profiles → Vibration | master switch, per-grip enable, min/max window, strength |
 | Controller → Other software | let Steam and similar take the pad over, and who currently holds it |
 | Profiles → Sticks | dead zone, outer dead zone, sensitivity curve presets, circular range |
-| Profiles → Triggers | stored effect — all six of Flydigi's, each with its own controls — dead zone, trigger motors with strength, threshold and a per-side amplitude window |
+| Profiles → Triggers | stored effect — all six of Flydigi's, each with its own controls — and dead zone |
 | Adaptive triggers | all 94 games, searchable, filtered by route; vibration presets load onto the pad from here; per-game **Auto** toggle and a route picker for the nine multi-route games |
 | Setup | the daemon's unit, "running now" and "start at login" as separate switches, the application-menu entry, and the udev rules behind one authentication prompt |
 | Lighting | effect, up to 5 colours, brightness, cycle time, react-to-rumble |
@@ -474,26 +474,13 @@ is `Vibration`. The per-game preset *is* effect type 5 and can be made to surviv
 needing re-application — that last part is still not wired up: the Games page applies a preset with
 live command 82, which the pad forgets on sleep, rather than storing it in a profile.
 
-**J5. The trigger-motor block — the four fields Flydigi writes are done; the rest is theirs to
-explain.** **Offset 154**: master enable, then per side two 7-byte gears (linear and micro),
-`m_fdg_motor_trig_setting_struct_t = {type, min, max, filter, vibr_limit, scale, time_limit}`.
-
-`SaveTriggerVibrationConfig` writes exactly four fields of the *linear* gear and never touches the
-micro one, so those four are what the page now offers: `min`/`max` as an amplitude window (grip
-rumble above the ceiling acts as the ceiling, below the floor as the floor), `scale` as strength and
-`filter` as a threshold below which the trigger stays still.
-
-Two things worth knowing before touching this again. **`scale` is stored as the percentage their
-slider shows** — `configBean.Scale = config.Level`, 1..100 — while `min`/`max` beside it are that
-same slider's percent scaled to a byte (`floor(pct * 255 / 100)`), so a UI offering 0..255 for
-strength offers two and a half times the field. And **Space Station syncs `scale` and `filter`
-across both triggers** while leaving the amplitude per side; its own tooltip says so. That is
-followed here rather than second-guessed, which leaves an untested question: the bytes are per side,
-so does this firmware read the right trigger's copy at all? A bench answer would be to set the left
-gear's scale to 100 and the right's to 1 and feel which trigger obeys.
-
-Still unexplained, and still needing a bench sweep: `vibr_limit`, `time_limit`, the gear `type`
-byte, and the whole micro gear.
+**J5. The trigger-motor block — not this pad's. Moved to multi-pad support.** Offset 154 is the
+trigger *vibration* block, and the Apex 5 has no such motors: `IsSupportTriggerVibration` is a Vader
+flag. `MappingConfig.trigger_motor()` reads and writes the four fields Flydigi's own writer touches,
+with the layout asserted in tests, and nothing in the app calls it. The full write-up, including the
+percentage-versus-byte trap and the open question about whether the right trigger's copy is read at
+all, is item 0 under **Multiple pads**. `vibr_limit`, `time_limit`, the gear `type` byte and the
+whole micro gear stay unexplained, and a bench sweep for them needs a pad that has the hardware.
 
 ### Small commands worth having
 
@@ -612,6 +599,32 @@ to a Vader 4.
 **Mode switch (27)** — `BluetoothMode {Switch=1, Xbox=2, Flashplay=3, DInput=4}` — is real and
 `IsSupportNs` is true, but it changes the report descriptor and probably the hidraw node. Treat as a
 one-way trip until proven otherwise; it is the one item here where a bad guess costs the session.
+
+**0. The trigger-vibration editor — written, then taken back out; it belongs to the Vader.** The
+profile blob's 29-byte block at **offset 154** holds, per side, two 7-byte gears
+`{type, min, max, filter, min_start, scale, min_time}` behind one shared enable.
+`SaveTriggerVibrationConfig` writes four fields of the first gear and never touches the second:
+`min`/`max` as an amplitude window (grip rumble above the ceiling acts as the ceiling, below the
+floor as the floor), `scale` as strength, `filter` as a threshold below which the trigger stays
+still. Two traps in it: **`scale` is stored as the percentage their slider shows** (1..100) while
+`min`/`max` beside it are that same slider's percent scaled to a byte (`floor(pct * 255 / 100)`);
+and **Space Station syncs `scale` and `filter` across both triggers** while leaving the amplitude
+per side, though the bytes are per side either way — so whether the firmware reads the right
+trigger's copy is an open question a bench test would answer.
+
+`MappingConfig.trigger_motor()` reads and writes all four, and `tests/test_mapping.py` asserts the
+layout against Flydigi's writer, so the protocol half is done and verified against the decompile.
+What was removed is the UI: **the Apex 5 does not have these motors.**
+`GenerateControllerApex5` sets seven capability flags and `IsSupportTriggerVibration` is not among
+them, while Vader 3, 4 and 5 all set it, and `ConvertTriggerConfigBean` only reads the block when
+that flag is on. The blob carries it regardless because it is one struct shared across the range.
+
+Worth knowing how this was missed, since the section above already said it: the app had a "Trigger
+vibration motors" switch for months, writing a byte nothing on this pad reads, and the mistake was
+to build outward from *the blob* instead of from the capability flags. **The pad's own factory bytes
+are not evidence either** — ours ships that block populated with `1 30 80 5 1 50 0`, which looks
+exactly like a feature in use. When a Vader 4 Pro is supported, this becomes a page gated on
+`IsSupportTriggerVibration`, and the Vader is the machine to verify the sync question on.
 
 **1. Screen image / GIF upload.** `UploadPic2K2Start/Data/End/Finish`, `UploadPicCommandK1/K2`,
 `TestScreen`, `OffScreen`, `ReadScreenSetting`. Note Space Station only offers this **over a wired

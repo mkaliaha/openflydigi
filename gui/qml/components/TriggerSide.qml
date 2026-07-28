@@ -79,27 +79,4 @@ FormCard.FormCard {
         onMoved: (newValue) => root.side.deadZone = newValue
     }
 
-    FormCard.FormDelegateSeparator {}
-
-    // The motor's amplitude window is per side; its strength and threshold are
-    // on the page, because Space Station edits those as one number for both.
-    SliderRow {
-        objectName: "amplitudeMin_" + root.sideName
-        label: "Vibration floor"
-        description: "Rumble weaker than this vibrates at this much"
-        enabled: App.profile.triggers.motorEnabled
-        value: root.side.amplitudeMin
-        onMoved: (newValue) => root.side.amplitudeMin = newValue
-    }
-
-    FormCard.FormDelegateSeparator {}
-
-    SliderRow {
-        objectName: "amplitudeMax_" + root.sideName
-        label: "Vibration ceiling"
-        description: "Rumble stronger than this vibrates at this much"
-        enabled: App.profile.triggers.motorEnabled
-        value: root.side.amplitudeMax
-        onMoved: (newValue) => root.side.amplitudeMax = newValue
-    }
 }

@@ -826,6 +826,19 @@ class MappingConfig:
     def trigger_motor(self, side):
         """One trigger's own vibration motor, as a dict.
 
+        **The Apex 5 does not have these motors, and this block does nothing
+        on it.** `GenerateControllerApex5` sets seven capability flags and
+        `IsSupportTriggerVibration` is not among them, while Vader 3, 4 and 5
+        all set it; `ConvertTriggerConfigBean` reads this block only when that
+        flag is on, so Space Station never touches it on an Apex 5. Trigger
+        haptics on this pad come out of the force triggers instead -- the
+        effect vocabulary in flydigi/effects.py, where `Sniper` vibrates
+        unaided and `Vibration` follows the grips.
+
+        Kept because the block is real, the layout is confirmed against
+        Flydigi's writer, and a Vader would use it. Nothing in the app calls
+        it: an editor for it would be an editor for hardware that is not here.
+
         The block holds two 7-byte gears per side -- `type, min, max, filter,
         min_start, scale, min_time` -- of which Flydigi's software writes four
         fields of the first (`SaveTriggerVibrationConfig`) and never touches

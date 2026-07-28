@@ -191,7 +191,7 @@ class VibrationModel(QObject):
 
 @QmlElement
 class TriggerSideModel(QObject):
-    """One trigger's stored adaptive effect, dead zone and motor."""
+    """One trigger's stored adaptive effect and dead zone."""
 
     changed = Signal()
 
@@ -266,41 +266,6 @@ class TriggerSideModel(QObject):
         values[key] = int(value)
         self._store(mode, values)
 
-    def _motor(self):
-        config = self._profile.config
-        if config is None:
-            return {"minimum": 0, "maximum": 0}
-        return config.trigger_motor(self._side)
-
-    def _set_motor(self, **fields):
-        config = self._profile.config
-        if config is None:
-            return
-        config.set_trigger_motor(self._side, **fields)
-        self.changed.emit()
-        self._profile.markChanged()
-
-    # The amplitude window, per side -- the one part of the motor block Space
-    # Station does *not* sync between the triggers. Grip rumble above the
-    # maximum acts as the maximum and below the minimum acts as the minimum, so
-    # it is a window the pad squeezes the game's rumble into, not a range of
-    # its own. The backend keeps min <= max by swapping, hence reading back.
-    @Property(int, notify=changed)
-    def amplitudeMin(self):
-        return self._motor()["minimum"]
-
-    @amplitudeMin.setter
-    def amplitudeMin(self, value):
-        self._set_motor(minimum=int(value))
-
-    @Property(int, notify=changed)
-    def amplitudeMax(self):
-        return self._motor()["maximum"]
-
-    @amplitudeMax.setter
-    def amplitudeMax(self, value):
-        self._set_motor(maximum=int(value))
-
     @Property(int, notify=changed)
     def deadZone(self):
         config = self._profile.config
@@ -323,77 +288,15 @@ class TriggerSideModel(QObject):
 class TriggerModel(QObject):
     """The two triggers' per-profile settings."""
 
-    motorEnabledChanged = Signal()
-    motorChanged = Signal()
-
     def __init__(self, profile):
         super().__init__(profile)
         self._profile = profile
         self._sides = {side: TriggerSideModel(profile, side) for side in mapping.SIDES}
 
-    @Property(bool, notify=motorEnabledChanged)
-    def motorEnabled(self):
-        """The trigger motors' single switch, shared by both sides.
-
-        One byte on the pad -- see MappingConfig.trigger_motor. Drawn once here
-        rather than once per trigger, because two switches over one byte let
-        someone ask for left-on/right-off, watch the UI agree, and get both.
-        """
-        return self._motor("left")["enabled"]
-
-    @motorEnabled.setter
-    def motorEnabled(self, value):
-        config = self._profile.config
-        if config is None:
-            return
-        config.set_trigger_motor("left", enabled=bool(value))
-        self.motorEnabledChanged.emit()
-        self._profile.markChanged()
-
-    def _motor(self, side):
-        config = self._profile.config
-        if config is None:
-            return {"enabled": False, "minimum": 0, "maximum": 0,
-                    "scale": 0, "block": 0}
-        return config.trigger_motor(side)
-
-    def _set_both(self, **fields):
-        """Write one field to both triggers.
-
-        Strength and threshold are stored per side but Space Station edits them
-        as one number and syncs the other trigger -- its own tooltip says so.
-        Followed here rather than second-guessed: whether this pad's firmware
-        even reads the right side's copy is untested, and a per-side control
-        that turns out to do nothing on one side is worse than no control.
-        """
-        config = self._profile.config
-        if config is None:
-            return
-        for side in mapping.SIDES:
-            config.set_trigger_motor(side, **fields)
-        self.motorChanged.emit()
-        self._profile.markChanged()
-
-    @Property(int, notify=motorChanged)
-    def motorStrength(self):
-        return self._motor("left")["scale"]
-
-    @motorStrength.setter
-    def motorStrength(self, value):
-        self._set_both(scale=int(value))
-
-    @Property(int, constant=True)
-    def motorStrengthMax(self):
-        """1..100, not 0..255 -- the pad stores this one as a percentage."""
-        return mapping.TRIGGER_MOTOR_SCALE_MAX
-
-    @Property(int, notify=motorChanged)
-    def motorThreshold(self):
-        return self._motor("left")["block"]
-
-    @motorThreshold.setter
-    def motorThreshold(self, value):
-        self._set_both(block=int(value))
+    # No trigger-motor properties. The blob has a trigger-vibration block and
+    # this pad has no such motors -- see MappingConfig.trigger_motor and the
+    # note on the Triggers page. The switch that used to be here was writing a
+    # byte nothing reads.
 
     @Property("QStringList", constant=True)
     def effectNames(self):
@@ -411,8 +314,6 @@ class TriggerModel(QObject):
         return self._sides[name]
 
     def refresh(self):
-        self.motorEnabledChanged.emit()
-        self.motorChanged.emit()
         for side in self._sides.values():
             side.refresh()
 

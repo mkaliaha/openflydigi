@@ -32,47 +32,14 @@ Kirigami.ScrollablePage {
             explanation: "Pick a profile on the Controller page."
         }
 
-        FormCard.FormHeader {
-            visible: App.profile.loaded
-            title: "Trigger vibration motors"
-        }
-
-        FormCard.FormCard {
-            visible: App.profile.loaded
-
-            FormCard.FormSwitchDelegate {
-                objectName: "triggerMotor"
-                text: "Enabled"
-                // One switch, because the pad has one byte for it.
-                description: "Shared by both triggers"
-                checked: App.profile.triggers.motorEnabled
-                onToggled: App.profile.triggers.motorEnabled = checked
-            }
-
-            FormCard.FormDelegateSeparator {}
-
-            SliderRow {
-                objectName: "motorStrength"
-                label: "Strength"
-                // Stored as a percentage, unlike every other level here.
-                description: "Shared by both triggers"
-                enabled: App.profile.triggers.motorEnabled
-                to: App.profile.triggers.motorStrengthMax
-                value: App.profile.triggers.motorStrength
-                onMoved: (newValue) => App.profile.triggers.motorStrength = newValue
-            }
-
-            FormCard.FormDelegateSeparator {}
-
-            SliderRow {
-                objectName: "motorThreshold"
-                label: "Threshold"
-                description: "Rumble below this leaves the triggers still"
-                enabled: App.profile.triggers.motorEnabled
-                value: App.profile.triggers.motorThreshold
-                onMoved: (newValue) => App.profile.triggers.motorThreshold = newValue
-            }
-        }
+        // No trigger-motor controls here, deliberately. The profile blob has a
+        // 29-byte trigger-vibration block at offset 154 and this pad does not
+        // have the hardware for it: `GenerateControllerApex5` sets seven
+        // capability flags and `IsSupportTriggerVibration` is not one of them,
+        // while Vader 3, 4 and 5 all set it. Space Station reads and writes
+        // that block only when the flag is on, so on an Apex 5 nobody touches
+        // it. Trigger *haptics* do exist here -- they come out of the force
+        // triggers above, via the effect vocabulary, not a separate motor.
 
         FormCard.FormHeader {
             visible: App.profile.loaded
