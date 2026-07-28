@@ -578,12 +578,29 @@ since re-enumeration rebinds. **Do not make it permanent with a udev rule**: the
 everything else here reads sticks and buttons — `tools/flydigi-ds5` relays them into the virtual
 DualSense, and `joystick-curve-probe` and `stick-feel` both depend on it.
 
-**Untested and important: whether this breaks Tier 4 and our own tools.** When SDL acquired the pad
-it set `controller_data` to False, and if that stops the standard controller report then the xpad
-evdev node goes quiet — which would take the DS5 relay, the stick probes and every evdev consumer
-with it. Nobody has checked. Test by enabling the flag and sweeping a stick under
-`tools/joystick-curve-probe --baseline`: events mean the two paths coexist, silence means the toggle
-and Tier 4 are mutually exclusive and the UI has to say so.
+**Tested, and it is a clean trade rather than a catch.** With the flag on:
+
+| | third-party off | third-party on |
+|---|---|---|
+| Steam's view | generic XInput controller | **Apex 5** |
+| standard gamepad path (xpad / evdev) | works | **dead** — the XInput entry accepts no input in Steam |
+| adaptive triggers over the vendor interface | works | **works** — commands 81 and 82 ACK *and are felt* |
+| profiles, lighting, curves (config commands) | work | work |
+
+So `controller_data = False` really does silence the ordinary controller report, confirmed by hand.
+What survives is everything this project drives over the vendor interface — which is tiers 1, 2, 3
+and 5, all of them. The trigger effects were verified by feel, not by ACK: command 245 already
+taught us that this pad ACKs commands it then ignores.
+
+**What it costs is exactly Tier 4 and our own evdev tools.** `tools/flydigi-ds5` relays sticks and
+buttons from evdev into the virtual DualSense, and `joystick-curve-probe` and `stick-feel` read the
+same node — none of them work while the flag is on. Tier 4 needed Steam Input off anyway, so the two
+were already mutually exclusive in practice; this makes it explicit.
+
+**A way out, worth building later.** `raw_data` is switched *on* by the acquirer, and the vendor
+stream carries sticks and buttons as well as the IMU (`OperatorDataParser`). A relay that read them
+from there instead of from evdev would work in both modes, and would drop the xpad dependency
+entirely. That is a real improvement to Tier 4 rather than a workaround.
 
 **Consequence worth stating in any UI**: this is not a preference, it is a handover. With it on,
 Steam drives the pad and our own onboard mapping stops being what the host sees. With

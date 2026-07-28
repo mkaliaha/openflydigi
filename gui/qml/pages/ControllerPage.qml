@@ -203,10 +203,15 @@ Kirigami.ScrollablePage {
                 // a generic XInput pad, with it on an Apex 5. The cost is that
                 // the taker also reconfigures how the pad reports, and the
                 // remapping set up here stops being what games see.
-                description: "Steam and similar can then drive it directly and "
-                             + "will recognise it as an Apex 5. While they do, "
-                             + "the button mapping on this pad is theirs, not "
-                             + "the one set up here."
+                // The trade is measured, not guessed: with this on the pad
+                // stops sending the ordinary gamepad report, so anything
+                // reading that directly goes dead -- including this app's own
+                // stick tools and the DualSense relay. Trigger effects, which
+                // go over the vendor interface, keep working.
+                description: "Steam and similar drive it directly and recognise "
+                             + "it as an Apex 5. The ordinary gamepad input "
+                             + "stops, so anything not going through them sees "
+                             + "nothing; adaptive triggers still work."
                 checked: App.device.thirdParty
                 onToggled: App.device.thirdParty = checked
             }
