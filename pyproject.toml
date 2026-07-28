@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# This describes the desktop app to PySide6's own tooling -- `pyside6-project
+# build`, `pyside6-project qmllint`, `pyside6-project run`. It covers gui/
+# only, and the flydigi/ backend is deliberately absent: that stays plain
+# Python with no Qt and no build step.
+#
+# `build` turns the QmlElement-decorated classes into the type information
+# qmllint checks gui/qml against, so a mistyped property name is caught before
+# it reaches a window instead of quietly binding to undefined.
+
+[project]
+name = "Apex5"
+version = "1.0"
+description = "Desktop app for the Flydigi Apex 5 on Linux"
+requires-python = ">=3.9"
+
+[tool.pyside6-project]
+files = [
+    "gui/__main__.py",
+    "gui/main.py",
+    "gui/app.py",
+    "gui/worker.py",
+    "gui/models/__init__.py",
+    "gui/models/device.py",
+    "gui/models/games.py",
+    "gui/models/lighting.py",
+    "gui/models/profile.py",
+    "gui/qml/Main.qml",
+    "gui/qml/components/DeviceStatus.qml",
+    "gui/qml/components/ProfileFooter.qml",
+    "gui/qml/components/SliderRow.qml",
+    "gui/qml/components/TriggerSide.qml",
+    "gui/qml/components/VibrationSide.qml",
+    "gui/qml/pages/ButtonsPage.qml",
+    "gui/qml/pages/ControllerPage.qml",
+    "gui/qml/pages/GamesPage.qml",
+    "gui/qml/pages/LightingPage.qml",
+    "gui/qml/pages/TriggersPage.qml",
+    "gui/qml/pages/VibrationPage.qml",
+]

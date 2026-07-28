@@ -2,149 +2,77 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Application window.
+"""QML entry point.
 
-Scope is the controller itself. The charging dock is a separate SDK we have not
-decompiled, and nothing here talks to it.
+The models reach QML as the `App` singleton of the Apex5 module, not as context
+properties. Importing `gui.app` is what registers the module -- the QmlElement
+decorators run at import time -- so the import below is load-bearing even
+though `App` is only named once here.
+
+Registered types are also what lets qmllint check the QML: see
+`tools/generate-qmltypes`.
 """
+import os
 import sys
 
-from PySide6.QtCore import QTimer, Signal
-from PySide6.QtWidgets import (
-    QApplication, QHBoxLayout, QLabel, QMainWindow, QPushButton, QStatusBar,
-    QTabWidget, QVBoxLayout, QWidget)
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QGuiApplication, QIcon
+from PySide6.QtQml import QQmlApplicationEngine, qmlTypeId
+from PySide6.QtQuickControls2 import QQuickStyle
 
-from .lighting import LightingPage
-from .profiles import ProfilePage
-from .triggers import TriggerPage
-from .worker import DeviceThread
+from . import i18n
+from .app import App  # noqa: F401  -- registers the Apex5 QML module
 
-PROFILE_COUNT = 4
-INFO_INTERVAL_MS = 30_000
+QML_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qml")
+
+QML_MODULE = "Apex5"
+QML_MODULE_MAJOR = 1
+QML_MODULE_MINOR = 0
+
+# Where a distribution keeps Kirigami. The system PySide6 finds these on its
+# own; listing them makes an unusual layout (a Flatpak, a venv pointed at the
+# system Qt) work without an environment variable.
+SYSTEM_QML_PATHS = ("/usr/lib64/qt6/qml", "/usr/lib/qt6/qml", "/usr/lib/qml")
 
 
-class MainWindow(QMainWindow):
-    # Requests go to the worker as signals, never as direct calls: calling a
-    # slot on an object living in another thread just runs it on this one,
-    # which would put blocking HID traffic back on the UI thread.
-    request_info = Signal()
-    request_status = Signal()
-    request_lighting = Signal()
-    request_vibration = Signal(dict)
+def build_engine():
+    """An engine with the Kirigami import paths set and i18n available."""
+    engine = QQmlApplicationEngine()
+    for path in SYSTEM_QML_PATHS:
+        if os.path.isdir(path) and path not in engine.importPathList():
+            engine.addImportPath(path)
+    # Kirigami's own components call i18n* and there is no KLocalizedContext to
+    # be had from PySide6; without this they throw. See gui/i18n.py.
+    i18n.install(engine)
+    return engine
 
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Flydigi Apex 5")
-        self.resize(760, 620)
 
-        self.device = DeviceThread()
-        worker = self.device.worker
-
-        central = QWidget()
-        layout = QVBoxLayout(central)
-
-        header = QHBoxLayout()
-        self.device_label = QLabel("Looking for a controller…")
-        header.addWidget(self.device_label, 1)
-        self.battery_label = QLabel("")
-        header.addWidget(self.battery_label)
-        self.reload_button = QPushButton("Reload from pad")
-        self.reload_button.clicked.connect(self._reload)
-        header.addWidget(self.reload_button)
-        layout.addLayout(header)
-
-        self.tabs = QTabWidget()
-        self.profile_page = ProfilePage()
-        self.trigger_page = TriggerPage()
-        self.tabs.addTab(self.profile_page, "Profiles && buttons")
-        self.tabs.addTab(self.trigger_page, "Adaptive triggers")
-        self.lighting_page = LightingPage()
-        self.tabs.addTab(self.lighting_page, "Lighting")
-        layout.addWidget(self.tabs, 1)
-
-        self.setCentralWidget(central)
-        self.setStatusBar(QStatusBar())
-
-        self.profile_page.write_requested.connect(worker.write_profile)
-        self.profile_page.apply_requested.connect(worker.apply_profile)
-        self.profile_page.load_requested.connect(worker.load_profile)
-        self.trigger_page.apply_vibration.connect(self.request_vibration)
-        self.request_info.connect(worker.refresh_info)
-        self.request_status.connect(worker.refresh_status)
-        self.request_vibration.connect(worker.apply_vibration)
-        worker.vibration_applied.connect(self._vibration_applied)
-
-        self.lighting_page.write_requested.connect(worker.write_lighting)
-        self.request_lighting.connect(worker.load_lighting)
-        worker.lighting_loaded.connect(self.lighting_page.config_loaded)
-        worker.lighting_written.connect(self._lighting_written)
-
-        worker.info_changed.connect(self._info_changed)
-        worker.active_changed.connect(self.profile_page.set_active)
-        worker.profile_loaded.connect(self.profile_page.profile_loaded)
-        worker.profile_written.connect(self._written)
-        worker.status.connect(self.statusBar().showMessage)
-        worker.failed.connect(self._failed)
-
-        # Kick off the first read once the window is up, so it appears
-        # immediately rather than after a second of blocking HID traffic.
-        self.profile_page.set_slots(PROFILE_COUNT)
-        QTimer.singleShot(0, self._reload)
-        self._info_timer = QTimer(self)
-        self._info_timer.timeout.connect(self.request_info)
-        self._info_timer.start(INFO_INTERVAL_MS)
-
-    def _reload(self):
-        """Re-read from the pad: info now, and the open profile on demand.
-
-        Other profiles stay unread until opened, because each read makes the
-        pad audibly re-seat its trigger motors.
-        """
-        self.request_info.emit()
-        self.request_status.emit()
-        self.request_lighting.emit()
-        self.profile_page.forget()
-
-    def _info_changed(self, info):
-        self.device_label.setText(f"Apex 5 connected ({info['connect_type']})")
-        if info["charging"]:
-            self.battery_label.setText("Charging")
-        else:
-            self.battery_label.setText(f"Battery {info['battery_level']}/8")
-
-    def _written(self, cfg_id, packets, saved):
-        self.profile_page.confirm_written(cfg_id, packets, saved)
-        where = "saved to flash" if saved else "in memory only"
-        self.statusBar().showMessage(
-            f"Profile {cfg_id + 1}: wrote {packets} packet(s), {where}", 8000)
-
-    def _lighting_written(self, packets, saved):
-        self.lighting_page.confirm_written()
-        where = "saved to flash" if saved else "in memory only"
-        self.statusBar().showMessage(
-            f"Lighting: wrote {packets} packet(s), {where}", 8000)
-
-    def _failed(self, message):
-        self.statusBar().showMessage(message, 10_000)
-        self.device_label.setText("Controller not responding")
-
-    def _vibration_applied(self, name, sides):
-        self.statusBar().showMessage(
-            f"{name}: applied to {sides or 'nothing'}", 8000)
-
-    def closeEvent(self, event):
-        self.trigger_page.save_prefs()
-        self.device.stop()
-        super().closeEvent(event)
+def app_singleton(engine):
+    """The one `App`, created by the QML engine on first access."""
+    return engine.singletonInstance(
+        qmlTypeId(QML_MODULE, QML_MODULE_MAJOR, QML_MODULE_MINOR, "App"))
 
 
 def main():
-    app = QApplication(sys.argv)
-    app.setApplicationName("Flydigi Apex 5")
-    app.setApplicationDisplayName("Flydigi Apex 5")
-    window = MainWindow()
-    window.show()
-    return app.exec()
+    # Must precede the first QQuickWindow, or Controls render in the default
+    # style and look alien on a KDE desktop.
+    QQuickStyle.setStyle("org.kde.desktop")
+
+    qt_app = QGuiApplication(sys.argv)
+    qt_app.setApplicationName("flydigi-apex5")
+    qt_app.setApplicationDisplayName("Flydigi Apex 5")
+    qt_app.setOrganizationName("flydigi-apex5")
+    qt_app.setDesktopFileName("flydigi-apex5")
+    qt_app.setWindowIcon(QIcon.fromTheme("input-gaming"))
+
+    engine = build_engine()
+    engine.load(QUrl.fromLocalFile(os.path.join(QML_DIR, "Main.qml")))
+    if not engine.rootObjects():
+        print("Failed to load the QML interface", file=sys.stderr)
+        return 1
+
+    qt_app.aboutToQuit.connect(app_singleton(engine).shutdown)
+    return qt_app.exec()
 
 
 if __name__ == "__main__":

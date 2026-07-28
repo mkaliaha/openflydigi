@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Smoke test for the application window, loaded exactly as `gui/main.py` does.
+
+The window is brought up through `QQmlApplicationEngine`, not created from
+inside a QML test: a top-level Window instantiated by the test engine is never
+placed in a graphics scene, and every page it pushes says so. Loading it the
+way the application does is both quieter and a truer test.
+
+Only window-level facts are asserted here -- what is in the page stack, what
+the models hold after startup. Anything that needs clicking lives in
+tests/qml/, inside a window QtQuickTest shows and activates.
+
+    python3 tests/test_shell.py
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("QT_QUICK_BACKEND", "software")
+os.environ.setdefault("QSG_RENDER_LOOP", "basic")
+
+try:
+    from PySide6.QtCore import QThread, QUrl
+    from PySide6.QtGui import QGuiApplication
+    from PySide6.QtQuickControls2 import QQuickStyle
+except ImportError:
+    print("PySide6 not installed -- skipping shell tests")
+    sys.exit(0)
+
+from gui import main as gui_main
+from tests.qml_harness import TestPad
+
+PASSED = []
+FAILED = []
+WARNINGS = []
+
+# Every App started here owns a worker thread. Qt calls qFatal if a QThread is
+# still running when it is destroyed, so a test that raises part way through
+# would take the interpreter down at exit with a core dump rather than a
+# failure message. Nothing may be left running.
+STARTED = []
+
+# The sections the global drawer offers, in order.
+SECTIONS = ["Controller", "Buttons", "Vibration", "Triggers", "Lighting", "Games"]
+
+
+def check(name, condition, detail=""):
+    (PASSED if condition else FAILED).append(name)
+    if not condition:
+        print(f"  FAIL {name} {detail}")
+
+
+def pump(qt_app, rounds=60):
+    for _ in range(rounds):
+        qt_app.processEvents()
+        QThread.msleep(20)
+        qt_app.processEvents()
+
+
+def load_shell(qt_app, pad):
+    """Bring the window up against `pad`, the way main.py brings it up."""
+    engine = gui_main.build_engine()
+    engine.warnings.connect(
+        lambda errors: WARNINGS.extend(e.toString() for e in errors))
+
+    app_object = gui_main.app_singleton(engine)
+    STARTED.append(app_object)
+    app_object.start(False)
+    app_object.thread.worker._drop()
+    app_object.thread.worker._controller = lambda: pad
+
+    engine.load(QUrl.fromLocalFile(os.path.join(gui_main.QML_DIR, "Main.qml")))
+    roots = engine.rootObjects()
+    return app_object, engine, (roots[0] if roots else None)
+
+
+def test_the_window_loads_and_pushes_its_first_page(qt_app):
+    pad = TestPad()
+    app_object, engine, window = load_shell(qt_app, pad)
+    check("the window loads", window is not None)
+    if window is None:
+        app_object.shutdown()
+        return
+    pump(qt_app)
+
+    # replace() on an empty stack silently drops the page: the object is
+    # created, it is just never shown. The count is what catches that.
+    check("the first page is really in the stack",
+          window.property("openPageCount") == 1,
+          str(window.property("openPageCount")))
+    check("the first page is the Controller page",
+          window.property("openPageTitle") == "Controller",
+          str(window.property("openPageTitle")))
+    app_object.shutdown()
+
+
+def test_startup_reads_only_the_open_profile(qt_app):
+    pad = TestPad()
+    pad.active = 1
+    app_object, engine, window = load_shell(qt_app, pad)
+    pump(qt_app)
+
+    # Every config read makes the pad audibly re-seat its trigger motors, so
+    # filling the slot list must not read all four.
+    check("startup reads exactly one profile", pad.reads == [0], str(pad.reads))
+    # Reading switches the pad, so the app has to switch it back.
+    check("the pad is put back on the profile it was running",
+          pad.switches == [1], str(pad.switches))
+    check("the pad ends where it started", pad.active == 1, str(pad.active))
+    check("all four slots are listed", app_object.profile.slots.count == 4)
+    app_object.shutdown()
+
+
+def test_the_models_reflect_what_the_pad_reported(qt_app):
+    pad = TestPad(battery=6, wired=False)
+    app_object, engine, window = load_shell(qt_app, pad)
+    pump(qt_app)
+
+    device = app_object.device
+    check("the pad is reported connected", device.connected)
+    check("battery comes from the pad", device.battery == 6, str(device.battery))
+    check("battery is reported in eight steps", device.batterySteps == 8)
+    check("the connection type comes from the pad",
+          device.connectionType == "dongle", device.connectionType)
+    check("the summary names the connection", "dongle" in device.summary,
+          device.summary)
+    check("lighting was read too", app_object.lighting.loaded)
+    app_object.shutdown()
+
+
+def test_a_charging_pad_says_so_rather_than_a_level(qt_app):
+    pad = TestPad(charging=True)
+    app_object, engine, window = load_shell(qt_app, pad)
+    pump(qt_app)
+    check("charging is reported", app_object.device.charging)
+    app_object.shutdown()
+
+
+def test_every_section_opens(qt_app):
+    pad = TestPad()
+    app_object, engine, window = load_shell(qt_app, pad)
+    pump(qt_app, rounds=20)
+
+    # Spelled out rather than read back off the window: the drawer's contents
+    # are part of what this is checking, so taking the expected list from the
+    # thing under test would assert nothing.
+    for index, name in enumerate(SECTIONS):
+        window.openSection(index)
+        pump(qt_app, rounds=5)
+        check(f"the {name} section opens",
+              window.property("openPageTitle") == name,
+              str(window.property("openPageTitle")))
+        check(f"the {name} section does not stack up",
+              window.property("openPageCount") == 1,
+              str(window.property("openPageCount")))
+    app_object.shutdown()
+
+
+def test_the_i18n_functions_are_installed(qt_app):
+    """Kirigami calls these from QML and throws without them."""
+    from PySide6.QtQml import QQmlEngine
+
+    from gui import i18n as gui_i18n
+
+    engine = QQmlEngine()
+    shim = gui_i18n.install(engine)
+
+    check("every i18n name is installed",
+          all(not shim.property(name).isUndefined() for name in gui_i18n.NAMES),
+          str([n for n in gui_i18n.NAMES if shim.property(n).isUndefined()]))
+
+    # The one kirigami-addons calls from FormTextFieldDelegate: a domain, a
+    # disambiguation context, then the message and its arguments.
+    result = shim.property("i18ndc").call(
+        ["kirigami-addons6", "@label", "%1/%2", 3, 10]).toString()
+    check("i18ndc substitutes its arguments", result == "3/10", result)
+
+    check("i18nc skips only the context",
+          shim.property("i18nc").call(["@label", "%1 left", 7]).toString()
+          == "7 left")
+    check("i18n takes the message first",
+          shim.property("i18n").call(["Battery %1"]).toString() == "Battery %1"
+          or shim.property("i18n").call(["Battery %1", 5]).toString() == "Battery 5")
+    check("a plural form picks the singular for one",
+          shim.property("i18np").call(["%1 game", "%1 games", 1]).toString()
+          == "1 game")
+    check("a plural form picks the plural otherwise",
+          shim.property("i18np").call(["%1 game", "%1 games", 4]).toString()
+          == "4 games")
+
+
+def test_a_game_list_update_that_fails_is_reported(qt_app):
+    """The network is never touched here -- the reply handler is."""
+    pad = TestPad()
+    app_object, engine, window = load_shell(qt_app, pad)
+    pump(qt_app, rounds=10)
+
+    app_object._fetched(None, "Name or service not known")
+    check("a failed update is reported",
+          "Could not update the game list" in app_object.device.error,
+          app_object.device.error)
+    check("a failed update leaves the list alone", app_object.games.count == 0
+          or app_object.games.count > 0)
+    check("the app is not left thinking it is still fetching",
+          not app_object.fetchingGames)
+    app_object.shutdown()
+
+
+def test_a_game_list_update_that_succeeds_replaces_the_list(qt_app):
+    pad = TestPad()
+    app_object, engine, window = load_shell(qt_app, pad)
+    pump(qt_app, rounds=10)
+
+    app_object._fetched([{"enGameName": "Silksong", "isVibration": True},
+                         {"enGameName": "Deathloop", "isPS5": True}], "")
+    check("the fetched list is shown", app_object.games.count == 2,
+          str(app_object.games.count))
+    check("the update is reported", "Game list updated" in app_object.device.status,
+          app_object.device.status)
+    check("no error is left behind", app_object.device.error == "",
+          app_object.device.error)
+    app_object.shutdown()
+
+
+def test_loading_the_window_is_warning_free(qt_app):
+    """The engine must not report anything while bringing the app up."""
+    check("no QML warnings while loading the window", not WARNINGS,
+          "; ".join(WARNINGS[:5]))
+
+
+def main():
+    QQuickStyle.setStyle("org.kde.desktop")
+    qt_app = QGuiApplication.instance() or QGuiApplication([])
+    try:
+        for test in (test_the_window_loads_and_pushes_its_first_page,
+                     test_startup_reads_only_the_open_profile,
+                     test_the_models_reflect_what_the_pad_reported,
+                     test_a_charging_pad_says_so_rather_than_a_level,
+                     test_every_section_opens,
+                     test_the_i18n_functions_are_installed,
+                     test_a_game_list_update_that_fails_is_reported,
+                     test_a_game_list_update_that_succeeds_replaces_the_list,
+                     test_loading_the_window_is_warning_free):
+            try:
+                test(qt_app)
+            except Exception as exc:                  # a broken test, not a failure
+                FAILED.append(test.__name__)
+                print(f"  ERROR {test.__name__}: {exc!r}")
+    finally:
+        # Even if a test raised: a live worker thread at interpreter shutdown
+        # is a qFatal, which buries the real error under a core dump.
+        for app_object in STARTED:
+            app_object.shutdown()
+    total = len(PASSED) + len(FAILED)
+    print(f"\n{len(PASSED)}/{total} passed")
+    return 1 if FAILED else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

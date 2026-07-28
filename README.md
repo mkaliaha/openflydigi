@@ -56,13 +56,22 @@ tools/flydigi-ds5
 
 ## Desktop app
 
-Profiles, button remapping and per-game trigger routes, without Space Station:
+Profiles, button remapping, lighting and per-game trigger routes, without Space
+Station. QML on Kirigami, so it looks like the rest of a KDE desktop:
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -r gui/requirements.txt
-.venv/bin/python -m gui
+# Fedora / KDE
+sudo dnf install python3-pyside6 kf6-kirigami kf6-kirigami-addons \
+                 kf6-qqc2-desktop-style
+python3 -m gui
 ```
+
+**Not a pip install.** PySide6 from PyPI bundles its own Qt, built with
+different private-symbol versioning from the distribution's, and Kirigami will
+not load against it — the two are mutually incompatible, in both directions.
+The app needs the distribution's PySide6, built against the same Qt as
+Kirigami. On an immutable system, a `distrobox` with those packages works
+without layering anything; see `gui/README.md`.
 
 PySide6 is a dependency of the GUI only — everything under `flydigi/` and
 `tools/` keeps working on a machine with no Qt installed.

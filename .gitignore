@@ -22,6 +22,11 @@ __pycache__/
 .venv/
 venv/
 
+# Generated QML type information for the Apex5 module. Derived from the models
+# themselves -- rebuild it with tools/generate-qmltypes. qmllint needs it; git
+# does not.
+/Apex5/
+
 # Editors / OS
 .vscode/
 .idea/

@@ -1,7 +1,26 @@
 # Plan: rewrite the GUI in QML/Kirigami
 
-The current app is QtWidgets with default layouts — a 2012 config-dialog idiom. Breeze styles it,
-so it does not look alien, but the visual grammar is a decade old: a 23-row table of combo boxes,
+> **Done, 2026-07-28.** Kept for the reasoning; `gui/README.md` and `PROGRESS.md` describe what
+> exists. Four things went differently from what is written below, and they are the interesting
+> part:
+>
+>   * **Phase 0 failed, and that was the useful result.** The venv's PySide6 cannot load Kirigami:
+>     the wheel's bundled Qt versions private symbols `Qt_6_PRIVATE_API` where Fedora's tags them
+>     `Qt_6.11_PRIVATE_API`, and it is mutual — preloading the system Qt breaks PySide6 instead.
+>     The fallback below assumed `rpm-ostree` layering and a reboot; a distrobox needs neither.
+>   * **The widgets were deleted rather than kept.** Phase 1's "extract models, keep the widgets"
+>     hedge existed in case the QML work stalled. It did not, and the project was a day old, so
+>     there was no installed base to protect and no `--legacy-ui`.
+>   * **Models are a QML module, not context properties.** Phase 2 proposed context properties.
+>     They work, but qmllint cannot see them, so all 117 model references were unqualified
+>     accesses it had to ignore. Registering the models with `QmlElement` and generating type
+>     information got qmllint to zero and made it find a real bug.
+>   * **The testing section below is right that QML can be driven, and wrong about how.** Python's
+>     `findChild` cannot see an item created by a delegate — see "Testing after the rewrite",
+>     corrected in place.
+
+The old app was QtWidgets with default layouts — a 2012 config-dialog idiom. Breeze styled it,
+so it did not look alien, but the visual grammar was a decade old: a 23-row table of combo boxes,
 `QGroupBox` + `QFormLayout` panels, text-only buttons in box layouts, no header, no icons.
 
 This plans the replacement. **Nothing in `flydigi/` changes**, and `gui/worker.py` should survive

@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Generate the type information qmllint checks gui/qml against.
+
+`pyside6-project build --qml-module` does this too, and is the tool to reach
+for first. It is not used here for one reason: `pyside6-metaobjectdump` works
+by parsing the Python source, so it cannot see `constant=True` -- the flag is
+an argument to Property, not something visible in the syntax tree. Every
+constant property then reaches qmllint looking merely read-only, and every use
+of one is reported as "binding might not update when the property changes".
+That was 99 warnings across gui/qml, all of them wrong, and enough to bury a
+real one.
+
+So the dump is taken from the metaobjects themselves. Importing `gui.app` runs
+the QmlElement decorators, after which each class carries a real QMetaObject
+that answers `isConstant()` correctly. Nothing here guesses: every field
+written out is read back from Qt. The output then goes through Qt's own
+qmltyperegistrar, unchanged.
+
+    tools/generate-qmltypes
+    qmllint -I . -I /usr/lib64/qt6/qml gui/qml/Main.qml gui/qml/*/*.qml
+
+Re-run it after adding or renaming anything a view binds to.
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+
+MODULE = "Apex5"
+MAJOR = 1
+MINOR = 0
+OUT_DIR = os.path.join(ROOT, MODULE)
+
+# moc's schema version, as emitted by pyside6-metaobjectdump. qmltyperegistrar
+# checks it, so it has to match the tooling rather than be invented.
+OUTPUT_REVISION = 68
+
+# qmltyperegistrar ships in Qt's libexec, not on PATH.
+REGISTRAR_CANDIDATES = [
+    "/usr/lib64/qt6/libexec/qmltyperegistrar",
+    "/usr/lib/qt6/libexec/qmltyperegistrar",
+    "/usr/lib/x86_64-linux-gnu/qt6/libexec/qmltyperegistrar",
+]
+
+
+def find_registrar():
+    found = shutil.which("qmltyperegistrar") or shutil.which("pyside6-qmltyperegistrar")
+    if found:
+        return found
+    for path in REGISTRAR_CANDIDATES:
+        if os.path.exists(path):
+            return path
+    try:
+        import PySide6
+        bundled = os.path.join(os.path.dirname(PySide6.__file__),
+                               "Qt", "libexec", "qmltyperegistrar")
+        if os.path.exists(bundled):
+            return bundled
+    except ImportError:
+        pass
+    return None
+
+
+def type_name(raw):
+    """`DeviceModel*` is how Qt spells it; the qmltypes format wants the name.
+
+    Qt hands some of these back as QByteArray rather than str, so decode first.
+    """
+    if isinstance(raw, (bytes, bytearray)):
+        raw = bytes(raw).decode()
+    elif not isinstance(raw, str):
+        raw = bytes(raw.data()).decode()
+    return raw.rstrip("*").strip()
+
+
+def dump_properties(meta):
+    out = []
+    for index in range(meta.propertyOffset(), meta.propertyCount()):
+        prop = meta.property(index)
+        entry = {
+            "name": prop.name(),
+            "type": type_name(prop.typeName()),
+            "index": index - meta.propertyOffset(),
+            "read": prop.name(),
+        }
+        if prop.isWritable():
+            entry["write"] = prop.name()
+        if prop.hasNotifySignal():
+            entry["notify"] = bytes(prop.notifySignal().name()).decode()
+        # The whole reason this script exists.
+        if prop.isConstant():
+            entry["constant"] = True
+        if prop.isFinal():
+            entry["final"] = True
+        out.append(entry)
+    return out
+
+
+def dump_methods(meta):
+    """Signals and invokables, so qmllint knows App.reload() from App.relaod()."""
+    from PySide6.QtCore import QMetaMethod
+
+    signals, slots = [], []
+    for index in range(meta.methodOffset(), meta.methodCount()):
+        method = meta.method(index)
+        names = method.parameterNames()
+        entry = {
+            "access": "public",
+            "name": bytes(method.name()).decode(),
+            "returnType": type_name(method.typeName()) or "void",
+            "arguments": [
+                {"name": bytes(names[i]).decode() or f"a{i + 1}",
+                 "type": type_name(method.parameterTypeName(i))}
+                for i in range(method.parameterCount())
+            ],
+        }
+        if method.methodType() == QMetaMethod.MethodType.Signal:
+            signals.append(entry)
+        elif method.methodType() in (QMetaMethod.MethodType.Slot,
+                                     QMetaMethod.MethodType.Method):
+            slots.append(entry)
+    return signals, slots
+
+
+def dump_class(cls, singleton=False):
+    meta = cls.staticMetaObject
+    signals, slots = dump_methods(meta)
+    class_infos = [{"name": "QML.Element", "value": "auto"}]
+    if singleton:
+        class_infos.append({"name": "QML.Singleton", "value": "true"})
+    return {
+        "className": cls.__name__,
+        "qualifiedClassName": cls.__name__,
+        "object": True,
+        "superClasses": [{"access": "public",
+                          "name": type_name(meta.superClass().className())}],
+        "classInfos": class_infos,
+        "properties": dump_properties(meta),
+        "signals": signals,
+        "slots": slots,
+    }
+
+
+def collect():
+    """Every type the Apex5 module exports, and which one is the singleton."""
+    from gui import models
+    from gui.app import App
+
+    types = [
+        (App, True),
+        (models.DeviceModel, False),
+        (models.ProfileModel, False),
+        (models.ProfileListModel, False),
+        (models.KeyMapModel, False),
+        (models.VibrationModel, False),
+        (models.VibrationSideModel, False),
+        (models.TriggerModel, False),
+        (models.TriggerSideModel, False),
+        (models.LightingModel, False),
+        (models.ColourListModel, False),
+        (models.GameListModel, False),
+        (models.GameFilterModel, False),
+    ]
+    return [dump_class(cls, singleton) for cls, singleton in types]
+
+
+def main():
+    registrar = find_registrar()
+    if registrar is None:
+        print("qmltyperegistrar not found; install Qt 6 declarative tooling",
+              file=sys.stderr)
+        return 1
+
+    classes = collect()
+    os.makedirs(OUT_DIR, exist_ok=True)
+    metatypes = os.path.join(OUT_DIR, "apex5metatypes.json")
+    with open(metatypes, "w") as fh:
+        json.dump([{
+            "classes": classes,
+            "outputRevision": OUTPUT_REVISION,
+            "QML_IMPORT_NAME": MODULE,
+            "QML_IMPORT_MAJOR_VERSION": MAJOR,
+            "QML_IMPORT_MINOR_VERSION": MINOR,
+            "inputFile": "gui/app.py",
+        }], fh, indent=2)
+
+    qmltypes = os.path.join(OUT_DIR, f"{MODULE}.qmltypes")
+    result = subprocess.run(
+        [registrar, f"--generate-qmltypes={qmltypes}",
+         f"--import-name={MODULE}", f"--major-version={MAJOR}",
+         f"--minor-version={MINOR}", metatypes],
+        capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"qmltyperegistrar failed:\n{result.stderr}", file=sys.stderr)
+        return 1
+
+    with open(os.path.join(OUT_DIR, "qmldir"), "w") as fh:
+        fh.write(f"module {MODULE}\ntypeinfo {MODULE}.qmltypes\n")
+
+    constants = sum(1 for c in classes for p in c["properties"] if p.get("constant"))
+    print(f"wrote {qmltypes}")
+    print(f"  {len(classes)} types, {constants} constant properties")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

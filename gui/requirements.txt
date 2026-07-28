@@ -6,11 +6,30 @@
 # keep working with no third-party packages at all, so nothing here may be
 # imported outside gui/.
 #
-#   python3 -m venv .venv
-#   .venv/bin/pip install -r gui/requirements.txt
-#   .venv/bin/python -m gui
+# Read this before reaching for `pip install -r`: it will not give you a
+# working app.
 #
-# PySide6-Essentials rather than PySide6: it is smaller, and it leaves out the
-# add-ons that are GPL-3.0-only in Qt's open-source release (Charts, Data
-# Visualization, Virtual Keyboard), so they cannot be reached for by accident.
-PySide6-Essentials>=6.6
+# The interface is QML on Kirigami, and Kirigami is a distribution package
+# built against the distribution's Qt. A PySide6 wheel from PyPI bundles a
+# different Qt build, tagging private symbols `Qt_6_PRIVATE_API` where Fedora's
+# Qt 6.11.1 tags them `Qt_6.11_PRIVATE_API`, so Kirigami's plugin will not link
+# against it. The incompatibility is mutual -- preloading the system Qt breaks
+# PySide6 instead -- and RPATH means LD_LIBRARY_PATH cannot talk it round.
+#
+# So PySide6 has to come from the same place Kirigami does:
+#
+#   Fedora / KDE   sudo dnf install python3-pyside6 kf6-kirigami \
+#                                   kf6-kirigami-addons kf6-qqc2-desktop-style
+#   immutable      the same packages inside a distrobox -- see gui/README.md
+#   Flatpak        io.qt.PySide.BaseApp//6.11 on org.kde.Platform//6.11, which
+#                  builds PySide6 against the runtime's own Qt
+#
+# Listed for the record rather than to be installed. Minimum versions are what
+# this has been run against.
+#
+#   PySide6         >= 6.6   (6.11.1 in use)
+#   kf6-kirigami    >= 6.0   (6.28.0 in use)
+#   kirigami-addons >= 1.0   (1.12.0 in use, for the FormCard components)
+#
+# Avoid the Qt add-ons that ship GPL-3.0-only under the open-source licence --
+# Charts, Data Visualization, Virtual Keyboard. Nothing here uses them.

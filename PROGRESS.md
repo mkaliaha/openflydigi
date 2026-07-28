@@ -30,17 +30,28 @@ for `gui/` only. `LICENSE` explains why, `gui/README.md` states the rule that ke
 
 ## The desktop app
 
-**PySide6, in `gui/`**, calling the backend in-process — no D-Bus. Run it with:
+**QML on Kirigami, in `gui/`**, calling the backend in-process — no D-Bus. Run it with:
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -r gui/requirements.txt
-.venv/bin/python -m gui
+sudo dnf install python3-pyside6 kf6-kirigami kf6-kirigami-addons kf6-qqc2-desktop-style
+python3 -m gui
 ```
 
 PySide6 specifically, **not PyQt6** — PyQt is GPL-only and would force the whole tree copyleft,
-which is where the "Qt means GPL" belief comes from. Installed as `PySide6-Essentials`, which also
-leaves out the add-ons that are GPL-3.0-only (Charts, Data Visualization, Virtual Keyboard). Draw
-graphs with `QPainter` or a QML `Canvas`.
+which is where the "Qt means GPL" belief comes from. Avoid the add-ons that are GPL-3.0-only
+(Charts, Data Visualization, Virtual Keyboard); draw graphs with a QML `Canvas`.
+
+**Not from pip.** A PySide6 wheel bundles its own Qt, tagging private symbols `Qt_6_PRIVATE_API`
+where Fedora's Qt 6.11.1 tags them `Qt_6.11_PRIVATE_API`, so Kirigami will not link against it —
+in either direction, and RPATH puts it beyond `LD_LIBRARY_PATH`. PySide6 has to come from wherever
+Kirigami does. On this immutable system that is the `apex-dev` distrobox; no layering, no reboot.
+Flatpak is the shipping target: `io.qt.PySide.BaseApp//6.11` on `org.kde.Platform//6.11` builds
+PySide6 against the runtime's own Qt, so the mismatch cannot arise.
+
+The widgets are gone. `gui/models/` holds view-agnostic state — no `QtWidgets`, no `QtQuick` — and
+QML binds to it through the `App` singleton of the `Apex5` module, registered by `QmlElement`
+decorators rather than injected as context properties, which is what lets qmllint type-check the
+QML. See `gui/README.md`.
 
 | Tab | What works |
 |---|---|
@@ -55,41 +66,74 @@ signals. Calling a worker slot directly runs it on the caller's thread, which si
 HID traffic back on the UI thread — that bug was written twice already.
 
 **Apply vs save.** "Apply" writes the changed packets (164/165) and takes effect immediately;
-"Apply & save" additionally sends 166, which Flydigi's SDK gives a 10 s timeout where everything
+"Apply and save" additionally sends 166, which Flydigi's SDK gives a 10 s timeout where everything
 else gets 500 ms.
 
 Confirmed on hardware: **an applied-but-unsaved change is lost when the pad sleeps** — not merely
-on a power cycle. Applied lighting reverted after the pad idled out. So "apply" is working memory
-in the literal sense, and anything meant to last needs the save.
+on a power cycle. Applied lighting reverted after the pad idled out, and a profile renamed with
+only "Apply" was gone after a hard power switch. So "apply" is working memory in the literal
+sense, and anything meant to last needs the save.
+
+That is why the two buttons do not share an enabled state. "Apply" follows *dirty* — is there an
+edit not yet written. "Apply and save" follows dirty **or** *saveNeeded* — has anything been
+written that has not reached flash. Binding both to dirty, as the first cut did, meant pressing
+Apply immediately greyed out the only way to keep the change you had just made. The footer says
+which of the two states you are in rather than leaving it to be inferred.
+
+The label is spelled out rather than "Apply & save": a bare `&` in a button label is taken as a
+mnemonic, swallowed, and drawn as an underline on the next character. The widget app escaped it as
+`&&`; in QML it is simpler to avoid the ampersand.
 
 Still unverified: that 166 itself works. It has only ever run against the fake pad, and nothing has
-yet confirmed a saved change surviving a sleep.
+yet confirmed a saved change surviving a sleep. The pad being attached now makes that a cheap
+experiment: rename a profile, press "Apply and save", let the pad idle out, reconnect and re-read.
 
 ### Tests, and how to run them without hardware
 
 `tests/fake_pad.py` answers reads, diffed writes, apply and save, and refuses a bad checksum by
-staying silent exactly as the pad does. `tests/test_gui.py` drives the real widgets offscreen.
+staying silent exactly as the pad does — unchanged by the QML rewrite. The desktop tests come in
+three layers, cheapest first:
 
 ```bash
-for t in tests/test_*.py; do python3 "$t"; done   # 105 backend tests, no Qt needed
-.venv/bin/python tests/test_gui.py                # 24 GUI tests
+for t in tests/test_{dsx,forza,mapping,monitor,relay}.py; do python3 "$t"; done  # backend, no Qt
+python3 tests/test_models.py     # 108, headless -- no engine, no display
+python3 tests/test_shell.py      # the window, loaded the way main.py loads it
+python3 tests/test_qml.py        # QtQuickTest: real clicks on real delegates
 ```
 
-`test_gui.py` exits 0 with a skip message when PySide6 is absent, so the backend run stays
-dependency-free.
+Each skips with exit 0 when PySide6 is absent, so the backend run stays dependency-free.
+
+Most assertions live in `test_models.py`, because most of the logic does. The QML layer exists for
+what only a running view can answer, and it has to be QtQuickTest: **PySide6 cannot see an item
+created by a delegate** — a Repeater and a ListView both really build theirs, QML counts them, and
+`findChild` finds none. Nor can a test drive its own window: Qt only delivers synthetic clicks once
+the *main* window is shown, so a page under test is instantiated inside the `TestCase`.
+
+Two traps worth remembering, both of which cost real time:
+
+  * `tryVerify(() => !button.enabled)` never sees a binding update. Wait on the model with
+    `tryCompare(App.lighting, "dirty", false)` instead — a closure over a binding has no notify
+    signal to watch, so it times out on work that already succeeded.
+  * recursing `QObject.children()` over QML objects aborts the interpreter with a shiboken
+    assertion. `findChildren` is fine.
+
+`qmllint` is clean and worth keeping that way:
+
+```bash
+tools/generate-qmltypes
+qmllint -I . -I /usr/lib64/qt6/qml gui/qml/Main.qml gui/qml/*/*.qml
+```
+
+`pyside6-project build` would be the framework's own route, but it shells out to
+`pyside6-metaobjectdump`, which *parses the source* and so cannot see `constant=True` — every
+constant property then reads as merely read-only and qmllint reports 99 bogus "binding might not
+update" warnings. `tools/generate-qmltypes` dumps the live `QMetaObject` instead, where the flag is
+correct. With those gone it immediately found a real bug: `pageStack.currentItem` is typed
+`QQuickItem`, which has no `title`.
 
 ## Next
 
 Agreed feature list, roughly in the order it came up. Each is a fresh-context-sized piece of work.
-
-**0. Rewrite the GUI in QML/Kirigami** — [docs/gui-kirigami-plan.md](docs/gui-kirigami-plan.md).
-The current app is QtWidgets with default layouts and looks a decade old; Kirigami 6.28 and
-kirigami-addons are already installed, and PySide6-Essentials ships QtQuick. The plan is phased so
-Phase 1 (extract view-agnostic models, keep the widgets, port the tests down onto the models) is
-worth shipping on its own even if the QML work stalls. Phase 0 settles whether the venv's bundled
-Qt can load the system's Kirigami QML modules — that answer decides the install story, so it comes
-before any UI work. Interaction tests survive the move: `PySide6.QtQuickTest` and `PySide6.QtTest`
-are both present, so QML can be clicked and asserted on much like widgets.
 
 **1. Screen image / GIF upload.** `UploadPic2K2Start/Data/End/Finish`, `UploadPicCommandK1/K2`,
 `TestScreen`, `OffScreen`, `ReadScreenSetting`. Note Space Station only offers this **over a wired
