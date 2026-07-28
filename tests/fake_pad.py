@@ -10,6 +10,8 @@ config blob per slot and answers exactly as the pad does, including the
 checksummed framing -- which means a packet the real pad would reject is
 rejected here too.
 """
+import contextlib
+
 from flydigi import device, lighting, mapping
 
 PROTO_V31 = 0x0301
@@ -66,6 +68,7 @@ class FakePad:
         self.saved = {}
         self.packets_received = 0
         self.bad_checksums = 0
+        self.claims = 0
         self.reads_answered = 0
         # Set to make a read switch the pad and then go silent, which is what a
         # dropped packet looks like from the host: the config is live, the
@@ -74,6 +77,18 @@ class FakePad:
         self._pending_write = None     # (cfg_id, start_index, count)
 
     # -- transport ---------------------------------------------------------
+
+    @contextlib.contextmanager
+    def claim(self, timeout=None):
+        """Part of the Controller contract, and a no-op here.
+
+        There is nobody to exclude: one test process, no file behind it. It
+        exists because `blobs.read_blob` and `blobs.write_blob` claim the pad
+        around their packet streams, and a fake missing a method the real code
+        calls has hidden a whole untested path here before.
+        """
+        self.claims += 1
+        yield self
 
     def send(self, buf, wait=0.3):
         buf = bytes(buf)

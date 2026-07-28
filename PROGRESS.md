@@ -111,11 +111,13 @@ Two things fell out of that run:
 ### Tests, and how to run them without hardware
 
 `tests/fake_pad.py` answers reads, diffed writes, apply and save, and refuses a bad checksum by
-staying silent exactly as the pad does — unchanged by the QML rewrite. The desktop tests come in
-three layers, cheapest first:
+staying silent exactly as the pad does — unchanged by the QML rewrite. `tests/test_device.py` is
+the exception to the fake: the claim is a kernel behaviour, so it runs against real descriptors —
+a socket pair for what a send does, two separate `open()`s of one path for what the lock does.
+The desktop tests come in three layers, cheapest first:
 
 ```bash
-for t in tests/test_{dsx,forza,mapping,monitor,relay}.py; do python3 "$t"; done  # backend, no Qt
+for t in tests/test_{device,dsx,forza,mapping,monitor,relay}.py; do python3 "$t"; done  # backend, no Qt
 python3 tests/test_models.py     # 108, headless -- no engine, no display
 python3 tests/test_shell.py      # the window, loaded the way main.py loads it
 python3 tests/test_qml.py        # QtQuickTest: real clicks on real delegates
@@ -155,10 +157,10 @@ correct. With those gone it immediately found a real bug: `pageStack.currentItem
 
 Agreed feature list, roughly in the order it came up. Each is a fresh-context-sized piece of work.
 
-### Two writers on one hidraw node — the arbitration gap
+### Two writers on one hidraw node — done
 
-**This is the one known-broken thing, and it has now been seen rather than predicted.** Nothing
-coordinates access to `/dev/hidraw4`. The desktop app holds it open and polls `Get info` every 30
+**Was the one known-broken thing, and it was seen rather than predicted.** Nothing coordinated
+access to `/dev/hidraw4`. The desktop app holds it open and polls `Get info` every 30
 seconds; a memory-driven route (`flydigi-monitor`, `flydigi-forza`, `flydigi-dsx`) rewrites trigger
 effects as often as every 50 ms; both write whole 32-byte packets and then read.
 
@@ -181,17 +183,37 @@ Two distinct failure modes, and only the first is obvious:
    so an overlapping exchange can hand the wrong answer to the wrong caller. Today that means a
    command reported as failed when it worked, or as succeeded when its own reply never came.
 
-**The fix is `flock(2)` on the open node** — an advisory whole-file lock, taken `LOCK_EX` around a
-write-and-read exchange and released after. Advisory means it binds only processes that ask for it,
-which is exactly the boundary here: everything in this repo goes through `flydigi/device.py`, so one
-context manager there covers the app, the daemon and every driver. Steam and SDL hold the same node
-open and will not take the lock — that contention stays a separate problem, and pretending otherwise
-would be the mistake.
+**The fix is `Controller.claim()`, an advisory `flock(2)` on the open node.** `send` takes it for a
+single packet; `blobs.read_blob` and `blobs.write_blob` hold it across a whole packet stream, and
+the app's write-then-save holds it across both, since the save command commits whatever is in the
+pad's working memory and would otherwise commit someone else's write too. It is re-entrant, so a
+claimed sequence can send freely. `_drain()` runs inside the claim before each write and throws away
+anything already waiting: under the claim, a reply that arrived before we asked provably belongs to
+an exchange that is over.
 
-Sketched shape: `Controller.claim()` as a context manager around `send`/`command`; drivers hold it
-per update rather than for their lifetime, so the app is starved for microseconds and not for the
-length of a game. Worth pairing with draining stale input before a write, since a reply that arrived
-before we sent anything cannot be ours whatever its command byte says.
+**Advisory is the right kind of lock here, not a compromise.** It binds only processes that ask,
+which covers ours completely — everything in this project goes through `flydigi/device.py`, and
+`tools/flydigi_cmd.py` takes the same lock by hand. Steam and SDL hold the same node open, will not
+take it, and **must not be shut out**: the vendor interface keeps working with Steam Input on, which
+is what lets trigger effects run in games Steam has taken the pad for (see the third-party toggle
+section — commands 81 and 82 are felt with `controller_data = False`). A lock that excluded Steam
+would break a working configuration to fix nothing. What remains is that Steam's writes can land
+between ours: harmless for effects, which the next frame overwrites, and a risk only for a config
+write, which is a deliberate action rather than something a game triggers.
+
+**Verified on hardware**, with Steam and steamwebhelper holding the node open throughout and
+unaffected:
+
+```
+node free:      0.44s
+held for 1.0s:  1.36s   ← the waiter is granted the moment the holder lets go
+held for 2.0s:  2.36s
+claim(timeout=0.3) while held -> DeviceBusy: another process has held /dev/hidraw4 for more than 0.3s
+```
+
+`DeviceBusy` is in the worker's retry tuple, so a busy pad reads as a transient in the UI rather
+than as a crash. Threads sharing one Controller get an in-process `RLock` as well, because `flock`
+attaches to the open file description: two threads on one handle would both be granted it.
 
 ### The profile blob has more in it than we edit
 
@@ -1052,7 +1074,12 @@ What this settles without a single guess:
     them. The mode byte is the whole difference, so a mode-5 effect that "does not work" is
     probably working and waiting for rumble.
   * **hidraw replies go to every reader of the node.** An ACK you receive is not necessarily an
-    answer to anything you sent — see the arbitration item under Next.
+    answer to anything you sent — hence `Controller.claim()` and the drain before each write.
+  * **`flock` attaches to the open file description, not the fd or the process.** A `dup`'d handle
+    is the same lock holder and is granted the lock unconditionally; two `open()`s of one path are
+    not. This makes a lock test easy to write so that it passes while proving nothing.
+  * **Steam holds `/dev/hidraw4` open the whole time it runs** and takes no lock on it, so it is
+    unaffected by ours — which is wanted, since the vendor interface works with Steam Input on.
   * **The pad discards unsaved config when it sleeps.** Not just on a power cycle — idling out is
     enough, observed with lighting. Applying is working memory; command 166 is what makes it last.
   * **`effects.rumble()` must use `wait=0`** when driven continuously, or the 100 ms ACK wait puts

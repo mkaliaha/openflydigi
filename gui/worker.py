@@ -66,7 +66,8 @@ class DeviceWorker(QObject):
         for attempt in (1, 2):
             try:
                 return work(self._controller())
-            except (OSError, device.DeviceNotFound, blobs.ProtocolError) as exc:
+            except (OSError, device.DeviceNotFound, device.DeviceBusy,
+                    blobs.ProtocolError) as exc:
                 self._drop()
                 if attempt == 2 or self._stopping:
                     self.failed.emit(f"{what}: {exc}")
@@ -165,10 +166,14 @@ class DeviceWorker(QObject):
         old = mapping.MappingConfig(previous, cfg_id) if previous else None
 
         def work(ctrl):
-            sent = mapping.write_config(ctrl, cfg_id, new, old=old)
-            # Pass the config's own id so committing does not overwrite the
-            # slot's version tag with zero.
-            saved = mapping.save_config(ctrl, new.data_version) if save else False
+            # Write and commit as one exchange: the save command commits
+            # whatever is in the pad's working memory, so anything of ours that
+            # got between the two would be committed along with this profile.
+            with ctrl.claim():
+                sent = mapping.write_config(ctrl, cfg_id, new, old=old)
+                # Pass the config's own id so committing does not overwrite the
+                # slot's version tag with zero.
+                saved = mapping.save_config(ctrl, new.data_version) if save else False
             return sent, saved
 
         result = self._attempt(work, f"writing profile {cfg_id + 1}")
@@ -211,12 +216,13 @@ class DeviceWorker(QObject):
         old = lighting.LedConfig(previous) if previous else None
 
         def work(ctrl):
-            sent = lighting.write_config(ctrl, new, old=old)
-            # Lighting shares the mapping save command; the pad commits the
-            # working set, not one config at a time. The lighting blob has no
-            # version tag of its own, so this leaves the field at zero -- which
-            # is one reason saving lighting is still unverified on hardware.
-            saved = mapping.save_config(ctrl) if save else False
+            with ctrl.claim():
+                sent = lighting.write_config(ctrl, new, old=old)
+                # Lighting shares the mapping save command; the pad commits the
+                # working set, not one config at a time. The lighting blob has no
+                # version tag of its own, so this leaves the field at zero -- which
+                # is one reason saving lighting is still unverified on hardware.
+                saved = mapping.save_config(ctrl) if save else False
             return sent, saved
 
         result = self._attempt(work, "writing lighting")

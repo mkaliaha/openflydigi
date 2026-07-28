@@ -56,24 +56,27 @@ def read_blob(ctrl, cmd_id, cfg_id, what, pkg_size=PKG_SIZE, wait=1.5, retries=3
     request per packet.
     """
     last_error = "no reply"
-    for _ in range(retries):
-        chunks = {}
-        total = None
-        for body in replies(ctrl, build(cmd_id, bytes([cfg_id, pkg_size])), wait):
-            if body[2] != cmd_id:
-                continue
-            total, index = body[3], body[4]
-            chunks[index] = bytes(body[6 : 6 + pkg_size])
-        if total and len(chunks) == total:
-            blob = bytearray(total * pkg_size)
-            for index, chunk in chunks.items():
-                blob[index * pkg_size : (index + 1) * pkg_size] = chunk
-            return blob
-        if total:
-            missing = sorted(set(range(total)) - set(chunks))
-            last_error = f"got {len(chunks)}/{total} packets, missing {missing}"
-        else:
-            last_error = "no reply -- the pad may be asleep, press a button"
+    # Held across the retries as well as the stream: a retry that races another
+    # process re-reads into the same half-full `chunks` problem it is retrying.
+    with ctrl.claim():
+        for _ in range(retries):
+            chunks = {}
+            total = None
+            for body in replies(ctrl, build(cmd_id, bytes([cfg_id, pkg_size])), wait):
+                if body[2] != cmd_id:
+                    continue
+                total, index = body[3], body[4]
+                chunks[index] = bytes(body[6 : 6 + pkg_size])
+            if total and len(chunks) == total:
+                blob = bytearray(total * pkg_size)
+                for index, chunk in chunks.items():
+                    blob[index * pkg_size : (index + 1) * pkg_size] = chunk
+                return blob
+            if total:
+                missing = sorted(set(range(total)) - set(chunks))
+                last_error = f"got {len(chunks)}/{total} packets, missing {missing}"
+            else:
+                last_error = "no reply -- the pad may be asleep, press a button"
     raise ProtocolError(f"reading {what} failed: {last_error}")
 
 
@@ -109,12 +112,16 @@ def write_blob(ctrl, start_cmd, pack_cmd, cfg_id, blob, old=None,
         runs.append((run_start, new_packets[run_start:]))
 
     sent = 0
-    for start, packets in runs:
-        header = bytes([cfg_id, start, len(packets), pkg_size])
-        if not acked(ctrl, start_cmd, header, wait):
-            raise ProtocolError(f"pad rejected the write header at packet {start}")
-        for offset, packet in enumerate(packets):
-            if not acked(ctrl, pack_cmd, bytes([offset]) + packet, wait):
-                raise ProtocolError(f"pad rejected packet {start + offset}")
-            sent += 1
+    # A header announces how many packets follow, so this is a sequence the pad
+    # is tracking, not a series of independent commands. Anything of ours that
+    # got in between would be read as one of the packets promised.
+    with ctrl.claim():
+        for start, packets in runs:
+            header = bytes([cfg_id, start, len(packets), pkg_size])
+            if not acked(ctrl, start_cmd, header, wait):
+                raise ProtocolError(f"pad rejected the write header at packet {start}")
+            for offset, packet in enumerate(packets):
+                if not acked(ctrl, pack_cmd, bytes([offset]) + packet, wait):
+                    raise ProtocolError(f"pad rejected packet {start + offset}")
+                sent += 1
     return sent

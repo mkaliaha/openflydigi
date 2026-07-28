@@ -14,10 +14,18 @@ Packet framing (verified on Apex 5, wired and dongle):
 
 Replies arrive on report 0x04. After stripping the report-id byte,
 data[2] is the echoed command id and data[5] is the success flag.
+
+Several processes drive this pad at once -- the desktop app polls it, a
+per-game driver rewrites trigger effects as often as every 50 ms, and the
+config editor streams whole profiles -- so an exchange is not just a write.
+See `Controller.claim`.
 """
+import contextlib
+import fcntl
 import glob
 import os
 import select
+import threading
 import time
 
 VID = 0x37D7
@@ -41,9 +49,21 @@ SIDE_LEFT = 1
 SIDE_RIGHT = 2
 SIDE_BOTH = 3
 
+# How long to wait for another process to finish its exchange. Generous on
+# purpose: the longest thing anyone here holds the pad for is a config write,
+# which streams up to 42 packets and waits for an ACK on each. A lock is
+# released by the kernel when its holder's file closes, crash included, so
+# waiting cannot be waiting on a corpse.
+CLAIM_TIMEOUT = 5.0
+CLAIM_POLL = 0.002
+
 
 class DeviceNotFound(Exception):
     pass
+
+
+class DeviceBusy(Exception):
+    """Another process held the pad for longer than we were willing to wait."""
 
 
 def checksum(buf, start, end):
@@ -92,13 +112,20 @@ def build(cmd_id, payload=b""):
 class Controller:
     """Open handle to the vendor interface.
 
-    Multiple processes may hold the node at once (Steam Input does), so this
-    deliberately does not take exclusive access.
+    The node stays open to anyone -- Steam Input holds it too -- and nothing
+    here tries to prevent that. What `claim` prevents is our own processes
+    talking over each other; see below.
     """
 
     def __init__(self, path=None):
         self.path = path or find_device()
         self.fd = os.open(self.path, os.O_RDWR | os.O_NONBLOCK)
+        # flock is per *open file description*, so two Controllers in one
+        # process already exclude each other -- but two threads sharing one
+        # Controller would not. This covers that case; between them the pair
+        # is exclusive whichever way the caller is arranged.
+        self._threads = threading.RLock()
+        self._depth = 0
 
     def close(self):
         if self.fd is not None:
@@ -111,19 +138,90 @@ class Controller:
     def __exit__(self, *exc):
         self.close()
 
+    @contextlib.contextmanager
+    def claim(self, timeout=CLAIM_TIMEOUT):
+        """Hold the pad for one exchange, excluding our own other processes.
+
+        `send` takes this for a single packet, which is enough for the effect
+        commands. Wrap a *sequence* in it by hand -- a config write is a
+        header, up to 42 packets and a save, and half of one interleaved with
+        anything else is the failure worth preventing.
+
+        The lock is `flock(2)`, which is advisory: it binds only processes that
+        ask for it. That is the right kind of lock here rather than a
+        limitation to apologise for. Everything in this project goes through
+        this class, so our own processes are covered; Steam and SDL hold the
+        same node, will not take the lock, and **must not be excluded** -- the
+        vendor interface keeps working with Steam Input on, which is what lets
+        trigger effects run in games Steam has taken the pad for. A lock that
+        shut them out would break a working configuration to fix nothing.
+
+        What it does not cover: Steam's own writes can still land between ours.
+        Harmless for effects, which the next frame overwrites, and a risk only
+        for a config write -- a rare, deliberate action, not something a game
+        triggers.
+
+        Re-entrant, so a claimed sequence can call `send` freely.
+        """
+        with self._threads:
+            if self._depth == 0:
+                self._flock(timeout)
+            self._depth += 1
+            try:
+                yield self
+            finally:
+                self._depth -= 1
+                if self._depth == 0:
+                    fcntl.flock(self.fd, fcntl.LOCK_UN)
+
+    def _flock(self, timeout):
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise DeviceBusy(
+                        f"another process has held {self.path} for more than "
+                        f"{timeout:g}s") from None
+                time.sleep(CLAIM_POLL)
+
+    def _drain(self):
+        """Throw away replies that arrived before we asked anything.
+
+        Replies are broadcast to every reader of the node, so a poll by the
+        desktop app lands in a driver's buffer and vice versa. Read under the
+        claim, so anything already waiting provably belongs to an exchange that
+        is over -- and `ack_ok` matches on the command byte alone, which would
+        otherwise be happy to accept it.
+        """
+        while True:
+            ready, _, _ = select.select([self.fd], [], [], 0)
+            if not ready:
+                return
+            try:
+                if not os.read(self.fd, 64):
+                    return
+            except BlockingIOError:
+                return
+
     def send(self, buf, wait=0.3):
         """Write a packet and collect replies for `wait` seconds."""
-        os.write(self.fd, bytes(buf))
-        replies = []
-        deadline = time.time() + wait
-        while time.time() < deadline:
-            ready, _, _ = select.select([self.fd], [], [], max(0.0, deadline - time.time()))
-            if not ready:
-                continue
-            data = os.read(self.fd, 64)
-            if data:
-                replies.append(data)
-        return replies
+        with self.claim():
+            self._drain()
+            os.write(self.fd, bytes(buf))
+            replies = []
+            deadline = time.time() + wait
+            while time.time() < deadline:
+                ready, _, _ = select.select(
+                    [self.fd], [], [], max(0.0, deadline - time.time()))
+                if not ready:
+                    continue
+                data = os.read(self.fd, 64)
+                if data:
+                    replies.append(data)
+            return replies
 
     def command(self, cmd_id, payload=b"", wait=0.3):
         return self.send(build(cmd_id, payload), wait=wait)

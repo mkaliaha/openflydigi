@@ -18,6 +18,7 @@ Total 32 bytes. "CRC" is an 8-bit sum over a command-specific range.
 Safety: trigger effects drive real servos. Keep force low and duration short.
 """
 import argparse
+import fcntl
 import glob
 import os
 import select
@@ -83,25 +84,52 @@ def build(cmd_id, payload, report_id=DEFAULT_REPORT_ID):
     return buf
 
 
-def send(fd, buf, wait=0.4, quiet=False):
-    if not quiet:
-        print(f"  TX {bytes(buf).hex(' ')}")
-    os.write(fd, bytes(buf))
-    deadline = time.time() + wait
-    replies = []
-    while time.time() < deadline:
-        remaining = deadline - time.time()
-        ready, _, _ = select.select([fd], [], [], max(0.0, remaining))
+def drain(fd):
+    """Discard replies that arrived before we asked anything.
+
+    hidraw hands every reply to every reader, so the desktop app's 30-second
+    poll lands here too -- and did, during the trigger-effect tests: a Get info
+    ACK turned up in the middle of a rumble exchange. Called under the lock, so
+    whatever is waiting belongs to an exchange that has finished.
+    """
+    while True:
+        ready, _, _ = select.select([fd], [], [], 0)
         if not ready:
-            continue
-        data = os.read(fd, 64)
-        if data:
-            replies.append(data)
-            if not quiet:
-                print(f"  RX {data.hex(' ')}")
-    if not replies and not quiet:
-        print("  RX (no response)")
-    return replies
+            return
+        try:
+            if not os.read(fd, 64):
+                return
+        except BlockingIOError:
+            return
+
+
+def send(fd, buf, wait=0.4, quiet=False):
+    # Same advisory lock flydigi/device.py takes, so this tool and the app take
+    # turns instead of talking over each other. Steam is not excluded and must
+    # not be -- the vendor interface works with Steam Input on.
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        drain(fd)
+        if not quiet:
+            print(f"  TX {bytes(buf).hex(' ')}")
+        os.write(fd, bytes(buf))
+        deadline = time.time() + wait
+        replies = []
+        while time.time() < deadline:
+            remaining = deadline - time.time()
+            ready, _, _ = select.select([fd], [], [], max(0.0, remaining))
+            if not ready:
+                continue
+            data = os.read(fd, 64)
+            if data:
+                replies.append(data)
+                if not quiet:
+                    print(f"  RX {data.hex(' ')}")
+        if not replies and not quiet:
+            print("  RX (no response)")
+        return replies
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
 
 
 def cmd_info(fd, args):
