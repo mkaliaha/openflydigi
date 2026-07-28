@@ -817,6 +817,12 @@ Measured per route, from inside the distrobox:
 | ps5 | `/dev/uhid` | works, and **the host sees the device** — a HID node created inside the container appeared on the host as `hidraw7`, since there is no device namespacing. The full relay was not run from in there, as it would take the pad over |
 | monitor | read another process's memory | **denied** |
 
+The `ps5` row was checked properly rather than by inference: a device with Sony's IDs and the real
+descriptor, created inside the container, is bound by `hid-playstation` on the host and produces all
+four input nodes (`Wireless Controller`, plus Motion Sensors, Touchpad and Headset Jack). An earlier
+attempt used a vendor-usage device with a made-up VID, which the gamepad stack rightly ignored — it
+showed a hidraw node appearing and nothing about whether anything believed it.
+
 So exactly one route is blocked, and it is the one that decides where the daemon lives. It turned out not to matter: distrobox shares `/run/user`, so `systemctl
 --user` from inside the container drives the *host's* user manager and the unit runs in the host's
 mount namespace. Verified by starting a transient unit from the container and comparing
@@ -1481,7 +1487,12 @@ What to watch for:
 - Effects logged but not felt → EFFECT_MAP mapping is wrong, not the transport; the transport is
   the same cmd 81 that Forza already proved.
 - Touchpad-click is on the touchpad *sub-device*, which needs `udev/72-flydigi-apex5.rules`
-  installed or the node stays root-owned.
+  installed or the node stays root-owned. **The rules only started working when they were renamed
+  from 99- to 72-**: `TAG+="uaccess"` merely sets a tag, and systemd's own `73-seat-late.rules` is
+  what acts on it, so a file sorting after 73 tagged devices nobody looked at again. Verified both
+  ways by standing up a virtual DualSense and reading the ACLs on its four input nodes — before,
+  only the gamepad node had one, and it came from systemd's `70-uaccess.rules` for joysticks; after,
+  all four do, touchpad included.
 
 ### Dark Souls: Remastered — VALIDATED
 
