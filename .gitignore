@@ -27,6 +27,9 @@ venv/
 # does not.
 /Apex5/
 
+# Scratch worktrees created by tooling
+.claude/
+
 # Editors / OS
 .vscode/
 .idea/
