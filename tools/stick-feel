@@ -67,8 +67,12 @@ def drive(ctrl, reader, codes, seconds):
     last = None
     deadline = time.time() + seconds
     while time.time() < deadline:
-        select.select([reader], [], [], 0.02)
-        reader.read()
+        # Only read when there is something to read: the node is opened
+        # blocking, so reading on spec would sit there until the stick moved --
+        # and a phase that ends only when the user happens to move is a phase
+        # that never ends when they stop.
+        if select.select([reader], [], [], 0.02)[0]:
+            reader.read()
         x = reader.axis(codes[0], -1.0, 1.0)
         y = reader.axis(codes[1], -1.0, 1.0)
         magnitude = min(1.0, (x * x + y * y) ** 0.5)

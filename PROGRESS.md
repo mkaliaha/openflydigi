@@ -158,6 +158,26 @@ Everything in this section is **already carried through** by `flydigi/mapping.py
 write the whole 840-byte blob, so these are accessors and a page, not new commands and not new
 risk. Offsets from `MappingConfigParser.cs`, struct names from `data.model.config/`.
 
+**J1 is validated by hand, not just by byte.** `tools/stick-feel` applies a curve and drives the
+grip motors from the stick's own output, so the buzz is the reading — no terminal to watch. A 60%
+dead zone compiled to `[0, 0, 0, 0, 26, 56, 87, 118, 150]`, and the bottom of the travel went
+audibly, tangibly silent before the rumble came in. Compiler → bank → firmware → hand, with nothing
+assumed in between.
+
+Two caveats recorded from that run, because the dead zone felt *smaller* than 60%:
+
+  * **A circle is not a constant magnitude in Rectangle mode.** The diagonal reaches 1.19 where the
+    axes reach 1.00, so tracing a physical circle just under the threshold pokes over it at the 45°
+    points while a straight push at the same radius does not. That is an artifact of deriving
+    magnitude as `sqrt(x²+y²)`, not of the dead zone.
+  * **The threshold is in the output domain, not the travel domain.** Sticks saturate electrically
+    before the mechanical stop, so 60% of range arrives before 60% of the throw.
+
+Measuring the threshold *properly* needs the raw stick position to compare the curved output
+against, and xpad only ever shows the curved one. The vendor input stream is the place to look —
+`flydigi/motion.py` already parses it for the IMU at ~300 Hz, and the raw axes are plausibly in the
+same report. Worth doing before anyone tries to calibrate a curve by numbers rather than by feel.
+
 **J1. Joystick dead zones, curves, circularity. — DONE, backend and GUI.**
 `stick()` / `set_stick()` and the compiler `stick_bank()` are in `flydigi/mapping.py`; the page is
 `gui/qml/pages/SticksPage.qml`, over `StickModel` in `gui/models/profile.py`. Verified end to end on
