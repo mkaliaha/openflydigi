@@ -1,0 +1,311 @@
+#!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
+"""Ask the firmware what a stick-curve byte means, by writing one and watching.
+
+Reading the decompiled SDK cannot settle these questions, because the question
+is never what Flydigi's app *writes* -- it is what the *pad* does with the byte.
+This asks the pad, using the one observable that needs no reference input:
+write a value that should silence the stick, and see whether it does.
+
+**What this already established** (all five runs cross-checked against a
+baseline, with button events proving somebody was working the pad):
+
+    flat bank at 790+1..9      stick goes COMPLETELY silent      -> LIVE
+    isRound at 790+10 = 1      diagonal clamped 1.19 -> 1.00     -> LIVE
+    flat core polyline at 109  no effect, even with type=Custom  -> inert
+    edge byte at 801 = 236     no effect                         -> inert
+    edge byte at 801 = 90      no effect                         -> inert
+    edge byte at 801 = 100     no effect, and it is degenerate   -> inert
+
+So the pad plays **the nine-point bank and isRound, and nothing else in either
+block**. The core polyline, the type byte, center and edge are not leftovers --
+they are the SOURCE the bank is compiled from, host-side: center and edge
+position a four-node polyline's endpoints, p1/p2 are its interior nodes, and the
+renderer samples it at nine points to get the bank. See PROGRESS.md for the
+sampler. What the app cannot tell you, and these runs can, is which of the two
+blocks the firmware reads -- Space Station writes both unconditionally. Same architecture as the lighting
+config, where the pad has no animation generator and simply plays stored frames.
+isRound is the exception because the bank *cannot* express it -- circularity is
+two-dimensional and the bank is a magnitude curve -- so the pad must do it.
+
+The consequence for anything built on top: a UI must **compute the bank** from
+whatever curve it offers. Writing center, edge or the polyline alone moves a
+slider and changes nothing the hand can feel.
+
+Use DEGENERATE values, not nudges. "Does a dead zone of 40 do anything" is
+unanswerable without a reference input, and an internal recalibration stage --
+this pad has one, and command 3 reports it enabled -- could mask a nudge
+entirely. Zeroing a curve or collapsing it to a step cannot be masked: nothing
+rescales a constant zero into a smooth sweep.
+
+**Buttons are the liveness signal.** A stick nobody touched and a stick the pad
+has silenced produce identical evdev traces -- nothing. Two runs were wasted
+before that was obvious. Every run now starts on a button press and counts
+button events throughout, so "silent" is a result rather than an empty room.
+
+Nothing is ever committed to flash -- there is no call to `save_config` here at
+all. The profile is restored before exit, and even if this is killed mid-run the
+pad discards an applied-but-unsaved config the next time it sleeps.
+
+    tools/joystick-curve-probe --baseline            # unmodified, for comparison
+    tools/joystick-curve-probe --flat-bank           # the control that found it
+    tools/joystick-curve-probe --flat-core --custom-type
+"""
+import argparse
+import os
+import select
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from flydigi import device, evdev, mapping
+
+# Below this the reading is centre noise rather than a deflection the user meant.
+NOISE_FLOOR = 0.02
+
+
+def sweep(seconds, side, arm=True, patience=90.0):
+    """Wait for the user to start, then collect |deflection| for one stick.
+
+    **Buttons are the liveness signal, and they are the whole reason this is not
+    a plain timed read.** The most interesting outcome of this probe is the
+    stick going completely silent -- but a stick nobody touched looks exactly
+    the same, and two runs were wasted discovering that. Pressing a button is an
+    input the curve cannot suppress, so button events during the window prove
+    somebody was working the pad. Zero axis events *alongside* live button
+    events is then a real result rather than an empty run.
+
+    So the run starts on a button press rather than on a countdown, which also
+    means it cannot begin before the hand is ready.
+    """
+    path, name = evdev.find_device(vendor=device.VID)
+    if path is None:
+        sys.exit("no Flydigi gamepad on evdev -- press a button to wake the pad")
+    codes = ((evdev.ABS_X, evdev.ABS_Y) if side == "left"
+             else (evdev.ABS_RX, evdev.ABS_RY))
+
+    samples = []
+    presses = 0
+    # Circularity only shows in the corners, and only *unclamped*. A full
+    # diagonal is (1.0, 1.0) on a square output -- magnitude 1.41 -- and
+    # (0.71, 0.71) on a round one -- magnitude 1.0. Clamping the magnitude to 1,
+    # which the analysis below wants, makes those two identical, so the raw
+    # extremes are tracked separately.
+    extremes = {"magnitude": 0.0, "x": 0.0, "y": 0.0}
+    with evdev.Reader(path) as reader:
+        # Drop whatever happened before we were watching.
+        while select.select([reader], [], [], 0)[0]:
+            reader.read()
+        pressed = {c for c, v in reader.keys.items() if v}
+
+        def poll(timeout):
+            nonlocal pressed, presses
+            if not select.select([reader], [], [], timeout)[0]:
+                return False
+            synced = reader.read()
+            now = {c for c, v in reader.keys.items() if v}
+            presses += len(now ^ pressed)
+            pressed = now
+            return synced
+
+        if arm:
+            print(f"{name} ({path}): PRESS ANY BUTTON to start the {seconds:.0f}s "
+                  "window, then sweep the stick and keep tapping a button")
+            giveup = time.time() + patience
+            while presses == 0 and time.time() < giveup:
+                poll(0.2)
+            if presses == 0:
+                sys.exit("nothing was pressed -- the pad may have slept")
+            print("started")
+
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            if not poll(0.2):
+                continue
+            x = reader.axis(codes[0], -1.0, 1.0)
+            y = reader.axis(codes[1], -1.0, 1.0)
+            magnitude = (x * x + y * y) ** 0.5
+            extremes["magnitude"] = max(extremes["magnitude"], magnitude)
+            extremes["x"] = max(extremes["x"], abs(x))
+            extremes["y"] = max(extremes["y"], abs(y))
+            samples.append(min(1.0, magnitude))
+    print("window closed -- you can stop")
+    return samples, presses, extremes
+
+
+def report(samples, presses, extremes):
+    moved = [s for s in samples if s > NOISE_FLOOR]
+    print(f"\n{len(samples)} axis samples ({len(moved)} a real deflection), "
+          f"{presses} button events")
+    if not moved:
+        # evdev is event-driven, so no axis event means the axis never moved.
+        # The buttons say whether that is because the pad suppressed it or
+        # because nobody was touching the thing.
+        if presses > 1:
+            print("SILENT: the pad was being worked -- button events prove it --"
+                  " and the stick produced nothing. The block took effect.")
+        else:
+            print("VOID: no stick and no buttons either, so nobody was at the "
+                  "pad. Run it again.")
+        return
+    if len(moved) < 50:
+        print("not enough movement to judge -- run it again and sweep more")
+        return
+    print(f"reached {max(moved) * 100:.0f}% of full scale at most")
+
+    # The corner reading, and the whole circularity test. A square output region
+    # puts a full diagonal at (1.0, 1.0), magnitude 1.41; a round one holds it to
+    # magnitude 1.0, i.e. about 0.71 per axis -- which is what makes a game with
+    # a per-axis run threshold stop running on the diagonal.
+    print(f"furthest corner: magnitude {extremes['magnitude']:.2f} "
+          f"(|x| {extremes['x']:.2f}, |y| {extremes['y']:.2f})")
+    # 1.05, not the textbook 1.41. A perfect square output region would put the
+    # diagonal at 1.41, but the stick's own gate is octagonal and never lets it
+    # get there -- measured, Rectangle tops out around 1.19. What separates the
+    # two modes is simply whether the diagonal is allowed past the unit circle
+    # at all, and Circular pins it to 1.00 exactly.
+    if extremes["x"] < 0.9 or extremes["y"] < 0.9:
+        print("  -> inconclusive; push the stick right into the diagonal corners")
+    elif extremes["magnitude"] >= 1.05:
+        print("  -> SQUARE: the diagonal is allowed past the unit circle")
+    else:
+        print("  -> ROUND: each axis reaches full alone, but the diagonal is "
+              "clamped to 1.00 -- about 0.71 per axis, which is what makes a "
+              "game with a per-axis run threshold stop on the diagonal")
+    # How much of the sweep was spent pinned at the top. A big outer dead zone
+    # saturates early, so the stick sits at full scale for most of its travel --
+    # which is how a positive `edge` shows itself, since it never lowers the max.
+    pinned = sum(1 for s in moved if s >= 0.95) / len(moved)
+    print(f"{pinned * 100:.0f}% of the sweep was pinned at full scale")
+
+    # The whole question, in one number: how small can the output get without
+    # being zero? A dead zone leaves that near the noise floor; an Offset cannot
+    # go below the offset itself.
+    floor = min(moved)
+    print(f"smallest real deflection seen: {floor * 100:.1f}%")
+
+    print("\nwhere the low end of the sweep landed:")
+    for lo in range(0, 40, 4):
+        hi = lo + 4
+        n = sum(1 for s in moved if lo / 100 <= s < hi / 100)
+        print(f"  {lo:2d}-{hi:2d}%  {'#' * min(60, n)}{'' if n else '  (empty)'}")
+
+    print()
+    if floor < 0.08:
+        print("VERDICT: no gap -- the pad read this byte as a positive dead zone "
+              "(or as no adjustment at all).")
+    else:
+        print(f"VERDICT: a gap of ~{floor * 100:.0f}% -- the pad read this byte "
+              "as NEGATIVE, i.e. an Offset of about that much. Compare the gap "
+              "against the value you were trying to encode to see which decode "
+              "the firmware uses.")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--raw-center", type=int,
+                    help="byte to write into the stick's centre field, verbatim")
+    ap.add_argument("--raw-edge", type=int,
+                    help="byte to write into the extra block's edge field. Read "
+                         "against the hard stop rather than the low end: a "
+                         "negative edge lowers what FULL travel reports, and "
+                         "full travel is the one position a hand can repeat")
+    ap.add_argument("--flat-bank", action="store_true",
+                    help="set the 9-point bank to all 50, which is no output at "
+                         "any deflection. A control: if the stick still reads "
+                         "100%% at the stop, the pad is not playing this block "
+                         "and no reading taken from it means anything")
+    ap.add_argument("--circular", action="store_true",
+                    help="set isRound to Circular. Push the stick into the "
+                         "DIAGONAL CORNERS: a square output reaches magnitude "
+                         "1.41 there, a round one is held to 1.0")
+    ap.add_argument("--flat-core", action="store_true",
+                    help="flatten the CORE polyline at 109 to zero output, the "
+                         "exact analogue of --flat-bank. If the stick still "
+                         "works, the pad is not playing the core block")
+    ap.add_argument("--custom-type", action="store_true",
+                    help="also set the curve type to Custom, in case the "
+                         "firmware ignores the fields unless asked to")
+    ap.add_argument("--baseline", action="store_true",
+                    help="change nothing; just measure the pad as it is")
+    ap.add_argument("--side", choices=("left", "right"), default="left")
+    ap.add_argument("--seconds", type=float, default=12.0)
+    args = ap.parse_args()
+
+    edits = [args.raw_center is not None, args.raw_edge is not None,
+             args.flat_bank, args.flat_core, args.custom_type, args.circular]
+    if args.baseline and any(edits):
+        ap.error("--baseline changes nothing, so it goes on its own")
+    if not args.baseline and not any(edits):
+        ap.error("pass --baseline, or one of --raw-center / --raw-edge / "
+                 "--flat-bank / --flat-core / --custom-type / --circular")
+
+    if args.baseline:
+        report(*sweep(args.seconds, args.side))
+        return 0
+
+    ctrl = device.Controller()
+    status = mapping.read_status(ctrl)
+    if status is None:
+        sys.exit("the pad did not answer -- press a button to wake it")
+    cfg_id = status["active"]
+
+    # Edit whichever profile is running, so the change takes effect where the
+    # stick is actually being read from.
+    original = mapping.read_config(ctrl, cfg_id)
+    edited = original.copy()
+    index = mapping.SIDES.index(args.side)
+    core = mapping.OFF_JOYSTICK_CURVE + index * mapping.CURVE_ENTRY
+    extra = mapping.OFF_JOYSTICK_EXTRA + index * mapping.JOYSTICK_EXTRA_ENTRY
+
+    changes = []
+    if args.raw_center is not None:
+        changes.append(f"centre {edited.blob[core + 1]} -> {args.raw_center & 0xFF}")
+        edited.blob[core + 1] = args.raw_center & 0xFF
+    if args.raw_edge is not None:
+        changes.append(f"edge {edited.blob[extra + 11]} -> {args.raw_edge & 0xFF}")
+        edited.blob[extra + 11] = args.raw_edge & 0xFF
+    if args.flat_bank:
+        changes.append("bank -> all 50 (no output at any deflection)")
+        edited.set_joystick_shape(args.side, bank=[50] * mapping.BANK_POINTS)
+    if args.circular:
+        changes.append("isRound -> Circular")
+        edited.set_joystick_shape(args.side, circular=True)
+    if args.flat_core:
+        changes.append("core polyline -> flat at zero")
+        edited.set_joystick_curve(args.side, point1=(0, 0), point2=(127, 0))
+    if args.custom_type:
+        changes.append("type -> Custom")
+        edited.set_joystick_curve(args.side, curve_type=mapping.CURVE_CUSTOM)
+
+    print(f"profile {cfg_id + 1}, {args.side} stick: " + "; ".join(changes)
+          + " (applied only, never saved)")
+    if args.circular:
+        print("push the stick into the DIAGONAL CORNERS -- that is the only "
+              "place circularity shows")
+    if args.raw_edge is not None or args.flat_bank:
+        print("push the stick ALL THE WAY to the stop and hold it there for "
+              "part of the run -- the max is the reading that matters")
+
+    try:
+        mapping.write_config(ctrl, cfg_id, edited, old=original)
+        time.sleep(0.3)
+        report(*sweep(args.seconds, args.side))
+    finally:
+        # Put it back whatever happened. The pad would drop an unsaved config on
+        # its next sleep anyway, but leaving someone's stick miscalibrated until
+        # then is not a reasonable thing for a probe to do.
+        mapping.write_config(ctrl, cfg_id, original, old=edited)
+        print(f"\nrestored profile {cfg_id + 1} -- undid: " + "; ".join(changes))
+        ctrl.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
