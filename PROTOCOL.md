@@ -115,13 +115,19 @@ builder emits a 0 there and `matchStroke` follows it.
 
 The mode numbers are `AdapterTriggerType`, and the same six are the first byte of the
 per-profile block (§3c). `Race` is the racing-throttle resistance effect — the Forza Horizon
-case. Only `Normal` and `Race` are confirmed on hardware; 2–5 are built from
-`SetForceTriggerCommandFactory` and unfelt so far.
+case. **All six are confirmed by feel on an Apex 5** — see §7.
 
-**`Vibration` means two different things.** As mode 5 it has `Sniper`'s shape and no rumble
-binding: the trigger vibrates on its own from a travel point. As the *stored* effect type 5 it
-is the game's rumble routed into the trigger, and Flydigi's own software never sends mode 5 for
-it — `ControllerRepository.CreateForceAdapterConfig` turns stored type 5 into `SyncWithGrip`.
+**`Sniper` and `Vibration` take identical parameters and behave differently.** Mode 2 vibrates
+on its own once the trigger is held past the travel point. Mode 5 does nothing at all with the
+grips still, however far the trigger is pulled, and comes alive the moment the grip motors are
+driven — so it is the rumble-to-trigger bind, minus command 82's bind type, filter and scale.
+Both were felt with the same numbers, which is what makes the pair a real distinction and not a
+difference in tuning.
+
+Flydigi's software never sends mode 5: `ControllerRepository.CreateForceAdapterConfig` turns the
+stored Vibration effect into `SyncWithGrip` instead. Since 82 carries a filter and a scale that
+mode 5 has no field for, 82 remains the one to use when the binding matters; what the pad does
+with a filter it was never given is untested.
 
 ### 3c. The same effects, stored in a profile
 
@@ -252,10 +258,21 @@ Decoding as `ParseAckData` does (strip report-ID byte, then index): `data[2]` = 
 | `0x01` | Get info | ACK, returns device id 128 |
 | `81` (`0x51`) | SetForceTrigger — `Race` | ACK + **physically felt resistance** |
 | `81` | SetForceTrigger — `Normal` | ACK, clears the effect |
+| `81` | SetForceTrigger — `Sniper` | ACK + **felt**: vibrates on its own past the travel point |
+| `81` | SetForceTrigger — `Recoil` | ACK + **felt**: resists, then gives way |
+| `81` | SetForceTrigger — `Lock` | ACK + **felt**: trigger stops dead at the position |
+| `81` | SetForceTrigger — `Vibration` | ACK + **felt**, but only while the grips are running |
 | `82` (`0x52`) | SyncWithGrip (Tier-1 vibration bind) | ACK + **physically confirmed** |
 | `0x12` | Rumble (SDL framing) | ACK, drives motors |
 
+Every mode ACKed and echoed its own parameters back — `[success=1][mode][params…]`, with the
+side byte dropped — so the pad is parsing the payload, not just acknowledging the command id.
+
 **Additional findings.**
+- **Replies are broadcast to every reader of the hidraw node.** A `Get info` ACK belonging to the
+  desktop app's 30-second poll was read by a second process that had sent nothing of the sort.
+  Anything that matches replies by command id can therefore pick up someone else's answer; this
+  is the arbitration problem, observed rather than reasoned about.
 - **No checksum byte is required for `81`/`82`** — packets sent with the CRC field left zero were
   accepted. The `Crc()` sum only appears in the `K6Trigger*` builders.
 - **Effects persist in controller state** with no host software running, until explicitly changed

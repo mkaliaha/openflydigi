@@ -284,11 +284,18 @@ def lock(ctrl, side, stroke, strength=255, match_stroke=True):
 
 def vibration(ctrl, side, stroke, pressure, strength, frequency,
               match_stroke=True):
-    """Vibrate the trigger from a travel point, ignoring the game's rumble.
+    """Pass the grips' rumble through to the trigger, past a travel point.
 
-    Not the same thing as the profile's Vibration effect, which Flydigi's
-    software delivers as `bind_grip` -- that one follows the game's rumble.
-    Mode 5 as a live command has Sniper's shape and no rumble binding at all.
+    Confirmed by feel: with the grips still this does nothing, however far the
+    trigger is pulled, and it comes alive the moment the motors are driven --
+    which is what separates it from `sniper`, whose parameters are identical
+    and which buzzes on its own.
+
+    So this is the rumble bind that `bind_grip` (command 82) does, minus 82's
+    bind type, filter and scale. Flydigi's own software always sends 82 for
+    the stored Vibration effect and never sends mode 5, so what the pad does
+    with a filter it was never given is not known -- 82 is the one to use when
+    the binding matters.
     """
     payload = [1, side, MODE_VIBRATION, stroke, _least_one(pressure),
                _least_one(strength), _least_one(frequency),

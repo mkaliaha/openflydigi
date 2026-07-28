@@ -379,9 +379,16 @@ def test_live_effect_payloads_match_the_command_builders():
     check("lock's wire form", pad.sent[-1] == (81, [1, 1, 4, 90, 255, 1]),
           str(pad.sent[-1]))
 
+    # Byte for byte the sniper packet with a different mode -- and on hardware
+    # a different effect: mode 2 vibrates unaided, mode 5 only while the grips
+    # are running. Same parameters, so the mode byte is the whole difference.
     effects.vibration(pad, device.SIDE_LEFT, 40, 30, 20, 10)
-    check("mode 5 has sniper's shape and no binding",
+    check("vibration is sniper's packet with mode 5",
           pad.sent[-1] == (81, [1, 1, 5, 40, 30, 20, 10, 1]), str(pad.sent[-1]))
+    effects.sniper(pad, device.SIDE_LEFT, 40, 30, 20, 10)
+    check("and the two differ in that byte alone",
+          pad.sent[-1][1][2] == 2 and pad.sent[-2][1][2] == 5
+          and pad.sent[-1][1][3:] == pad.sent[-2][1][3:], str(pad.sent[-2:]))
 
     # Flydigi's builders raise a zero to one rather than refusing the packet,
     # so a caller that sends 0 gets the weakest setting, not silence.

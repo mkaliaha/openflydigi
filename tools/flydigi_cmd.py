@@ -172,10 +172,15 @@ def cmd_lock(fd, args):
 
 
 def cmd_vibrate(fd, args):
-    """SetForceTrigger: Vibration (mode 5).
+    """SetForceTrigger: Vibration (mode 5) -- the grips' rumble, in the trigger.
 
-    Not the profile's Vibration effect, which Space Station sends as `bind`
-    (SyncWithGrip) instead -- this one has no rumble binding at all.
+    Felt nothing? Nothing is wrong: this one does nothing with the grips still,
+    so drive them while holding the trigger --
+
+        flydigi_cmd.py vibrate left && flydigi_cmd.py rumble --seconds 15
+
+    which is exactly what separates it from `sniper`, whose parameters are the
+    same and which buzzes unaided.
     """
     params = bytes([SIDE[args.side], 5, args.stroke, max(1, args.pressure),
                     max(1, args.strength), max(1, args.frequency),

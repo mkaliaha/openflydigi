@@ -378,11 +378,21 @@ Three things that only show up once all six exist. The ten parameter slots are *
 effect writes into the same bytes, so switching effect reads back whatever the last one left, and a
 value out of the new effect's range is its default rather than a number clipped into range.
 Slots an effect does not use are **not** free space — Lock's 255/1 and Vibration's 1/90 are
-constants Flydigi's writer emits. And `Vibration` is two different things: as a live mode-5 command
-it has Sniper's shape and no rumble binding at all, while as stored type 5 it is the grip-rumble
-bind, which Flydigi sends as `SyncWithGrip` — `set_trigger_effect()` now writes that bind half, and
-the bind type byte, which is what this entry was originally about. **Unfelt on hardware:** modes
-2–5 ACK-clean by construction but nobody has pulled a trigger against them yet.
+constants Flydigi's writer emits. And `Sniper` and `Vibration` take the *same* parameters and are
+not the same effect — see below. `set_trigger_effect()` now writes the bind half and the bind type
+byte, which is what this entry was originally about.
+
+**All four new modes are felt on hardware**, at their default settings: Lock stops the trigger dead,
+Recoil resists and gives way, Sniper vibrates past the travel point. Every one ACKed *and echoed
+its own parameters back* — `[success=1][mode][params…]`, side dropped — so the pad parses the
+payload rather than merely acknowledging the command id.
+
+**Mode 5 corrected.** This entry first claimed mode 5 "has Sniper's shape and no rumble binding at
+all", meaning it would buzz on its own. It does not: with the grips still it does nothing however
+far the trigger is pulled, and it comes alive the instant the motors are driven. Sniper, with
+byte-identical parameters, buzzes unaided. So mode 5 *is* the rumble-to-trigger bind, minus command
+82's bind type, filter and scale — which is presumably why Flydigi never sends it and turns the
+stored Vibration effect into 82 instead. 82 stays the one to use when the binding matters.
 
 The original question, answered: PROGRESS.md used to say the
 profile's force-trigger `bind` sub-struct "may be" the stored form of command 82 but "the counts do
