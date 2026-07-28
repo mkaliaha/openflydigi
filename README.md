@@ -17,7 +17,7 @@ for the wire protocol and [PROGRESS.md](PROGRESS.md) for project state.
 | Vibration bind (config only) | 33 | Working, automated |
 | Forza telemetry | 4 | Built, self-tested |
 | DSX protocol listener | third-party mods | Built, self-tested |
-| Game-memory monitor | 31 | Built, offsets unvalidated |
+| Game-memory monitor | 31 | Validated in Dark Souls: Remastered; pointer chains are per-build |
 | Virtual DualSense | 15 | Foundation working |
 
 ## Quick start

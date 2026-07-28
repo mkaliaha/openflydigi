@@ -431,10 +431,10 @@ def test_live_effect_payloads_match_the_command_builders():
     check("lock's wire form", pad.sent[-1] == (81, [1, 1, 4, 90, 255, 1]),
           str(pad.sent[-1]))
 
-    # Byte for byte the sniper packet with a different mode. On hardware that
-    # one byte is the difference between an effect and nothing: sent with these
-    # same parameters and the pad's standing rumble bind suppressed, mode 2
-    # vibrates on press and mode 5 does nothing at all.
+    # Byte for byte the sniper packet with a different mode, which is what
+    # makes the pair worth asserting: on hardware mode 2 vibrates and what
+    # mode 5 does is still unresolved (PROTOCOL.md 3a), so the packets being
+    # identical bar the mode byte is the fact any future test rests on.
     effects.vibration(pad, device.SIDE_LEFT, 40, 30, 20, 10)
     check("vibration is sniper's packet with mode 5",
           pad.sent[-1] == (81, [1, 1, 5, 40, 30, 20, 10, 1]), str(pad.sent[-1]))

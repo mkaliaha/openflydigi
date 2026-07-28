@@ -69,7 +69,7 @@ singleton of the `Apex5` module, registered by the `QmlElement` decorators.
 
 ## Tests
 
-    python3 tests/test_models.py    # 108, headless, no engine
+    python3 tests/test_models.py    # headless, no engine
     python3 tests/test_shell.py     # window smoke test, the way main.py loads it
     python3 tests/test_qml.py       # QtQuickTest: real clicks on real delegates
 

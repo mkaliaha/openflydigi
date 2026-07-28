@@ -107,10 +107,10 @@ EFFECTS = (
                        "Travel the trigger is allowed before it stops",
                        20, 200, 60),
            )),
-    # Not the same thing as the live mode-5 command, which does nothing -- see
-    # `vibration()`. Stored type 5 is delivered as SyncWithGrip (82), which is
-    # what actually binds rumble to the triggers, and the pad ships carrying
-    # one of these whether or not anyone asked for it.
+    # Not the same thing as the live mode-5 command, whose effect is unresolved
+    # -- see `vibration()`. Stored type 5 is delivered as SyncWithGrip (82),
+    # and these four knobs are 82's filter and scale, which is why Flydigi's
+    # own "Vibration" panel edits the bind rather than any mode-5 parameter.
     Effect(MODE_VIBRATION, "vibration", "Vibration",
            "The game's own rumble, routed into the trigger", (
                _number("scale", "Intensity coefficient",
@@ -288,24 +288,18 @@ def lock(ctrl, side, stroke, strength=255, match_stroke=True):
 
 def vibration(ctrl, side, stroke, pressure, strength, frequency,
               match_stroke=True):
-    """Mode 5. **Accepted by the pad and does nothing you can feel.** Use
-    `bind_grip` (command 82) for rumble in the triggers, or `sniper` for a
-    vibration of their own.
+    """Mode 5. **Dead code in Flydigi's stack; keep for completeness only.**
 
-    Tested against `sniper` with byte-identical parameters and the pad's
-    standing 82 bind suppressed, which is what it takes to see this at all:
-    mode 2 vibrates on press with no rumble anywhere, mode 5 stays silent
-    through twelve seconds of grip rumble. The pad does act on it -- the
-    triggers seat themselves for a moment as the effect is applied, and the
-    ACK echoes the parameters -- so this is "applied and inert", not ignored.
+    Nothing constructs their mode-5 builder, the config path turns stored type
+    5 into command 82, the DualSense relay emits only modes 0-3, and pads with
+    real trigger motors use command 18 instead -- so no caller for this exists
+    anywhere, theirs or ours. On hardware it buzzed once with the pad's own
+    bind and did nothing with that bind suppressed; inconclusive, and not worth
+    more bench time given that nothing depends on it. See PROTOCOL.md 3a.
 
-    Every buzz once credited to mode 5 was that standing bind, which the
-    factory profile ships populated; suppress it and mode 5 has nothing left.
-    Flydigi's own software never sends mode 5, which fits.
-
-    Kept because the command is real and the parameters are known. What has
-    not been ruled out is some other parameter combination doing something --
-    two were tried, differing in pressure.
+    Want a trigger to vibrate? `sniper` (mode 2) is the one in real use -- the
+    DualSense's own vibration effect maps to it. Want the game's rumble in the
+    triggers? `bind_grip` (command 82).
     """
     payload = [1, side, MODE_VIBRATION, stroke, _least_one(pressure),
                _least_one(strength), _least_one(frequency),

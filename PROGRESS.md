@@ -117,8 +117,8 @@ a socket pair for what a send does, two separate `open()`s of one path for what 
 The desktop tests come in three layers, cheapest first:
 
 ```bash
-for t in tests/test_{device,dsx,forza,mapping,monitor,relay}.py; do python3 "$t"; done  # backend, no Qt
-python3 tests/test_models.py     # 108, headless -- no engine, no display
+for t in tests/test_{device,dsx,forza,games,mapping,monitor,prefs,relay}.py; do python3 "$t"; done  # backend, no Qt
+python3 tests/test_models.py     # headless -- no engine, no display
 python3 tests/test_shell.py      # the window, loaded the way main.py loads it
 python3 tests/test_qml.py        # QtQuickTest: real clicks on real delegates
 ```
@@ -457,34 +457,32 @@ Recoil resists and gives way, Sniper vibrates past the travel point. Every one A
 its own parameters back* — `[success=1][mode][params…]`, side dropped — so the pad parses the
 payload rather than merely acknowledging the command id.
 
-**Mode 5 does nothing, and the reason it took three attempts to establish is worth more than the
-result.** This entry claimed first that mode 5 buzzes on its own, then — after that was disproved by
-feel — that mode 5 *is* the rumble-to-trigger bind. Both were inferred from a pad that was binding
-rumble to its triggers the whole time, unasked.
+**Mode 5 is dead code in Flydigi's own stack, which is the answer three hardware sessions failed to
+reach.** Nothing constructs `ForceTriggerConfigVibration`; the config path turns stored type 5 into
+command 82; the DualSense relay emits only modes 0-3 (ours transcribes theirs, `relay.translate_ds5`,
+and agrees); and pads that have real trigger motors drive them with command **18**, not 81. So the
+firmware has never been asked to do anything with mode 5, and a mode-5 command that produces nothing
+is the expected result rather than a puzzle.
 
-**This pad carries a `SyncWithGrip` bind at rest.** The factory profile ships
-`bind.Filter=10, bind.Scale=10, bind.Param=[100, 1, 255, 70, 0]` with `Type=0`, and the consequence
-is that the triggers buzz on plain rumble *with no effect set at all* — confirmed by feel. So any
-trigger-haptics test that does not suppress the bind first will credit whatever effect it just sent
-with the bind's work, which is exactly what happened twice.
+The vibration effect in real use is **mode 2** — the DualSense vibration/automatic-gun effect maps
+to it and Space Station calls it 机枪, machine gun — and the "Vibration" a user picks in their UI is
+the *stored* type 5, delivered as command 82, which works. The name is a red herring twice over.
 
-Suppressed (`82` with filter 255, scale 0, zero params) and re-run with byte-identical parameters on
-both triggers — `stroke 30, pressure 10, strength 200, frequency 60`:
+Our own hardware readings, kept because they cost real time: mode 5 buzzed once with the pad's own
+bind and did nothing with the bind suppressed. The two runs in between were sent `bindType 0`, which
+Flydigi never uses and which appears to mean no bind, so they measured silence rather than mode 5.
+This entry has now been written four ways in one session; the decompile settled in ten minutes what
+the pad would not.
 
-| Phase | Effect | Rumble | Result |
-|---|---|---|---|
-| 1 | mode 5, both triggers | 12s | **nothing**, beyond a brief seat as the effect applied |
-| 2 | mode 2, both triggers | none | **vibrates on press** |
+**Two things this did settle.** A config apply does not restore live bind state — it survives the
+switch, so an experiment that alters the bind leaves it altered until something sets it back, and
+"I re-applied the profile" is not a restore. And the method for every effect test on this pad:
+control the bind explicitly, prove the path is alive with a known-good effect such as mode 2, and
+put byte-identical parameters in both arms so the mode byte is the only variable.
 
-Phase 2 is the control that makes phase 1 mean anything: the vibration path is demonstrably alive
-with the bind zeroed. So mode 5 is *applied and inert* rather than rejected — the ACK echoes its
-parameters and the triggers visibly seat themselves — and `82` is the way to bind rumble. Flydigi's
-own software never sends mode 5 either. Not ruled out: some other parameter combination doing
-something; two were tried, differing in pressure.
-
-**The method, since it generalises to every effect on this pad**: suppress the standing bind, prove
-the path is still alive with a known-good effect, then test the one in question — and put the same
-bytes in both so the mode byte is the only variable.
+**How this went wrong is the reusable part.** Three write-ups, each confident, each built on one
+unrepeated observation with the pad in a state nobody had pinned down. The failure was not the
+inference each time; it was writing the conclusion into two documents before a second run existed.
 
 The original question, answered: PROGRESS.md used to say the
 profile's force-trigger `bind` sub-struct "may be" the stored form of command 82 but "the counts do
@@ -596,8 +594,8 @@ particular is testable the moment multi-pad support exists; see "Multiple pads" 
 ### Multiple pads
 
 Wanted later, not now. A Vader 4 Pro is on the desk, and the two are closer than "fewer features"
-suggests: the SDK gives Vader 4 26 keys to the Apex 5's 27, with the same six extra buttons placed
-differently. What actually differs is the trigger technology —
+suggests: the SDK gives Vader 4 26 keys to the Apex 5's 27 over an identical 20-key standard core.
+Only M1-M4 are common to both: the Vader adds C and Z, the Apex 5 adds Turbo, M5 and M6. What actually differs is the trigger technology —
 
 ```
 GenerateControllerVader4 ("f4")        GenerateControllerApex5 ("k5")
@@ -795,9 +793,10 @@ nothing — check that before recommending it as a default.
 which is `EnableRawDataTransportInCommandFactory` — **17**, `[4]=7`, `[5]`=controllerData,
 `[6]`=rawData, `[7]`=keyboard, `[8]`=mouse, **`[9]`=thirdPartyControl**, `[10]`=crc, with `0xFF`
 meaning "leave alone". `flydigi/motion.py:34` `set_raw_data(..., third_party=...)` already sends it.
-What is missing is the reader — command **16**, `ReadRawDataReportStatusCommandFactory`, which
-decodes `data[5..8]` as the four transport flags and `data[9]` as the third-party flag — plus a UI
-toggle.
+The reader is command **16**, `ReadRawDataReportStatusCommandFactory`, which decodes `data[5..8]`
+as the four transport flags and `data[9]` as the third-party flag. Both halves are built:
+`flydigi/motion.py` has `CMD_READ_TRANSPORT = 16`, `parse_transport` and `read_transport`, and the
+switch is on the Controller page (`gui/models/device.py`, `thirdParty`).
 
 **One gate to honour.** `ControllerBusinessService.cs:1128` only offers this for `DeviceCode == "k5"`
 when the firmware is at or above **7.0.3.0**. Below that, hide it.
@@ -1130,15 +1129,16 @@ What this settles without a single guess:
   * **Never match a game process by cmdline alone** — Steam/Proton wrappers (`reaper`, `bwrap`,
     `pv-adverb`, `steam.exe`) all carry the game's path. Require the PE to be mapped.
   * **Effects persist in controller state** until changed; there is no timeout.
-  * **The pad binds rumble to its triggers at rest.** The factory profile carries a `SyncWithGrip`
-    bind (`filter 10, scale 10, params [100, 1, 255, 70, 0]`), so the triggers buzz on plain rumble
-    with no effect set. Suppress it with `82` (filter 255, scale 0, zero params) before testing any
-    trigger effect, or the bind's work gets credited to whatever was just sent — it fooled this
-    project twice.
-  * **`Sniper` (2) and `Vibration` (5) send byte-identical parameters; mode 2 works and mode 5 does
-    nothing.** With the bind suppressed, mode 2 vibrates on press and mode 5 stays silent through
-    twelve seconds of rumble. Mode 5 is applied rather than rejected — it ACKs and the triggers seat
-    themselves briefly — so "the pad took it" is not evidence that it does anything.
+  * **`bindType` is always 2.** Every `SyncWithGrip` Flydigi constructs passes 2, and all 34
+    vibration games in the gamelist carry `vibType: 2`. Sending 0 is not a quieter bind, it appears
+    to be no bind: with it set, neither `Normal` nor mode 5 produced anything under rumble.
+  * **A config apply does not restore live trigger state.** Bind and effect state set by 81/82
+    survive `apply_config`, so "I re-applied the profile" does not undo an experiment. Set it back
+    explicitly, with `bindType 2`.
+  * **`Sniper` (2) and `Vibration` (5) send byte-identical parameters — the mode byte is the only
+    difference.** Mode 2 vibrates on press with the bind suppressed and is settled. Mode 5 is not:
+    see PROTOCOL.md §3a. Note that mode 5 ACKs and visibly seats the triggers either way, so "the
+    pad took it" is not evidence that it does anything.
   * **hidraw replies go to every reader of the node.** An ACK you receive is not necessarily an
     answer to anything you sent — hence `Controller.claim()` and the drain before each write.
   * **`flock` attaches to the open file description, not the fd or the process.** A `dup`'d handle
@@ -1196,7 +1196,7 @@ What this settles without a single guess:
 |---|---|
 | `PROTOCOL.md` | Full wire protocol + hardware verification results |
 | `flydigi/` | Library — `device.py` (transport), `blobs.py` (packetised config transfer), `effects.py` (live trigger commands), `mapping.py` (profiles, remapping, vibration, stored triggers), `lighting.py` (RGB), `games.py`, `forza.py` |
-| `gui/` | PySide6 desktop app (GPL-3.0-or-later) — `main.py`, `worker.py` (all device I/O), `profiles.py`, `triggers.py`, `lighting.py` |
+| `gui/` | PySide6/QML desktop app (GPL-3.0-or-later) — `app.py` (the object graph), `main.py` (entry point), `worker.py` (all device I/O, on its own thread), `models/` (view-agnostic state), `qml/` (`Main.qml`, `pages/`, `components/`) |
 | `tools/flydigi-mapping` | CLI for profiles — list/show/set/clear/rename/apply/backup/restore |
 | `tools/flydigi-forza` | Forza driver — UDP 5300 → rules → triggers (`--dump` for telemetry only) |
 | `tools/flydigi-dsx` | DSX protocol listener on UDP 7878 — drives triggers from any DSX-compatible mod |
@@ -1577,7 +1577,7 @@ Everything is committed and green. To check:
 ```bash
 distrobox enter apex-dev -- bash -lc 'cd ~/Projects/ApexExperiments && \
   python3 tests/test_models.py && python3 tests/test_shell.py && python3 tests/test_qml.py'
-for t in tests/test_{dsx,forza,games,mapping,monitor,prefs,relay}.py; do python3 "$t"; done  # no Qt
+for t in tests/test_{device,dsx,forza,games,mapping,monitor,prefs,relay}.py; do python3 "$t"; done  # no Qt
 tools/generate-qmltypes && qmllint -I . -I /usr/lib64/qt6/qml gui/qml/Main.qml gui/qml/*/*.qml
 ```
 

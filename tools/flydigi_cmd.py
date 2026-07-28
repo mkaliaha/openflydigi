@@ -200,18 +200,13 @@ def cmd_lock(fd, args):
 
 
 def cmd_vibrate(fd, args):
-    """SetForceTrigger: Vibration (mode 5). **Does nothing on an Apex 5.**
+    """SetForceTrigger: Vibration (mode 5). **Nothing in Flydigi's stack sends
+    this one** -- see PROTOCOL.md 3a. Kept so the vocabulary is complete.
 
-    Kept for protocol work, not because it is useful. The pad ACKs it and the
-    triggers seat themselves as it applies, but nothing follows -- tested
-    against `sniper`, whose parameters are byte-identical, with the pad's
-    standing rumble bind suppressed. Use `bind` for rumble in the triggers and
-    `sniper` for a vibration of their own.
-
-    Note that testing this without suppressing the bind first will look like it
-    works, because the pad binds rumble to its triggers at rest:
-
-        flydigi_cmd.py bind both --filter 255 --scale 0 --params "0,0,0,0"
+    Use `sniper` (mode 2) for a trigger vibration, which is the effect the
+    DualSense's own vibration maps to, or `bind` (82) for the game's rumble in
+    the triggers. If you do test this, control the bind explicitly -- bindType
+    is always 2, and sending 0 is no bind at all rather than a quiet one.
     """
     params = bytes([SIDE[args.side], 5, args.stroke, max(1, args.pressure),
                     max(1, args.strength), max(1, args.frequency),

@@ -78,7 +78,9 @@ Note `end` is **exclusive**.
 
 ## 3. Command families
 
-Two distinct trigger families exist. Which one an Apex 5 accepts is **unverified**.
+Two distinct trigger families exist, and the Apex 5's is `SetForceTrigger` — confirmed by
+hardware (§7) and by the SDK, which gates `K6Trigger*` on `DeviceCode == "k6"` (the Apex 6).
+This pad is `k5`.
 
 ### 3a. `SetForceTrigger` — effect-based (used by the DSX/adapter-trigger path)
 
@@ -115,27 +117,55 @@ builder emits a 0 there and `matchStroke` follows it.
 
 The mode numbers are `AdapterTriggerType`, and the same six are the first byte of the
 per-profile block (§3c). `Race` is the racing-throttle resistance effect — the Forza Horizon
-case. **All six are confirmed by feel on an Apex 5** — see §7.
+case. **Modes 0–4 are confirmed by feel on an Apex 5** (§7); mode 5 is the exception, and the
+next few paragraphs are about why.
 
-**`Sniper` and `Vibration` take identical parameters. Mode 2 works; mode 5 does nothing.** Sent
-with the same bytes (`stroke 30, pressure 10, strength 200, frequency 60`) to both triggers and
-the pad's standing `SyncWithGrip` bind suppressed, mode 2 vibrates on press with no rumble
-anywhere, while mode 5 stays silent through twelve seconds of grip rumble. The pad does act on
-it — the triggers seat themselves for a moment as it is applied, and the ACK echoes the
-parameters back — so mode 5 is *applied and inert*, not rejected.
+**Nothing in Flydigi's software ever sends mode 5.** Worth establishing before reading the
+hardware results below, because it explains them. Every path that can produce a mode byte:
 
-**Suppressing the bind first is what it takes to see this**, and not doing so is how mode 5 got
-written up wrong twice here. This pad carries a rumble-to-trigger bind at rest: the factory
-profile ships `bind.Filter=10, bind.Scale=10, bind.Param=[100, 1, 255, 70, 0]` with `Type=0`,
-so **the triggers buzz on plain rumble with no effect set at all**. Any trigger-haptics test
-that skips the suppression will credit whatever effect it just sent with the bind's work.
-Suppress with `82` (filter 255, scale 0, zero params), confirm the path is still alive with a
-known-good effect such as `Sniper`, and only then read the result.
+| Source | Modes it emits |
+|---|---|
+| Profile/config (`ControllerRepository.CreateForceAdapterConfig`) | 0, 1, 2, 3, 4 — stored type 5 becomes **command 82**, not mode 5 |
+| DualSense relay (`PS5DataManager`, and our `relay.translate_ds5`) | 0, 1, 2, 3 only — never 4, never 5 |
+| `ForceTriggerConfigVibration`, the mode-5 builder | `SetForceTriggerCommandFactory.cs:197` — defined, **never constructed anywhere** |
 
-Flydigi's software never sends mode 5 either: `ControllerRepository.CreateForceAdapterConfig`
-turns the stored Vibration effect into `SyncWithGrip`. So `82` is the way to bind rumble to the
-triggers, and mode 5 has no known use. Not ruled out: some other parameter combination doing
-something — two were tried, differing in pressure.
+Nor is it for another pad. Pads with real trigger motors (`IsSupportTriggerVibration`: Vader 3, 4,
+5) do not use `SetForceTrigger` for them at all — trigger vibration there is **command 18**,
+`VibrationCommandFactory` with `VibrationType.Trigger`, levels in `[5]`/`[6]`. Every pad that *does*
+have force triggers goes through the repository path above. So mode 5 is a vestigial enum slot, and
+firmware that does nothing with it has never been asked to do anything else.
+
+Two names worth keeping straight, because "Vibration" is a red herring twice over. The vibration
+effect in real use is **mode 2**: the DualSense's own vibration/automatic-gun effect
+(`data[11] == 6`) maps to it, and Space Station labels it 机枪, *machine gun*. And the "Vibration"
+a user picks in their UI is the **stored** type 5, which is delivered as command 82 — the rumble
+bind, which works.
+
+**`Sniper` and `Vibration` take identical parameters. Mode 2 works. Mode 5 measured inconclusively**
+— written three different ways in one session, so what follows is the measurements, not a
+conclusion. Given that nothing sends it, this is a curiosity rather than a gap.
+
+| # | Bind state | Effect | Rumble | Felt |
+|---|---|---|---|---|
+| 1 | the pad's own, untouched | mode 5 | yes | **buzzed** |
+| 2 | suppressed (`82`, bindType 2, filter 255, scale 0, zero params) | mode 5 | yes | nothing |
+| 3 | suppressed, same params | mode 2 | no | vibrates on press |
+| 4 | `82` sent with **bindType 0** | Normal, and mode 5 | yes | nothing either side |
+
+Run 3 is the control for run 2: the vibration path is alive with the bind zeroed, so mode 5's
+silence there is not the suppression killing everything. Run 4 does **not** test an active bind —
+`bindType` is `2` in every `SyncWithGrip` Flydigi constructs and in all 34 vibration games in the
+gamelist, so `0` is not a value they ever send and appears to mean no bind at all. It was sent by
+mistake here while trying to restore the pad, which is why runs after it read as silence.
+
+So mode 5 did something once with the pad's own bind and nothing with the bind suppressed. Left
+open, and not worth more bench time given that no caller exists: the run that would settle it is a
+bindType-2 bind at working values with `Normal` on one trigger and mode 5 on the other, under one
+rumble.
+
+One thing this did settle, and it cost two wasted runs: **a config apply does not restore live bind
+state.** It survives the switch, so an experiment that alters the bind leaves it altered until
+something sets it back — "I re-applied the profile" is not a restore.
 
 ### 3c. The same effects, stored in a profile
 
@@ -269,7 +299,7 @@ Decoding as `ParseAckData` does (strip report-ID byte, then index): `data[2]` = 
 | `81` | SetForceTrigger — `Sniper` | ACK + **felt**: vibrates on its own past the travel point |
 | `81` | SetForceTrigger — `Recoil` | ACK + **felt**: resists, then gives way |
 | `81` | SetForceTrigger — `Lock` | ACK + **felt**: trigger stops dead at the position |
-| `81` | SetForceTrigger — `Vibration` | ACK, and **nothing felt** with the standing bind suppressed |
+| `81` | SetForceTrigger — `Vibration` | ACK; what it produces is unresolved — see §3a |
 | `82` (`0x52`) | SyncWithGrip (Tier-1 vibration bind) | ACK + **physically confirmed** |
 | `0x12` | Rumble (SDL framing) | ACK, drives motors |
 
@@ -294,13 +324,17 @@ side byte dropped — so the pad is parsing the payload, not just acknowledging 
 
 ## 5. Open questions
 
-- Which family the Apex 5 firmware actually accepts (`SetForceTrigger` 81/82 vs `K6Trigger` 83/85/87).
-- Report ID for the Apex 5 in each connection mode (wired / 2.4G dock / BT). Wired exposes
-  `hidraw3` (input1) and `hidraw4` (input2) — which one takes commands is untested.
-- `SetForceTrigger` NewXInput builder sets no CRC byte; `K6Trigger*` does. Unverified whether
-  firmware requires one.
-- Mode/param byte values for Sniper / Recoil / Lock / Vibration (only Normal=0 and Race=1 confirmed).
-- Whether `AcquireController` / heartbeat is a precondition for trigger commands (SDL sends `0x1C`).
+Four of the six questions that used to sit here are answered, in §7 of this file and in PROGRESS.md,
+and are recorded there rather than repeated: the Apex 5's family is `SetForceTrigger` (`K6Trigger*`
+is gated on `DeviceCode == "k6"`, the Apex 6, and this pad is `k5`); the wired report ID is `0x03`
+on the vendor node, found by its `06 a0 ff` descriptor prefix; no CRC byte is required for 81/82;
+and `AcquireController` is not a precondition for trigger commands. What is genuinely still open:
+
+- Report ID for the Apex 5 over the 2.4G dock and Bluetooth. Only wired has been tested.
+- **Whether mode 5 (`Vibration`) does anything** — a curiosity, not a gap: nothing in Flydigi's
+  stack sends it (§3a), so no route depends on the answer. Modes 0–4 are settled and felt (§7).
+- Whether the pad honours a stored effect on profile switch without the host re-sending it. Effects
+  applied live persist until changed, but that is not the same claim.
 
 ---
 
