@@ -351,7 +351,7 @@ def test_the_status_bar_toggle_is_a_different_sub_command():
 
 
 def test_screen_status_reads_the_reply_a_real_pad_gave():
-    """The bytes an Apex 5 answered command 3 with, recorded in PROGRESS.md.
+    """The bytes an Apex 5 answered command 3 with, recorded in docs/device-settings.md.
 
     Not the fake's, so the bit positions are checked against hardware rather
     than against the other half of this repository.

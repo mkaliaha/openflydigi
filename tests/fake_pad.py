@@ -34,7 +34,7 @@ def blank_blob(title="Profile"):
         offset = mapping.OFF_KEY_TABLE + slot * mapping.KEY_ENTRY
         blob[offset : offset + mapping.KEY_ENTRY] = bytes([mapping.TARGET_IDENTITY, 0, 0])
     # The curve blocks carry what a real Apex 5 ships with, not 0xFF -- read off
-    # the hardware, see PROGRESS.md. It matters: each is the identity line on
+    # the hardware, see docs/findings-profile-blob.md. It matters: each is the identity line on
     # its own scale (sticks run to 127, triggers to 255), so an accessor tested
     # against these is tested against a shape the pad would really hand it,
     # rather than against a fill byte that happens to parse.

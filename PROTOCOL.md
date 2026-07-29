@@ -345,8 +345,9 @@ side byte dropped — so the pad is parsing the payload, not just acknowledging 
 
 ## 5. Open questions
 
-Four of the six questions that used to sit here are answered, in §7 of this file and in PROGRESS.md,
-and are recorded there rather than repeated: the Apex 5's family is `SetForceTrigger` (`K6Trigger*`
+Four of the six questions that used to sit here are answered, in §7 of this file and in
+`docs/findings-other-devices.md` and `docs/device-settings.md`, and are recorded there rather than
+repeated: the Apex 5's family is `SetForceTrigger` (`K6Trigger*`
 is gated on `DeviceCode == "k6"`, the Apex 6, and this pad is `k5`); the wired report ID is `0x03`
 on the vendor node, found by its `06 a0 ff` descriptor prefix; no CRC byte is required for 81/82;
 and `AcquireController` is not a precondition for trigger commands. What is genuinely still open:
