@@ -80,8 +80,8 @@ Note `end` is **exclusive**.
 ## 3. Command families
 
 Two distinct trigger families exist, and the Apex 5's is `SetForceTrigger` — confirmed by
-hardware (§7) and by the SDK, which gates `K6Trigger*` on `DeviceCode == "k6"` (the Apex 6).
-This pad is `k5`.
+hardware (§7) and by the SDK, which gates `K6Trigger*` on `DeviceCode == "k6"`. This pad is `k5`;
+what `k6` is, and why nobody can test it, is §3b.
 
 ### 3a. `SetForceTrigger` — effect-based (used by the DSX/adapter-trigger path)
 
@@ -222,7 +222,20 @@ Slider bounds, from Space Station's own UI (not the byte range): travel position
 `Lock`'s position 20–200, `Vibration`'s intensity 0–200 and travel 1–200, everything else
 1–255.
 
-### 3b. `K6Trigger*` — low-level / waveform (newer hardware generation)
+### 3b. `K6Trigger*` — low-level / waveform, and unreachable
+
+**Everything in this section is transcription, not knowledge.** The SDK gates this family on
+`DeviceCode == "k6"`, which its own factory resolves to `GenerateControllerApex6` —
+`DeviceType.K6 = 149`, `K6Pro = 150`, and `RecognizeDeviceCodeFromProductName` returns `k6` for a
+product name containing "APEX" and a 6.
+
+**As of July 2026 no Apex 6 has shipped** — Flydigi's current flagship is the Apex 5 — but it is
+coming rather than hypothetical: an FCC registration appeared in July 2026, and a manual for an
+"Apex6 Haptics Elite" is dated 2026-07-17. The SDK carries the support ahead of the hardware.
+
+So the layouts below have never been sent to anything, and nothing here is hardware-verified. Keep
+them — this is the one section of this file that has a release date coming toward it — but re-check
+the whole of it against a real device before trusting a byte, exactly as §7 did for `SetForceTrigger`.
 
 | Command | ID | Layout |
 |---|---|---|
@@ -348,7 +361,8 @@ side byte dropped — so the pad is parsing the payload, not just acknowledging 
 Four of the six questions that used to sit here are answered, in §7 of this file and in
 `docs/findings-other-devices.md` and `docs/device-settings.md`, and are recorded there rather than
 repeated: the Apex 5's family is `SetForceTrigger` (`K6Trigger*`
-is gated on `DeviceCode == "k6"`, the Apex 6, and this pad is `k5`); the wired report ID is `0x03`
+is gated on `DeviceCode == "k6"`, a model that had not shipped as of July 2026, and this pad is
+`k5`); the wired report ID is `0x03`
 on the vendor node, found by its `06 a0 ff` descriptor prefix; no CRC byte is required for 81/82;
 and `AcquireController` is not a precondition for trigger commands. What is genuinely still open:
 
@@ -372,8 +386,8 @@ and `AcquireController` is not a precondition for trigger commands. What is genu
 
 1. `hidraw` writer implementing §2 framing + §3 commands.
 2. Bench-verify with `Race` (`SetForceTrigger`) — directly observable, and done: §7. Not `K6`
-   realtime; `83`/`85`/`87` are gated on `DeviceCode == "k6"` (the Apex 6, §5), so that family is
-   not reachable on this pad.
+   realtime; `83`/`85`/`87` are gated on `DeviceCode == "k6"`, which had no shipping hardware as of
+   July 2026 (§3b), so that family is reachable on nothing we can put on a desk.
 3. UDP listener on 7878 speaking §4 DSX JSON → existing DSX mods work under Proton
    (Wine shares the host loopback, so `127.0.0.1:7878` from inside the prefix reaches a Linux daemon).
 4. Optional: `/tmp/fcs.sock` protobuf server to drive the stock Electron UI on Linux.

@@ -259,7 +259,7 @@ which §3a of PROTOCOL.md has hardware-verified. Three things to get right if an
     mode), **166** (flash write) and **253** (factory reset). A naive passthrough hands every
     application a brick button. Whitelist 81 and 82 and refuse the rest.
   * **Per-model dispatch is unvalidated.** Ours is Apex 5 knowledge. Vader trigger vibration is
-    command **18**, not 81/82, and the Apex 6 uses the `K6Trigger*` family (83/85/87). We have an
+    command **18**, not 81/82, and the not-yet-shipped `k6` would use `K6Trigger*` (83/85/87). We have an
     Apex 5 and a Vader 4 Pro, and the Vader 4 has no force triggers to test against.
   * **Expect "who calls it?"** and have an answer. SDL has **no typed adaptive-trigger API** -- no
     `adaptive` or `TriggerEffect` anywhere in `SDL_gamepad.h` -- so `SDL_SendGamepadEffect` is a raw

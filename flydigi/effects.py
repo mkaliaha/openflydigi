@@ -6,7 +6,10 @@
 
 Two families exist (see PROTOCOL.md):
   * SetForceTrigger (81/82) -- effect based. Used by everything so far.
-  * K6Trigger (83/85/87)    -- waveform/realtime. Untested on hardware.
+  * K6Trigger (83/85/87)    -- waveform/realtime, gated on DeviceCode "k6".
+    Not merely untested: as of July 2026 no controller with that code had
+    shipped, so there was nothing to test it against. An Apex 6 is coming
+    (FCC registration, July 2026), so this is transcription awaiting hardware.
 
 The six effects below are Flydigi's whole `AdapterTriggerType` vocabulary, and
 the same six appear twice: as the live command's `mode` byte and as the first

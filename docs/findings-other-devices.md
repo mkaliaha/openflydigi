@@ -51,9 +51,14 @@ particular is testable the moment multi-pad support exists; see *Multiple pads* 
     controller in the whole factory: `GenerateControllerVader4`. So this is a **Vader 4 feature**,
     and a good one — recalibrating stick centres is the classic fix for drift. Sending it to an
     Apex 5 is probably a harmless no-op, but there is no reason to.
-  * **The K6 trigger family** — commands 83/85/87 belong to `DeviceCode == "k6"`, the Apex 6. The
-    Apex 5 is `k5` and `SetForceTrigger` is its family, which **closes the other open question in
-    PROTOCOL.md §5**. `K6TriggerMode.Local` is not a route to autonomous effects on *this* pad.
+  * **The K6 trigger family** — commands 83/85/87 are gated on `DeviceCode == "k6"`, which the
+    SDK's factory resolves to `GenerateControllerApex6` (`DeviceType.K6 = 149`, `K6Pro = 150`).
+    **No Apex 6 had shipped as of July 2026**, so unlike the ADC item this is not waiting on a pad
+    we could go and buy. It is close, though — FCC registration in July 2026, and an "Apex6 Haptics
+    Elite" manual dated 2026-07-17 — so PROTOCOL.md §3b is worth keeping current rather than
+    letting rot. The Apex 5 is `k5` and `SetForceTrigger` is its family, which **closes the other
+    open question in PROTOCOL.md §5**. `K6TriggerMode.Local` is not a route to autonomous effects
+    on *this* pad.
   * **The wheel block (183..185)** — `m_fdg_macro_lunpan_struct_t {type, rev}`. `IsSupportWheel` is
     never set for the Apex 5. Keep carrying the bytes; build UI only for a pad that declares it.
 
