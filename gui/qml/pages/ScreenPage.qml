@@ -22,6 +22,30 @@ Kirigami.ScrollablePage {
     objectName: "screenPage"
     title: "Screen"
 
+    // Which frame the preview is showing. An animation is played here rather
+    // than shown as its first frame, because the upload takes minutes and is
+    // far too expensive to be how you find out what you picked.
+    property int previewFrame: 0
+
+    Timer {
+        objectName: "screenPreviewTimer"
+        running: App.screen.animated && page.visible
+        // The pad's own frame interval, so the preview runs at the speed the
+        // picture will. Floored because a spin box can ask for faster than a
+        // QML timer will honour.
+        interval: Math.max(20, App.screen.interval)
+        repeat: true
+        onTriggered: page.previewFrame =
+            (page.previewFrame + 1) % Math.max(1, App.screen.frameCount)
+    }
+
+    Connections {
+        target: App.screen
+        // A new picture, or a different fit, restarts the loop -- otherwise the
+        // index would point into the middle of something else, or past its end.
+        function onChanged() { page.previewFrame = 0; }
+    }
+
     Dialogs.FileDialog {
         id: fileDialog
         objectName: "screenFileDialog"
@@ -49,11 +73,19 @@ Kirigami.ScrollablePage {
 
                     Rectangle {
                         objectName: "screenPreviewFrame"
-                        // Four times the panel, which is small enough to sit in
-                        // a form and big enough to judge a crop by.
-                        implicitWidth: 640
-                        implicitHeight: 320
+                        // Takes the column's width and keeps the panel's own
+                        // 2:1 shape, so the preview is never wider than the
+                        // card it sits in -- a fixed 640 was, on a narrow
+                        // window. Capped at four times the real 160x80, past
+                        // which it is only showing bigger pixels.
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: 640
                         Layout.alignment: Qt.AlignHCenter
+                        // A floor as well as a ceiling: with fillWidth and no
+                        // implicit width of its own the card would have nothing
+                        // to size itself from and could collapse.
+                        implicitWidth: 320
+                        implicitHeight: width / 2
                         color: "black"
                         radius: Kirigami.Units.smallSpacing
                         border.width: 1
@@ -63,7 +95,12 @@ Kirigami.ScrollablePage {
                             objectName: "screenPreview"
                             anchors.fill: parent
                             anchors.margins: 1
-                            source: App.screen.previewSource
+                            source: {
+                                const frames = App.screen.previewFrames;
+                                if (frames.length > page.previewFrame)
+                                    return frames[page.previewFrame];
+                                return App.screen.previewSource;
+                            }
                             visible: source.toString() !== ""
                             fillMode: Image.PreserveAspectFit
                             // The panel is 160x80 and this is drawn at 4x, so

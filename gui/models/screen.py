@@ -95,6 +95,7 @@ class ScreenModel(QObject):
         self._fit = 0
         self._source = ""
         self._preview = ""
+        self._preview_files = []
         self._preview_serial = 0
         self._busy = False
         self._done = 0
@@ -159,35 +160,57 @@ class ScreenModel(QObject):
         self.changed.emit()
 
     def _write_preview(self):
-        """Render frame one back out, so the preview is what will be sent.
+        """Render every frame back out, so the preview is what will be sent.
 
         Deliberately a round trip through the encoder rather than a scaled copy
         of the source: this shows the 565 quantisation and the crop the pad will
         actually get. Written to the cache directory because the models may not
         import QtQuick, so an image provider would have to live in main.py and
         this does not need one.
+
+        All the frames rather than the first, because the page plays them: a
+        still frame of an animation tells you almost nothing about it, and the
+        upload is far too long to be the thing that shows you what you chose.
+        Written once at load rather than regenerated per tick -- a file write
+        every 100 ms to animate a preview would be absurd.
         """
+        self._clear_previews()
         if not self._frames:
             self._preview = ""
+            self._preview_files = []
             return
-        width, height, rgb = screen.decode_frame(self._frames[0])
-        image = QImage(rgb, width, height, width * 3, QImage.Format_RGB888).copy()
         folder = QStandardPaths.writableLocation(QStandardPaths.CacheLocation)
         os.makedirs(folder, exist_ok=True)
-        path = os.path.join(folder, "screen-preview.png")
-        if not image.save(path, "PNG"):
-            self._preview = ""
-            return
-        # Qt caches by URL, and the path never changes, so without something
-        # varying the second preview would be the first one again.
+        # The serial is in the *name*, not a query string: Qt caches by URL, and
+        # a new picture must not show the previous one's pixels.
         self._preview_serial += 1
-        self._preview = f"{QUrl.fromLocalFile(path).toString()}?v={self._preview_serial}"
+        paths = []
+        for index, frame in enumerate(self._frames):
+            width, height, rgb = screen.decode_frame(frame)
+            image = QImage(rgb, width, height, width * 3, QImage.Format_RGB888).copy()
+            path = os.path.join(
+                folder, f"screen-preview-{self._preview_serial}-{index}.png")
+            if not image.save(path, "PNG"):
+                break
+            paths.append(path)
+        self._preview_files = paths
+        self._preview = QUrl.fromLocalFile(paths[0]).toString() if paths else ""
+
+    def _clear_previews(self):
+        """Delete the last picture's frames rather than filling the cache."""
+        for path in getattr(self, "_preview_files", []):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        self._preview_files = []
 
     @Slot()
     def clear(self):
         self._images = []
         self._frames = []
         self._source = ""
+        self._clear_previews()
         self._preview = ""
         self._message = ""
         self.changed.emit()
@@ -204,7 +227,13 @@ class ScreenModel(QObject):
 
     @Property(str, notify=changed)
     def previewSource(self):
+        """Frame one. What the page shows for a still, and the fallback."""
         return self._preview
+
+    @Property(list, notify=changed)
+    def previewFrames(self):
+        """Every frame as a file URL, in order, so the page can play them."""
+        return [QUrl.fromLocalFile(path).toString() for path in self._preview_files]
 
     @Property(int, notify=changed)
     def frameCount(self):

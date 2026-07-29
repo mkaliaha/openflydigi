@@ -1104,6 +1104,36 @@ def test_changing_the_fit_changes_the_pixels():
     check("fill does not", filled[:3] != b"\x00\x00\x00", filled[:3].hex())
 
 
+def test_every_frame_gets_a_preview_so_the_page_can_play_it():
+    """A still frame of an animation says almost nothing about it.
+
+    And the upload is far too long to be how you find out what you chose, so
+    the frames are written once at load and the page cycles them.
+    """
+    from PySide6.QtCore import QUrl
+
+    model, _ = screen_model_with(4)
+    check("one preview per frame", len(model.previewFrames) == 4,
+          str(len(model.previewFrames)))
+    check("all distinct files", len(set(model.previewFrames)) == 4)
+    check("previewSource is the first of them",
+          model.previewSource == model.previewFrames[0])
+    check("they are file URLs that exist",
+          all(os.path.exists(QUrl(u).toLocalFile()) for u in model.previewFrames))
+
+    # A second picture must not show the first one's pixels: Qt caches by URL,
+    # so the names carry a serial rather than the paths being reused.
+    old = list(model.previewFrames)
+    model.fitMode = 2
+    check("a re-encode renames them", set(model.previewFrames).isdisjoint(old),
+          str(model.previewFrames[:1]))
+    check("and cleans the old ones up",
+          not any(os.path.exists(QUrl(u).toLocalFile()) for u in old))
+
+    model.clear()
+    check("clearing drops them all", model.previewFrames == [])
+
+
 def test_the_screen_state_is_read_rather_than_assumed():
     """The bits arrive from command 3, under the names they were measured with.
 
@@ -1200,6 +1230,7 @@ def main():
                  test_the_frames_handed_over_are_ones_the_pad_would_accept,
                  test_an_upload_in_flight_locks_everything_that_would_disturb_it,
                  test_changing_the_fit_changes_the_pixels,
+                 test_every_frame_gets_a_preview_so_the_page_can_play_it,
                  test_the_screen_state_is_read_rather_than_assumed,
                  test_the_two_switches_are_different_sub_commands,
                  test_models_pull_in_no_view_code):
