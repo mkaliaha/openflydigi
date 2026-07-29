@@ -33,6 +33,7 @@ Kirigami.ApplicationWindow {
         {name: "Vibration", icon: "media-playback-start", url: "pages/VibrationPage.qml"},
         {name: "Triggers", icon: "input-gamepad", url: "pages/TriggersPage.qml"},
         {name: "Lighting", icon: "color-management", url: "pages/LightingPage.qml"},
+        {name: "Screen", icon: "video-display", url: "pages/ScreenPage.qml"},
         {name: "Games", icon: "applications-games", url: "pages/GamesPage.qml"},
         {name: "Setup", icon: "configure", url: "pages/SetupPage.qml"}
     ]

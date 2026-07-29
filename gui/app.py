@@ -22,7 +22,7 @@ from PySide6.QtQml import QmlElement, QmlSingleton
 from flydigi import games
 
 from .models import (DeviceModel, GameFilterModel, GameListModel,
-                     LightingModel, ProfileModel, SetupModel)
+                     LightingModel, ProfileModel, ScreenModel, SetupModel)
 from .worker import DeviceThread
 
 # See gui/models/device.py for what these two names do.
@@ -61,6 +61,7 @@ class App(QObject):
     requestStatus = Signal()
     requestLighting = Signal()
     requestTransport = Signal()
+    requestScreen = Signal()
     requestVibration = Signal(dict)
     fetchingChanged = Signal()
 
@@ -73,6 +74,7 @@ class App(QObject):
         self._lighting = LightingModel(self)
         self._games = GameListModel(self)
         self._games_view = GameFilterModel(self._games, self)
+        self._screen = ScreenModel(self)
         self._setup = SetupModel(self)
         # A failed setup action is the same kind of news as a failed device
         # one, so it goes to the same inline message rather than a second
@@ -84,6 +86,7 @@ class App(QObject):
 
         self._info_timer = QTimer(self)
         self._info_timer.timeout.connect(self.requestInfo)
+        self._polling = False
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -111,6 +114,10 @@ class App(QObject):
         self._profile.loadRequested.connect(worker.load_profile)
         self._profile.writeRequested.connect(worker.write_profile)
         self._lighting.writeRequested.connect(worker.write_lighting)
+        self.requestScreen.connect(worker.refresh_screen)
+        self._screen.uploadRequested.connect(self._screen_upload_starting)
+        self._screen.uploadRequested.connect(worker.upload_screen)
+        self._screen.settingRequested.connect(worker.set_screen_setting)
 
         # -- replies in -----------------------------------------------------
         worker.info_changed.connect(self._device.infoReceived)
@@ -124,9 +131,14 @@ class App(QObject):
         worker.lighting_loaded.connect(self._lighting.configLoaded)
         worker.lighting_written.connect(self._lighting_written)
         worker.vibration_applied.connect(self._vibration_applied)
+        worker.screen_status.connect(self._screen.statusReceived)
+        worker.screen_progress.connect(self._screen.progressReceived)
+        worker.screen_finished.connect(self._screen_finished)
 
+        self._polling = poll
         if poll:
             self._info_timer.start(INFO_INTERVAL_MS)
+            self.requestScreen.emit()
 
     @Slot()
     def shutdown(self):
@@ -164,6 +176,10 @@ class App(QObject):
     def games(self):
         return self._games_view
 
+    @Property(ScreenModel, constant=True)
+    def screen(self):
+        return self._screen
+
     @Property(SetupModel, constant=True)
     def setup(self):
         return self._setup
@@ -181,6 +197,7 @@ class App(QObject):
         self.requestStatus.emit()
         self.requestLighting.emit()
         self.requestTransport.emit()
+        self.requestScreen.emit()
         self._profile.forget()
 
     @Slot(int)
@@ -223,6 +240,9 @@ class App(QObject):
 
     # -- worker replies that need a sentence rather than a model ------------
 
+    def _screen_upload_starting(self, _frames, _interval, _restore):
+        self._info_timer.stop()
+
     def _status(self, message):
         self._device.status = message
 
@@ -239,6 +259,19 @@ class App(QObject):
         self._lighting.confirmWritten(saved)
         where = "saved to flash" if saved else "in memory only"
         self._device.status = f"Lighting: wrote {packets} packet(s), {where}"
+
+    def _screen_finished(self, ok):
+        """Let the info poll resume, and re-read the screen state.
+
+        The poll is stopped for the upload rather than left to fail: the pad is
+        busy bridging to its screen chip for minutes, and a 30-second `Get info`
+        landing in the middle would report a healthy pad as broken.
+        """
+        self._screen.uploadFinished(ok)
+        if self._polling:
+            self._info_timer.start(INFO_INTERVAL_MS)
+        if ok:
+            self.requestScreen.emit()
 
     def _vibration_applied(self, name, sides):
         self._device.status = f"{name}: applied to {sides or 'nothing'}"

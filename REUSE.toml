@@ -23,6 +23,15 @@ precedence = "closest"
 SPDX-FileCopyrightText = "2026 Mikalai Kaliaha"
 SPDX-License-Identifier = "CC0-1.0"
 
+# A four-frame GIF, generated for the screen tests. Qt can read animated GIFs
+# and cannot write them, so an animation cannot be produced at test time -- and
+# the screen model reads real files, which is the part worth testing.
+[[annotations]]
+path = "tests/qml/four-frames.gif"
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 Mikalai Kaliaha"
+SPDX-License-Identifier = "CC0-1.0"
+
 [[annotations]]
 path = [".gitignore", "LICENSE", "NOTICE", "REUSE.toml"]
 precedence = "closest"

@@ -428,7 +428,7 @@ def test_live_effect_payloads_match_the_command_builders():
             self.sent.append((cmd_id, list(payload)))
             return []
 
-        def send(self, buf, wait=0.3):
+        def send(self, buf, wait=0.3, until=None):
             self.sent.append((buf[3], list(buf[5 : 5 + buf[4]])))
             return []
 

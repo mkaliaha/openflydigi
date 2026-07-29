@@ -16,7 +16,10 @@ once" rather than as fatal.
 """
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
-from flydigi import blobs, device, effects, lighting, mapping, motion
+import time
+
+from flydigi import (blobs, device, effects, lighting, mapping, motion,
+                     screen, screen_ota)
 
 
 class DeviceWorker(QObject):
@@ -28,6 +31,9 @@ class DeviceWorker(QObject):
     vibration_applied = Signal(str, str)       # game name, sides applied
     transport_changed = Signal(dict)     # third-party flag + who holds the pad
     versions_changed = Signal(dict)      # the seven firmware components
+    screen_status = Signal(dict)
+    screen_progress = Signal(int, int)
+    screen_finished = Signal(bool)
     lighting_loaded = Signal(bytes)
     lighting_written = Signal(int, bool)
     active_changed = Signal(int)
@@ -228,6 +234,69 @@ class DeviceWorker(QObject):
         result = self._attempt(work, "writing lighting")
         if result is not None:
             self.lighting_written.emit(*result)
+
+    # -- screen ------------------------------------------------------------
+
+    @Slot()
+    def refresh_screen(self):
+        state = self._attempt(screen.read_screen_status, "reading the screen state")
+        if state:
+            self.screen_status.emit(state)
+
+    @Slot(int, bool)
+    def set_screen_setting(self, sub_id, value):
+        """One command-19 sub-setting, then read the block back.
+
+        Read back rather than trusted: the reply to command 19 echoes the value
+        and never the sub-id, so an ack says "a setting was written" and not
+        which one. Command 3 says what actually happened.
+        """
+        def work(ctrl):
+            screen._setting(ctrl, sub_id, value)
+            return screen.read_screen_status(ctrl)
+
+        state = self._attempt(work, "changing a screen setting")
+        if state:
+            self.screen_status.emit(state)
+            if sub_id == screen.SUB_OFF_SCREEN:
+                self.status.emit("Screen keeps your picture up" if state["always_on"]
+                                 else "Screen dark when idle")
+            else:
+                self.status.emit("Status bar always on" if state["status_bar_always_on"]
+                                 else "Status bar hides itself")
+
+    @Slot(list, int, bool)
+    def upload_screen(self, frames, interval, restore):
+        """Put a picture on the screen, over Space Station's own serial route.
+
+        Not routed through `_attempt`, and deliberately: that retries once, and
+        retrying something that takes six minutes and has already switched the
+        pad into upgrade mode is a decision for a person. A failure here leaves
+        the pad reachable on its tty, so the honest thing is to say so and stop.
+        """
+        self.status.emit("Switching the screen into upgrade mode…")
+        try:
+            port = screen_ota.find_port()
+            if port is None:
+                screen_ota.enter_upgrade_mode(self._controller())
+                # The pad keeps its HID nodes but the handle is no longer worth
+                # holding across a reboot it is about to do.
+                self._drop()
+                time.sleep(screen_ota.SWITCH_SETTLE)
+                port = screen_ota.wait_for_port()
+            self.status.emit(f"Writing {len(frames)} frame(s) over {port}…")
+            with screen_ota.OtaLink(port) as link:
+                screen_ota.upload(link, frames, interval_ms=interval,
+                                  restore_default=restore,
+                                  progress=self.screen_progress.emit)
+        except (screen_ota.OtaError, OSError, device.DeviceNotFound) as exc:
+            self._drop()
+            self.failed.emit(f"screen upload: {exc}")
+            self.screen_finished.emit(False)
+            return
+        self._drop()
+        self.screen_finished.emit(True)
+        self.status.emit("Screen written — the pad reboots itself in about 15 seconds")
 
     @Slot()
     def shutdown(self):

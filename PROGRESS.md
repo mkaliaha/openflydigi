@@ -68,6 +68,7 @@ QML. See `gui/README.md`.
 | Games | all 94 games, searchable, filtered by route; vibration presets load onto the pad from here; per-game **Auto** toggle and a route picker for the nine multi-route games |
 | Setup | the daemon's unit, "running now" and "start at login" as separate switches, the application-menu entry, and the udev rules behind one authentication prompt |
 | Lighting | effect, up to 5 colours, brightness, cycle time, react-to-rumble |
+| Screen | pick a picture or GIF, choose how it fits, preview the encoded frame, and send it over the serial link — with the frame count and a time estimate before you start; plus the always-on display and the status bar |
 
 **Everything device-facing runs on a worker thread** (`gui/worker.py`) and requests cross as
 signals. Calling a worker slot directly runs it on the caller's thread, which silently puts blocking
@@ -1921,7 +1922,8 @@ sections above. What remains is code:
 
 1. **Decompile ChargerSdk / CoolerSdk** for the gen2 dock.
 2. **Qt/KDE app** — the Kirigami app is built and green (profiles, buttons, sticks, vibration,
-   triggers, lighting, games, setup). Still missing: macros, device settings and the charging dock —
-   see the end-goal section above and "Next". **A screen page is now worth building**: the transport
-   is proven, so the open questions are UI ones — a crop against the 160×80 frame, a frame-count cap,
-   and a progress bar that survives six minutes without looking hung.
+   triggers, lighting, screen, games, setup). Still missing: macros, device settings and the charging
+   dock — see the end-goal section above and "Next". The screen page does the whole job bar an
+   interactive crop: Qt reads the file, the preview is the encoded frame decoded back rather than a
+   scaled copy of the source, and the frame count and estimate sit next to the button because an
+   upload runs for minutes and cannot be stopped.

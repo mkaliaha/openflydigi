@@ -969,6 +969,176 @@ def test_models_pull_in_no_view_code():
     check("models import no view toolkit", not leaked, str(leaked))
 
 
+
+# -- screen ---------------------------------------------------------------
+
+
+def screen_model_with(frames=1):
+    """A ScreenModel holding a picture, loaded from a real file.
+
+    Through the file reader rather than a back door, because reading files is
+    most of what the model does and a test that skipped it would leave the only
+    interesting part uncovered.
+    """
+    from PySide6.QtCore import QUrl
+    from PySide6.QtGui import QImage
+
+    from gui.models import ScreenModel
+
+    model = ScreenModel()
+    if frames > 1:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "qml", "four-frames.gif")
+    else:
+        path = os.path.join(tempfile.mkdtemp(), "still.png")
+        image = QImage(90, 70, QImage.Format_RGB888)
+        image.fill(0x804020)
+        # Not a flat colour: a solid image survives crop, letterbox and squash
+        # identically, so it cannot tell the three fit modes apart. Taller than
+        # the 2:1 panel, with something off-centre to crop away.
+        from PySide6.QtGui import QColor, QPainter
+        painter = QPainter(image)
+        painter.fillRect(0, 0, 90, 18, QColor("white"))
+        painter.fillRect(10, 40, 30, 25, QColor("blue"))
+        painter.end()
+        image.save(path, "PNG")
+    loaded = model.open(QUrl.fromLocalFile(path))
+    return model, loaded
+
+
+def test_a_picture_is_encoded_as_it_is_loaded():
+    """The frames exist before the button is pressed, not after.
+
+    That is what lets the page state a frame count and a time estimate up
+    front, and an upload is far too long to start before knowing either.
+    """
+    from flydigi import screen
+
+    model, loaded = screen_model_with(1)
+    check("the still loaded", loaded)
+    check("one frame", model.frameCount == 1, model.frameCount)
+    check("not an animation", not model.animated)
+    check("an estimate is offered", bool(model.estimate), model.estimate)
+    check("a preview was written", model.previewSource.startswith("file:"),
+          model.previewSource)
+
+    model, loaded = screen_model_with(4)
+    check("the animation loaded", loaded)
+    check("every frame was taken", model.frameCount == 4, model.frameCount)
+    check("it knows it moves", model.animated)
+    # The GIF states 120 ms; a still has none and falls back to 100.
+    check("the interval came from the file", model.interval == 120, model.interval)
+
+
+def test_the_frames_handed_over_are_ones_the_pad_would_accept():
+    """A malformed frame would only surface minutes into an upload."""
+    from flydigi import screen
+
+    model, _ = screen_model_with(4)
+    sent = {}
+    model.uploadRequested.connect(
+        lambda frames, interval, restore: sent.update(
+            frames=frames, interval=interval, restore=restore))
+    model.upload()
+
+    check("every frame went", len(sent.get("frames", [])) == 4)
+    check("each is a whole frame",
+          all(len(f) == screen.FRAME_LEN for f in sent["frames"]))
+    check("each carries the header",
+          all(f[:4] == screen.frame_header() for f in sent["frames"]))
+    check("the interval went with them", sent["interval"] == 120)
+    check("and it is not a factory restore", sent["restore"] is False)
+
+
+def test_an_upload_in_flight_locks_everything_that_would_disturb_it():
+    """Covered here rather than in QML on purpose.
+
+    In the QML suite `upload()` reaches the real worker, which switches the pad
+    into upgrade mode and then waits half a minute for a serial device -- which
+    stalls the worker thread and fails every case after it. No worker is
+    attached here, so the signal goes nowhere and the state machine is all that
+    is under test.
+    """
+    model, _ = screen_model_with(1)
+    check("ready before", model.canUpload)
+    model.upload()
+    check("busy after", model.busy)
+    check("and cannot be started again", not model.canUpload)
+    check("the progress line says something", bool(model.progressText))
+
+    model.progressReceived(50, 200)
+    check("progress is a fraction", abs(model.progress - 0.25) < 1e-6, model.progress)
+    check("and is spelled out too", "50 of 200" in model.progressText,
+          model.progressText)
+
+    model.uploadFinished(True)
+    check("released afterwards", not model.busy)
+    check("and ready to send again", model.canUpload)
+
+
+def test_changing_the_fit_changes_the_pixels():
+    """Fill crops, fit letterboxes, stretch squashes -- three different images.
+
+    The source is taller than the 2:1 panel, so all three have to give something
+    different up. A preview that showed the same bytes for each would be lying
+    about what the pad is going to hold.
+    """
+    from flydigi import screen
+
+    model, _ = screen_model_with(1)
+    encoded = {}
+    model.uploadRequested.connect(
+        lambda frames, _i, _r: encoded.__setitem__(model.fitMode, frames[0]))
+    for index in range(3):
+        model.fitMode = index
+        check(f"fit mode {index} took", model.fitMode == index)
+        model.upload()
+        model.uploadFinished(True)
+
+    check("three fits, three different images", len(set(encoded.values())) == 3,
+          str(sorted(len(v) for v in encoded.values())))
+    # Letterboxing a tall picture into a wide panel leaves the corners black.
+    _w, _h, rgb = screen.decode_frame(encoded[1])
+    check("fit leaves a black corner", rgb[:3] == b"\x00\x00\x00", rgb[:3].hex())
+    _w, _h, filled = screen.decode_frame(encoded[0])
+    check("fill does not", filled[:3] != b"\x00\x00\x00", filled[:3].hex())
+
+
+def test_the_screen_state_is_read_rather_than_assumed():
+    """The bits arrive from command 3, under the names they were measured with.
+
+    `always_on` is the SDK's `OffScreen`, and it is not a screen-off switch --
+    see flydigi/screen.py. Named for the behaviour so a true value means a lit
+    screen.
+    """
+    from gui.models import ScreenModel
+
+    model = ScreenModel()
+    check("nothing is claimed before a read", not model.loaded)
+    model.statusReceived({"always_on": True, "status_bar_always_on": False,
+                          "always_on_usable": True})
+    check("loaded", model.loaded)
+    check("the display is up", model.alwaysOn)
+    check("the status bar is not pinned", not model.statusBarAlwaysOn)
+    check("and it is supported", model.supported)
+
+
+def test_the_two_switches_are_different_sub_commands():
+    from flydigi import screen
+
+    from gui.models import ScreenModel
+
+    model = ScreenModel()
+    asked = []
+    model.settingRequested.connect(lambda sub, value: asked.append((sub, value)))
+    model.setAlwaysOn(True)
+    model.setStatusBarAlwaysOn(False)
+    check("the display is sub-id 9",
+          asked[0] == (screen.SUB_OFF_SCREEN, True), str(asked))
+    check("the status bar is sub-id 8",
+          asked[1] == (screen.SUB_STATUS_BAR, False), str(asked))
+
+
 def main():
     QCoreApplication.instance() or QCoreApplication([])
     for test in (test_selecting_an_unread_profile_requests_it_once,
@@ -1026,6 +1196,12 @@ def main():
                  test_flipping_the_switch_asks_the_worker,
                  test_device_reports_a_failure,
                  test_battery_is_clamped,
+                 test_a_picture_is_encoded_as_it_is_loaded,
+                 test_the_frames_handed_over_are_ones_the_pad_would_accept,
+                 test_an_upload_in_flight_locks_everything_that_would_disturb_it,
+                 test_changing_the_fit_changes_the_pixels,
+                 test_the_screen_state_is_read_rather_than_assumed,
+                 test_the_two_switches_are_different_sub_commands,
                  test_models_pull_in_no_view_code):
         test()
     total = len(PASSED) + len(FAILED)

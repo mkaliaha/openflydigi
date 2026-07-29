@@ -48,7 +48,7 @@ STARTED = []
 
 # The sections the global drawer offers, in order.
 SECTIONS = ["Controller", "Buttons", "Sticks", "Vibration", "Triggers",
-            "Lighting", "Games", "Setup"]
+            "Lighting", "Screen", "Games", "Setup"]
 
 
 def check(name, condition, detail=""):
@@ -259,7 +259,7 @@ def test_an_unexpected_worker_error_is_reported(qt_app):
     untested code path that way.
     """
     class BrokenPad(TestPad):
-        def send(self, buf, wait=0.3):
+        def send(self, buf, wait=0.3, until=None):
             raise AttributeError("no such thing")
 
     pad = BrokenPad()

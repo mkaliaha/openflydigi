@@ -23,18 +23,19 @@ from .profile import (CURVE_PRESETS, DEFAULT_TARGET, KEY_CLUSTERS, KEY_LABELS,
                       StickSideModel, TriggerModel,
                       TriggerSideModel, VibrationModel, VibrationSideModel,
                       key_label)
+from .screen import FIT_MODES, MAX_FRAMES, ScreenModel
 from .setup import SetupChecksModel, SetupModel
 
 __all__ = [
     "ALL_ROUTES", "APPLIABLE_ROUTE", "BATTERY_STEPS", "CURVE_PRESETS",
-    "CYCLE_MAX", "CYCLE_MIN", "STICK_MAX",
+    "CYCLE_MAX", "CYCLE_MIN", "FIT_MODES", "MAX_FRAMES", "STICK_MAX",
     "DEFAULT_TARGET", "EFFECTS", "EFFECT_NAMES", "KEEP_CURRENT", "KEY_CLUSTERS",
     "KEY_LABELS", "ROUTE_NAMES", "TARGETS", "TIER_LABELS", "TITLE_MAX_CHARS",
     "TRIGGER_MODES", "TURBO_MAX_HZ",
     "TURBO_MODES",
     "ColourListModel", "DeviceModel", "GameFilterModel", "GameListModel",
     "KeyMapModel", "LightingModel", "ProfileListModel", "ProfileModel",
-    "SetupChecksModel", "SetupModel",
+    "ScreenModel", "SetupChecksModel", "SetupModel",
     "StickModel", "StickSideModel", "TriggerModel", "TriggerSideModel", "VibrationModel", "VibrationSideModel",
     "from_hex", "game_name", "invert_cycle", "key_label", "route_detail",
     "route_name", "to_hex",

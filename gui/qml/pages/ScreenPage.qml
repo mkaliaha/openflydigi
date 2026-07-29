@@ -1,0 +1,235 @@
+// SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+//
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+// The 160x80 screen. Two halves with very different costs: the display
+// settings are one packet, and an upload is about 25 seconds a frame over a
+// serial link that cannot be interrupted once it starts. The page puts the
+// frame count and the estimate next to the button for that reason.
+
+pragma ComponentBehavior: Bound
+
+import QtQuick
+import QtQuick.Layouts
+import QtQuick.Controls as Controls
+import QtQuick.Dialogs as Dialogs
+import org.kde.kirigami as Kirigami
+import org.kde.kirigamiaddons.formcard as FormCard
+import Apex5
+
+Kirigami.ScrollablePage {
+    id: page
+    objectName: "screenPage"
+    title: "Screen"
+
+    Dialogs.FileDialog {
+        id: fileDialog
+        objectName: "screenFileDialog"
+        title: "Choose an image or animation"
+        nameFilters: ["Images and animations (*.png *.jpg *.jpeg *.gif *.bmp *.webp)",
+                      "All files (*)"]
+        onAccepted: App.screen.open(selectedFile)
+    }
+
+    ColumnLayout {
+        spacing: 0
+
+        FormCard.FormHeader {
+            title: "Picture"
+        }
+
+        FormCard.FormCard {
+            // The preview is the encoded frame read back, not a scaled copy of
+            // the file, so what is shown is what the pad will hold -- crop,
+            // letterboxing and the 16-bit colour included.
+            FormCard.AbstractFormDelegate {
+                background: null
+                contentItem: ColumnLayout {
+                    spacing: Kirigami.Units.largeSpacing
+
+                    Rectangle {
+                        objectName: "screenPreviewFrame"
+                        // Four times the panel, which is small enough to sit in
+                        // a form and big enough to judge a crop by.
+                        implicitWidth: 640
+                        implicitHeight: 320
+                        Layout.alignment: Qt.AlignHCenter
+                        color: "black"
+                        radius: Kirigami.Units.smallSpacing
+                        border.width: 1
+                        border.color: Kirigami.Theme.disabledTextColor
+
+                        Image {
+                            objectName: "screenPreview"
+                            anchors.fill: parent
+                            anchors.margins: 1
+                            source: App.screen.previewSource
+                            visible: source.toString() !== ""
+                            fillMode: Image.PreserveAspectFit
+                            // The panel is 160x80 and this is drawn at 4x, so
+                            // smoothing would show an interpolation the pad
+                            // cannot produce.
+                            smooth: false
+                            asynchronous: true
+                        }
+
+                        Controls.Label {
+                            objectName: "screenPreviewPlaceholder"
+                            anchors.centerIn: parent
+                            visible: App.screen.previewSource === ""
+                            text: "No picture chosen"
+                            color: Kirigami.Theme.disabledTextColor
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.alignment: Qt.AlignHCenter
+                        spacing: Kirigami.Units.largeSpacing
+
+                        Controls.Button {
+                            objectName: "screenChooseButton"
+                            text: "Choose picture…"
+                            icon.name: "document-open"
+                            enabled: !App.screen.busy
+                            onClicked: fileDialog.open()
+                        }
+
+                        Controls.Button {
+                            objectName: "screenClearButton"
+                            text: "Clear"
+                            icon.name: "edit-clear"
+                            enabled: App.screen.frameCount > 0 && !App.screen.busy
+                            onClicked: App.screen.clear()
+                        }
+                    }
+                }
+            }
+
+            FormCard.FormDelegateSeparator {}
+
+            FormCard.FormComboBoxDelegate {
+                objectName: "screenFitMode"
+                text: "How it fits"
+                description: "The panel is 160x80 — twice as wide as it is tall, "
+                             + "so most pictures have to give something up."
+                model: App.screen.fitModes
+                currentIndex: App.screen.fitMode
+                enabled: App.screen.frameCount > 0 && !App.screen.busy
+                onCurrentIndexChanged: App.screen.fitMode = currentIndex
+            }
+
+            FormCard.FormDelegateSeparator {}
+
+            FormCard.FormSpinBoxDelegate {
+                objectName: "screenInterval"
+                label: "Milliseconds per frame"
+                from: 10
+                to: 2550
+                stepSize: 10
+                value: App.screen.interval
+                enabled: App.screen.animated && !App.screen.busy
+                onValueChanged: App.screen.interval = value
+            }
+
+            FormCard.FormDelegateSeparator {}
+
+            FormCard.FormTextDelegate {
+                objectName: "screenSummary"
+                text: {
+                    if (App.screen.frameCount === 0)
+                        return "Nothing loaded";
+                    if (App.screen.frameCount === 1)
+                        return "One still picture";
+                    return App.screen.frameCount + " frames";
+                }
+                description: {
+                    if (App.screen.message !== "")
+                        return App.screen.message;
+                    if (App.screen.frameCount === 0)
+                        return "Choose a PNG, JPEG or GIF.";
+                    // The estimate is the point of this line. An upload cannot
+                    // be stopped once the pad is switched over, so the cost
+                    // belongs on screen before the button is pressed.
+                    return "Writing this takes " + App.screen.estimate
+                           + ", and the pad restarts itself afterwards.";
+                }
+            }
+        }
+
+        FormCard.FormHeader {
+            title: "While the pad is idle"
+        }
+
+        FormCard.FormCard {
+            FormCard.FormSwitchDelegate {
+                objectName: "screenAlwaysOn"
+                text: "Keep the picture on screen"
+                // Named for what it does rather than for the bit behind it: the
+                // SDK calls this OffScreen, and setting it is what keeps the
+                // display lit. Off is a real blank -- which Space Station
+                // offers no way to do at all.
+                description: checked
+                             ? "The screen shows your picture."
+                             : "The screen stays dark; the logo button wakes the "
+                               + "status view for a couple of seconds."
+                checked: App.screen.alwaysOn
+                enabled: App.screen.loaded && App.screen.supported && !App.screen.busy
+                onToggled: App.screen.setAlwaysOn(checked)
+            }
+
+            FormCard.FormDelegateSeparator {}
+
+            FormCard.FormSwitchDelegate {
+                objectName: "screenStatusBar"
+                text: "Keep the status bar up"
+                description: "Otherwise it hides itself after a moment."
+                checked: App.screen.statusBarAlwaysOn
+                enabled: App.screen.loaded && !App.screen.busy
+                onToggled: App.screen.setStatusBarAlwaysOn(checked)
+            }
+        }
+    }
+
+    footer: Controls.ToolBar {
+        position: Controls.ToolBar.Footer
+
+        contentItem: RowLayout {
+            spacing: Kirigami.Units.largeSpacing
+
+            Controls.ProgressBar {
+                objectName: "screenProgress"
+                visible: App.screen.busy
+                // Indeterminate until the first packet lands, because the mode
+                // switch and the wait for the serial device take five seconds
+                // during which a bar sitting at zero looks stuck.
+                indeterminate: App.screen.progress === 0
+                value: App.screen.progress
+                Layout.preferredWidth: Kirigami.Units.gridUnit * 8
+            }
+
+            Controls.Label {
+                objectName: "screenHint"
+                text: {
+                    if (App.screen.busy)
+                        return App.screen.progressText
+                               + " — leave the pad plugged in.";
+                    if (App.screen.frameCount === 0)
+                        return "Choose a picture to send.";
+                    return "Sends over the pad's own upgrade link; it restarts "
+                           + "itself when done.";
+                }
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+                Layout.preferredWidth: 0
+            }
+
+            Controls.Button {
+                objectName: "screenUploadButton"
+                text: "Send to the pad"
+                icon.name: "document-send"
+                enabled: App.screen.canUpload
+                onClicked: App.screen.upload()
+            }
+        }
+    }
+}

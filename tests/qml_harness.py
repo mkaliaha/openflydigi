@@ -72,7 +72,7 @@ class TestPad(FakePad):
         self.transport = {"controller_data": True, "raw_data": False,
                           "keyboard": False, "mouse": False, "third_party": False}
 
-    def send(self, buf, wait=0.3):
+    def send(self, buf, wait=0.3, until=None):
         buf = bytes(buf)
         # Answered before the checksum test, like CMD_GET_INFO: `bind_grip`
         # builds a command-82 packet without a trailing checksum -- Flydigi's
@@ -288,10 +288,12 @@ class Fixture(QObject):
         self._shell = None
         self._profile_reads = 0
         self._lighting_reads = 0
+        self._screen_reads = 0
         # Connected after each model's own handler, so by the time a counter
         # moves the model already holds the new config.
         app.thread.worker.profile_loaded.connect(self._count_profile_read)
         app.thread.worker.lighting_loaded.connect(self._count_lighting_read)
+        app.thread.worker.screen_status.connect(self._count_screen_read)
 
     def _count_profile_read(self, *_args):
         self._profile_reads += 1
@@ -301,10 +303,51 @@ class Fixture(QObject):
         self._lighting_reads += 1
         self.changed.emit()
 
+    def _count_screen_read(self, *_args):
+        self._screen_reads += 1
+        self.changed.emit()
+
     @Property(int, notify=changed)
     def lightingReads(self):
         """How many lighting reads have landed. See `profileReads`."""
         return self._lighting_reads
+
+    @Slot(int, result=str)
+    def testImage(self, frames):
+        """A file URL for a still picture, or for the committed animation.
+
+        The screen model reads real files through `QImageReader`, so a test that
+        wants a loaded picture needs one on disk. A still is generated here; an
+        animation cannot be, because **Qt reads animated GIFs and cannot write
+        them**. `QImageWriter.supportedImageFormats()` has no gif in it at all,
+        and multi-page tiff and webp both write happily and then read back as a
+        single frame. So `qml/four-frames.gif` is committed instead -- 213 bytes,
+        ours rather than Flydigi's, and the only way to exercise the animation
+        branch at all.
+
+        `frames` is honoured for a still and ignored above one; the committed
+        file has four, which is what a caller asking for an animation gets.
+        """
+        import os
+        import tempfile
+
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QImage
+
+        if frames > 1:
+            return QUrl.fromLocalFile(
+                os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "qml", "four-frames.gif")).toString()
+        folder = tempfile.mkdtemp(prefix="apex5-screen-")
+        path = os.path.join(folder, "picture.png")
+        image = QImage(120, 60, QImage.Format_RGB888)
+        image.fill(0x203040)
+        image.save(path, "PNG")
+        return QUrl.fromLocalFile(path).toString()
+
+    @Property(int, notify=changed)
+    def screenStatusReads(self):
+        return self._screen_reads
 
     @Property(int, notify=changed)
     def profileReads(self):
@@ -320,6 +363,7 @@ class Fixture(QObject):
     def resetCounts(self):
         self._profile_reads = 0
         self._lighting_reads = 0
+        self._screen_reads = 0
         self.changed.emit()
 
     @Slot(result=QObject)

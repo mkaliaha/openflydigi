@@ -171,6 +171,7 @@ def collect():
         (models.ColourListModel, False),
         (models.GameListModel, False),
         (models.GameFilterModel, False),
+        (models.ScreenModel, False),
         (models.SetupModel, False),
         (models.SetupChecksModel, False),
     ]
