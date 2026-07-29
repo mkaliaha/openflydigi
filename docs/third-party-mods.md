@@ -13,7 +13,7 @@ drive the controller with no further work.
 Each mod runs inside the game and sends DSX-protocol JSON over UDP to `127.0.0.1:7878`:
 
 ```lua
--- from the Resident Evil mods' udp_client/packet.lua
+-- from the Resident Evil mods' udp_client/packet.lua and udp_client/client.lua
 data = { instructions = { left:packet(), right:packet() } }
 Client.get_port = function() return 7878 end
 ```

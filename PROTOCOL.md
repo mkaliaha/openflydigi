@@ -38,7 +38,8 @@ Key assemblies (in `bundle/`):
    real UI natively.
 2. They ship `GameFinder.Wine.dll` — Wine/Proton game discovery is already a supported concept.
 3. Ingress is the **DualSenseX (DSX) UDP protocol**, an open de-facto standard with an existing
-   mod ecosystem. Flydigi did not write 60 game integrations; they adopted DSX's.
+   mod ecosystem. Flydigi did not invent an ingress protocol for it; they adopted DSX's, which is
+   why the 11 third-party mods in their 94-game list drive the pad with no work from us.
 
 ---
 
@@ -361,7 +362,9 @@ and `AcquireController` is not a precondition for trigger commands. What is genu
 ## 6. Implementation path (Linux)
 
 1. `hidraw` writer implementing §2 framing + §3 commands.
-2. Bench-verify with `Race` (`SetForceTrigger`) and `K6` realtime — both are directly observable.
+2. Bench-verify with `Race` (`SetForceTrigger`) — directly observable, and done: §7. Not `K6`
+   realtime; `83`/`85`/`87` are gated on `DeviceCode == "k6"` (the Apex 6, §5), so that family is
+   not reachable on this pad.
 3. UDP listener on 7878 speaking §4 DSX JSON → existing DSX mods work under Proton
    (Wine shares the host loopback, so `127.0.0.1:7878` from inside the prefix reaches a Linux daemon).
 4. Optional: `/tmp/fcs.sock` protobuf server to drive the stock Electron UI on Linux.

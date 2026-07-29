@@ -30,8 +30,9 @@ SPDX-FileCopyrightText = "2026 Mikalai Kaliaha"
 SPDX-License-Identifier = "CC0-1.0"
 
 # The GUI links Qt, so copyleft costs nothing there, and a desktop frontend is
-# not something anyone needs to embed. Everything under flydigi/ and tools/
-# stays MIT so it can be reused without conditions.
+# not something anyone needs to embed. flydigi/ stays MIT so it can be reused
+# without conditions, as does everything under tools/ and tests/ that does not
+# import Qt -- the few files that do carry GPL-3.0-or-later headers of their own.
 [[annotations]]
 path = "gui/**"
 precedence = "closest"

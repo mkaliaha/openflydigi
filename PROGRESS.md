@@ -58,12 +58,12 @@ QML. See `gui/README.md`.
 
 | Tab | What works |
 |---|---|
-| Profiles → Buttons | remap, turbo + hold/toggle, rename, back up / restore to file |
+| Profiles → Buttons | remap, turbo + hold/toggle, reset all to default |
 | Profiles → Vibration | master switch, per-grip enable, min/max window, strength |
-| Controller → Other software | let Steam and similar take the pad over, and who currently holds it |
+| Controller → Selected profile / Other software | rename the open profile, back up / restore it to file; let Steam and similar take the pad over, and who currently holds it |
 | Profiles → Sticks | dead zone, outer dead zone, sensitivity curve presets, circular range |
-| Profiles → Triggers | stored effect — all six of Flydigi's, each with its own controls — and dead zone |
-| Adaptive triggers | all 94 games, searchable, filtered by route; vibration presets load onto the pad from here; per-game **Auto** toggle and a route picker for the nine multi-route games |
+| Profiles → Triggers | stored effect — all six of Flydigi's, each with its own controls — plus a dead zone that writes the curve block at 123 and is not confirmed to reach this pad |
+| Games | all 94 games, searchable, filtered by route; vibration presets load onto the pad from here; per-game **Auto** toggle and a route picker for the nine multi-route games |
 | Setup | the daemon's unit, "running now" and "start at login" as separate switches, the application-menu entry, and the udev rules behind one authentication prompt |
 | Lighting | effect, up to 5 colours, brightness, cycle time, react-to-rumble |
 
@@ -138,12 +138,18 @@ Two traps worth remembering, both of which cost real time:
     signal to watch, so it times out on work that already succeeded.
   * recursing `QObject.children()` over QML objects aborts the interpreter with a shiboken
     assertion. `findChildren` is fine.
+  * **A case that starts a read must wait for it to land.** `App.profile.select()` empties the name
+    field synchronously but asks the worker thread for the profile, so a case that only waits on the
+    field ends with a read in flight. It arrives during a *later* case's cleanup, where the
+    read-settled guard reports "a read was still arriving" against whichever test was running then —
+    two runs in three, blamed on a name-capping case that touches no device at all. The guard is
+    right; wait on `Fixture.profileReads` in the case that caused the traffic.
 
 `qmllint` is clean and worth keeping that way:
 
 ```bash
 tools/generate-qmltypes
-qmllint -I . -I /usr/lib64/qt6/qml gui/qml/Main.qml gui/qml/*/*.qml
+qmllint-qt6 -I . -I /usr/lib64/qt6/qml gui/qml/Main.qml gui/qml/*/*.qml
 ```
 
 `pyside6-project build` would be the framework's own route, but it shells out to
@@ -316,8 +322,11 @@ Two consequences worth the space:
 
   * **A GUI must compute the bank.** Offering a dead-zone slider that writes `center` would move a
     number, dirty the profile, write successfully — and change nothing the hand can feel. Whatever
-    curve the UI offers has to be sampled into nine points the way Space Station samples it:
-    `clamp(round(output_percent), -50, 100) + 50` at x = 0, 12.5, … 100.
+    curve the UI offers has to be sampled into nine points at x = 0, 12.5, … 100 as
+    `clamp(trunc(output_percent), -50, 100) + 50`. Space Station's JavaScript rounds there (the
+    `round` in the listing above is theirs, faithfully), but an untouched pad holds
+    `50 62 75 87 100 112 125 137 150` and only truncation reproduces it, so `stick_bank()`
+    truncates on purpose — see `flydigi/mapping.py`.
   * **It makes the sign question much less urgent.** `center` and `edge` are the two fields whose
     negative encoding is ambiguous, and neither reaches the firmware. They matter for what Space
     Station *displays* if someone opens a profile we wrote, not for how the pad behaves.
@@ -427,8 +436,9 @@ the force-trigger block at 195/215 instead — so anything we write into 123..13
 subsequent edit in their app, and the only repair is a whole-profile "Restore default".
 
 **Where those two numbers land, exactly**, found while filling in the effect vocabulary: 195 and 215
-are `Param[0]` and `Param[1]` of each side's force-trigger block, and the protobuf record for them
-is `AdapterTriggerTypeNormal { Start, End }` — the *General* effect's two parameters are the stroke
+are `Param[0]` of the left and right force-trigger blocks — each side's pair is `Param[0]`/`Param[1]`
+at 195/196 and 215/216 — and the protobuf record for them is
+`AdapterTriggerTypeNormal { Start, End }` — the *General* effect's two parameters are the stroke
 window. So the Triggers page's "Dead zone", which writes the curve block at 123, is very likely
 writing somewhere this pad does not read, and the control Space Station calls "Stroke Setting" is
 missing from ours. Not yet done, and worth doing as one piece: a start/end pair on General, and
@@ -499,7 +509,7 @@ trigger *vibration* block, and the Apex 5 has no such motors: `IsSupportTriggerV
 flag. `MappingConfig.trigger_motor()` reads and writes the four fields Flydigi's own writer touches,
 with the layout asserted in tests, and nothing in the app calls it. The full write-up, including the
 percentage-versus-byte trap and the open question about whether the right trigger's copy is read at
-all, is item 0 under **Multiple pads**. `vibr_limit`, `time_limit`, the gear `type` byte and the
+all, is item 0 under **Multiple pads**. `min_start`, `min_time`, the gear `type` byte and the
 whole micro gear stay unexplained, and a bench sweep for them needs a pad that has the hardware.
 
 ### Small commands worth having
@@ -530,8 +540,9 @@ it before `SetForceTrigger`, and our hardware tests already prove 81/82 work wit
 | 4 | mapping switch (no UI string; *not* the third-party toggle) | 9 | off screen |
 | 5 | joystick debounce | 10 | audio (gated on the `AudioUsable` bit from command 3) |
 
-Standalone, all `[4]=3, [5]=value, [6]=crc`: **20** report rate `{1000=1, 500=2, 250=4, 125=8}`,
-**21** joystick precision, **22** joystick sensitivity, **23** sleep time in minutes, **29** restart.
+Standalone, `[4]=3, [5]=value, [6]=crc`: **20** report rate `{1000=1, 500=2, 250=4, 125=8}`,
+**21** joystick precision, **22** joystick sensitivity, **23** sleep time in minutes. **29** restart
+takes no argument: `[4]=2, [5]=crc`.
 
 **Do sub-ID 1 first** — quick-switch is the only one here that gives a Linux user something
 otherwise unobtainable: switching profiles from the pad with nothing running.
@@ -578,11 +589,14 @@ particular is testable the moment multi-pad support exists; see "Multiple pads" 
     generations. Comfortably a dozen independently flashable images, and we have the flashing
     protocol for none of them.
 
-    The scale is the other half of the argument. `ChipModule` is `{ChipMain, ChipScreen,
-    ChipTrigger, ChipDongle}` — and the info reply carries ADC and NearLink versions too — across
-    **two silicon vendors**, `ChipType.{Telink, Wch}`, with `ChipId.{WCH_582, WCH_547, WCH_571}`
-    selecting among WCH parts. Implementing this means implementing two third-party bootloader
-    protocols correctly, first time, with no recovery when wrong. The payoff is a convenience wanted
+    The scale is the other half of the argument. `ChipModule` has eight members, and the Apex 5's
+    own factory entry (`GenerateControllerApex5`) declares five of them — `ChipMain`, `ChipRf`,
+    `ChipScreen`, `ChipDongle`, `ChipSi` — across **four silicon vendors**, `ChipType.{Megahunt,
+    NearLink, Freq, Jieli}`. The `ChipType.{Telink, Wch}` split, with `ChipId.{WCH_582, WCH_547,
+    WCH_571}` selecting among WCH parts, is a branch only the legacy XInput/DInput builders carry;
+    this pad declares neither vendor, and its NewXInput builder sends the chip module alone.
+    Implementing this means implementing four third-party bootloader protocols correctly, first
+    time, with no recovery when wrong. The payoff is a convenience wanted
     perhaps twice in a pad's life. It is not worth one brick, and it would cost the hardware
     everything here is validated against.
 
@@ -613,8 +627,8 @@ uses it.
 
 The work would be almost entirely in `flydigi/`: per-model key tables, offsets and capability flags.
 `gui/models/` only knows `mapping.APEX5_KEYS`. The prerequisite is the device-type guard — see
-`flydigi/device.py`, which today matches on vendor id alone and would happily write an Apex 5 config
-to a Vader 4.
+`flydigi/device.py`, which today matches on vendor id plus the vendor report-descriptor prefix —
+neither of which tells the models apart — and would happily write an Apex 5 config to a Vader 4.
 
 **Mode switch (27)** — `BluetoothMode {Switch=1, Xbox=2, Flashplay=3, DInput=4}` — is real and
 `IsSupportNs` is true, but it changes the report descriptor and probably the hidraw node. Treat as a
@@ -882,7 +896,7 @@ choices.
 |---|---|---|---|
 | Joystick debounce | 5 | supported, on | "Joystick debounce" — off makes sticks read subtle movement better but jitter at rest, and **disables auto-calibration** |
 | Rebound algorithm | 7 | supported, on | "Rebounce algorithm" — filters the reverse spike a stick's inertia produces on release |
-| Motion debounce | 3 | **unsupported** | none, in any of the ten locales — only a dangling `IpcCommandEnum_EnableMotionDebounce` |
+| Motion debounce | 3 | **unsupported** | none, in any of the twelve locales — only a dangling `IpcCommandEnum_EnableMotionDebounce` |
 
 So Space Station's debounce toggle is sub-id 5. Sub-id 3 needs no UI.
 
@@ -1089,7 +1103,9 @@ slots are identical, so anything here is the factory shape rather than one profi
 145 grip vibration  0 | 0  60 255  50 | 0  80 255  50
 154 trigger motors  0 | 1 30 80 5 1 50 0 · 255 40 120 5 0 50 0 | (same, right)
 183 wheel           0   0
-185 force trigger   0   0  10  10 100   1 255  70   0 | 0 0 0 0 0 0 0 0 0 0
+185 force trigger   0   0  10  10 100   1 255  70   0   ? | 0 0 0 0 0 0 0 0 0 0
+                    left side only, and one byte short: [9] mixed border was not
+                    transcribed, nor was the right side (205..225)
 790 joy extra L     0 | 50 62 75 87 100 112 125 137 150 | 0 | 0
 802 joy extra R     0 | 50 62 75 87 100 112 125 137 150 | 0 | 0
 814 macro cycle     255 255 255 255 255 255   3   3   3   3   3 255 255 255 255 255
@@ -1108,9 +1124,12 @@ What this settles without a single guess:
   * **The motion smoothing block at 830 is the joystick block minus its type byte**: `zero, p1.x,
     p1.y, p2.x, p2.y, end`, and it carries the identical `0 63 63 127 127 127`. Same code can read
     all three.
-  * **The trigger-motor gears are two 7-byte structs per side**, and the second one leads with
-    **255**, not 1 — so `type` there is an enable flag stored inverted, like every other switch in
-    this blob. `trigger_motor()` reads the first gear only, which is the enabled one.
+  * **The trigger-motor gears are two 7-byte structs per side**, and their lead bytes differ: the
+    first gear's `type` is **1**, the micro gear's **255**. Nothing in the SDK decodes either — both
+    are read as plain ints with no consumer — and neither fits the blob's inverted-switch convention
+    (0 on, 0xFF off), under which 1 is the *off* value the enable byte itself writes. So `type` stays
+    unexplained, as J5 says. `trigger_motor()` reads the first gear, the only one
+    `SaveTriggerVibrationConfig` touches.
   * **The force-trigger bind is populated at rest**: `bind.Filter = 10, bind.Scale = 10,
     bind.Param = [100, 1, 255, 70, 0]` with `Type = 0` and `bind.Type = 0`. So J4's claim that the
     stored bind mirrors live command 82 has real numbers behind it to diff against.
@@ -1210,7 +1229,7 @@ What this settles without a single guess:
 | `flydigi/ps5_data.py` | Generated DualSense descriptor + feature blobs (from MIT inputtino) |
 | `tools/gen_ps5_data.py` | Regenerates the above from inputtino's `ps5.hpp` |
 | `work/ref/inputtino/` | MIT reference clone — DS5 output report layout, canned feature reports |
-| `tests/` | `test_forza.py` (7), `test_dsx.py` (9), `test_monitor.py`, `test_relay.py` (37), `test_mapping.py` (105), `test_gui.py` (24) — all pass without hardware |
+| `tests/` | `test_device.py`, `test_dsx.py`, `test_forza.py`, `test_games.py`, `test_mapping.py`, `test_monitor.py`, `test_prefs.py`, `test_relay.py` need no Qt; `test_models.py`, `test_shell.py`, `test_qml.py` need PySide6 — all pass without hardware, each printing its own count |
 | `tests/fake_pad.py` | Stand-in controller: multi-packet reads, diffed writes, apply, save, checksum rejection |
 | `tools/forza-simulate` | Synthetic telemetry generator, for testing without the game |
 | `tests/test_forza.py` | Self-test for the parser and rule engine (no hardware needed) |
@@ -1225,7 +1244,7 @@ What this settles without a single guess:
 | `tools/flydigi_cmd.py` | Manual command tool — `info`, `race`, `normal`, `bind`, `rumble`, `game`, `k6*`, `raw` |
 | `gamelist.json` | All 94 games + per-game configs (from the public API) |
 | `mods/` | All 46 downloadable mod zips (44 MB) |
-| `bundle/` | 250 .NET assemblies extracted from `SpaceStationService.exe` |
+| `bundle/` | 248 .NET assemblies (plus `deps.json` / `runtimeconfig.json`) extracted from `SpaceStationService.exe` |
 | `decompiled/` | C# source for AdapterTriggerService, ControllerSdk, Hid, Basic, SpaceStationService |
 | `asar/` | Extracted Electron app (`main.pretty.js` is the beautified main process) |
 
@@ -1236,12 +1255,12 @@ What this settles without a single guess:
 | 1. Vibration bind | 33 | cmd `82` SyncWithGrip, config from API, driven by game rumble | **Done & automated** — verified in Death Stranding 2, triggers buzz with in-game rumble, daemon auto-detects and applies |
 | 2. ForzaDualSense | 4 | Forza "Data Out" UDP telemetry → JSON rule engine → cmd `81` | **Done — validated in Forza Horizon 6.** All 7 distinct rules fired in-game and the effects are felt on the pad |
 | 3. XGameMonitor | 31 | Generic engine + per-game config; reads game process memory | **Done — validated in Dark Souls: Remastered.** Weapon-specific filters fire from live memory reads; resistance differs correctly per weapon |
-| 4. PS5 emulation | 15 listed, **any DS5-aware game in practice** | Game natively speaks DualSense; needs uhid virtual DS5 | **Validated in Deathloop** — adaptive triggers work in-game. Input relay, DS5 binding and effect translation all confirmed. Rumble and gyro outstanding, see notes |
+| 4. PS5 emulation | 15 listed, **any DS5-aware game in practice** | Game natively speaks DualSense; needs uhid virtual DS5 | **Validated in Deathloop** — adaptive triggers work in-game. Input relay, DS5 binding, effect translation, rumble, gyro and battery all confirmed. Haptic-audio titles need the PipeWire bridge, and M1-M4 have no DualSense destination — see notes |
 | 5. Third-party mods | 11 | Game-side mods (REFramework, ScriptHookV, F4SE, Bannerlord module, F1 telemetry) | **No work needed** — they send DSX JSON to 127.0.0.1:7878, which `tools/flydigi-dsx` already accepts. Deliberately not shipped or supported; see [docs/third-party-mods.md](docs/third-party-mods.md) |
 
 ## Owned games (for prioritisation)
 
-- **Tier 1**: Death Stranding 2 *(downloading)*, Silksong, Uncharted: Lost Legacy, Space Marine 2
+- **Tier 1**: Death Stranding 2, Silksong, Uncharted: Lost Legacy, Space Marine 2
   *(200 GB — skipped, disk limited to 512 GB)*
 - **Tier 2**: Forza Horizon 4, 5, 6 (all three)
 - **Tier 3**: everything except Starfield, AC Odyssey/Origins/Valhalla, Hitman, Sniper Elite 5,
@@ -1561,7 +1580,6 @@ themselves are already parsed (`data[45..47]` of the DS5 output report).
   Death Stranding 2 (`['DS2', 'DEATH STRANDING 2: ON THE BEACH']`) and Uncharted (`['u4','tll']`)
   do have them. Need a fallback — likely resolving the exe from the Steam manifest, which is what
   Flydigi's bundled `GameFinder.StoreHandlers.Steam` does.
-- **Steam not yet installed** (`flatpak install -y flathub com.valvesoftware.Steam`).
 - **Steam Input contention**: Steam/SDL also claim the hidraw node and send their own
   acquire/heartbeat (`0x1C`). May need to disable Steam Input for the pad or tolerate it. Distinct
   from our own two-writer problem (see "Two writers on one hidraw node" under Next) — a lock fixes
@@ -1583,10 +1601,12 @@ Everything is committed and green. To check:
 distrobox enter apex-dev -- bash -lc 'cd ~/Projects/ApexExperiments && \
   python3 tests/test_models.py && python3 tests/test_shell.py && python3 tests/test_qml.py'
 for t in tests/test_{device,dsx,forza,games,mapping,monitor,prefs,relay}.py; do python3 "$t"; done  # no Qt
-tools/generate-qmltypes && qmllint -I . -I /usr/lib64/qt6/qml gui/qml/Main.qml gui/qml/*/*.qml
+tools/generate-qmltypes && qmllint-qt6 -I . -I /usr/lib64/qt6/qml gui/qml/Main.qml gui/qml/*/*.qml
 ```
 
-201 model tests, 52 shell, 71 QML, 348 backend; qmllint and `reuse lint` clean.
+Every suite prints its own count; qmllint and `reuse lint` clean. The counts are deliberately not
+repeated here — the last one sat wrong for months, and `test_mapping.py` moved twice in a single
+session while this file was being corrected.
 
 **Both known bugs are fixed**, each with a test that fails without the fix.
 
@@ -1617,7 +1637,7 @@ tools/generate-qmltypes && qmllint -I . -I /usr/lib64/qt6/qml gui/qml/Main.qml g
 
 **Not settleable by reading; needs the pad.** Whether the firmware accepts 164/165 aimed at a slot
 it is not running (the app now sidesteps this by always editing the running profile), and what
-`filter` / `vibr_limit` / `time_limit` do in the trigger-motor gears.
+`filter` / `min_start` / `min_time` do in the trigger-motor gears.
 
 ### Working on the GUI
 
@@ -1656,7 +1676,7 @@ install. The whole job is the relay.
 
 What to watch for:
 - Double input (both pads registering) → the SDL ignore variable is not taking effect.
-- Effects logged but not felt → EFFECT_MAP mapping is wrong, not the transport; the transport is
+- Effects logged but not felt → the `relay.translate_ds5` mapping is wrong, not the transport; the transport is
   the same cmd 81 that Forza already proved.
 - Touchpad-click is on the touchpad *sub-device*, which needs `udev/72-flydigi-apex5.rules`
   installed or the node stays root-owned. **The rules only started working when they were renamed
@@ -1741,15 +1761,11 @@ any undocumented command ordering.
 
 ## Next steps
 
-All five engines are built. What remains needs games, not code:
+All five engines are built, and all three game validations are done — Forza Horizon 6 (tier 2),
+Dark Souls: Remastered (tier 3) and Deathloop (tier 4); see the tier table and the per-game
+sections above. What remains is code:
 
-1. **Forza Horizon 6** — enable Data Out (127.0.0.1:5300), run `tools/flydigi-forza --dump`
-   first to confirm telemetry crosses the Proton boundary, then run it for real.
-2. **Dark Souls: Remastered** — validates Tier 3 (31 games). Run
-   `tools/flydigi-monitor --probe <config>` and check the `move` define changes as you swing.
-   If it reads 0, suspect module-base resolution under Proton.
-3. **Deathloop** — validates Tier 4. Launch with
-   `SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501` so it binds the virtual DualSense, then
-   tune `relay.EFFECT_MAP` by feel.
-4. **Decompile ChargerSdk / CoolerSdk** for the gen2 dock.
-5. **Qt/KDE app** — see the end-goal section above.
+1. **Decompile ChargerSdk / CoolerSdk** for the gen2 dock.
+2. **Qt/KDE app** — the Kirigami app is built and green (profiles, buttons, sticks, vibration,
+   triggers, lighting, games, setup). Still missing: screen/GIF upload, macros, device settings
+   and the charging dock — see the end-goal section above and "Next".

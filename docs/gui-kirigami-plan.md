@@ -15,9 +15,11 @@
 >     They work, but qmllint cannot see them, so all 117 model references were unqualified
 >     accesses it had to ignore. Registering the models with `QmlElement` and generating type
 >     information got qmllint to zero and made it find a real bug.
->   * **The testing section below is right that QML can be driven, and wrong about how.** Python's
->     `findChild` cannot see an item created by a delegate — see "Testing after the rewrite",
->     corrected in place.
+>   * **The testing section below is right that QML can be driven, and wrong about how.** It is left
+>     as written, like the rest of the plan. Python's `findChild` cannot see an item created by a
+>     delegate, and Qt only delivers synthesised clicks to a window it showed itself — so layer 3 is
+>     not `QtTest` driven from Python. Every interaction test is a QtQuickTest case in `tests/qml/`,
+>     with only the model and load layers left in Python.
 
 The old app was QtWidgets with default layouts — a 2012 config-dialog idiom. Breeze styled it,
 so it did not look alien, but the visual grammar was a decade old: a 23-row table of combo boxes,

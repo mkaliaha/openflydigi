@@ -74,7 +74,7 @@ singleton of the `Apex5` module, registered by the `QmlElement` decorators.
     python3 tests/test_qml.py       # QtQuickTest: real clicks on real delegates
 
     tools/generate-qmltypes         # then:
-    qmllint -I . -I /usr/lib64/qt6/qml gui/qml/Main.qml gui/qml/*/*.qml
+    qmllint-qt6 -I . -I /usr/lib64/qt6/qml gui/qml/Main.qml gui/qml/*/*.qml
 
 `tools/generate-qmltypes` is what makes qmllint useful — without the generated
 type information every model reference is an unqualified access it has to shrug

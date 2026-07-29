@@ -4,7 +4,7 @@ Native Linux support for the Flydigi Apex 5's **ForceAdapt adaptive triggers** �
 the one major feature that otherwise requires Flydigi's Windows-only Space
 Station app.
 
-Everything here is pure Python with **no dependencies**.
+The backend is pure Python with **no dependencies**; only the desktop app needs Qt.
 
 ## Status
 
@@ -15,10 +15,10 @@ for the wire protocol and [PROGRESS.md](PROGRESS.md) for project state.
 | Approach | Games | State |
 |---|---|---|
 | Vibration bind (config only) | 33 | Working, automated |
-| Forza telemetry | 4 | Built, self-tested |
+| Forza telemetry | 4 | Validated in Forza Horizon 6 |
 | DSX protocol listener | third-party mods | Built, self-tested |
 | Game-memory monitor | 31 | Validated in Dark Souls: Remastered; pointer chains are per-build |
-| Virtual DualSense | 15 | Foundation working |
+| Virtual DualSense | 15 listed, any DS5-aware game | Validated in Deathloop; HD/audio haptics blocked |
 
 ## Quick start
 
@@ -73,8 +73,9 @@ The app needs the distribution's PySide6, built against the same Qt as
 Kirigami. On an immutable system, a `distrobox` with those packages works
 without layering anything; see `gui/README.md`.
 
-PySide6 is a dependency of the GUI only — everything under `flydigi/` and
-`tools/` keeps working on a machine with no Qt installed.
+PySide6 is a dependency of the GUI only — everything under `flydigi/`, and every
+tool that talks to the pad, keeps working on a machine with no Qt installed.
+(`tools/generate-qmltypes` is the exception; it is GUI build tooling.)
 
 ## Requirements
 
@@ -123,15 +124,16 @@ SPDX header, full texts are in `LICENSES/`, and `reuse lint` verifies it.
 
 | | |
 |---|---|
-| `flydigi/`, `tools/`, `tests/` | MIT |
+| `flydigi/`, `tools/`, `tests/` | MIT, except the Qt-dependent files — `tools/generate-qmltypes`, `tests/test_models.py`, `tests/test_qml.py`, `tests/test_shell.py`, `tests/qml_harness.py`, `tests/qml/` — which are GPL-3.0-or-later |
 | `README.md`, `PROGRESS.md`, `docs/` | MIT |
 | `PROTOCOL.md` | CC0-1.0 |
 | `udev/`, `pipewire/` | CC0-1.0 |
 | `gui/` | GPL-3.0-or-later |
 
 The protocol implementation is MIT because reuse is welcome without conditions —
-take it into any project, under any license. Only the desktop frontend is
-copyleft, since it links Qt and copyleft costs nothing there. The GUI importing
+take it into any project, under any license. Copyleft is confined to what links
+Qt — `gui/`, plus the handful of Qt-dependent files under `tools/` and `tests/`
+listed above — since GPL costs nothing there. The GUI importing
 `flydigi/` does not make `flydigi/` GPL; those files stay independently
 reusable. See [LICENSE](LICENSE) for the full reasoning.
 

@@ -22,7 +22,7 @@ written out is read back from Qt. The output then goes through Qt's own
 qmltyperegistrar, unchanged.
 
     tools/generate-qmltypes
-    qmllint -I . -I /usr/lib64/qt6/qml gui/qml/Main.qml gui/qml/*/*.qml
+    qmllint-qt6 -I . -I /usr/lib64/qt6/qml gui/qml/Main.qml gui/qml/*/*.qml
 
 Re-run it after adding or renaming anything a view binds to.
 """

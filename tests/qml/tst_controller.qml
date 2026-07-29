@@ -143,9 +143,20 @@ TestCase {
 
         // Slot 1 has not been read, so there is no title to show -- the field
         // must not go on showing slot 0's.
+        let before = Fixture.profileReads;
         App.profile.select(1);
         tryCompare(field, "text", "", 3000,
                    "the name field kept the previous profile's name");
+
+        // Wait for the read this case started. `select()` empties the field
+        // synchronously but asks the worker thread for the profile, so without
+        // this the case ends with a read in flight -- it lands during some
+        // later case's cleanup, which reports "a read was still arriving" and
+        // fails whichever test was unlucky enough to be running then. That is
+        // what made this suite flaky: two runs in three, blamed on the name-cap
+        // case, which touches no device at all.
+        tryVerify(() => Fixture.profileReads > before, 5000,
+                  "the slot-1 read never landed");
     }
 
     function test_backup_and_restore_wait_for_a_profile() {
