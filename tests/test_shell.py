@@ -131,14 +131,18 @@ def test_startup_reads_only_the_open_profile(qt_app):
 
 
 def test_the_models_reflect_what_the_pad_reported(qt_app):
-    pad = TestPad(battery=6, wired=False)
+    # Five, not six. Six is the charging sentinel, and a pad cannot report it
+    # with the charging bit clear -- the fixture used to, which only looked
+    # sensible while the scale was wrongly believed to run to eight.
+    pad = TestPad(battery=5, wired=False)
     app_object, engine, window = load_shell(qt_app, pad)
     pump(qt_app)
 
     device = app_object.device
     check("the pad is reported connected", device.connected)
-    check("battery comes from the pad", device.battery == 6, str(device.battery))
-    check("battery is reported in eight steps", device.batterySteps == 8)
+    check("battery comes from the pad", device.battery == 5, str(device.battery))
+    check("and five is a full pad", device.battery == device.batterySteps)
+    check("battery is reported in five steps, not eight", device.batterySteps == 5)
     check("the connection type comes from the pad",
           device.connectionType == "dongle", device.connectionType)
     check("the summary names the connection", "dongle" in device.summary,

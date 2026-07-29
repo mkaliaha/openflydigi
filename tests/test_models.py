@@ -886,7 +886,7 @@ def test_device_folds_in_an_info_reply():
                          "connect_type": "dongle"})
     check("an info reply marks it connected", device.connected)
     check("battery is reported in steps", device.battery == 5, str(device.battery))
-    check("battery steps are eight", device.batterySteps == 8)
+    check("battery steps are five -- 5 is a full pad", device.batterySteps == 5)
     check("connection type is reported", device.connectionType == "dongle")
     check("the summary names the connection", "dongle" in device.summary,
           device.summary)

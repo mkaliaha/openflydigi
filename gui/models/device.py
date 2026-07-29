@@ -20,9 +20,17 @@ from flydigi import motion
 QML_IMPORT_NAME = "Apex5"
 QML_IMPORT_MAJOR_VERSION = 1
 
-# The pad reports charge in eight steps, not a percentage. Showing "4/8" is
-# honest about that; inventing "50%" would not be.
-BATTERY_STEPS = 8
+# The pad reports charge in steps, not a percentage. Showing "4/5" is honest
+# about that; inventing "80%" would not be.
+#
+# **Five, not eight**, and this said eight for its whole life. The scale comes
+# from the pad's own reply -- a 4-bit nibble, which is where eight was guessed
+# from -- but Space Station only ever draws `Power0.svg` through `Power6.svg`,
+# picked as `level <= 6 ? level : 0`, and the SDK turns the charging bit into
+# the literal 6. So the display domain is 0..6 with 6 meaning charging, which
+# leaves 0..5 for charge and makes **5 full**. `flydigi/motion.py` had it right
+# all along; this constant did not, and reported a full pad as five-eighths.
+BATTERY_STEPS = motion.MAX_LEVEL
 
 
 @QmlElement

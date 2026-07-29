@@ -42,7 +42,8 @@ ColumnLayout {
             }
 
             // The pad reports charge in eight steps, not a percentage. Saying
-            // "5/8" is honest about that; "62%" would not be.
+            // "4/5" is honest about that; "80%" would not be. Five is full --
+            // see gui/models/device.py, which said eight for a long time.
             Controls.Label {
                 objectName: "batteryLabel"
                 text: {

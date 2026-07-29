@@ -107,7 +107,14 @@ Kirigami.ScrollablePage {
                             // smoothing would show an interpolation the pad
                             // cannot produce.
                             smooth: false
-                            asynchronous: true
+                            // Synchronous on purpose. Asynchronous loading
+                            // leaves the item blank for a frame or two while
+                            // the next image arrives, which at ten frames a
+                            // second reads as a flicker on light pictures.
+                            // These are 160x80 PNGs already on local disk --
+                            // there is nothing to wait for.
+                            asynchronous: false
+                            cache: true
                         }
 
                         Controls.Label {
