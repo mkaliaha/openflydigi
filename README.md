@@ -52,6 +52,13 @@ tools/flydigi-monitor configs/monitor/<game>.json
 tools/flydigi-ds5
 #   set per-game: SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501 %command%
 #   and disable Steam Input for that game
+
+# the 160x80 screen
+tools/flydigi-screen status
+tools/flydigi-screen show photo.jpg     # ~25s; the pad reboots itself after
+tools/flydigi-screen animate spin.gif   # ~25s per frame, so keep it short
+tools/flydigi-screen off                # blank the panel -- Space Station cannot
+#   needs the udev rules: the screen's bootloader tty is root:dialout
 ```
 
 ## Desktop app

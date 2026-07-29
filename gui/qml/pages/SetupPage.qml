@@ -158,7 +158,13 @@ Kirigami.ScrollablePage {
             Controls.Label {
                 objectName: "rulesNotNeeded"
                 Kirigami.FormData.label: "udev rules:"
-                text: "Not needed — the devices are already reachable."
+                // Two different good states, and saying the wrong one is how a
+                // page teaches you not to read it: installed, or genuinely not
+                // called for. The screen upload needs them even when every
+                // other device is reachable without.
+                text: App.setup.rulesInstalled
+                      ? "Installed."
+                      : "Not needed — the devices are already reachable."
                 color: Kirigami.Theme.disabledTextColor
                 visible: !App.setup.rulesNeeded && App.setup.loaded
             }

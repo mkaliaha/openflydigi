@@ -352,6 +352,9 @@ on the vendor node, found by its `06 a0 ff` descriptor prefix; no CRC byte is re
 and `AcquireController` is not a precondition for trigger commands. What is genuinely still open:
 
 - Report ID for the Apex 5 over the 2.4G dock and Bluetooth. Only wired has been tested.
+- **Whether this pad implements the picture-upload family (208..211) at all**, and in which of the
+  three envelopes — §8b. Space Station uploads to a k5 through the firmware console instead, so
+  nothing in their software exercises it here. One start packet settles it.
 - **Whether mode 5 (`Vibration`) does anything** — a curiosity, not a gap: nothing in Flydigi's
   stack sends it (§3a), so no route depends on the answer. Modes 0–4 are settled and felt (§7).
 - Whether the pad honours a stored effect on profile switch without the host re-sending it. Effects
@@ -369,3 +372,291 @@ and `AcquireController` is not a precondition for trigger commands. What is genu
    (Wine shares the host loopback, so `127.0.0.1:7878` from inside the prefix reaches a Linux daemon).
 4. Optional: `/tmp/fcs.sock` protobuf server to drive the stock Electron UI on Linux.
 5. Optional: telemetry providers (e.g. Forza "Data Out" UDP) for titles with no mod.
+
+---
+
+## 8. The screen
+
+The Apex 5 has a 160×80 colour screen (`IsSupportScreen`, set only for this pad and the k2
+family). Two halves, and their confidence levels are very different: the **image format is
+settled**, the **upload transport is not**.
+
+### 8a. Image format — verified offline, against Flydigi's own files
+
+A frame is **25604 bytes** and is an **LVGL v8 binary image**:
+
+```
+0..4    header: little-endian uint32 of bit fields
+        cf (5) | always_zero (3) | reserved (2) | width (11) | height (11)
+        An Apex 5 frame is cf=4 (LV_IMG_CF_TRUE_COLOR), 160x80 -- the constant 04 80 02 0A
+4..     160 x 80 pixels, RGB565, high byte first, row-major
+```
+
+A `.bin` is frames concatenated with no container of any kind: file size is always an exact
+multiple of 25604.
+
+Three independent things pin this down. `always_zero` and `reserved` really are zero, which a wrong
+bit layout would not produce. Width falls out as 160, and an autocorrelation over the pixel bytes
+finds its lowest inter-row difference at a stride of exactly 320 = 160 × 2. And decoding this way
+gives a picture where the other byte order gives colour noise. All **14** files Flydigi ships under
+`Configs/Controller/{k2,k5}/default/default_screen_image_*.bin` — 686 frames — decode and re-encode
+**byte-identical** through `flydigi/screen.py`.
+
+Byte order is worth stating because LVGL treats it as a build option rather than part of the
+format: this is `LV_COLOR_16_SWAP = 1`. Space Station's own converter is the LVGL one — its image
+picker carries `ICF_TRUE_COLOR_ARGB8332 / 8565 / 8565_RBSWAP / 8888` and `CF_RAW` verbatim.
+
+`default_screen_image_<deviceType>.bin` is per device *type*, not per model: an Apex 5 has six
+(128, 129, 133, 134, 135, 136), and 134 is the EVA edition.
+
+### 8b. Picture upload — the SDK's HID path, and why the Apex 5 may not use it
+
+Four commands, in the *legacy* envelope rather than the `5A A5` one — they predate it, and the SDK
+has **no NewXInput branch for them at all**. Its XInput and DInput branches are the same packet with
+a different prefix, so all three envelopes are one builder:
+
+```
+new     03 5A A5 <cmd> <len> <payload…> <crc>      every other command on this pad
+a5      03    A5 <cmd> <len> <payload…> <crc>      the SDK's DInput branch
+bare    03       <cmd> <len> <payload…> <crc>      the SDK's XInput branch
+```
+
+`len` counts the command and length bytes as well as the payload; the checksum is the usual 8-bit
+sum from the command byte up to it.
+
+| Cmd | What | Payload |
+|---|---|---|
+| `208` | start a frame | `picId, picType, picCount, picIdx, period, sizeHigh, sizeLow` |
+| `209` | data | `offsetHigh, offsetLow, chunk…` |
+| `210` | end a frame | `picId, picIdx, sizeHigh, sizeLow, 0` |
+| `211` | finish the upload | `picId, frameCount, sizeHigh, sizeLow, 0` |
+
+`picId` is always 1, `picType` is 1 for an animation and 0 for a single image, `picIdx` is 1-based,
+and `size` is **25604** — the frame *including* its four header bytes, which Flydigi pass as the
+literal pair `(100, 4)`. The data offsets run over the same 25604 bytes. `period` is
+`frameInterval / 100` in the XInput branch; the DInput branch writes a literal zero there instead
+and adds one to `picType` and `picIdx` on top of the caller's numbering. Only one of those can be
+what the firmware wants, and the branch that carries the frame interval is the one that can
+describe an animation at all.
+
+**Space Station never sends any of this to an Apex 5.** `upload_pic2screen` in the Electron layer
+branches on the device code: for `k5` it sends `SwitchUsb` — which is `SwitchToFirmwareUpgradeMode`,
+**command 31**, with `chipModule = CHIP_SCREEN` and `chipType = FREQ` — waits five seconds, and then
+runs `firmware/FirmwareConsole.exe --upgrade_type 2 --pic_type … --pic_num … --frame_rate …` over a
+temp file of the frames. Every other pad takes the HID path above. `ControllerSdk.UploadPicImpl`
+gates only on `IsSupportScreen`, so the SDK *would* send 208..211 to a k5 if asked — nothing in
+their UI asks.
+
+**All four are live on a wired Apex 5, in the `new` envelope.** Measured, because nothing in the
+SDK predicts it — there is no NewXInput branch for this family at all. Every field varied in a
+payload comes back echoed, which is the same signature the trigger commands show:
+
+```
+TX 208 picType=1 count=5 idx=2 period=3   RX 5a a5 18 01 00 | 01 05 02 03
+TX 209 offset=0x1234 data=AA AA AA        RX 5a a5 19 01 00 | 34 aa aa aa
+TX 210 picId=1 idx=3 size=0x1234          RX 5a a5 d2 07    | 01 03 12 34
+TX 211 picId=1 count=9 size=0x1234        RX 5a a5 d3 07    | 01 09 12 34
+```
+
+**The reply command byte is not always the command's own.** 210 and 211 answer as `0xD2`/`0xD3`,
+but 208 and 209 answer as **`0x18`/`0x19`** — which are real command ids elsewhere (nickname write,
+mapping enable), so this is not a "no such command" reply. 208 and 209 also drop the first payload
+byte from their echo, the way `SetForceTrigger` drops the side byte, while 210 and 211 echo theirs
+whole and carry a length of 7 where the other two carry 1. Match on the id the pad uses, not the one
+you sent: `screen.ACK_ID` has the map.
+
+So Space Station's choice to route k5 through the firmware console looks like a speed decision
+rather than a capability one — 24 bytes of payload per 32-byte packet is ~1067 packets a frame,
+where the serial path moves 55 bytes at 921600 baud.
+
+Upload is **wired only** in Space Station — its UI refuses with "please use wired connection"
+before it gets as far as the device.
+
+### 8d. The serial path — decompiled, implemented, and **verified on hardware**
+
+**This is the one that works.** A test card and a 14-frame Bad Apple both went onto a wired Apex 5's
+screen from Linux, each written at base `0x002ff000`, each followed by the pad rebooting itself and
+coming back on the HID bus. `flydigi/screen_ota.py`.
+
+Numbers worth having before planning anything around it:
+
+| | |
+|---|---|
+| Exchange rate | **~19 a second, ~52 ms each** — steady, and the same for one frame or fourteen |
+| One frame | 7 erases + 466 writes = 473 exchanges, **~25 s** |
+| 14 frames | 88 erases + 6518 writes = 6606 exchanges, **5 m 46 s** (predicted 346 s, measured 346 s) |
+| The 255-frame ceiling | about **1.8 hours** |
+
+It is slow because the unit is 55 bytes and every one waits for its reply. Space Station is stuck
+with exactly the same arithmetic, which is worth remembering before assuming a faster route exists.
+
+**The pad does not leave the HID bus.** Observed mid-upload: with the bootloader tty live, the pad's
+own `37d7:2501` hidraw nodes were still enumerated and `find_device` resolved normally. So command
+31 for the screen *adds* a CDC interface beside the gamepad rather than replacing the device with a
+bootloader — the main firmware keeps running throughout. (Only the nodes were checked, not whether
+input still flowed, so take it at that strength.) This is a materially smaller risk than the phrase
+"firmware upgrade mode" suggests.
+
+**The tty needs a udev rule.** It lands as `root:dialout`, and a screen upload without one gets as
+far as finding the port and then cannot open it — with the pad already switched over. See
+`udev/72-flydigi-apex5.rules`; `flydigi/setup.py` fails an absent rules file for this reason even
+when every other device is already reachable, because this is the one node that cannot be tested
+until it is too late to fix.
+
+#### How Space Station does it
+
+`FirmwareConsole.exe` is a .NET single-file bundle (`sfextract`, then `ilspycmd`), and the screen
+work is all managed code in `FirmwareLibrary.dll`. It dispatches on chip type, and only some
+branches shell out to a vendor tool:
+
+| `ChipType` | Updater | Implementation |
+|---|---|---|
+| `Freq` — **the screen** | `OtaNewUpdater` | **managed C#, UART OTA over a serial port** |
+| `Telink` | `HidUpdater` | managed, HID |
+| `Megahunt` / `NearLink` / `Jieli` | `MhExeUpdater` / `HshExeUpdater` / `ExeUpdater` | shells out to `firmware/tool/*` |
+| `Wch` | `CH375Updater` / `WCH59XUpdater` | the WCH DLLs |
+
+**So the screen chip is the one branch with no vendor blob in it.** After command 31 the pad
+re-enumerates as a **USB CDC serial device, VID `FFAA` PID `5555`**, and the upload is a plain
+request/response protocol at **921600 8N1**.
+
+#### The whole chain, end to end
+
+Traced through all four layers rather than inferred, because guessing at it is expensive: the HID
+family answers every packet on a k5 and changes nothing, so "the pad accepted it" is not evidence.
+
+1. **Electron** converts each frame to the 25604-byte LVGL image of §8a and concatenates them into
+   a temp `.bin`. No container, no header of its own.
+2. It sends IPC `SwitchUsb {uid, chipModule: CHIP_SCREEN (4), chipType: FREQ}`, which the service
+   turns into **HID command 31**: `[4]=3, [5]=chipModule, [6]=crc`. Three bytes.
+3. It **waits 5000 ms**, hard-coded, for the device to re-enumerate.
+4. It spawns `firmware/FirmwareConsole.exe` with
+   `--device_id k5 --chip_module 4 --chip_type <Freq> --url <temp.bin> --vendor_id 37d7
+   --product_id 2501 --pic_type <1|2> --pic_num <N> --frame_rate <interval/10> --upgrade_type 2
+   --is_restore_default <0|1>`.
+5. The console maps `ChipType.Freq` to `OtaNewUpdater` and fills a `ScreenUpgradeConfig`, then calls
+   `StartUpdate(bin)`.
+
+`ScreenUpgradePicType {NONE=0, GIF=1, PNG=2}` — **PNG for a single frame, GIF for more than one**.
+`frameRate` is `frameInterval / 10`, hundredths of a second, which is *not* the `/100` the HID start
+packet uses. `ScreenUpgradeType {PROGRAM=0, SYS_PIC=1, CUSTOM_PIC=2}`; a user image is **CUSTOM_PIC**,
+and only `SYS_PIC` and `PROGRAM` ever touch the program region.
+
+#### Finding the device and opening it
+
+`ScanDevices` polls for a serial port whose **VID is `FFAA` and PID `5555`**, up to 10 times at 3
+second intervals, then opens it at **921600 8N1, no parity, no handshake, DTR and RTS asserted**.
+(`InitSerialPort` in the same class says 115200 and is never called on this path — 921600 is the
+one that runs.)
+
+On Linux the port lookup is the only part that does not transfer: theirs is a WMI query against
+`Win32_PnPEntity`, ours is `/dev/serial/by-id/` or the `idVendor`/`idProduct` files under
+`/sys/class/tty/ttyACM*/device/../`. Everything after that is bytes on a tty.
+
+#### The state machine
+
+Out: `[opcode][length uint16 LE][payload…]`. In: `[result][opcode][length uint16][payload…]`, with
+a short (<5 byte) reply carrying opcode 12 as the end-of-session signal. A 300 ms timer drives it,
+and 60 ticks without a reply — 18 seconds — aborts.
+
+```
+10  PicGetBaseAddr   len=4   picType, picNum, frameRate, isRestoreDefault -> baseAddr uint32 at [4]
+11  PicGetVersion    len=6   --                                           -> version
+ 3  EraseSector      len=6   addr uint32       x ceil(size/4096), addr = base + i*4096
+ 5  WriteData        len=64  addr uint32, 55, 0, then 55 data bytes  x ceil(size/55)
+12  PicResetDevice   len=8   totalLength uint32, crc32 uint32         -> done
+```
+
+The opcode enum is `PicGetVersion = 10, PicGetBaseAddr = 11`, but **the base address is fetched
+first** — the state machine goes 10 → 11 in its own numbering, which is `PicGetBaseAddr` then
+`PicGetVersion`. Read the transitions, not the enum order.
+
+**Do not compute the length field.** It means something different per opcode and is inconsistent
+with the bytes that follow in three of the five: `PicGetVersion` says 6 and sends no payload,
+`EraseSector` says 6 and sends 4, `WriteData` says 64 which is the *whole packet* rather than its
+payload. Only `PicGetBaseAddr` and `PicResetDevice` state their own payload length. Copy the
+constants.
+
+The CRC is a CRC-32 variant of their own: the standard reflected table, but fed MSB-first
+(`crc = (crc << 8) ^ table[((crc >> 24) ^ byte) & 0xFF]`), seeded 0, no final xor, computed over the
+data in 256-byte chunks. Note their `crc / 256` is signed integer division in C#, which is not
+`>> 8` for negative values — port it as an explicit unsigned shift and mask.
+
+After the last reply the screen **syncs for about 15 seconds and reboots itself**; Space Station's
+own dialog says so and warns against cutting power during it.
+
+**Three things make CUSTOM_PIC much safer than "flashing firmware" sounds.** The picture base
+address is **read back from the device** (`PicGetBaseAddr`), and every erase and write is
+`base + offset`, so the program region is only reachable through `ScreenUpgradeType.PROGRAM`, which
+a picture upload never sends. There is a defined way out — `PicResetDevice` ends the session and
+resets the chip — on top of Flydigi's own "toggle the power switch on the back of the controller".
+And a botched upload is recoverable: `isRestoreDefault = 1` with the stock
+`default_screen_image_<deviceType>.bin` puts the factory animation back.
+
+### 8e. Coming back from command 31
+
+Four statements from Space Station's own dialogs, which is the best evidence available short of
+trying it. Together they describe a state its designers expect users to get into and out of
+unaided.
+
+| When | What their UI says |
+|---|---|
+| Screen upload **succeeded** | "Screen needs ~15 seconds to sync resources. **It will restart automatically** when done. Please do not turn off the device." |
+| Screen upload **failed** | "Slide the power switch on the back to restart the controller and retry connection" |
+| Any firmware update failed | "Upgrade failed with {type}. Please attempt the upgrade again" — with a Retry button |
+| Controller abnormal after an SI flash | "**Hold the START button (lower right of LOGO) for 8 seconds** to restore controller function" |
+
+So: a successful upload **reboots the pad by itself**; a failed one is cleared by the power switch;
+a failed flash is expected to be retried rather than mourned, which means upgrade mode stays
+addressable; and there is a hardware escape hatch on the pad itself.
+
+**All of that is now backed by having done it.** Two uploads went across and back with no drama, the
+pad rebooted itself both times, and — the part none of the dialogs say — the HID nodes never went
+away at all (§8d). A failed *picture* upload leaves a pad that is still a gamepad with a stale
+picture region, retryable with `--port` and without a second command 31.
+
+The one window where a power cycle is *contraindicated* is the ~15 s resource sync after a
+successful write — their warning is explicit about it, and it is the only place in the flow where
+cutting power is worse than waiting.
+
+Two supporting details, weaker but pointing the same way. Flydigi's own name for the command is
+**`SwitchUsb`**, not "enter bootloader" — it reads as a change of USB personality. And the upload is
+a *UART* OTA reached over a USB CDC device, which is what a main firmware bridging to the screen
+chip's serial port looks like, rather than a main chip that has replaced itself with a bootloader.
+
+**What none of this proves** is whether the mode flag is volatile. Nothing in the decompiled code
+writes it to flash, but the flag lives in firmware we do not have. The evidence is Flydigi telling
+their own users to power-cycle out of exactly this state — strong, and still not the same as having
+done it.
+
+What is unproven on Linux specifically: whether the pad enumerates as `cdc_acm`, and whether it
+comes back. That is one cheap experiment — send 31, watch `/dev/serial/by-id` and `dmesg`, never
+open the port, power-cycle — not a decompile.
+
+### 8c. Screen settings — ordinary NewXInput commands, no upload involved
+
+| Cmd | What | Layout |
+|---|---|---|
+| `242` | flood the screen with a colour | `[4]=len, [5]=on, [6]=R, [7]=G, [8]=B, [9]=crc` |
+| `19` sub `8` | status bar always on | `[4]=4, [5]=8, [6]=enable, [7]=crc` |
+| `19` sub `9` | screen off | `[4]=4, [5]=9, [6]=enable, [7]=crc` |
+| `3` | reads both back | `data[5] bit7`/`data[6] bit7` status bar supported/on; `data[7] bit0`/`data[8] bit0` off-screen supported/on |
+
+**242 is confirmed on a wired Apex 5, and it is stickier than its name suggests.** Sent with our
+length-6 reading, it ACKed and the screen went solid orange immediately — so the screen does take
+host commands, and the corrected length is the right one. Two things the SDK does not say:
+
+  * **it floods the RGB LEDs as well as the screen.** This is a whole-device indicator test, not a
+    screen test — which also explains why Space Station keeps it in `data.command.test` beside the
+    factory-line commands rather than on any user-facing page.
+  * **`on=0` does not clear it.** The command ACKs, the pad stays flooded, and the only exit found
+    was the pad's own power switch. So entering this mode is a deliberate act with a physical undo.
+    An earlier draft of this section said "`on=0` puts it back"; that was written from the builder,
+    not from the pad.
+
+**Flydigi's 242 builder disagrees with itself**, which matters because there is no third source.
+It writes four payload bytes (on, R, G, B), sets the length byte to **5**, then puts the checksum at
+offset **9** and sums it over the range a length of 5 implies. A length of 5 means three payload
+bytes and a checksum at offset 8; a length of 6 means four and a checksum at 9. The placement says
+6, the length byte says 5, and one of them is a typo. `flydigi/screen.py` defaults to 6 — it is the
+reading that keeps the blue byte — and can send their exact bytes instead.

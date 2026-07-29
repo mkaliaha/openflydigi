@@ -573,8 +573,25 @@ def checks():
         out.append(Check("rules", "udev rules", FAIL,
                          "installed copy differs from this checkout", "install-rules"))
     else:
-        out.append(Check("rules", "udev rules", SKIP,
-                         "not installed -- only needed if a check above fails",
+        # This used to be SKIP, "only needed if a check above fails", and that
+        # was true while every device the rules cover could be tested at rest.
+        # The screen chip's bootloader cannot be: it appears as a tty only while
+        # an upload has the pad switched into upgrade mode, and discovering the
+        # rule is missing at *that* point leaves the pad mid-transfer. So an
+        # absent rules file is a problem here even when everything visible is
+        # already reachable -- which on this system it is, since the hidraw
+        # nodes are world-accessible.
+        #
+        # **Revisit this when a second model is supported.** The rules exist for
+        # two features, and neither is universal: DualSense emulation (uhid and
+        # the input nodes) applies to the Apex 4 and 5, and the screen bootloader
+        # to the Apex 5 alone. A Vader or a Direwolf has neither, so failing this
+        # for one would be a false alarm about a file it does not need. The check
+        # is unconditional only because the project drives one model.
+        out.append(Check("rules", "udev rules", FAIL,
+                         "not installed -- the screen bootloader (ttyACM "
+                         "ffaa:5555) exists only during an upload, so nothing "
+                         "here can check it in advance",
                          "install-rules"))
 
     if unit_installed():

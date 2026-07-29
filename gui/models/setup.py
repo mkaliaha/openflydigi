@@ -212,12 +212,23 @@ class SetupModel(QObject):
     def rulesNeeded(self):
         """Whether anything actually calls for the privileged step.
 
-        The rules are not a requirement in themselves -- on this system the
-        hidraw nodes are already world-accessible. Asking for root when nothing
-        is broken is how a checklist teaches people to click through it.
+        The rules were once not a requirement in themselves -- on this system
+        the hidraw nodes are already world-accessible, and asking for root when
+        nothing is broken is how a checklist teaches people to click through it.
+        That held while every device they cover could be tested at rest. It
+        stopped holding with the screen: its bootloader is a tty that exists
+        only while an upload has the pad switched over, so a missing rule cannot
+        be seen from here and shows up instead as an upload that dies with the
+        pad off the HID bus. `setup.checks` now fails an absent rules file for
+        that reason, and this follows it.
         """
         return any(self._checks.state(c) == setup.FAIL
                    for c in ("hidraw", "uhid", "input", "rules"))
+
+    @Property(bool, notify=changed)
+    def rulesInstalled(self):
+        """So the page can say "installed" rather than guessing "not needed"."""
+        return self._checks.state("rules") == setup.OK
 
     # -- actions -----------------------------------------------------------
 

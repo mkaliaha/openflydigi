@@ -1,0 +1,439 @@
+#!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
+"""Drive the Apex 5's 160x80 screen.
+
+Offline, no pad needed (needs Pillow except for `check`):
+
+    tools/flydigi-screen check default_screen_image_129.bin
+    tools/flydigi-screen preview default_screen_image_129.bin out.png --frame 60
+    tools/flydigi-screen convert photo.jpg photo.bin --mode fill
+
+On the pad, in the order to try them:
+
+    tools/flydigi-screen status            # what the screen reports about itself
+    tools/flydigi-screen test ff8000       # flood it with a colour -- cheapest proof
+    tools/flydigi-screen test off
+    tools/flydigi-screen probe             # does this pad know the upload commands?
+    tools/flydigi-screen show photo.jpg
+    tools/flydigi-screen animate spin.gif --interval 100
+    tools/flydigi-screen off / on         # dark when idle, or keep the picture up
+    tools/flydigi-screen statusbar on|off
+
+**`show`, `animate` and `send` take Space Station's own route by default**: HID
+command 31 switches the screen chip into upgrade mode, the pad comes back as a
+serial device, and the picture goes over a UART OTA. `--via hid` sends the SDK's
+picture family instead -- which every *other* screen pad uses, and which on an
+Apex 5 acknowledges every packet and changes nothing.
+
+After a successful upload the screen syncs for about 15 seconds and the pad
+**reboots itself**; do not cut power during that. If an upload fails, the pad is
+probably still in upgrade mode -- retry with `--port`, or use the power switch on
+its back.
+
+`test` is stickier than it sounds: it floods the RGB LEDs as well as the screen,
+and `test off` does not undo it. The power switch does.
+
+Command 31 is sent for the **screen chip only**, and `flydigi/screen_ota.py`
+explains why that one is not the one-way door the others are. Nothing here will
+flash a program image.
+"""
+import argparse
+import sys
+import time
+
+sys.path.insert(0, __file__.rsplit("/", 2)[0])
+
+from flydigi import device, screen, screen_ota
+
+
+def open_pad():
+    try:
+        return device.Controller()
+    except device.DeviceNotFound as exc:
+        sys.exit(f"error: {exc}")
+
+
+def need_pillow(what):
+    try:
+        from PIL import Image, ImageOps, ImageSequence     # noqa: F401
+    except ImportError:
+        sys.exit(f"error: {what} needs Pillow -- pip install pillow, or use "
+                 "`check`, which does not")
+    return Image, ImageOps, ImageSequence
+
+
+def parse_colour(text):
+    text = text.lstrip("#")
+    if len(text) != 6:
+        sys.exit(f"error: {text!r} is not a six-digit hex colour")
+    try:
+        return tuple(int(text[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        sys.exit(f"error: {text!r} is not a six-digit hex colour")
+
+
+def to_screen(page, mode):
+    """One image page, resampled to 160x80 with Pillow.
+
+    `screen.fit` does the same thing in pure Python, and the backend keeps it so
+    that a caller with no imaging library is not stuck. Here Pillow is already a
+    dependency, so use it: Lanczos over a phone photo is both better looking and
+    a great deal faster than averaging eleven million source pixels one at a
+    time in a Python loop.
+    """
+    Image, ImageOps, _ = need_pillow("reading images")
+    size = (screen.WIDTH, screen.HEIGHT)
+    rgb = page.convert("RGB")
+    if mode == "stretch":
+        return rgb.resize(size, Image.LANCZOS)
+    if mode == "fill":
+        return ImageOps.fit(rgb, size, Image.LANCZOS)
+    inner = rgb.copy()
+    inner.thumbnail(size, Image.LANCZOS)
+    out = Image.new("RGB", size, (0, 0, 0))
+    out.paste(inner, ((size[0] - inner.width) // 2, (size[1] - inner.height) // 2))
+    return out
+
+
+def frames_from_image(path, mode, limit=None):
+    """Every frame of an image file, resampled and encoded, plus its interval."""
+    Image, _, ImageSequence = need_pillow("reading images")
+    frames, durations = [], []
+    with Image.open(path) as source:
+        for page in ImageSequence.Iterator(source):
+            fitted = to_screen(page, mode)
+            frames.append(screen.encode_frame(fitted.tobytes()))
+            durations.append(page.info.get("duration") or 0)
+            if limit and len(frames) >= limit:
+                break
+    interval = max(durations) if any(durations) else 100
+    return frames, interval
+
+
+_last_percent = -1
+
+
+def report_progress(done, total):
+    """Redraw only when the number changes.
+
+    `\\r` collapses to one line on a terminal and to one line per packet
+    everywhere else -- a log, a pipe, a captured run. At a thousand packets a
+    frame that is the difference between a progress bar and a wall of text.
+    """
+    global _last_percent
+    percent = done * 100 // total
+    if percent == _last_percent and done != total:
+        return
+    _last_percent = percent
+    print(f"\r  {percent:3d}%  {done}/{total} packets", end="", flush=True)
+    if done == total:
+        print()
+
+
+def do_check(args):
+    """Decode and re-encode every frame of a .bin, byte for byte.
+
+    Points at Flydigi's own `default_screen_image_*.bin` as much as at ours:
+    if their files survive this, the format is right rather than merely
+    self-consistent.
+    """
+    data = open(args.file, "rb").read()
+    try:
+        frames = screen.split_frames(data)
+    except screen.ScreenError as exc:
+        sys.exit(f"error: {exc}")
+    bad = 0
+    for index, frame in enumerate(frames):
+        try:
+            width, height, rgb = screen.decode_frame(frame)
+        except screen.ScreenError as exc:
+            print(f"  frame {index}: {exc}")
+            bad += 1
+            continue
+        if (width, height) != (screen.WIDTH, screen.HEIGHT):
+            print(f"  frame {index}: {width}x{height}, not the Apex 5's screen")
+            bad += 1
+        if screen.encode_frame(rgb, width, height) != frame:
+            print(f"  frame {index}: does not survive a round trip")
+            bad += 1
+    print(f"{len(frames)} frame(s), {len(data)} bytes: "
+          f"{'ok' if not bad else f'{bad} problem(s)'}")
+    return 1 if bad else 0
+
+
+def do_preview(args):
+    Image, _, _ = need_pillow("preview")
+    frames = screen.split_frames(open(args.file, "rb").read())
+    chosen = frames if args.frame is None else [frames[args.frame]]
+    sheet = Image.new("RGB", (screen.WIDTH, screen.HEIGHT * len(chosen)))
+    for row, frame in enumerate(chosen):
+        width, height, rgb = screen.decode_frame(frame)
+        sheet.paste(Image.frombytes("RGB", (width, height), rgb), (0, row * height))
+    sheet.save(args.out)
+    print(f"wrote {args.out} ({len(chosen)} frame(s))")
+    return 0
+
+
+def do_convert(args):
+    frames, interval = frames_from_image(args.image, args.mode)
+    with open(args.out, "wb") as fh:
+        fh.write(screen.join_frames(frames))
+    print(f"wrote {args.out}: {len(frames)} frame(s), "
+          f"{len(frames) * screen.FRAME_LEN} bytes, interval {interval} ms")
+    return 0
+
+
+def do_probe(args):
+    ctrl = open_pad()
+    print("asking each envelope whether this pad knows command 208.")
+    print("this announces a frame it never sends -- harmless, but not nothing; "
+          "power-cycle or do a real upload afterwards")
+    answered = []
+    for dialect, bodies in screen.probe(ctrl, wait=args.wait):
+        if screen.acked(bodies):
+            answered.append(dialect)
+            print(f"  {dialect:5s} ACK   {bodies[0][:10].hex(' ')}")
+        elif bodies:
+            print(f"  {dialect:5s} other traffic only "
+                  f"({', '.join(b[:4].hex(' ') for b in bodies[:2])})")
+        else:
+            print(f"  {dialect:5s} silence")
+    if answered:
+        print(f"\nthe pad answers 208 in: {', '.join(answered)}")
+        print(f"try:  tools/flydigi-screen show IMAGE --dialect {answered[0]}"
+              if answered[0] != screen.DEFAULT_DIALECT
+              else "try:  tools/flydigi-screen show IMAGE")
+    else:
+        print("\nno envelope got an answer. On an Apex 5 that is the expected "
+              "result rather than a failure -- Space Station uploads to this pad "
+              "through the firmware console, not over HID. See flydigi/screen.py.")
+    return 0
+
+
+def do_status(args):
+    try:
+        status = screen.read_screen_status(open_pad(), wait=args.wait)
+    except screen.ScreenError as exc:
+        sys.exit(f"error: {exc}")
+    print(f"display          {'shows your picture' if status['always_on'] else 'dark when idle'}"
+          f"{'' if status['always_on_usable'] else '   (not supported)'}")
+    print(f"status bar       {'always on' if status['status_bar_always_on'] else 'auto'}"
+          f"{'' if status['status_bar_usable'] else '   (not supported)'}")
+    return 0
+
+
+def do_power(args):
+    """`on` keeps the picture up; `off` lets the panel go dark.
+
+    Named for what you see, not for the wire: the bit behind this is the SDK's
+    `OffScreen`, and setting it is what keeps the display *on*.
+    """
+    on = args.command == "on"
+    ok = screen.set_always_on(open_pad(), on, wait=args.wait)
+    if not ok:
+        print("no reply -- nothing changed")
+        return 1
+    print("display keeps your picture up" if on else
+          "display dark when idle -- the logo button wakes the status view briefly")
+    return 0
+
+
+def do_statusbar(args):
+    ok = screen.set_status_bar_always_on(open_pad(), args.state == "on", wait=args.wait)
+    print(f"status bar {'always on' if args.state == 'on' else 'auto'}"
+          if ok else "no reply -- nothing changed")
+    return 0 if ok else 1
+
+
+def do_test(args):
+    ctrl = open_pad()
+    if args.colour == "off":
+        ok = screen.test_screen(ctrl, False, faithful=args.faithful, wait=args.wait)
+        print("sent -- but on a wired Apex 5 this ACKs without clearing anything.\n"
+              "If the pad is still flooded, its own power switch is the way out."
+              if ok else "no reply")
+        return 0 if ok else 1
+    colour = parse_colour(args.colour)
+    print("this floods the RGB LEDs as well as the screen, and `test off` was "
+          "not observed to undo it -- you will need the pad's power switch")
+    ok = screen.test_screen(ctrl, True, colour, faithful=args.faithful, wait=args.wait)
+    print(f"screen flooded with #{colour[0]:02x}{colour[1]:02x}{colour[2]:02x}"
+          if ok else "no reply -- try --faithful for Flydigi's own byte layout")
+    return 0 if ok else 1
+
+
+def upload(args, frames, interval):
+    print(f"{len(frames)} frame(s), {len(frames) * screen.FRAME_LEN} bytes, "
+          f"{interval} ms per frame")
+    if args.via == "hid":
+        return upload_over_hid(args, frames, interval)
+    return upload_over_serial(args, frames, interval)
+
+
+def upload_over_hid(args, frames, interval):
+    """The SDK's picture family. Inert on an Apex 5 -- see flydigi/screen.py.
+
+    Kept because it is the path every *other* screen pad uses, and because the
+    negative result is only meaningful if the code that produced it survives.
+    """
+    period = screen.period_from_interval(interval)
+    print(f"over HID, period {period}. On an Apex 5 this ACKs every packet and "
+          "changes nothing; the serial path is the one that works")
+    try:
+        screen.upload(open_pad(), frames, period=period, dialect=args.dialect,
+                      wait=args.wait, progress=report_progress)
+    except screen.ScreenError as exc:
+        print()
+        sys.exit(f"error: {exc}")
+    print("done")
+    return 0
+
+
+def upload_over_serial(args, frames, interval):
+    """Space Station's own route: command 31, then UART OTA to the screen chip."""
+    port = args.port
+    if port is None:
+        port = screen_ota.find_port()
+        if port:
+            print(f"the pad is already in upgrade mode on {port}")
+    if port is None:
+        print("switching the screen chip into upgrade mode (command 31) -- the "
+              "pad will leave the HID bus and come back as a serial device")
+        try:
+            screen_ota.enter_upgrade_mode(open_pad())
+        except device.DeviceNotFound as exc:
+            sys.exit(f"error: {exc}")
+        time.sleep(screen_ota.SWITCH_SETTLE)
+        try:
+            port = screen_ota.wait_for_port()
+        except screen_ota.OtaError as exc:
+            sys.exit(f"error: {exc}")
+        print(f"found it on {port}")
+    try:
+        with screen_ota.OtaLink(port) as link:
+            base = screen_ota.upload(link, frames, interval_ms=interval,
+                                     restore_default=args.restore_default,
+                                     progress=report_progress)
+    except (screen_ota.OtaError, OSError) as exc:
+        print()
+        print(f"error: {exc}")
+        print(f"the pad may still be in upgrade mode -- retry with --port {port}, "
+              "or power-cycle it at its own switch")
+        return 1
+    print(f"written at {base:#010x}. The screen syncs for about 15 seconds and "
+          "then reboots itself -- do not turn the pad off until it does.")
+    return 0
+
+
+def do_show(args):
+    frames, _interval = frames_from_image(args.image, args.mode, limit=1)
+    return upload(args, frames, 100)
+
+
+def do_animate(args):
+    frames, interval = frames_from_image(args.image, args.mode)
+    if args.interval:
+        interval = args.interval
+    return upload(args, frames, interval)
+
+
+def do_send(args):
+    """Upload a .bin as it stands -- Flydigi's own default images included."""
+    frames = screen.split_frames(open(args.file, "rb").read())
+    return upload(args, frames, args.interval or 100)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description=__doc__.split("\n")[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    # Shared options, attached to the subcommands that use them rather than to
+    # the top level, so they can be typed where they read: `... test ff8000
+    # --wait 1`, not `... --wait 1 test ff8000`.
+    pad = argparse.ArgumentParser(add_help=False)
+    pad.add_argument("--wait", type=float, default=0.5,
+                     help="seconds to wait for each reply (default 0.5)")
+    sending = argparse.ArgumentParser(add_help=False, parents=[pad])
+    sending.add_argument("--via", choices=("serial", "hid"), default="serial",
+                         help="serial is Space Station's own route and the one "
+                              "that works on an Apex 5; hid is for other pads")
+    sending.add_argument("--port", help="skip the mode switch; the pad is already "
+                                        "in upgrade mode on this tty")
+    sending.add_argument("--restore-default", action="store_true",
+                         help="tell the screen chip this is the factory image")
+    sending.add_argument("--dialect", choices=sorted(screen.DIALECTS),
+                         default=screen.DEFAULT_DIALECT,
+                         help="--via hid only: packet envelope, as reported by `probe`")
+
+    p = sub.add_parser("check", help="verify a .bin round-trips through our codec")
+    p.add_argument("file")
+    p.set_defaults(run=do_check)
+
+    p = sub.add_parser("preview", help="render a .bin back to a PNG")
+    p.add_argument("file")
+    p.add_argument("out")
+    p.add_argument("--frame", type=int, help="one frame instead of all of them")
+    p.set_defaults(run=do_preview)
+
+    p = sub.add_parser("convert", help="turn an image into a .bin, without a pad")
+    p.add_argument("image")
+    p.add_argument("out")
+    p.add_argument("--mode", choices=("fill", "fit", "stretch"), default="fill")
+    p.set_defaults(run=do_convert)
+
+    p = sub.add_parser("probe", parents=[pad],
+                       help="does this pad know the upload commands?")
+    p.set_defaults(run=do_probe)
+
+    p = sub.add_parser("status", parents=[pad],
+                       help="what the screen reports about itself")
+    p.set_defaults(run=do_status)
+
+    p = sub.add_parser("on", parents=[pad],
+                       help="keep your picture on screen while the pad idles")
+    p.set_defaults(run=do_power)
+    p = sub.add_parser("off", parents=[pad],
+                       help="let the panel go dark -- a real blank, which Space "
+                            "Station does not offer")
+    p.set_defaults(run=do_power)
+
+    p = sub.add_parser("statusbar", parents=[pad],
+                       help="keep the status bar up, or let it time out")
+    p.add_argument("state", choices=("on", "off"))
+    p.set_defaults(run=do_statusbar)
+
+    p = sub.add_parser("test", parents=[pad], help="flood the screen with a colour")
+    p.add_argument("colour", help="rrggbb, or 'off'")
+    p.add_argument("--faithful", action="store_true",
+                   help="Flydigi's own byte layout, which disagrees with itself")
+    p.set_defaults(run=do_test)
+
+    p = sub.add_parser("show", parents=[sending], help="upload one image")
+    p.add_argument("image")
+    p.add_argument("--mode", choices=("fill", "fit", "stretch"), default="fill")
+    p.set_defaults(run=do_show)
+
+    p = sub.add_parser("animate", parents=[sending],
+                       help="upload every frame of a GIF")
+    p.add_argument("image")
+    p.add_argument("--mode", choices=("fill", "fit", "stretch"), default="fill")
+    p.add_argument("--interval", type=int, help="milliseconds per frame")
+    p.set_defaults(run=do_animate)
+
+    p = sub.add_parser("send", parents=[sending], help="upload a .bin unchanged")
+    p.add_argument("file")
+    p.add_argument("--interval", type=int, help="milliseconds per frame")
+    p.set_defaults(run=do_send)
+
+    args = parser.parse_args()
+    return args.run(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -26,6 +26,13 @@
 # Apex 5 vendor command interface (trigger effects, rumble, config).
 KERNEL=="hidraw*", ATTRS{idVendor}=="37d7", ATTRS{idProduct}=="2501", TAG+="uaccess"
 
+# The screen chip's bootloader. After command 31 the pad leaves the HID bus and
+# comes back as a USB CDC serial device under these ids -- not Flydigi's, and
+# not anyone's: ffaa:5555 is a placeholder the chip vendor shipped. The node
+# lands as root:dialout, so without this a screen upload gets as far as finding
+# the port and then fails to open it, with the pad already switched over.
+KERNEL=="ttyACM*", ATTRS{idVendor}=="ffaa", ATTRS{idProduct}=="5555", TAG+="uaccess"
+
 # /dev/uhid, needed to create the virtual DualSense.
 KERNEL=="uhid", TAG+="uaccess"
 

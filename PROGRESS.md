@@ -7,8 +7,10 @@ now covers five delivery mechanisms plus a virtual DualSense.
 
 **Status: adaptive triggers are done and validated in real games, and the desktop app — now QML on
 Kirigami — covers profiles, button remapping, vibration, per-profile trigger config and RGB
-lighting.** What remains is the screen/GIF upload, the charging dock, macros, the device
-settings, and the gyro block the profile already carries — see "Next". The daemon now detects a
+lighting.** What remains is the charging dock, macros, the device settings, and the gyro block the
+profile already carries — see "Next". The screen is done: image format, the
+two screen settings, and uploads over Space Station's own serial route — a test card and Bad Apple
+are both on the pad. What is left there is a GUI page. The daemon now detects a
 game and applies the pad-side route by itself, with a per-game Auto toggle and a Setup page to
 install it; supervising a helper process for the other routes is still to do. The joystick block and the third-party takeover toggle are both done, and both
 known UI bugs are fixed.
@@ -117,7 +119,7 @@ a socket pair for what a send does, two separate `open()`s of one path for what 
 The desktop tests come in three layers, cheapest first:
 
 ```bash
-for t in tests/test_{device,dsx,forza,games,mapping,monitor,prefs,relay}.py; do python3 "$t"; done  # backend, no Qt
+for t in tests/test_{device,dsx,forza,games,mapping,monitor,prefs,relay,screen,screen_ota}.py; do python3 "$t"; done  # backend, no Qt
 python3 tests/test_models.py     # headless -- no engine, no display
 python3 tests/test_shell.py      # the window, loaded the way main.py loads it
 python3 tests/test_qml.py        # QtQuickTest: real clicks on real delegates
@@ -602,8 +604,14 @@ particular is testable the moment multi-pad support exists; see "Multiple pads" 
 
     **If a firmware update is genuinely needed, use real Windows hardware — not a VM.** Flashing
     drops the device off USB and brings it back as a bootloader with a different identity, and that
-    re-enumeration is precisely where USB passthrough loses a device: mid-flash. Whether the Apex 5
-    has a button-combination recovery mode is **unknown**, so assume it does not.
+    re-enumeration is precisely where USB passthrough loses a device: mid-flash.
+
+    **There is a button-combination recovery, and this file used to say there was not.** Space
+    Station's own failure dialog for the SI chip: "If the controller behaves abnormally, hold the
+    START button (lower right of LOGO) for 8 seconds to restore controller function." The Apex 5
+    declares `ChipSi` among its five chip modules, so it applies to this pad. That is one chip's
+    recovery rather than a general one, and it does not make flashing a program image sensible — but
+    "assume the hardware has no way back" was wrong, and it was load-bearing in the argument above.
 
 ### Multiple pads
 
@@ -624,6 +632,13 @@ have trigger haptics; the Apex 5 reaches them *through* the force-trigger subsys
 Scope for this is **config only** — writing settings to the pad. Driving impulse triggers during a
 game is explicitly not wanted: on Linux there is no XInput to carry it, and almost nothing but Forza
 uses it.
+
+**The udev rules become per-model too, and today they are not.** They exist for two features and
+neither is universal: DualSense emulation (`/dev/uhid` plus the DualSense input nodes) applies to the
+Apex 4 and 5, and the screen chip's bootloader tty to the **Apex 5 alone**. A Vader or a Direwolf
+needs none of it. `setup.checks()` currently **fails** an absent rules file unconditionally — right
+for a one-model project, a false alarm the moment a Vader is plugged in — so gate it on what the
+connected pad actually supports. The comment at that check says the same thing where it will be read.
 
 The work would be almost entirely in `flydigi/`: per-model key tables, offsets and capability flags.
 `gui/models/` only knows `mapping.APEX5_KEYS`. The prerequisite is the device-type guard — see
@@ -660,11 +675,119 @@ are not evidence either** — ours ships that block populated with `1 30 80 5 1 
 exactly like a feature in use. When a Vader 4 Pro is supported, this becomes a page gated on
 `IsSupportTriggerVibration`, and the Vader is the machine to verify the sync question on.
 
-**1. Screen image / GIF upload.** `UploadPic2K2Start/Data/End/Finish`, `UploadPicCommandK1/K2`,
-`TestScreen`, `OffScreen`, `ReadScreenSetting`. Note Space Station only offers this **over a wired
-connection** — worth assuming the dongle cannot carry it, and testing wired first rather than
-debugging a dongle failure that is by design. The image encoding may live in the Electron layer
-rather than the SDK, so check `asar/` as well as `decompiled/`.
+**1. Screen image / GIF upload — DONE, and validated by putting Bad Apple on the pad.**
+`flydigi/screen.py` (format and settings), `flydigi/screen_ota.py` (the upload that works),
+`tools/flydigi-screen`, `tests/test_screen.py` + `tests/test_screen_ota.py`. Full write-up in
+PROTOCOL.md §8, and read §8d before touching it.
+
+A test card and a 14-frame Bad Apple are both on a wired Apex 5's screen, written from Linux at base
+`0x002ff000`, each followed by the pad rebooting itself. **It is slow and that is inherent**: ~19
+exchanges a second, ~25 s a frame, 5 m 46 s for fourteen, and about 1.8 hours at the 255-frame
+ceiling. Space Station is stuck with the same arithmetic.
+
+**The image format is settled, and settled *hard*.** A frame is 25604 bytes: a 4-byte LVGL v8
+header (`cf=4 TRUE_COLOR, 160x80`, the constant `04 80 02 0A`) then 160x80 RGB565 with the **high
+byte first**, and a `.bin` is frames concatenated with no container at all. All 14 files Flydigi
+ships under `Configs/Controller/{k2,k5}/default/` — 686 frames — decode and re-encode
+**byte-identical** through our codec. `tools/flydigi-screen check` runs that against their files and
+`preview` renders one back to PNG, which is how the byte order was settled: one way gives an anime
+face, the other gives colour noise.
+
+The hint in the old version of this entry was right — the encoding *is* in the Electron layer. It is
+the LVGL image converter, and their picker carries `ICF_TRUE_COLOR_ARGB8332 / 8565 / 8565_RBSWAP /
+8888` and `CF_RAW` verbatim.
+
+**The transport is the open question, and it is a bigger one than expected. Space Station does not
+upload to an Apex 5 over HID at all.** `upload_pic2screen` branches on the device code: everything
+else gets `IpcCommandEnum_UploadPic` and the SDK's 208/209/210/211 family, and `k5` gets
+`SwitchUsb` — which is `SwitchToFirmwareUpgradeMode`, **command 31**, `chipModule = CHIP_SCREEN`,
+`chipType = FREQ` — followed five seconds later by `firmware/FirmwareConsole.exe --upgrade_type 2`
+over a temp file of the frames.
+
+So the pad's screen is written by the firmware updater. **That path is not implemented here and
+nothing in this project sends command 31** — but it has now been decompiled, and it is much less
+forbidding than the vendor DLLs sitting next to it suggested. Full protocol in PROTOCOL.md §8d.
+
+`FirmwareConsole.exe` unpacks with `sfextract` and decompiles cleanly, and the screen work is all
+managed code in `FirmwareLibrary.dll`. It dispatches on chip type, and the screen's — `ChipType.Freq`
+— is **the one branch with no vendor blob in it**: `OtaNewUpdater`, a plain request/response UART
+protocol. JieLi, WCH, Megahunt and NearLink shell out to `firmware/tool/*`; Freq does not. After
+command 31 the pad re-enumerates as a **USB CDC serial device, VID `FFAA` PID `5555`**, 921600 8N1,
+and the upload is five opcodes: read the picture base address back from the device, read a version,
+erase 4096 at a time, write 55 bytes at a time, then reset with a length and a CRC.
+
+Three things make a *picture* upload much safer than the phrase "firmware upgrade mode" implies. The
+picture base address is **read back from the device**, and every erase and write is `base + offset`,
+so the program region is only reachable through `ScreenUpgradeType.PROGRAM` — which a picture upload
+never sends. `isRestoreDefault = 1` with the stock `default_screen_image_<deviceType>.bin` puts the
+factory animation back, so a botched upload has a documented repair. And **coming back out is
+something Flydigi document four ways** — a successful upload reboots the pad by itself, a failed one
+is cleared by the power switch, a failed flash is expected to be retried, and holding START for 8
+seconds restores a misbehaving pad. PROTOCOL.md §8e quotes all four.
+
+The one window where cutting power is worse than waiting is the **~15 second resource sync** after a
+successful write: "It will restart automatically when done. Please do not turn off the device."
+
+What is unproven is everything past command 31: whether this pad enumerates as `cdc_acm` on Linux,
+and whether it comes back. That is one cheap experiment — send 31, watch `/dev/serial/by-id` and
+`dmesg`, power-cycle, with the port never even opened — not another decompile.
+
+**The HID family answers on this pad and does not drive the screen. Settled on hardware, and it is
+a dead end — do not spend another session on it.** All four commands parse: the pad ACKs every
+packet and echoes every field back (PROTOCOL.md §8b). Two complete uploads went out, 9623 packets,
+no errors — a single test card and an eight-frame animation — and **the display never changed**.
+The only persistent trace either left was the status-bar flag flipping to always-on, which survives
+a power cycle and needs 19/8 to put back.
+
+Everything that could be a missing step was checked rather than guessed at, because "the pad
+accepted it" is worth nothing here:
+
+  * the sequence we send is exactly `UploadPicCommandK2Factory` — start, data x N, end per frame,
+    one finish for the set;
+  * nothing wraps it: `UploadPicAsync` calls the repository with a 300 s timeout and
+    `AddCommandsToCommunicationManager` queues the list, with no preamble or epilogue;
+  * and **there is no commit command anywhere in the id space** — every command id in the SDK was
+    mapped, and 208..211 is the whole picture family. No 166 equivalent exists for pictures.
+
+The reason is upstream of all that and was in the first file read: **for `k5`, Space Station never
+sends the HID family at all.** `upload_pic2screen` branches `deviceCode == "k5" ? SwitchUsb +
+FirmwareConsole : IpcCommandEnum_UploadPic`. Every other screen pad takes the HID route; this one
+does not. Protocol conformance with no visible effect is what writing to a chip that does not drive
+the panel looks like — and note the k2 has the *same* separate `ChipScreen`/`ChipType.Freq`, so
+"separate screen chip" is not the discriminator and no source-backed reason for the split was found.
+
+One trap in it: **the reply command byte is not always the command's own.** 210 and 211 answer as
+themselves, but 208 and 209 answer as `0x18`/`0x19` — real command ids elsewhere, so not a
+"no such command". `screen.ACK_ID` maps it, and the fake pad models the pad rather than the SDK.
+
+Two things worth running first, neither of which uploads anything: `flydigi-screen status` (the
+screen bits out of command 3, read-only) and `flydigi-screen test ff8000` (command 242).
+
+**242 works, and it is a trap.** It floods the **RGB LEDs as well as the screen**, and `test off`
+**does not clear it** — the command ACKs and the pad stays flooded. The only exit found was the
+pad's own power switch. Both facts are hardware; the SDK says neither.
+
+Also confirmed: upload is **wired only**, refused in their UI before it reaches the device.
+
+**Command 31 for the screen chip is now something this project does**, and the firmware-update
+section below still says not to send 31. Both are right, and the distinction is the whole argument:
+that section is about *program* images across four bootloader vendors with no recovery. A picture
+upload shares the transport and nothing else — the device hands back the picture base address so
+the program region is never addressed, `ScreenUpgradeType.PROGRAM` is not implemented and should not
+be, and the factory image is on disk to restore. `screen_ota.enter_upgrade_mode` takes no chip
+argument for exactly this reason: it can reach the screen and nothing else.
+
+**And it is milder than the name.** Measured mid-upload: the pad's own `37d7:2501` hidraw nodes were
+still enumerated with the bootloader tty live, so command 31 for the screen *adds* a CDC interface
+beside the gamepad rather than replacing the device. The main firmware keeps running. (Nodes
+observed, not input — take it at that strength.)
+
+**The one thing that will bite a new machine is the udev rule.** The bootloader tty lands as
+`root:dialout`, so without `udev/72-flydigi-apex5.rules` an upload gets as far as finding the port
+and then cannot open it, with the pad already switched over. `flydigi/setup.py` therefore **fails**
+an absent rules file rather than skipping it, even when every other device is reachable without —
+this is the one node that cannot be tested until it is too late to fix. Recovering from that costs
+nothing: retry with `--port`, no second command 31 needed.
 
 **2. ~~A real battery reading.~~ Settled: there is not one, in this SDK.** Every path resolves to
 the same 4-bit nibble. `HeartBeatCommandFactory`'s NewXInput branch is
@@ -685,10 +808,29 @@ is blocked only on decompiling the DLL, not on hardware. (The Vader 4's older do
 dumb USB hub with a charger — do not assume it speaks anything.) `Flydigi.ChargerSdk.dll` and
 `Flydigi.CoolerSdk.dll` are in `bundle/` and **not yet decompiled** — that is step one
 (`~/.dotnet/tools/ilspycmd -o decompiled/Flydigi.ChargerSdk bundle/Flydigi.ChargerSdk.dll` in the
-`wine-arch` distrobox). The Electron locales already show what the feature looks like:
-`cd2_charger_led_type_{breath,custom,default,diagonal_flow,gradient,pulse,rainbow,wave_gradient}`,
-and `cd2_led_sync` — "Keep the lighting mode of the controller and dock in sync". So the dock has
-its own effect set plus a sync toggle, which is the integration the user wants.
+`wine-arch` distrobox).
+
+**The dock takes images and animations, and it is a lighting problem rather than a screen one.**
+Worth stating plainly because the feature *looks* like the pad's screen — the DIY page accepts
+png/jpeg/gif, crops on a 334x304 canvas, decodes GIF frames and shows an "animation generating"
+spinner — and it shares the pad's `screen_*` locale strings. It is not a screen. The CD2 has **162
+addressable LEDs** in a wedge: 16 rows of 14, 15, 16, 15, 14, 13 … down to 3, at fixed coordinates
+the page carries as a literal array. Conversion samples **one pixel per LED** into
+`Color {red, green, blue}`, builds a `FramedLedColor {brightness, colors[162]}` per GIF frame, and
+sends the lot as an ordinary `IpcCommandEnum_UpdateConfig` carrying
+`ChargerLedConfig {mode: ChargerLedType_Custom, period, direction, brightness, frames[]}` →
+`ChargerSdk.WriteRgbConfig`.
+
+So: **no `SwitchUsb`, no firmware console, no command 31** — the ordinary config path, and the same
+host-computes-frames/device-plays-them architecture as `flydigi/lighting.py`. `ChargerRepository`
+has no screen or picture method at all, and `Configs/Charger/cd2/default/` holds only mapping
+`.dat` files. Its whole API is mapping configs, `UpdateFrame(FramedLedColor)`, `EnableLedSync`,
+`EnableCloseWithSystem`, `EnableSleepWhenCharging`, `EnableShowAnimationWhenCharging` — plus a
+`SwitchUsb` that is firmware update and nothing to do with images.
+
+The locales show the effect set: `cd2_charger_led_type_{breath,custom,default,diagonal_flow,
+gradient,pulse,rainbow,wave_gradient}`, and `cd2_led_sync` — "Keep the lighting mode of the
+controller and dock in sync", which is the integration the user wants.
 
 **4. "Allow third-party apps to take over mappings" — DONE, and it is what makes Steam recognise
 the pad.** Command 16 reads it, command 17 writes it, and the switch is on the Controller page
@@ -1062,7 +1204,7 @@ All command factories are decompiled under `decompiled/Flydigi.ControllerSdk/`.
 | Vibration + triggers | inside the profile blob | **done** — same module |
 | RGB / lighting | read **167**, write **168**/**169** | **done** — `flydigi/lighting.py`, GUI |
 | Macros | `ReadMacroConfig`, `WriteMarcoConfig`, `SetHardwareMacroEnable` | not started; blob at 230..768 is carried through untouched |
-| Screen image (pad + dock) | `UploadPic2K2Start/Data/End/Finish`, `UploadPicCommandK1/K2`, `TestScreen`, `OffScreen` | not started; **wired only in Space Station**; encoding may live in the Electron layer |
+| Screen image | command **31** + UART OTA over a CDC tty (Space Station's own route); `TestScreen` (242); always-on display and status bar (19/9, 19/8) | **done and on hardware** — `flydigi/screen_ota.py`. The SDK's HID family (208–211) answers on this pad and does not drive the panel; kept in `screen.py` for other models |
 | Device settings | read them all with **3**; writes are the 22 factories in `command.setting/` | not started — but command 3 already returns supported/enabled bits plus sleep time, report rate and stick precision/sensitivity in one reply, see "Next" |
 | Dock / cooler | `Flydigi.ChargerSdk.dll`, `Flydigi.CoolerSdk.dll` in `bundle/` | not decompiled — now in scope, including `cd2_led_sync` (dock/pad lighting sync) |
 
@@ -1208,28 +1350,40 @@ What this settles without a single guess:
 - Host: Aurora DX (nvidia-open), Fedora 44 atomic, KDE/Wayland
 - `wine-arch` distrobox (Arch + wine-staging 11.14, winetricks, innoextract, dotnet-sdk 10,
   ilspycmd, sfextract, nodejs). Created with `distrobox create --name wine-arch --image archlinux:latest --nvidia`
+- **`sfextract` needs `DOTNET_ROLL_FORWARD=Major`** in that box. It targets .NET 8 and the box has
+  10, so it fails with "To install missing framework" and extracts nothing — which reads as a broken
+  bundle rather than a missing runtime. Unpacking `FirmwareConsole.exe` (194 files, the whole screen
+  upgrade path) is one line:
+
+  ```bash
+  DOTNET_ROLL_FORWARD=Major ~/.dotnet/tools/sfextract "<prefix>/firmware/FirmwareConsole.exe" -o work/firmware-console
+  ~/.dotnet/tools/ilspycmd -o decompiled/FirmwareLibrary work/firmware-console/FirmwareLibrary.dll
+  ```
 - Wine prefix: `~/.local/share/wineprefixes/flydigi` — Space Station 4.2.1.4 installs and runs
   (UI connects to its service over the named pipe), but **does not detect the controller**
   under Wine. Not needed; kept for reference only.
 - Controller: wired. `hidraw3` = keyboard/mouse composite, `hidraw4` = vendor command interface.
-  Nodes are `0666`, no udev rule needed.
+  Nodes are `0666`, no udev rule needed **for HID** — the screen's bootloader tty is the exception
+  and lands `root:dialout`, which is why the rules are no longer optional here. The node number
+  moves; find it by the report-descriptor prefix, not by name.
 
 ## Repo contents
 
 | Path | What |
 |---|---|
 | `PROTOCOL.md` | Full wire protocol + hardware verification results |
-| `flydigi/` | Library — `device.py` (transport), `blobs.py` (packetised config transfer), `effects.py` (live trigger commands), `mapping.py` (profiles, remapping, vibration, stored triggers), `lighting.py` (RGB), `games.py`, `forza.py` |
+| `flydigi/` | Library — `device.py` (transport), `blobs.py` (packetised config transfer), `effects.py` (live trigger commands), `mapping.py` (profiles, remapping, vibration, stored triggers), `lighting.py` (RGB), `screen.py` (160×80 screen: LVGL image format, settings, and the HID upload that this pad ignores), `screen_ota.py` (the serial upload that works), `games.py`, `forza.py` |
 | `gui/` | PySide6/QML desktop app (GPL-3.0-or-later) — `app.py` (the object graph), `main.py` (entry point), `worker.py` (all device I/O, on its own thread), `models/` (view-agnostic state), `qml/` (`Main.qml`, `pages/`, `components/`) |
 | `tools/flydigi-mapping` | CLI for profiles — list/show/set/clear/rename/apply/backup/restore |
 | `tools/flydigi-forza` | Forza driver — UDP 5300 → rules → triggers (`--dump` for telemetry only) |
 | `tools/flydigi-dsx` | DSX protocol listener on UDP 7878 — drives triggers from any DSX-compatible mod |
 | `tools/flydigi-monitor` | Memory-reading driver using Flydigi's XGameMonitor configs (`--probe` to debug offsets) |
+| `tools/flydigi-screen` | The screen — `check`/`preview`/`convert` need no pad, then `status`, `test`, `probe`, `show`, `animate`, `send`, `on`/`off`, `statusbar` |
 | `flydigi/uhid.py` | Pure-Python `/dev/uhid` binding (no dependencies) — creates kernel-side HID devices |
 | `flydigi/ps5_data.py` | Generated DualSense descriptor + feature blobs (from MIT inputtino) |
 | `tools/gen_ps5_data.py` | Regenerates the above from inputtino's `ps5.hpp` |
 | `work/ref/inputtino/` | MIT reference clone — DS5 output report layout, canned feature reports |
-| `tests/` | `test_device.py`, `test_dsx.py`, `test_forza.py`, `test_games.py`, `test_mapping.py`, `test_monitor.py`, `test_prefs.py`, `test_relay.py` need no Qt; `test_models.py`, `test_shell.py`, `test_qml.py` need PySide6 — all pass without hardware, each printing its own count |
+| `tests/` | `test_device.py`, `test_dsx.py`, `test_forza.py`, `test_games.py`, `test_mapping.py`, `test_monitor.py`, `test_prefs.py`, `test_relay.py`, `test_screen.py`, `test_screen_ota.py` need no Qt; `test_models.py`, `test_shell.py`, `test_qml.py` need PySide6 — all pass without hardware, each printing its own count |
 | `tests/fake_pad.py` | Stand-in controller: multi-packet reads, diffed writes, apply, save, checksum rejection |
 | `tools/forza-simulate` | Synthetic telemetry generator, for testing without the game |
 | `tests/test_forza.py` | Self-test for the parser and rule engine (no hardware needed) |
@@ -1600,7 +1754,7 @@ Everything is committed and green. To check:
 ```bash
 distrobox enter apex-dev -- bash -lc 'cd ~/Projects/ApexExperiments && \
   python3 tests/test_models.py && python3 tests/test_shell.py && python3 tests/test_qml.py'
-for t in tests/test_{device,dsx,forza,games,mapping,monitor,prefs,relay}.py; do python3 "$t"; done  # no Qt
+for t in tests/test_{device,dsx,forza,games,mapping,monitor,prefs,relay,screen,screen_ota}.py; do python3 "$t"; done  # no Qt
 tools/generate-qmltypes && qmllint-qt6 -I . -I /usr/lib64/qt6/qml gui/qml/Main.qml gui/qml/*/*.qml
 ```
 
@@ -1767,5 +1921,7 @@ sections above. What remains is code:
 
 1. **Decompile ChargerSdk / CoolerSdk** for the gen2 dock.
 2. **Qt/KDE app** — the Kirigami app is built and green (profiles, buttons, sticks, vibration,
-   triggers, lighting, games, setup). Still missing: screen/GIF upload, macros, device settings
-   and the charging dock — see the end-goal section above and "Next".
+   triggers, lighting, games, setup). Still missing: macros, device settings and the charging dock —
+   see the end-goal section above and "Next". **A screen page is now worth building**: the transport
+   is proven, so the open questions are UI ones — a crop against the 160×80 frame, a frame-count cap,
+   and a progress bar that survives six minutes without looking hung.

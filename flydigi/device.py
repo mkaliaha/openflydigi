@@ -206,8 +206,20 @@ class Controller:
             except BlockingIOError:
                 return
 
-    def send(self, buf, wait=0.3):
-        """Write a packet and collect replies for `wait` seconds."""
+    def send(self, buf, wait=0.3, until=None):
+        """Write a packet and collect replies for `wait` seconds.
+
+        `until` is a predicate on the replies so far; when it returns true the
+        collection stops early. Without it this always waits the full `wait`,
+        which is right when the answer may arrive in several packets and no
+        caller can say how many -- a config read streams 42 of them.
+
+        It is wrong for a long stream of one-for-one exchanges. A screen frame
+        is over a thousand packets, each acked by exactly one reply, and waiting
+        out the timeout on every one of them turns a two-second upload into nine
+        minutes. Pass `until` there and the wait becomes a ceiling rather than a
+        cost.
+        """
         with self.claim():
             self._drain()
             os.write(self.fd, bytes(buf))
@@ -221,6 +233,8 @@ class Controller:
                 data = os.read(self.fd, 64)
                 if data:
                     replies.append(data)
+                    if until is not None and until(replies):
+                        break
             return replies
 
     def command(self, cmd_id, payload=b"", wait=0.3):
