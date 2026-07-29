@@ -24,7 +24,8 @@ Two gaps remain, neither in the transport:
   a menu button press — so it does emit motor rumble, just not to a DualSense. Our own output path
   is proven: a direct cmd `0x12` rumbles the pad and ACKs.
 
-  **Superseded — see "Haptic audio" below.** Original finding retained for context:
+  What the audio path needs is in *Haptic audio* below; the null-sink attempt that came first is
+  recorded here because its negative result still stands.
 
   **Built, tested, negative result.** Neither Flydigi nor DSX implements audio haptics — verified
   by decompilation: Space Station bundles no audio libraries at all, and its `EnableAudio` command

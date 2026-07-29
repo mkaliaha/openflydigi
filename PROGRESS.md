@@ -175,9 +175,9 @@ in `gui/` is [gui/README.md](gui/README.md).
     timeout. Right when a reply may arrive in several packets and no caller can say how many; wrong
     for a long stream of one-for-one exchanges, where it turned a two-second upload into nine
     minutes. Any fake that stands in for a Controller has to accept the keyword.
-  * **Do not restate a backend constant in the GUI.** `BATTERY_STEPS = 8` sat beside
-    `motion.MAX_LEVEL = 5` for months and drew a full pad as five-eighths. The defect was two
-    sources of truth, not the wrong digit.
+  * **Do not restate a backend constant in the GUI.** A `BATTERY_STEPS = 8` beside
+    `motion.MAX_LEVEL = 5` draws a full pad as five-eighths. Two sources of truth is the defect;
+    the wrong digit is only the symptom.
   * **Qt reads animated GIFs and cannot write them.** No `gif` in
     `QImageWriter.supportedImageFormats()` at all, and multi-page tiff and webp both write happily
     and then read back as a single frame. An animation for a test has to be committed, not generated.

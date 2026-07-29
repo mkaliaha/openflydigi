@@ -20,13 +20,13 @@ sense, and anything meant to last needs the save.
 
 That is why the two buttons do not share an enabled state. "Apply" follows *dirty* — is there an
 edit not yet written. "Apply and save" follows dirty **or** *saveNeeded* — has anything been
-written that has not reached flash. Binding both to dirty, as the first cut did, meant pressing
-Apply immediately greyed out the only way to keep the change you had just made. The footer says
-which of the two states you are in rather than leaving it to be inferred.
+written that has not reached flash. Bind both to dirty and pressing Apply immediately greys out the
+only way to keep the change you just made. The footer says which of the two states you are in rather
+than leaving it to be inferred.
 
 The label is spelled out rather than "Apply & save": a bare `&` in a button label is taken as a
-mnemonic, swallowed, and drawn as an underline on the next character. The widget app escaped it as
-`&&`; in QML it is simpler to avoid the ampersand.
+mnemonic, swallowed, and drawn as an underline on the next character. Escaping it as `&&` works;
+in QML it is simpler to avoid the ampersand.
 
 **166 is now verified on hardware.** Slot 4 (factory, `data_version` 65535) was renamed to
 `SAVETEST`, written with 164/165 and committed with 166; the pad was then switched off at its own
@@ -77,7 +77,7 @@ created by a delegate** — a Repeater and a ListView both really build theirs, 
 `findChild` finds none. Nor can a test drive its own window: Qt only delivers synthetic clicks once
 the *main* window is shown, so a page under test is instantiated inside the `TestCase`.
 
-Two traps worth remembering, both of which cost real time:
+Two traps:
 
   * `tryVerify(() => !button.enabled)` never sees a binding update. Wait on the model with
     `tryCompare(App.lighting, "dirty", false)` instead — a closure over a binding has no notify
@@ -105,9 +105,8 @@ update" warnings. `tools/generate-qmltypes` dumps the live `QMetaObject` instead
 correct. With those gone it immediately found a real bug: `pageStack.currentItem` is typed
 `QQuickItem`, which has no `title`.
 
-**Suite counts are deliberately written down nowhere.** The last recorded one sat wrong for months,
-and `test_mapping.py` moved twice in a single session while this file was being corrected. Every
-suite prints its own count; read it there.
+**Suite counts are deliberately written down nowhere** — they go stale faster than anyone updates
+them. Every suite prints its own count; read it there.
 
 ## Two bugs that needed the test before the fix
 

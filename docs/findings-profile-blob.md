@@ -213,7 +213,7 @@ this one did until it was corrected.
 So the live/inert map for the two blocks is complete: **bank and `isRound` reach the firmware; the
 core polyline, the type byte, `center` and `edge` do not.**
 
-**The liveness trap, which cost two runs.** A stick nobody is touching and a stick the pad has
+**The liveness trap.** A stick nobody is touching and a stick the pad has
 silenced produce byte-identical evdev traces: nothing at all, because evdev is event-driven. The
 first two silencing runs were therefore unreadable — the answer looked like a result and was
 indistinguishable from an empty room. The probe now starts on a button press and counts button
@@ -323,16 +323,15 @@ effect writes into the same bytes, so switching effect reads back whatever the l
 value out of the new effect's range is its default rather than a number clipped into range.
 Slots an effect does not use are **not** free space — Lock's 255/1 and Vibration's 1/90 are
 constants Flydigi's writer emits. And `Sniper` and `Vibration` take the *same* parameters and are
-not the same effect — see below. `set_trigger_effect()` now writes the bind half and the bind type
-byte, which is what this entry was originally about.
+not the same effect — see below. `set_trigger_effect()` writes the bind half and the bind type byte.
 
 **All four new modes are felt on hardware**, at their default settings: Lock stops the trigger dead,
 Recoil resists and gives way, Sniper vibrates past the travel point. Every one ACKed *and echoed
 its own parameters back* — `[success=1][mode][params…]`, side dropped — so the pad parses the
 payload rather than merely acknowledging the command id.
 
-**Mode 5 is dead code in Flydigi's own stack, which is the answer three hardware sessions failed to
-reach.** Nothing constructs `ForceTriggerConfigVibration`; the config path turns stored type 5 into
+**Mode 5 is dead code in Flydigi's own stack**, which is why the pad does nothing with it.
+Nothing constructs `ForceTriggerConfigVibration`; the config path turns stored type 5 into
 command 82; the DualSense relay emits only modes 0-3 (ours transcribes theirs, `relay.translate_ds5`,
 and agrees); and pads that have real trigger motors drive them with command **18**, not 81. So the
 firmware has never been asked to do anything with mode 5, and a mode-5 command that produces nothing
@@ -342,25 +341,15 @@ The vibration effect in real use is **mode 2** — the DualSense vibration/autom
 to it and Space Station calls it 机枪, machine gun — and the "Vibration" a user picks in their UI is
 the *stored* type 5, delivered as command 82, which works. The name is a red herring twice over.
 
-Our own hardware readings, kept because they cost real time: mode 5 buzzed once with the pad's own
-bind and did nothing with the bind suppressed. The two runs in between were sent `bindType 0`, which
-Flydigi never uses and which appears to mean no bind, so they measured silence rather than mode 5.
-This entry has now been written four ways in one session; the decompile settled in ten minutes what
-the pad would not.
-
-**Two things this did settle.** A config apply does not restore live bind state — it survives the
-switch, so an experiment that alters the bind leaves it altered until something sets it back, and
-"I re-applied the profile" is not a restore. And the method for every effect test on this pad:
+**How to test an effect on this pad**, since a bind left in the wrong state invalidates the run:
 control the bind explicitly, prove the path is alive with a known-good effect such as mode 2, and
-put byte-identical parameters in both arms so the mode byte is the only variable.
+put byte-identical parameters in both arms so the mode byte is the only variable. `bindType 0` is
+not a quieter bind — Flydigi never sends it and it appears to mean *no* bind, so a run using it
+measures silence rather than the mode. And a config apply does not restore live bind state: it
+survives the switch, so "I re-applied the profile" is not a reset.
 
-**How this went wrong is the reusable part.** Three write-ups, each confident, each built on one
-unrepeated observation with the pad in a state nobody had pinned down. The failure was not the
-inference each time; it was writing the conclusion into two documents before a second run existed.
-
-The original question, answered: PROGRESS.md used to say the
-profile's force-trigger `bind` sub-struct "may be" the stored form of command 82 but "the counts do
-not match". They do. `ParseTriggerConfigToArray` writes, at **offset 185** + 20 per side:
+**The stored bind is the same structure as live command 82.** `ParseTriggerConfigToArray` writes, at
+**offset 185** + 20 per side:
 `Type, bind.Type, bind.Filter, bind.Scale, bind.Param[5], MixedBorder, Param[10]`. Live 82 takes
 3 + 4 parameters; the stored form is 3 + **5** — the same structure with one spare byte. And the
 writer sets `bind.Type = (Type == 5) ? 2 : 0`, so bind type 2 appears exactly when the stored effect
@@ -394,15 +383,13 @@ trigger's copy is an open question a bench test would answer.
 
 `MappingConfig.trigger_motor()` reads and writes all four, and `tests/test_mapping.py` asserts the
 layout against Flydigi's writer, so the protocol half is done and verified against the decompile.
-What was removed is the UI: **the Apex 5 does not have these motors.**
-`GenerateControllerApex5` sets seven capability flags and `IsSupportTriggerVibration` is not among
-them, while Vader 3, 4 and 5 all set it, and `ConvertTriggerConfigBean` only reads the block when
-that flag is on. The blob carries it regardless because it is one struct shared across the range.
+There is no UI, because **the Apex 5 does not have these motors.** `GenerateControllerApex5` sets
+seven capability flags and `IsSupportTriggerVibration` is not among them, while Vader 3, 4 and 5 all
+set it, and `ConvertTriggerConfigBean` only reads the block when that flag is on. The blob carries it
+regardless because it is one struct shared across the range.
 
-Worth knowing how this was missed, since the section above already said it: the app had a "Trigger
-vibration motors" switch for months, writing a byte nothing on this pad reads, and the mistake was
-to build outward from *the blob* instead of from the capability flags. **The pad's own factory bytes
-are not evidence either** — ours ships that block populated with `1 30 80 5 1 50 0`, which looks
-exactly like a feature in use. When a Vader 4 Pro is supported, this becomes a page gated on
-`IsSupportTriggerVibration`, and the Vader is the machine to verify the sync question on.
+**Gate a feature on the capability flags, never on the presence of bytes in the blob** — and **the
+factory bytes are not evidence either**: ours ships that block populated with `1 30 80 5 1 50 0`,
+which looks exactly like a feature in use. When a Vader 4 Pro is supported this becomes a page gated
+on `IsSupportTriggerVibration`, and the Vader is the machine to verify the sync question on.
 

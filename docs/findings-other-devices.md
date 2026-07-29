@@ -118,9 +118,8 @@ everything here is validated against.
 drops the device off USB and brings it back as a bootloader with a different identity, and that
 re-enumeration is precisely where USB passthrough loses a device: mid-flash.
 
-**There is a button-combination recovery, and this file used to say there was not.** Space
-Station's own failure dialog for the SI chip: "If the controller behaves abnormally, hold the
+**There is a button-combination recovery**, so the hardware is not entirely without a way back.
+Space Station's own failure dialog for the SI chip: "If the controller behaves abnormally, hold the
 START button (lower right of LOGO) for 8 seconds to restore controller function." The Apex 5
-declares `ChipSi` among its five chip modules, so it applies to this pad. That is one chip's
-recovery rather than a general one, and it does not make flashing a program image sensible — but
-"assume the hardware has no way back" was wrong, and it was load-bearing in the argument above.
+declares `ChipSi` among its five chip modules, so it applies to this pad. It recovers **one chip**,
+not the device, and it does not make flashing a program image sensible.

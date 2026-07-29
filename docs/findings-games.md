@@ -50,10 +50,9 @@ this app can contain. **And the memory route cannot run in a container at all**:
 distrobox, `/proc/<pid>/maps` of a host process is `Permission denied` — not only for a game inside
 pressure-vessel's sandbox but for an ordinary host process too, `flydigid` itself included, even
 though `stat` reports the same owner. Reading it needs PTRACE_MODE_READ across a user-namespace
-boundary, with SELinux enforcing on top. So tier 3 is host-only by construction. An earlier note
-here claimed a daemon in the container "would work today, for all four routes" — that was inferred
-from the shared PID namespace and `ptrace_scope=0` without ever attempting a cross-process read,
-and it is wrong.
+boundary, with SELinux enforcing on top. So tier 3 is host-only by construction. A shared PID
+namespace and `ptrace_scope=0` are not enough to infer otherwise — only an attempted cross-process
+read answers this.
 
 Measured per route, from inside the distrobox:
 
@@ -67,9 +66,9 @@ Measured per route, from inside the distrobox:
 
 The `ps5` row was checked properly rather than by inference: a device with Sony's IDs and the real
 descriptor, created inside the container, is bound by `hid-playstation` on the host and produces all
-four input nodes (`Wireless Controller`, plus Motion Sensors, Touchpad and Headset Jack). An earlier
-attempt used a vendor-usage device with a made-up VID, which the gamepad stack rightly ignored — it
-showed a hidraw node appearing and nothing about whether anything believed it.
+four input nodes (`Wireless Controller`, plus Motion Sensors, Touchpad and Headset Jack). Test it
+that way or not at all: a vendor-usage device with a made-up VID is rightly ignored by the gamepad
+stack, so it shows a hidraw node appearing and nothing about whether anything believed it.
 
 So exactly one route is blocked, and it is the one that decides where the daemon lives. It turned out not to matter: distrobox shares `/run/user`, so `systemctl
 --user` from inside the container drives the *host's* user manager and the unit runs in the host's
@@ -109,8 +108,7 @@ both. Most multi-store titles have no plural list at all, their executable being
 everywhere. Polling can reach the whole list, so `flydigi-run` is a convenience (instant, no 1 Hz lag,
 survives a renamed process) rather than a requirement for coverage.
 
-**The plural list is not just graphics-API variants**, as this section claimed while Apex Legends
-(`r5apex` / `r5apex_dx12`) was taken to be the only entry really using it. Nine entries add names
+**The plural list is not just graphics-API variants.** Nine entries add names
 beyond their singular, and they are three different things: API variants (Apex Legends, Forza
 Motorsport), *sibling titles* under one entry (Call of Duty carries six `*-cod` executables; both
 Uncharted entries list both `u4` and `tll`), and — for OVERWATCH — two other games' executables,

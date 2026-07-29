@@ -101,8 +101,8 @@ Three things fall out of that run:
     `raw_data` False→True, and *we did not ask for that* — both were sent as 0xFF, "leave alone". So
     the new holder switched the pad into raw-report mode, which is what its own driver reads.
   * **Nothing re-enumerates.** Same bus address, same evdev names, same VID/PID. So Steam's native
-    recognition comes from the acquire, not from any change of USB identity — which is why the
-    earlier guess that this was about descriptors or double-remapping was wrong.
+    recognition comes from the acquire, not from any change of USB identity — nothing to do with
+    descriptors or double-remapping.
 
 **Steam then lists the pad twice, and that is not our bug.** Reported on Windows as well as here.
 Both paths are legitimately supported and Steam does not merge them:
@@ -166,10 +166,10 @@ Their `data[17]`/`data[23]` land on our proven `GYRO_OFFSET`/`ACCEL_OFFSET`, so 
 established and the stick offsets inherit that confidence. Buttons are in the same report, offset
 not yet located.
 
-**There is no plan attached to this, and an earlier draft of this section wrongly implied one.**
-Reading sticks from here instead of from evdev was proposed to stop Tier 4 conflicting with the
-third-party toggle — but Tier 4 requires Steam Input *off* and the toggle exists to let Steam take
-over, so they conflict a level above the input source and were never going to be used together.
+**There is no plan to use this, and the obvious reason to want it does not hold.** Reading sticks
+from here instead of from evdev would stop Tier 4 conflicting with the third-party toggle — except
+Tier 4 requires Steam Input *off* and the toggle exists to let Steam take over, so they conflict a
+level above the input source and cannot be used together anyway.
 M1-M4 do not justify it either: the pad already remaps them onto real XInput buttons onboard, with
 nothing running. The only thing left that onboard remapping cannot do is a pad button the game never
 sees, for a host-side hotkey. Narrow, and not a reason to rework the relay.
@@ -199,7 +199,7 @@ switch is on the Controller page (`gui/models/device.py`, `thirdParty`).
 when the firmware is at or above **7.0.3.0**. Below that, hide it.
 
 `EnableMappingSwitchCommandFactory` (19 sub-function 4) is something else entirely and has no
-English UI string at all — the earlier guess that it was this feature was wrong.
+English UI string at all. It is **not** this feature.
 
 Also relevant to the "extra buttons and gyro" part: `DeviceMaskCommandFactory` (**16**) takes
 `maskController`, `maskMedia`, `maskGyro`, which is how the pad decides what to expose to the host.

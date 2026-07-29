@@ -137,16 +137,13 @@ all. The only richer variant is a `DeviceCode == "f4"` special case remapping ra
 percentage exists it is in the dongle or the input report, not the command set, and that is where to
 look.
 
-**The scale is 0..5, and this file used to say x/8.** The nibble is four bits, which is where eight
-came from, but the values are not a byte range — Space Station ships exactly seven battery icons and
-picks one as `Power${level <= 6 ? level : 0}.svg`, while the SDK turns the charging bit into the
-literal **6**. So the domain is 0..6 with 6 meaning *charging*, which leaves **0..5 for charge and
-makes 5 a full pad**. `flydigi/motion.py` had `MAX_LEVEL = 5` from the start; the desktop app's own
-constant said 8 and reported a full pad as five-eighths for months. It now reads
-`BATTERY_STEPS = motion.MAX_LEVEL` rather than repeating the number.
+**The scale is 0..5, not 0..15.** The nibble is four bits, but the values are not a byte range:
+Space Station ships exactly seven battery icons and picks one as `Power${level <= 6 ? level : 0}.svg`,
+while the SDK turns the charging bit into the literal **6**. So the domain is 0..6 with 6 meaning
+*charging*, leaving **0..5 for charge and 5 as a full pad**. `motion.MAX_LEVEL` is the one source of
+truth; the GUI reads `BATTERY_STEPS = motion.MAX_LEVEL` rather than repeating the number.
 
-Confirmed against the pad on the desk: wired, `battery_level: 5, charging: False` — full, and
-previously drawn as "5/8".
+Confirmed against the pad on the desk: wired, `battery_level: 5, charging: False` — full.
 
 What the same multi-packet reply *does* carry, in order after device type and connect type: MAC
 (4 bytes, reversed), the battery nibble, chip type, motion chip type, then seven BCD firmware
@@ -193,8 +190,8 @@ to be in a diagnostic state first.
     before a colour will stick.
 
 So bridging the DualSense lightbar to the pad means decoding that config, setting a static mode and
-writing it back -- a real job, not the one-command bridge originally assumed. The lightbar bytes
-themselves are already parsed (`data[45..47]` of the DS5 output report).
+writing it back -- a real job rather than a one-command bridge. The lightbar bytes themselves are
+already parsed (`data[45..47]` of the DS5 output report).
 
 
 ## Command inventory, by feature
