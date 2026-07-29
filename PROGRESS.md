@@ -1640,6 +1640,48 @@ software running and persists in controller memory.
 
 ## Prior art (researched)
 
+### SDL's own Flydigi driver, and the one stub worth filling — future work, not queued
+
+`src/joystick/hidapi/SDL_hidapi_flydigi.c` upstream. It knows this pad well: device ids **128/129**
+are the Apex 5, and its sensor rates (**970 Hz wired**, 295 Hz dongle) match what we measured
+independently. `FLYDIGI_ACQUIRE_CONTROLLER_COMMAND 0x1C` on a 30-second heartbeat is our command 28,
+which is where the `0x1C` traffic in "Steam Input contention" comes from.
+
+**Input is complete; every output beyond rumble is a stub.**
+`SetJoystickLED`, `RumbleJoystickTriggers` and `SendJoystickEffect` all return `SDL_Unsupported()`,
+and `GetJoystickCapabilities` reports only `SDL_JOYSTICK_CAP_RUMBLE`. Its command vocabulary stops
+at `0x01` info, `0x10`/`0x11` status, `0x12` haptic, `0x1C` acquire — 81 and 82 appear nowhere.
+Twenty-two commits, all input-side; nothing has ever gone near effects. **Note "Joystick" in these
+names is SDL's word for the device, not the analog stick** -- `SendJoystickEffect` is the backend
+for `SDL_SendGamepadEffect` and has nothing to do with the sticks, which have no actuator anyway.
+
+**Filling `SendJoystickEffect` is small and we have the missing half.** The driver already has
+`HIDAPI_DriverFlydigi_WritePacket`, the report-id and magic constants, and a convention for
+stripping a leading report id (`HandlePacketV2`). What upstream lacks is the effect vocabulary,
+which §3a of PROTOCOL.md has hardware-verified. Three things to get right if anyone picks this up:
+
+  * **Gate it, do not pass bytes through.** The same envelope carries **31** (firmware upgrade
+    mode), **166** (flash write) and **253** (factory reset). A naive passthrough hands every
+    application a brick button. Whitelist 81 and 82 and refuse the rest.
+  * **Per-model dispatch is unvalidated.** Ours is Apex 5 knowledge. Vader trigger vibration is
+    command **18**, not 81/82, and the Apex 6 uses the `K6Trigger*` family (83/85/87). We have an
+    Apex 5 and a Vader 4 Pro, and the Vader 4 has no force triggers to test against.
+  * **Expect "who calls it?"** and have an answer. SDL has **no typed adaptive-trigger API** -- no
+    `adaptive` or `TriggerEffect` anywhere in `SDL_gamepad.h` -- so `SDL_SendGamepadEffect` is a raw
+    byte passthrough and a caller must hard-code the packet layout. That works for the DualSense
+    because everyone knows its format; nobody knows this one.
+
+**The version that would actually matter is a typed API**, something like
+`SDL_SetGamepadTriggerEffect(gamepad, side, effect, params)` over both the DualSense and this pad.
+We are unusually well placed to argue for it: `flydigi/relay.py`'s `translate_ds5` already maps
+DualSense effects onto Flydigi modes and is verified on hardware in both directions. It is also a
+much bigger ask -- a cross-device abstraction over two different parameter spaces, which SDL has so
+far deliberately not attempted.
+
+**None of it buys us anything.** We reach 81/82 over hidraw directly, and that keeps working with
+the third-party toggle on and SDL holding the pad. An upstream patch would only help other software
+that wants Flydigi triggers without opening hidraw itself.
+
   * **`DualSense-haptic-helper`** (MIT) — real hardware; independently found haptics on channels
     2 and 3 of a 4.0 stream, matching our tone probing. Warns that **Steam Input masks the
     DualSense as an Xbox pad and breaks 4-channel audio**, so it must be disabled.
