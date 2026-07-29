@@ -5,6 +5,39 @@ the one thing on every device that must never be sent.
 
 Index: [PROGRESS.md](../PROGRESS.md).
 
+## Device codes: what `k5`, `k6` and `f4` mean
+
+Flydigi's SDK identifies a model by a short `DeviceCode` string, and every capability check in
+their source keys off it. The mapping is **not** guessable from the name — `k2` is the Apex *4* —
+so here it is, straight from `FlydigiControllerFactory`'s dispatch:
+
+| `DeviceCode` | Factory | Product | `DeviceType` values |
+|---|---|---|---|
+| `k1` | `GenerateControllerApex3` | Apex 3 | 24, plus 26 / 29 special editions |
+| `k2` | `GenerateControllerApex4` | **Apex 4** — not the Apex 2 | 84, 86, 87, 92, 93, 102, 103, 104 |
+| `k5` | `GenerateControllerApex5` | **Apex 5 — this pad** | 128, 129, 133, 134, 135, 136 |
+| `k6` | `GenerateControllerApex6` | Apex 6 — see below, it has not shipped | 149, 150 (`K6Pro`) |
+| `f3`, `f3p` | `GenerateControllerVader3` | Vader 3 | 28, 80, 81, 88 |
+| `f4` | `GenerateControllerVader4` | Vader 4 | 85, 91 |
+| `f5` | `GenerateControllerVader5` | Vader 5 | 130, 144, 145 |
+| `fp1`–`fp4` | `GenerateControllerDirewolf` | Direwolf | 25, 30, 31, 82, 83, 95, 132, 146–148 |
+
+There is no `k3` or `k4`: the Apex line's codes skip, so the digit in the code is not the digit in
+the product name for anything before the Apex 5. `DeviceType` is the numeric form of the same
+thing, one per SKU rather than per model — which is why SDL's Flydigi driver recognises the Apex 5
+as ids **128/129**, the base model and the Eva edition.
+
+`RecognizeDeviceCodeFromProductName` goes the other way, matching "APEX" plus a digit, so a product
+name is enough to derive the code.
+
+**Why `k6` appears in this repository at all**: `PROTOCOL.md` §3b transcribes the `K6Trigger*`
+command family (83/85/87) because it is in the SDK next to the family we do use. As of **July 2026
+no Apex 6 has shipped** — Flydigi's flagship is still the Apex 5 — so none of §3b has ever been
+sent to a device. It is coming rather than hypothetical: an FCC registration appeared in July 2026
+and an "Apex6 Haptics Elite" manual is dated 2026-07-17. Nothing in this project sends 83/85/87 to
+an Apex 5 by default, and `tools/flydigi_cmd.py`'s `k6mode` / `k6realtime` exist only to poke at it
+by hand.
+
 ## Multiple pads
 
 Wanted later, not now. A Vader 4 Pro is on the desk, and the two are closer than "fewer features"

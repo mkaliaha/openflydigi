@@ -396,12 +396,17 @@ def main():
     p.add_argument("--match-stroke", action="store_true", default=True)
     p.set_defaults(func=cmd_vibrate)
 
-    p = sub.add_parser("k6mode")
+    # "k6" is a device code, not a command prefix: it is the Apex 6, which had
+    # not shipped as of July 2026. These two send its trigger family to
+    # whatever is plugged in, which on an Apex 5 is expected to do nothing.
+    K6_HELP = "Apex 6 trigger family (device code k6) -- no such pad has shipped; inert on an Apex 5"
+
+    p = sub.add_parser("k6mode", help=K6_HELP)
     p.add_argument("--trigger-mode", type=int, default=2, help="0=Local 1=BindGrip 2=Realtime")
     p.add_argument("--grip-mode", type=int, default=1, help="0=RotorMapping 1=Realtime")
     p.set_defaults(func=cmd_k6mode)
 
-    p = sub.add_parser("k6realtime")
+    p = sub.add_parser("k6realtime", help=K6_HELP)
     p.add_argument("--channel", type=int, default=1)
     p.add_argument("--trigger", type=int, default=40)
     p.add_argument("--lgrip", type=int, default=0)

@@ -329,7 +329,7 @@ a bad checksum by staying silent exactly as the pad does.
 | `flydigi/prefs.py` | Per-game preferences in `~/.config/flydigi/games.json` |
 | `tools/flydigi-run` | Steam launch wrapper — `flydigi-run "<name>" -- %command%` |
 | `tools/hid_probe.py` | Passive HID descriptor dump (writes nothing) |
-| `tools/flydigi_cmd.py` | Manual command tool — `info`, `race`, `normal`, `bind`, `rumble`, `game`, `k6*`, `raw` |
+| `tools/flydigi_cmd.py` | Manual command tool — `info`, `race`, `normal`, `bind`, `rumble`, `game`, `raw`, plus `k6*` for the trigger family belonging to an Apex 6, which has not shipped ([device codes](docs/findings-other-devices.md)) |
 | `gamelist.json` | All 94 games + per-game configs (from the public API) |
 | `mods/` | All 46 downloadable mod zips (44 MB) |
 | `bundle/` | 248 .NET assemblies (plus `deps.json` / `runtimeconfig.json`) extracted from `SpaceStationService.exe` |
@@ -347,7 +347,7 @@ a bad checksum by staying silent exactly as the pad does.
 | [docs/findings-steam.md](docs/findings-steam.md) | Locking the hidraw node, the third-party takeover toggle, and SDL's own driver |
 | [docs/findings-games.md](docs/findings-games.md) | Game detection, routes, and the per-game validation notes |
 | [docs/findings-haptics.md](docs/findings-haptics.md) | Tier 4's limits: haptic audio, the USB gadget question, M1-M4 |
-| [docs/findings-other-devices.md](docs/findings-other-devices.md) | The Vader 4, the charging dock, and firmware update |
+| [docs/findings-other-devices.md](docs/findings-other-devices.md) | **What `k5`/`k6`/`f4` mean**, the Vader 4, the charging dock, and firmware update |
 | [docs/findings-desktop-app.md](docs/findings-desktop-app.md) | Apply vs save, the QML testing traps, the two fixed bugs |
 | [gui/README.md](gui/README.md) | Working in `gui/`: toolkit, runtime, layout, licensing |
 | [docs/gui-kirigami-plan.md](docs/gui-kirigami-plan.md) | The QML rewrite plan (finished; kept for the reasoning) |

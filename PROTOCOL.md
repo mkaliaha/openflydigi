@@ -81,7 +81,8 @@ Note `end` is **exclusive**.
 
 Two distinct trigger families exist, and the Apex 5's is `SetForceTrigger` — confirmed by
 hardware (§7) and by the SDK, which gates `K6Trigger*` on `DeviceCode == "k6"`. This pad is `k5`;
-what `k6` is, and why nobody can test it, is §3b.
+what `k6` is, and why nobody can test it, is §3b. For the device codes generally — `k2` is the
+Apex 4, not the Apex 2 — see `docs/findings-other-devices.md`.
 
 ### 3a. `SetForceTrigger` — effect-based (used by the DSX/adapter-trigger path)
 

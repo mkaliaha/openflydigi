@@ -41,6 +41,10 @@ CMD_GET_INFO = 0x01
 CMD_RUMBLE = 0x12
 CMD_SET_FORCE_TRIGGER = 81
 CMD_SET_FORCE_TRIGGER_GRIP = 82
+# "K6" is Flydigi's DeviceCode for the Apex 6, which had not shipped as of
+# July 2026 -- these three are transcribed from the SDK and have never been
+# sent to hardware. The Apex 5 is "k5" and uses 81/82 above. See
+# docs/findings-other-devices.md for the full device-code table.
 CMD_K6_TRIGGER_MODE = 83
 CMD_K6_TRIGGER_WAVEFORM = 85
 CMD_K6_TRIGGER_REALTIME = 87
