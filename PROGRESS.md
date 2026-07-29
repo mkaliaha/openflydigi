@@ -1640,7 +1640,7 @@ software running and persists in controller memory.
 
 ## Prior art (researched)
 
-### SDL's own Flydigi driver, and the one stub worth filling — future work, not queued
+### SDL's own Flydigi driver, and why filling its trigger stub was ruled out
 
 `src/joystick/hidapi/SDL_hidapi_flydigi.c` upstream. It knows this pad well: device ids **128/129**
 are the Apex 5, and its sensor rates (**970 Hz wired**, 295 Hz dongle) match what we measured
@@ -1655,7 +1655,38 @@ Twenty-two commits, all input-side; nothing has ever gone near effects. **Note "
 names is SDL's word for the device, not the analog stick** -- `SendJoystickEffect` is the backend
 for `SDL_SendGamepadEffect` and has nothing to do with the sticks, which have no actuator anyway.
 
-**Filling `SendJoystickEffect` is small and we have the missing half.** The driver already has
+**Considered, scoped, and dropped.** A fork was set up and a handoff written before the argument
+against it landed; both are kept at `~/Projects/sdl-flydigi/` with the conclusion recorded. Read the
+next three paragraphs before reviving it.
+
+**A passthrough is only worth anything if something sends Flydigi-format packets, and nothing will.**
+Games emit *DualSense* reports, because that is the format with an ecosystem behind it. So a game's
+trigger effects reach an Apex only if the game special-cases Flydigi — which no one is going to do —
+or if something translates DS5 into Flydigi's vocabulary. `SDL_SendGamepadEffect` is documented as
+"a gamepad specific effect packet", so a driver quietly accepting *another device's* format would be
+inventing a convention SDL has not blessed.
+
+**And we already solve it better.** Tier 4 is the answer to "how do DualSense trigger effects reach
+this pad": present a virtual DualSense, let the game send DS5 reports to something it recognises, and
+translate in `relay.translate_ds5`. Verified in Deathloop, works with any DS5-aware game, and needs
+neither SDL nor upstream cooperation. An SDL patch would be a worse version of something that
+already works.
+
+**And the one plausible universal consumer has nowhere to put it.** Steam Input is the only layer
+that could carry trigger effects across devices, and its abstraction is Xbox-shaped: it hands the
+game a virtual controller, and an Xbox pad has impulse trigger *rumble*, not adaptive resistance.
+There is no slot in that model for an effect. We have this documented already from the other
+direction — **Steam Input must be off for Tier 4**, because it masks the DualSense as an Xbox pad
+and breaks DS5 semantics, and the prior-art note below records the same for haptics. Steam Input
+does not merely lack a path for trigger effects; it destroys the one that exists.
+
+**The omission upstream is a judgement, not an oversight.** Whoever implemented acquire, status,
+battery and per-model gyro rates knew this protocol well enough to add effects and did not.
+
+What follows is what an implementation *would* have needed, kept because it is the part upstream
+lacks and because the same facts would apply to any future attempt.
+
+**The driver already has**
 `HIDAPI_DriverFlydigi_WritePacket`, the report-id and magic constants, and a convention for
 stripping a leading report id (`HandlePacketV2`). What upstream lacks is the effect vocabulary,
 which §3a of PROTOCOL.md has hardware-verified. Three things to get right if anyone picks this up:
