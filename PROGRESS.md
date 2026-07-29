@@ -1328,6 +1328,23 @@ What this settles without a single guess:
     enough, observed with lighting. Applying is working memory; command 166 is what makes it last.
   * **`effects.rumble()` must use `wait=0`** when driven continuously, or the 100 ms ACK wait puts
     the motors far behind.
+  * **A command answering is not a command working.** The screen's picture family (208..211) parses
+    every packet on an Apex 5 and echoes the fields back, and nothing appears on the panel; command
+    242 ACKs `off` and stays lit; command 245 ACKs and is ignored. On this pad an ACK means the
+    firmware understood the *shape* of what you sent. Only the hardware says whether it did it.
+  * **`Controller.send` takes an `until` predicate**, and without one it always burns its full
+    timeout. Right when a reply may arrive in several packets and no caller can say how many; wrong
+    for a long stream of one-for-one exchanges, where it turned a two-second upload into nine
+    minutes. Any fake that stands in for a Controller has to accept the keyword.
+  * **Do not restate a backend constant in the GUI.** `BATTERY_STEPS = 8` sat beside
+    `motion.MAX_LEVEL = 5` for months and drew a full pad as five-eighths. The defect was two
+    sources of truth, not the wrong digit.
+  * **Qt reads animated GIFs and cannot write them.** No `gif` in
+    `QImageWriter.supportedImageFormats()` at all, and multi-page tiff and webp both write happily
+    and then read back as a single frame. An animation for a test has to be committed, not generated.
+  * **Do not send anything slow through the worker's `_attempt`.** It retries once, which is right
+    for a sulking pad and wrong for a screen upload: that runs for minutes and has already switched
+    the pad into upgrade mode, so a silent second attempt is not a retry anyone asked for.
   * **Steam Input must be off** for Tier 4 — it masks the pad and breaks DualSense semantics.
   * **A sleeping Apex 5 leaves the USB bus.** It does not go quiet on HID — it disconnects, wired
     included: `usb 3-4: USB disconnect, device number 27` with no matching connect, no `37d7:2501`
@@ -1385,12 +1402,12 @@ What this settles without a single guess:
 |---|---|
 | `PROTOCOL.md` | Full wire protocol + hardware verification results |
 | `flydigi/` | Library — `device.py` (transport), `blobs.py` (packetised config transfer), `effects.py` (live trigger commands), `mapping.py` (profiles, remapping, vibration, stored triggers), `lighting.py` (RGB), `screen.py` (160×80 screen: LVGL image format, settings, and the HID upload that this pad ignores), `screen_ota.py` (the serial upload that works), `games.py`, `forza.py` |
-| `gui/` | PySide6/QML desktop app (GPL-3.0-or-later) — `app.py` (the object graph), `main.py` (entry point), `worker.py` (all device I/O, on its own thread), `models/` (view-agnostic state), `qml/` (`Main.qml`, `pages/`, `components/`) |
+| `gui/` | PySide6/QML desktop app (GPL-3.0-or-later) — `app.py` (the object graph), `main.py` (entry point), `worker.py` (all device I/O, on its own thread), `models/` (view-agnostic state; `screen.py` is the one that touches QtGui, for image decoding), `qml/` (`Main.qml`, `pages/`, `components/`) |
 | `tools/flydigi-mapping` | CLI for profiles — list/show/set/clear/rename/apply/backup/restore |
 | `tools/flydigi-forza` | Forza driver — UDP 5300 → rules → triggers (`--dump` for telemetry only) |
 | `tools/flydigi-dsx` | DSX protocol listener on UDP 7878 — drives triggers from any DSX-compatible mod |
 | `tools/flydigi-monitor` | Memory-reading driver using Flydigi's XGameMonitor configs (`--probe` to debug offsets) |
-| `tools/flydigi-screen` | The screen — `check`/`preview`/`convert` need no pad, then `status`, `test`, `probe`, `show`, `animate`, `send`, `on`/`off`, `statusbar` |
+| `tools/flydigi-screen` | The screen — `check`/`preview`/`convert` need no pad; then `status`, `test`, `show`, `animate`, `send`, `on`/`off`, `statusbar`. Sending goes over the serial route by default (`--via hid` is for other models, and inert here) |
 | `flydigi/uhid.py` | Pure-Python `/dev/uhid` binding (no dependencies) — creates kernel-side HID devices |
 | `flydigi/ps5_data.py` | Generated DualSense descriptor + feature blobs (from MIT inputtino) |
 | `tools/gen_ps5_data.py` | Regenerates the above from inputtino's `ps5.hpp` |

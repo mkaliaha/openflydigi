@@ -20,6 +20,10 @@ for the wire protocol and [PROGRESS.md](PROGRESS.md) for project state.
 | Game-memory monitor | 31 | Validated in Dark Souls: Remastered; pointer chains are per-build |
 | Virtual DualSense | 15 listed, any DS5-aware game | Validated in Deathloop; HD/audio haptics blocked |
 
+The pad's **160x80 screen** works too — pictures and animations, over the same
+serial route Space Station uses, plus the always-on display and status bar. It
+is slow by nature (~25 s a frame) and needs a wired connection.
+
 ## Quick start
 
 ```bash
@@ -63,8 +67,9 @@ tools/flydigi-screen off                # blank the panel -- Space Station canno
 
 ## Desktop app
 
-Profiles, button remapping, lighting and per-game trigger routes, without Space
-Station. QML on Kirigami, so it looks like the rest of a KDE desktop:
+Profiles, button remapping, sticks, vibration, triggers, lighting, the 160x80
+screen and per-game trigger routes, without Space Station. QML on Kirigami, so
+it looks like the rest of a KDE desktop:
 
 ```bash
 # Fedora / KDE
@@ -90,6 +95,8 @@ tool that talks to the pad, keeps working on a machine with no Qt installed.
 - Python 3.9+
 - For the memory monitor: `kernel.yama.ptrace_scope = 0`
 - For the virtual DualSense: `/dev/uhid` writable
+- For the screen: the udev rule in `udev/`, since the pad's picture bootloader
+  appears as a `root:dialout` tty and nothing can check for it in advance
 
 ## Reproducing the analysis
 

@@ -352,9 +352,14 @@ on the vendor node, found by its `06 a0 ff` descriptor prefix; no CRC byte is re
 and `AcquireController` is not a precondition for trigger commands. What is genuinely still open:
 
 - Report ID for the Apex 5 over the 2.4G dock and Bluetooth. Only wired has been tested.
-- **Whether this pad implements the picture-upload family (208..211) at all**, and in which of the
-  three envelopes — §8b. Space Station uploads to a k5 through the firmware console instead, so
-  nothing in their software exercises it here. One start packet settles it.
+- ~~Whether this pad implements the picture-upload family (208..211).~~ **Answered, and the answer
+  is worse than a no**: all four parse and acknowledge, echoing every field back, and none of it
+  reaches the panel — §8b. Protocol conformance without effect. The serial path of §8d is what
+  drives an Apex 5's screen.
+- **Why Flydigi split the two models.** Every other screen pad takes the HID route and the k5 takes
+  the serial one, and no source-backed reason was found: the k2 has the *same* separate
+  `ChipScreen`/`ChipType.Freq`, so "a separate screen chip" is not the discriminator. The decision
+  is unambiguous in their code; the motive is not in it.
 - **Whether mode 5 (`Vibration`) does anything** — a curiosity, not a gap: nothing in Flydigi's
   stack sends it (§3a), so no route depends on the answer. Modes 0–4 are settled and felt (§7).
 - Whether the pad honours a stored effect on profile switch without the host re-sending it. Effects
