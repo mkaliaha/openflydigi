@@ -50,7 +50,15 @@ def find(name, games=None):
 
 
 def tier(game):
-    """Which implementation path a game needs."""
+    """Which implementation path a game needs.
+
+    `isPS5` is deliberately not one of them, though it used to be. It says the
+    game speaks DualSense, which is answered by turning DualSense mode on for
+    the whole system rather than by doing anything per game -- see
+    `flydigi/dsmode.py`. Ask `ds5_aware()` for the flag itself; a game carrying
+    only that one lands in "unknown" here, which is the honest answer to "what
+    would the daemon do for it".
+    """
     if game.get("modDownLoadUrl"):
         mod = game.get("modName") or "(unnamed)"
         if mod == "XGameMonitor.exe":
@@ -60,9 +68,18 @@ def tier(game):
         return "bespoke"
     if game.get("isVibration"):
         return "vibration"
-    if game.get("isPS5"):
-        return "ps5"
     return "unknown"
+
+
+def ds5_aware(game):
+    """Whether Flydigi lists this game as reading a DualSense directly.
+
+    23 of the 94 entries do. It is worth showing and worth nothing else: with
+    DualSense mode on, a game that speaks DualSense gets it whether or not
+    Flydigi has ever heard of the game, and this list is not the boundary of
+    what works.
+    """
+    return bool(game.get("isPS5"))
 
 
 def _claim(index, name, game):

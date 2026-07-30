@@ -22,7 +22,6 @@ TIER_LABELS = {
     "vibration": "Preset — tunes the pad's rumble-to-trigger bind",
     "telemetry": "Game telemetry (needs flydigi-forza)",
     "monitor": "Game memory (needs flydigi-monitor)",
-    "ps5": "DualSense mode (needs flydigi-ds5)",
     "bespoke": "Third-party mod (needs flydigi-dsx)",
     "unknown": "No trigger support",
 }
@@ -44,14 +43,63 @@ ROUTE_NAMES = {
     "vibration": "Pad preset",
     "telemetry": "Telemetry",
     "monitor": "Game memory",
-    "ps5": "DualSense",
     "bespoke": "Third-party mod",
     "unknown": "None",
 }
 
+# `isPS5` used to be a route here, and is not one any more: DualSense mode is a
+# single switch for the whole system (the DualSense page), because unlike every
+# other route it needs no per-game data at all. The flag is still worth showing
+# -- it says this game reads a DualSense directly -- but it is not a choice, and
+# 23 preferences pretending otherwise was Flydigi's model leaking into a tier
+# that does not share its constraints.
+DS5_DETAIL = (
+    "Flydigi lists this game as reading a DualSense directly. Nothing to set "
+    "up per game: turn DualSense mode on and every game that speaks it gets "
+    "adaptive triggers, gyro and haptics — including games not in this list.")
+
+
+def marks_ds5(game, route):
+    """Whether the row needs a DualSense badge.
+
+    A badge earns its place by saying something the row does not already say.
+    `route_label` spells DualSense mode out for a game whose only capability is
+    that, so a badge beside it is decoration; for the eight games that pair the
+    flag with a mod or a preset, the label is about the other thing and the
+    badge is the only mention.
+
+    There used to be a "pad-side" badge too, on exactly the rows whose label
+    read "Preset — tunes the pad's rumble-to-trigger bind" and whose footer
+    button was enabled. Three ways of saying one thing.
+    """
+    return games.ds5_aware(game) and route != "unknown"
+
 
 def route_name(route):
     return ROUTE_NAMES.get(route, route)
+
+
+def route_label(game, route):
+    """The one-line label for a row.
+
+    "No trigger support" is right for a game with no capability flags at all,
+    and wrong for the fifteen whose only flag is DualSense: those work, with no
+    per-game setup, the moment DualSense mode is on.
+    """
+    if route == "unknown" and games.ds5_aware(game):
+        return "DualSense mode — nothing to set up per game"
+    return TIER_LABELS.get(route, route)
+
+
+def can_auto(route):
+    """Whether auto mode has anything to do for a game.
+
+    The daemon acts per route; with no route there is nothing for it to start
+    or write, so a switch would be an offer it cannot keep. This became
+    reachable when DualSense mode stopped being a route: fifteen games carry
+    that flag and nothing else.
+    """
+    return route != "unknown"
 
 
 def game_name(game):
@@ -60,13 +108,23 @@ def game_name(game):
 
 def route_detail(game, route):
     """The explanatory line for one game, given its route."""
-    if route == APPLIABLE_ROUTE:
-        return VIBRATION_DETAIL
-    label = TIER_LABELS.get(route, route)
     if route == "unknown":
-        return label + "."
-    processes = ", ".join(game.get("processGameNames") or []) or "not listed"
-    return f"{label} — start it alongside the game. Process: {processes}"
+        # For the fifteen games whose only capability is DualSense, "No trigger
+        # support" is the wrong sentence: there is support, it just is not
+        # per-game. Saying otherwise would send someone looking for a route
+        # that was deliberately taken away.
+        if games.ds5_aware(game):
+            return DS5_DETAIL
+        return TIER_LABELS[route] + "."
+    if route == APPLIABLE_ROUTE:
+        base = VIBRATION_DETAIL
+    else:
+        label = TIER_LABELS.get(route, route)
+        processes = ", ".join(game.get("processGameNames") or []) or "not listed"
+        base = f"{label} — start it alongside the game. Process: {processes}"
+    if games.ds5_aware(game):
+        base += "\n\n" + DS5_DETAIL
+    return base
 
 
 @QmlElement
@@ -82,6 +140,8 @@ class GameListModel(QAbstractListModel):
     AutoRole = Qt.UserRole + 7
     RouteChoicesRole = Qt.UserRole + 8
     ChosenRouteIndexRole = Qt.UserRole + 9
+    Ds5Role = Qt.UserRole + 10
+    CanAutoRole = Qt.UserRole + 11
 
     countChanged = Signal()
 
@@ -106,6 +166,8 @@ class GameListModel(QAbstractListModel):
             self.AutoRole: b"auto",
             self.RouteChoicesRole: b"routeChoices",
             self.ChosenRouteIndexRole: b"chosenRouteIndex",
+            self.Ds5Role: b"ds5Mark",
+            self.CanAutoRole: b"canAuto",
         }
 
     def rowCount(self, parent=QModelIndex()):
@@ -115,16 +177,16 @@ class GameListModel(QAbstractListModel):
         if not 0 <= index.row() < len(self._games):
             return None
         game = self._games[index.row()]
-        # The chosen route, not the tier: nine games support more than one, and
-        # a row that still said "Game memory" after being switched to DualSense
-        # would be describing something that is no longer going to happen.
+        # The chosen route, not the tier: a game that supports more than one can
+        # be switched, and a row that still said "Game memory" afterwards would
+        # be describing something that is no longer going to happen.
         route = self._prefs.route(game)
         if role in (self.NameRole, Qt.DisplayRole):
             return game_name(game)
         if role == self.RouteRole:
             return route
         if role == self.RouteLabelRole:
-            return TIER_LABELS.get(route, route)
+            return route_label(game, route)
         if role == self.CanApplyRole:
             return route == APPLIABLE_ROUTE
         if role == self.DetailRole:
@@ -137,6 +199,10 @@ class GameListModel(QAbstractListModel):
             return [route_name(r) for r in prefs.routes(game)]
         if role == self.ChosenRouteIndexRole:
             return prefs.routes(game).index(route)
+        if role == self.Ds5Role:
+            return marks_ds5(game, route)
+        if role == self.CanAutoRole:
+            return can_auto(route)
         return None
 
     # -- per-game auto mode ------------------------------------------------
@@ -146,7 +212,9 @@ class GameListModel(QAbstractListModel):
 
     def setAuto(self, row, value):
         game = self.game(row)
-        if game is None:
+        if game is None or not can_auto(self._prefs.route(game)):
+            # Nothing for the daemon to do for this game, so storing a
+            # preference about it would only mislead whoever read the file.
             return
         self._prefs.set_auto(game, value)
         self._changed(row)

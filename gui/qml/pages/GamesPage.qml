@@ -166,6 +166,8 @@ Kirigami.ScrollablePage {
             required property bool auto
             required property var routeChoices
             required property int chosenRouteIndex
+            required property bool ds5Mark
+            required property bool canAuto
 
             objectName: "gameRow" + index
             width: ListView.view.width
@@ -194,16 +196,26 @@ Kirigami.ScrollablePage {
                     }
                 }
 
+                // The row's one badge, and it appears only where the label does
+                // not already carry the same fact -- a game that pairs the
+                // DualSense flag with a mod or a preset. Marked rather than
+                // offered as a choice: DualSense mode is one switch for the
+                // whole system, on its own page.
+                //
+                // A "pad-side" badge used to sit here too, on precisely the
+                // rows that already said "Preset — tunes the pad's
+                // rumble-to-trigger bind" and whose footer button was enabled.
                 Kirigami.Chip {
-                    visible: gameRow.canApply
+                    objectName: "ds5Chip" + gameRow.index
+                    visible: gameRow.ds5Mark
                     checkable: false
                     closable: false
-                    text: "pad-side"
+                    text: "DualSense"
                 }
 
-                // Only the nine games that support more than one route get a
-                // choice; for the rest the combo would be a control with one
-                // option, which is furniture rather than information.
+                // Only games that support more than one route get a choice; for
+                // the rest the combo would be a control with one option, which
+                // is furniture rather than information.
                 Controls.ComboBox {
                     objectName: "routeChoice" + gameRow.index
                     visible: gameRow.routeChoices.length > 1
@@ -216,8 +228,13 @@ Kirigami.ScrollablePage {
                     onActivated: App.games.setRouteIndexAt(gameRow.index, currentIndex)
                 }
 
+                // Hidden where there is no route to take. Fifteen games carry
+                // only Flydigi's DualSense flag, and that is not something the
+                // daemon does per game -- it is the DualSense switch, once, for
+                // everything. A toggle here would be an offer nothing keeps.
                 Controls.Switch {
                     objectName: "autoSwitch" + gameRow.index
+                    visible: gameRow.canAuto
                     checked: gameRow.auto
                     onToggled: App.games.setAutoAt(gameRow.index, checked)
 

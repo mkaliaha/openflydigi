@@ -8,8 +8,18 @@ Auto mode is a per-game decision: "when this game starts, do the right thing
 for it without me". What that means depends on the game's route -- load a
 vibration preset onto the pad, or run a driver for as long as the game lives.
 
-Nine games support more than one route, so "the right thing" is itself a
+One game supports more than one route, so "the right thing" can itself be a
 per-game choice; see `routes()`.
+
+**DualSense mode is not a route here.** It used to be, as `ps5`, because
+Flydigi's gamelist carries an `isPS5` flag per game and the rest of this module
+follows that list. It does not belong: the other routes need per-game data --
+which bind to write, which telemetry rules, which memory offsets -- and the
+DualSense tier needs none of it. It presents a DualSense, and any DS5-aware game
+gets it, including games Flydigi has never heard of. So it is one switch for the
+whole system (`flydigi/dsmode.py`) rather than 23 preferences, and the daemon
+never starts it: the virtual pad has to exist *before* a game enumerates pads,
+so acting on detection is already too late.
 
 Keyed by the gamelist's `id`, which is present and unique across all 94 entries
 -- names are not, since the same title appears differently per store, and the
@@ -44,26 +54,22 @@ def routes(game):
     """Every route a game supports, the one `games.tier` picks first.
 
     A game's capability flags are not exclusive and `tier()` returns only the
-    winner of its priority chain, which hides the alternatives. Nine of the 94
-    entries carry more than one:
+    winner of its priority chain, which hides the alternatives. Of the 94
+    entries, one carries a second route this daemon can take: Fallout 4, with a
+    mod *and* a vibration preset.
 
-        6  XGameMonitor mod + isPS5   -- the choice Space Station calls MapMode
-        2  vibration + isPS5          -- Apex Legends, Uncharted: Lost Legacy
-        1  Fallout 4 mod + vibration
-
-    Only the first six were modelled at first, on the assumption that MapMode
-    was the whole story. Counting the flag combinations across the gamelist
-    said otherwise, so this returns a list and the preference picks from it.
+    Eight more used to appear here, pairing `isPS5` with a mod or a preset --
+    the choice Space Station calls MapMode. DualSense mode is a global switch
+    now (see the module docstring), so a game's `isPS5` flag no longer produces
+    a route to choose between; `games.ds5_aware()` still reports it, because it
+    is worth telling someone that a game reads a DualSense directly.
 
     `tier()` stays at the head, so a game nobody has an opinion about behaves
     exactly as it did before any of this existed.
     """
-    first = games.tier(game)
-    out = [first]
-    for route, present in (("vibration", game.get("isVibration")),
-                           ("ps5", game.get("isPS5"))):
-        if present and route not in out:
-            out.append(route)
+    out = [games.tier(game)]
+    if game.get("isVibration") and "vibration" not in out:
+        out.append("vibration")
     return out
 
 
@@ -72,7 +78,22 @@ def has_choice(game):
     return len(routes(game)) > 1
 
 
-def default_auto_for(route):
+def default_auto_for(route, tier=None):
+    """Whether a game acts on its own when nobody has said.
+
+    **Choosing a route must never turn auto on.** Picking one says *how* this
+    game should be handled, not *whether* it should be handled without being
+    asked -- and the two came coupled: a multi-route game whose tier defaults to
+    off would start acting by itself the moment its route was switched to the
+    preset, from a dropdown nobody expected to grant that.
+
+    So both have to allow it. The tier is what the game is by default, the route
+    is what it is now, and the more cautious of the two wins in either
+    direction. An explicit toggle still overrides it, which is the only thing
+    that should be able to.
+    """
+    if tier is not None and tier not in AUTO_BY_DEFAULT:
+        return False
     return route in AUTO_BY_DEFAULT
 
 
@@ -117,17 +138,17 @@ class Prefs:
     # -- auto -------------------------------------------------------------
 
     def auto(self, game):
-        """Whether this game acts on its own, falling back to its route default.
+        """Whether this game acts on its own, falling back to a default.
 
-        The default follows the *chosen* route rather than the game's tier, so
-        switching Apex Legends from its vibration preset to DualSense emulation
-        also stops it acting unasked -- taking the controller over is not
-        something to inherit from a preset's default.
+        The default takes both the game's tier and its chosen route into
+        account, and the cautious one wins -- see `default_auto_for`. Switching
+        Fallout 4 to its mod stops it acting unasked, and switching it back to
+        the preset does not silently start it again.
         """
         entry = self._entry(game)
         if "auto" in entry:
             return bool(entry["auto"])
-        return default_auto_for(self.route(game))
+        return default_auto_for(self.route(game), games.tier(game))
 
     def set_auto(self, game, value):
         self._update(game, "auto", bool(value))
@@ -160,11 +181,6 @@ class Prefs:
                 f"{game.get('enGameName')} has no {route!r} route; it offers "
                 + ", ".join(available))
         self._update(game, "route", route)
-
-    def set_mode(self, game, value):
-        if value not in (MODE_FLYDIGI, MODE_PS5):
-            raise ValueError(f"unknown mode {value!r}")
-        self._update(game, "mode", value)
 
     # -- persistence ------------------------------------------------------
 

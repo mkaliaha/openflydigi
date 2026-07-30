@@ -11,10 +11,14 @@
     tools/flydigi-auto on "Death Stranding"
     tools/flydigi-auto off "Cyberpunk"
     tools/flydigi-auto reset "Cyberpunk"       # back to the route default
-    tools/flydigi-auto route "Cyberpunk" ps5   # for the 9 multi-route games
+    tools/flydigi-auto route "Fallout 4" vibration   # multi-route games only
 
 The daemon re-reads the file each poll, so a change here takes effect within a
 second -- no restart.
+
+DualSense mode is not here. It is one switch for the whole system rather than a
+per-game route: `sudo tools/flydigi-ds5-usbip --haptics --motors`, or the app's
+DualSense page.
 """
 import argparse
 import os

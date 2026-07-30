@@ -230,9 +230,11 @@ def driver_argv(game, route):
         return [sys.executable, os.path.join(TOOLS, "flydigi-forza"), "--quiet"]
     if route == "bespoke":
         return [sys.executable, os.path.join(TOOLS, "flydigi-dsx"), "--quiet"]
-    # Deliberately not ps5. The virtual DualSense has to exist before the game
-    # enumerates pads, so starting it on detection is already too late -- see
-    # tools/flydigi-run, which is the supported way in.
+    # DualSense mode is not here, and is not a route at all. It is a switch for
+    # the whole system (flydigi/dsmode.py, and the app's DualSense page): the
+    # virtual pad has to exist *before* a game enumerates pads, so acting on
+    # detection is already too late, and its attach needs an authentication that
+    # a daemon must not be able to perform unattended.
     return None
 
 

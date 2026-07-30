@@ -29,6 +29,7 @@ except ImportError:
     sys.exit(0)
 
 from flydigi import lighting as led
+from flydigi import dsmode as ds_backend
 from flydigi import effects, mapping, prefs
 from flydigi import setup as system_setup
 from gui import models
@@ -671,11 +672,19 @@ def test_lighting_write_and_confirm():
 GAMES = [
     {"id": 1, "enGameName": "Forza Horizon 6", "modDownLoadUrl": "x",
      "modName": "ForzaDualSense.exe", "processGameNames": ["forza.exe"]},
+    # DualSense-aware and nothing else: 15 of the 94 entries are like this.
+    # There is no route to take for it -- DualSense mode is a switch for the
+    # whole system -- but the flag is still shown.
     {"id": 2, "enGameName": "Deathloop", "isPS5": True},
     {"id": 3, "enGameName": "Silksong", "isVibration": True},
-    # Both flags, like Apex Legends and Uncharted: Lost Legacy -- the case that
-    # makes the route a choice rather than a label.
-    {"id": 4, "enGameName": "Two Ways", "isVibration": True, "isPS5": True},
+    # A mod *and* a preset, like Fallout 4 -- the one remaining case that makes
+    # the route a choice rather than a label. Eight more used to qualify by
+    # pairing isPS5 with something else; that is not a route any more.
+    # DualSense-aware as well, like the six MapMode games: the flag is not the
+    # row's headline, so it is the one case where a badge says something new.
+    {"id": 4, "enGameName": "Two Ways", "isVibration": True, "isPS5": True,
+     "modDownLoadUrl": "x", "modName": "Fallout 4",
+     "processGameNames": ["fallout4.exe"]},
 ]
 
 
@@ -702,8 +711,8 @@ def test_game_list_and_filters():
 
     view.search = ""
     view.route = "vibration"
-    # Two: Silksong, and the two-route game while it is still on its tier.
-    check("route filter works", view.count == 2, str(view.count))
+    # One: the two-route game starts on its tier, which is the mod.
+    check("route filter works", view.count == 1, str(view.count))
     check("route filter picks the pad-side game",
           role(view, 0, b"name") == "Silksong", str(role(view, 0, b"name")))
     check("the filtered row maps back to its entry",
@@ -731,10 +740,53 @@ def test_route_wording_does_not_oversell_the_preset():
           detail)
     check("and says nothing runs alongside", "nothing runs" in detail, detail)
 
-    view.route = "ps5"
+    view.route = "telemetry"
     check("a helper route names what to start",
           "start it alongside" in role(view, 0, b"detail"),
           str(role(view, 0, b"detail")))
+
+
+def test_a_dualsense_game_is_marked_rather_than_offered_a_route():
+    source, view = make_games()
+    marked = {role(view, row, b"name"): role(view, row, b"ds5Mark")
+              for row in range(view.count)}
+    # A badge has to say something the row does not already say. "Two Ways"
+    # pairs the flag with a mod, so its label is about the mod and the badge is
+    # the only mention; "Deathloop" has nothing else, so its own label spells
+    # DualSense mode out and a badge beside it would be decoration.
+    check("a game whose label is about something else is badged",
+          marked["Two Ways"] is True, str(marked))
+    check("a game whose label already says it is not",
+          marked["Deathloop"] is False, str(marked))
+    check("and a game without the flag never is", marked["Silksong"] is False,
+          str(marked))
+
+    row = row_for(view, "Deathloop")
+    check("it offers no route to choose",
+          len(role(view, row, b"routeChoices")) == 1,
+          str(role(view, row, b"routeChoices")))
+    check("and none of them is the old ps5 route",
+          role(view, row, b"route") != "ps5", str(role(view, row, b"route")))
+    detail = role(view, row, b"detail")
+    # "No trigger support" would be the wrong sentence for a game that works
+    # perfectly well once DualSense mode is on.
+    check("the row explains DualSense mode instead of denying support",
+          "DualSense mode on" in detail, detail)
+    check("and says there is nothing per-game to do",
+          "per game" in detail, detail)
+    check("its one-line label does not deny support either",
+          "No trigger support" not in role(view, row, b"routeLabel"),
+          str(role(view, row, b"routeLabel")))
+
+    # Auto mode acts per route, and this game has none for it to take -- so
+    # there is nothing to offer, and offering it anyway would be a switch that
+    # does nothing whichever way it is set.
+    check("it is not offered auto mode", role(view, row, b"canAuto") is False)
+    check("and games with a route still are",
+          role(view, row_for(view, "Silksong"), b"canAuto") is True)
+    view.setAutoAt(row, True)
+    check("asking anyway is refused rather than stored",
+          role(view, row, b"auto") is False, str(role(view, row, b"auto")))
 
 
 # -- per-game auto mode ----------------------------------------------------
@@ -752,7 +804,7 @@ def test_auto_defaults_follow_the_route():
             for row in range(view.count)}
     check("the pad-side route acts by default", auto["Silksong"] is True,
           str(auto))
-    check("a route that takes the pad over does not",
+    check("a game with no route to take does not",
           auto["Deathloop"] is False, str(auto))
     check("nor does one that runs a helper", auto["Forza Horizon 6"] is False,
           str(auto))
@@ -789,39 +841,205 @@ def test_only_multi_route_games_offer_a_choice():
 def test_choosing_a_route_changes_what_the_row_says():
     source, view = make_games()
     row = row_for(view, "Two Ways")
-    check("it starts on its tier", role(view, row, b"route") == "vibration",
+    check("it starts on its tier", role(view, row, b"route") == "bespoke",
           str(role(view, row, b"route")))
-    check("so it can be applied from here", role(view, row, b"canApply") is True)
+    check("so it cannot be applied from here",
+          role(view, row, b"canApply") is False)
     check("and the chosen index points at it",
           role(view, row, b"chosenRouteIndex") == 0)
+    check("the mod route does not act by default",
+          role(view, row, b"auto") is False)
 
     view.setRouteIndexAt(row, 1)
     check("choosing the other route takes effect",
-          role(view, row, b"route") == "ps5", str(role(view, row, b"route")))
-    check("the row stops offering to load a preset",
-          role(view, row, b"canApply") is False)
+          role(view, row, b"route") == "vibration",
+          str(role(view, row, b"route")))
+    check("the row starts offering to load a preset",
+          role(view, row, b"canApply") is True)
     check("its description follows the choice",
-          "start it alongside" in role(view, row, b"detail"),
+          "preset" in role(view, row, b"detail"),
           str(role(view, row, b"detail")))
-    check("and auto withdraws with it", role(view, row, b"auto") is False)
+    # Picking a route from the dropdown says how this game is handled, not that
+    # it should be handled unasked. It used to grant auto mode as a side effect,
+    # because the default followed the chosen route alone.
+    check("but choosing a route does not switch auto on",
+          role(view, row, b"auto") is False, str(role(view, row, b"auto")))
 
     # A route the game does not have must not be reachable from a view.
     view.setRouteIndexAt(row, 7)
     check("an out-of-range choice is ignored",
-          role(view, row, b"route") == "ps5", str(role(view, row, b"route")))
+          role(view, row, b"route") == "vibration",
+          str(role(view, row, b"route")))
 
 
 def test_the_route_filter_follows_the_chosen_route():
     source, view = make_games()
-    view.route = "ps5"
+    view.route = "vibration"
     check("the two-route game is not there under its tier",
           row_for(view, "Two Ways") < 0, str(view.count))
 
     view.route = models.ALL_ROUTES
     view.setRouteIndexAt(row_for(view, "Two Ways"), 1)
-    view.route = "ps5"
+    view.route = "vibration"
     check("after choosing, it filters as the route it now takes",
           row_for(view, "Two Ways") >= 0, str(view.count))
+
+
+def test_the_route_filter_no_longer_offers_dualsense():
+    _source, view = make_games()
+    # It was one of the routes here, and a stale filter value would silently
+    # match nothing rather than saying it is gone.
+    check("ps5 is not in the filter list", "ps5" not in view.routeNames,
+          str(view.routeNames))
+    check("nor is it a route name", "ps5" not in models.ROUTE_NAMES,
+          str(sorted(models.ROUTE_NAMES)))
+
+
+# -- DualSense mode --------------------------------------------------------
+#
+# Nothing here starts a relay: what is worth asserting is that the model reads
+# the system rather than remembering what it did, since the relay outlives the
+# app on purpose, and that a failed start says which failure it was.
+
+class FakeProc:
+    """A Popen that has already exited with `code`."""
+
+    def __init__(self, code):
+        self.returncode = code
+
+    def poll(self):
+        return self.returncode
+
+
+def make_dsmode(state, start=None):
+    """A model over a stand-in system.
+
+    The model reaches the backend by attribute on the module rather than by a
+    name bound at import, so replacing them here is what the model will
+    actually call. `state` is kept by reference: mutate it to make the system
+    change under the model, which is the whole thing being tested.
+    """
+    ds_backend.state = lambda: dict(state)
+    ds_backend.latest_status = lambda **_: {"out": 7, "iso_urbs": 99,
+                                            "reports": 5}
+    ds_backend.tail = lambda **kwargs: []
+    if start is not None:
+        ds_backend.start = start
+    return models.DsModeModel()
+
+
+def test_dsmode_reads_the_system_rather_than_remembering():
+    live = {"available": True, "loaded": True, "running": False, "pids": [],
+            "relay": "x"}
+    model = make_dsmode(live)
+    try:
+        check("a stopped relay reads as off", model.running is False)
+
+        # Started by something else -- a terminal, or this app before it was
+        # restarted. The switch has to notice.
+        live["running"] = True
+        live["pids"] = [4242]
+        model.refresh()
+        check("a relay started elsewhere reads as on", model.running is True)
+        check("and its counters are picked up", model.outputReports == 7,
+              str(model.outputReports))
+        check("including the haptic ones", model.hapticUrbs == 99,
+              str(model.hapticUrbs))
+
+        live["running"] = False
+        live["pids"] = []
+        model.refresh()
+        check("and it notices when the relay goes", model.running is False)
+        check("dropping the counters with it", model.outputReports == 0,
+              str(model.outputReports))
+    finally:
+        model.wait(100)
+
+
+def test_dsmode_refuses_to_start_what_cannot_run():
+    model = make_dsmode({"available": False, "loaded": False, "running": False,
+                         "pids": [], "relay": "x"})
+    said = []
+    model.failed.connect(said.append)
+    try:
+        model.setRunning(True)
+        check("a kernel without vhci-hcd is refused, not attempted",
+              len(said) == 1, str(said))
+        check("and the reason names the module",
+              said and "vhci-hcd" in said[0], str(said))
+        check("nothing is reported as running", model.running is False)
+    finally:
+        model.wait(100)
+
+
+def test_dsmode_does_not_call_a_clean_stop_a_failure():
+    """Pressing the switch off is not news, and it is certainly not an error.
+
+    The relay exits 0 on SIGTERM, which is exactly what the switch sends, so
+    treating any exit as a failure put a red banner and the relay's closing
+    summary on screen every time DualSense mode was turned off.
+    """
+    live = {"available": True, "loaded": True, "running": True, "pids": [900],
+            "relay": "x"}
+    model = make_dsmode(live, start=lambda **_: FakeProc(0))
+    errors, notes = [], []
+    model.failed.connect(errors.append)
+    model.note.connect(notes.append)
+    try:
+        model.setRunning(False)
+        # The stop runs on its own thread; the relay going is what the poll
+        # sees, so simulate the system it is asking about.
+        live["running"] = False
+        live["pids"] = []
+        model._proc = FakeProc(0)
+        model.refresh()
+        check("a stop that was asked for is not an error", errors == [],
+              str(errors))
+        check("and does not need announcing either", notes == [], str(notes))
+        check("the switch is off afterwards", model.running is False)
+    finally:
+        model.wait(2000)
+
+
+def test_dsmode_says_so_when_the_relay_goes_by_itself():
+    live = {"available": True, "loaded": True, "running": True, "pids": [900],
+            "relay": "x"}
+    model = make_dsmode(live)
+    errors, notes = [], []
+    model.failed.connect(errors.append)
+    model.note.connect(notes.append)
+    try:
+        # Nobody asked -- Ctrl-C in a terminal, or someone else's pkill. Still
+        # a clean exit, so still not an error, but the switch moving on its own
+        # needs a word or it looks like a glitch.
+        live["running"] = False
+        live["pids"] = []
+        model._proc = FakeProc(0)
+        model.refresh()
+        check("an unasked-for clean exit is not an error", errors == [],
+              str(errors))
+        check("but it is announced", len(notes) == 1, str(notes))
+    finally:
+        model.wait(2000)
+
+
+def test_dsmode_reports_a_cancelled_authentication():
+    live = {"available": True, "loaded": True, "running": False, "pids": [],
+            "relay": "x"}
+    # pkexec exits 126 when the dialog is dismissed or the password refused.
+    model = make_dsmode(live, start=lambda **_: FakeProc(126))
+    said = []
+    model.failed.connect(said.append)
+    try:
+        model.setRunning(True)
+        model.refresh()
+        check("a dismissed dialog is reported", len(said) == 1, str(said))
+        check("in words rather than an exit code",
+              said and "cancelled" in said[0], str(said))
+        check("and the switch goes back", model.running is False)
+        check("and stops claiming to be busy", model.busy is False)
+    finally:
+        model.wait(100)
 
 
 # -- setup -----------------------------------------------------------------
@@ -1212,11 +1430,18 @@ def main():
                  test_game_list_and_filters,
                  test_only_the_pad_side_route_can_be_applied,
                  test_route_wording_does_not_oversell_the_preset,
+                 test_a_dualsense_game_is_marked_rather_than_offered_a_route,
                  test_auto_defaults_follow_the_route,
                  test_toggling_auto_is_saved_and_announced,
                  test_only_multi_route_games_offer_a_choice,
                  test_choosing_a_route_changes_what_the_row_says,
                  test_the_route_filter_follows_the_chosen_route,
+                 test_the_route_filter_no_longer_offers_dualsense,
+                 test_dsmode_reads_the_system_rather_than_remembering,
+                 test_dsmode_refuses_to_start_what_cannot_run,
+                 test_dsmode_does_not_call_a_clean_stop_a_failure,
+                 test_dsmode_says_so_when_the_relay_goes_by_itself,
+                 test_dsmode_reports_a_cancelled_authentication,
                  test_setup_reports_ready_only_when_nothing_fails,
                  test_setup_asks_for_root_only_when_something_needs_it,
                  test_setup_keeps_running_and_starting_at_login_apart,

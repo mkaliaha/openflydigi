@@ -51,18 +51,26 @@ def main():
     vibration = only("vibration")
     monitor = only("monitor")
 
-    # Multi-route detection. Six of these are the MapMode pairs Space Station
-    # offers; the other three were missed by modelling only that pair.
-    results.append(check("nine multi-route games", len(multi) == 9, f"got {len(multi)}"))
+    # Multi-route detection. Eight of the nine pairs were `isPS5` beside
+    # something else -- the choice Space Station calls MapMode. DualSense mode
+    # is a global switch rather than a route now, so what is left is the one
+    # game carrying two routes the daemon can actually take.
+    results.append(check("one multi-route game", len(multi) == 1, f"got {len(multi)}"))
     results.append(check("every route offered is a real capability",
-                         all(set(prefs.routes(g)) <= {games.tier(g), "vibration", "ps5"}
+                         all(set(prefs.routes(g)) <= {games.tier(g), "vibration"}
                              for g in multi)))
     results.append(check("the tier is always the first route offered",
                          all(prefs.routes(g)[0] == games.tier(g) for g in all_games)))
-    names = {g.get("enGameName") for g in multi}
-    results.append(check("the vibration+ps5 pair is included",
-                         any("Lost Legacy" in n for n in names)
-                         and any("Apex Legends" in n for n in names), str(sorted(names))))
+    results.append(check("no game offers a ps5 route",
+                         not any("ps5" in prefs.routes(g) for g in all_games)))
+    # The flag itself is not thrown away: it is worth telling someone that a
+    # game reads a DualSense directly, it is just not a per-game decision.
+    aware = [g for g in all_games if games.ds5_aware(g)]
+    results.append(check("the DualSense flag is still readable",
+                         len(aware) == 23, f"{len(aware)} games"))
+    results.append(check("a DualSense-only game has no route to take",
+                         all(games.tier(g) == "unknown" for g in aware
+                             if not g.get("isVibration") and not g.get("modDownLoadUrl"))))
 
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "games.json")
@@ -91,34 +99,44 @@ def main():
         # Routes: unchanged for ordinary games, chosen for multi-route ones.
         results.append(check("route of a vibration game is its tier",
                              p.route(vibration) == "vibration", p.route(vibration)))
-        game = games.find("Cyberpunk", all_games)
-        results.append(check("a multi-route game defaults to Flydigi's own effects",
-                             p.route(game) == "monitor", p.route(game)))
-        p.set_route(game, "ps5")
+        game = multi[0]
+        results.append(check("a multi-route game defaults to its tier",
+                             p.route(game) == games.tier(game), p.route(game)))
+        p.set_route(game, "vibration")
         results.append(check("choosing another route changes the route",
-                             p.route(game) == "ps5", p.route(game)))
-        results.append(check("route and auto are independent",
-                             p.auto(game) is False and p.route(game) == "ps5"))
+                             p.route(game) == "vibration", p.route(game)))
 
         bad = False
         try:
-            p.set_route(game, "vibration")
+            p.set_route(game, "monitor")
         except ValueError:
             bad = True
         results.append(check("a route the game does not offer is refused", bad))
 
-        # The auto default follows the chosen route, not the tier: a preset the
-        # pad applies to itself may act unasked, taking the pad over may not.
-        apex = games.find("Apex Legends", all_games)
-        results.append(check("vibration route acts by default", p.auto(apex)))
-        p.set_route(apex, "ps5")
-        results.append(check("switching to PS5 withdraws the default",
-                             not p.auto(apex), p.route(apex)))
-        p.set_auto(apex, True)
-        results.append(check("an explicit yes still wins", p.auto(apex)))
+        # The auto default takes tier and route together, cautiously. A preset
+        # the pad applies to itself may act unasked; spawning a process may not;
+        # and picking a route from a dropdown may not grant either -- that is a
+        # statement about how, not about whether.
+        p.clear(game)
+        results.append(check("the mod route does not act by default",
+                             not p.auto(game), p.route(game)))
+        p.set_route(game, "vibration")
+        results.append(check("switching route does not turn auto on by itself",
+                             not p.auto(game), p.route(game)))
+        p.set_auto(game, True)
+        results.append(check("an explicit yes still wins", p.auto(game)))
+        # ...and the other direction still withdraws it, which is the case the
+        # per-route default existed for.
+        p.clear(vibration)
+        results.append(check("a pad-side game acts by default",
+                             p.auto(vibration)))
+        p.data["games"][prefs.key(vibration)] = {"route": "vibration"}
+        results.append(check("and keeps doing so on its own route",
+                             p.auto(vibration)))
 
         # A stored route that the gamelist no longer offers is ignored, since
-        # the list is refetched from Flydigi's API.
+        # the list is refetched from Flydigi's API -- and since "ps5" was one of
+        # them, every preference file written before this change carries one.
         p.data["games"][prefs.key(vibration)] = {"route": "ps5"}
         results.append(check("a route that vanished falls back to the tier",
                              p.route(vibration) == "vibration", p.route(vibration)))
