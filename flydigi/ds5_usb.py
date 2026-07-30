@@ -10,10 +10,10 @@ These are the bytes a host compares against, so they are served verbatim rather
 than rebuilt from fields. Note DEVICE_DESC advertises bNumConfigurations 1 and
 iSerial 0: the real controller carries no serial string.
 
-REPORT_DESC is 289 bytes and is NOT the descriptor in ps5_data.py, which comes
-from inputtino and is 273 -- the two agree for 145 bytes, then inputtino stops
-short of feature reports 0x0B and 0x0C. Prefer this one when impersonating the
-device to a host; ps5_data.py remains what the uhid tier uses.
+REPORT_DESC is 289 bytes, read from the hardware. inputtino's copy was 273 --
+it stopped short of feature reports 0x0B and 0x0C -- and its calibration and
+firmware blobs belonged to a different unit of a different vintage. Both tiers
+use this file now; the inputtino data is gone.
 """
 
 # 18 bytes. Device descriptor: 054c:0ce6, bcdUSB 2.00, class 0 (per-interface).
@@ -64,8 +64,8 @@ LANGIDS = (0x0409,)
 
 # Feature reports, read off the same physical controller, WITHOUT the leading
 # report id -- whoever serves these prepends it exactly once. inputtino's copies
-# in ps5_data.py do include the id, which is a trap: prefixing those shifts every
-# byte of calibration data by one and the pad still enumerates.
+# included the id, which is a trap: prefixing those shifts every byte of
+# calibration data by one and the pad still enumerates.
 FEATURE_REPORTS = {
     0x05: bytes.fromhex(
         "00000a00000092226edd8a228add8a2276dd1c021c020320f8dfe51fe7dff21f"

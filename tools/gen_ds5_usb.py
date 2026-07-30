@@ -145,9 +145,16 @@ def main():
     source, features = read_features()
     if features:
         print(f"read {len(features)} feature reports from {source}")
-    else:
-        print("no real DualSense on hidraw -- feature reports NOT refreshed",
-              file=sys.stderr)
+    elif "FEATURE_REPORTS = {" in (OUT.read_text() if OUT.exists() else ""):
+        # Refuse rather than regenerate an empty block. Feature reports can only
+        # come from a live controller, so running this without one would quietly
+        # delete blobs that took hardware to obtain -- and the result still
+        # imports, still enumerates, and only fails later at the point where a
+        # driver reads calibration.
+        sys.exit("no real DualSense on hidraw, and flydigi/ds5_usb.py already "
+                 "holds feature reports.\n"
+                 "Refusing to overwrite them with nothing -- plug one in, or "
+                 "delete the file first if that is really what you want.")
 
     feature_block = "\n".join(
         f"    0x{rid:02X}: bytes.fromhex(\n{hexblock(body, 8)}\n    ),"
@@ -167,10 +174,10 @@ These are the bytes a host compares against, so they are served verbatim rather
 than rebuilt from fields. Note DEVICE_DESC advertises bNumConfigurations 1 and
 iSerial 0: the real controller carries no serial string.
 
-REPORT_DESC is {len(rdesc)} bytes and is NOT the descriptor in ps5_data.py, which comes
-from inputtino and is 273 -- the two agree for 145 bytes, then inputtino stops
-short of feature reports 0x0B and 0x0C. Prefer this one when impersonating the
-device to a host; ps5_data.py remains what the uhid tier uses.
+REPORT_DESC is {len(rdesc)} bytes, read from the hardware. inputtino's copy was 273 --
+it stopped short of feature reports 0x0B and 0x0C -- and its calibration and
+firmware blobs belonged to a different unit of a different vintage. Both tiers
+use this file now; the inputtino data is gone.
 """
 
 # 18 bytes. Device descriptor: 054c:0ce6, bcdUSB 2.00, class 0 (per-interface).
@@ -205,8 +212,8 @@ LANGIDS = (0x0409,)
 
 # Feature reports, read off the same physical controller, WITHOUT the leading
 # report id -- whoever serves these prepends it exactly once. inputtino's copies
-# in ps5_data.py do include the id, which is a trap: prefixing those shifts every
-# byte of calibration data by one and the pad still enumerates.
+# included the id, which is a trap: prefixing those shifts every byte of
+# calibration data by one and the pad still enumerates.
 FEATURE_REPORTS = {{
 {feature_block}
 }}

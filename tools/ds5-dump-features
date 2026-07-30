@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
+"""Read a real DualSense's feature reports, and diff them against what we serve.
+
+flydigi/ds5_usb.py holds blobs captured from hardware; this re-reads a real
+controller and says whether they still match. Bluetooth addresses are expected
+to differ: those are deliberately replaced so no hardware identity is committed
+and we cannot collide with a real pad, which hid-playstation keys by MAC.
+
+Plug in a real DualSense and run:
+
+    tools/ds5-dump-features
+
+It writes nothing to the device: HIDIOCGFEATURE is a read.
+"""
+
+import argparse
+import fcntl
+import glob
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from flydigi import ds5_usb  # noqa: E402
+
+# _IOWR('H', 0x07, len): (dir << 30) | (size << 16) | (type << 8) | nr
+def HIDIOCGFEATURE(size):
+    return 0xC0000000 | (size << 16) | (0x48 << 8) | 0x07
+
+
+# The reports SDL and hid-playstation actually read, with the lengths the
+# DualSense's report descriptor declares for them.
+WANTED = {
+    0x05: (40, "calibration"),
+    0x09: (19, "pairing info / MAC"),
+    0x0B: (41, "unknown, carries both addresses"),
+    0x20: (63, "firmware version"),
+}
+
+# Reports whose difference is expected because we scrub the addresses in them.
+SCRUBBED = (0x09, 0x0B)
+
+
+def find_real_dualsense():
+    """A DualSense that is NOT ours -- ours hangs off vhci_hcd."""
+    for path in sorted(glob.glob("/dev/hidraw*")):
+        node = os.path.basename(path)
+        uevent = f"/sys/class/hidraw/{node}/device/uevent"
+        try:
+            with open(uevent) as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        if "054C" not in text or "0CE6" not in text:
+            continue
+        real = os.path.realpath(f"/sys/class/hidraw/{node}/device")
+        yield path, ("vhci_hcd" in real), real
+
+
+def get_feature(path, report_id, size):
+    buf = bytearray(size + 1)
+    buf[0] = report_id
+    with open(path, "rb+", buffering=0) as fh:
+        length = fcntl.ioctl(fh, HIDIOCGFEATURE(len(buf)), buf, True)
+    return bytes(buf[:length])
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--device", help="hidraw path, if autodetection picks wrong")
+    args = ap.parse_args()
+
+    if args.device:
+        targets = [(args.device, False, "(given)")]
+    else:
+        targets = [t for t in find_real_dualsense() if not t[1]]
+        if not targets:
+            sys.exit("no *real* DualSense found on hidraw "
+                     "(only the virtual one, or none at all -- plug one in)")
+
+    path, _virtual, syspath = targets[0]
+    print(f"reading {path}")
+    print(f"  {syspath}\n")
+
+    ours = ds5_usb.FEATURE_REPORTS
+
+    for report_id, (size, what) in sorted(WANTED.items()):
+        print(f"=== report 0x{report_id:02X}  ({what})")
+        try:
+            got = get_feature(path, report_id, size)
+        except OSError as exc:
+            print(f"  read failed: {exc}\n")
+            continue
+        body = got[1:]
+        mine = ours.get(report_id)
+        print(f"  hardware ({len(body):3d}): {body.hex()}")
+        if mine is None:
+            print("  we serve nothing for this report")
+            print()
+            continue
+        print(f"  we serve ({len(mine):3d}): {mine.hex()}")
+        if body == mine:
+            print("  IDENTICAL")
+        else:
+            diff = sum(1 for a, b in zip(body, mine) if a != b)
+            note = " (expected: addresses are scrubbed)" if report_id in SCRUBBED else ""
+            print(f"  differs in {diff} of {min(len(body), len(mine))} "
+                  f"shared bytes{note}")
+        print()
+
+    print("Anything differing outside 0x09/0x0B means the capture is stale --")
+    print("regenerate with tools/gen_ds5_usb.py.")
+
+
+if __name__ == "__main__":
+    main()
