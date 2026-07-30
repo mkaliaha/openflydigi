@@ -25,9 +25,13 @@ Lighting, 380 bytes (19 packets of 20):
 
 ```
 0..2 version   2 click feedback   3 loop start   4 loop end   5 cycle time
-6 brightness   7 LED count (12)   8 mode   9..20 reserved
+6 brightness   7 LED count (12)   8 mode   9 grip sync   10..20 reserved (0xFF fill)
 20.. frames of `LED count` RGB triples -- 10 x 12 on an Apex 5
 ```
+
+Byte 9 is **grip sync** — lighting follows the grip motors, which Space Station exposes as
+`SyncWithGripEnable`. `flydigi/lighting.py` carries it through untouched with no accessor, so it is
+an editable switch nothing currently edits.
 
 Config structures for mapping/macro/RGB are already decompiled as `m_fdg_*_struct_t` types.
 
@@ -50,7 +54,9 @@ slots are identical, so anything here is the factory shape rather than one profi
                     transcribed, nor was the right side (205..225)
 790 joy extra L     0 | 50 62 75 87 100 112 125 137 150 | 0 | 0
 802 joy extra R     0 | 50 62 75 87 100 112 125 137 150 | 0 | 0
-814 macro cycle     255 255 255 255 255 255   3   3   3   3   3 255 255 255 255 255
+814 unclaimed       255 255 255 255 255 255
+820 macro cycle       3   3   3   3   3          5 intervals, stored as ms/10
+825 unclaimed       255 255 255 255 255
 830 motion curve    0  63  63 127 127 127
 836 padding         255 255 255 255
 ```
@@ -169,7 +175,13 @@ for X in 0..8:  bank[X] = clamp(round(sample(100*X/8)), -50, 100) + 50
 Everything is in 0..100 percent, including `center` and `edge`; `p1`/`p2` are stored as 0..127 and
 converted with `×100/127`. `type` is only a preset picker for `p1`/`p2` — Default (64,64), Instant
 (64,96), Delay (64,32), all with `p2 = (127,127)` — and any manual edit to a node forces it to
-Custom.
+Custom. **`STICK_PRESETS` writes Default as (63,63), not (64,64)**: 63 is what the pad ships with, so
+resetting to Default reproduces a factory blob byte for byte. The compiled bank is identical either
+way; only the stored polyline differs.
+
+**`center` and `edge` are cross-clamped so `center + edge <= 100`.** They consume the same travel,
+and a zero span turns the curve into a step. The field being set is the one that gives way, so
+moving one slider never moves the other.
 
 Note what this does *not* tell you, and why the hardware runs above were still needed: Space Station
 writes both blocks unconditionally, so nothing in the app reveals which one the pad reads. The app

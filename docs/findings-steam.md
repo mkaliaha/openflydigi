@@ -1,8 +1,10 @@
 # Sharing the pad with Steam and SDL
 
-Three things that all turn on the same fact: the vendor hidraw node has more than one
+Four things, three of which turn on the same fact: the vendor hidraw node has more than one
 writer. Our own arbitration, the pad-side toggle that hands Steam the device, and why
-filling SDL's Flydigi trigger stub upstream was ruled out.
+filling SDL's Flydigi trigger stub upstream was ruled out. The fourth is the odd one — why
+that toggle being on is not enough to make Steam call the pad an Apex 5, and why disabling
+and re-enabling it is a real fix rather than folklore.
 
 Index: [PROGRESS.md](../PROGRESS.md).
 
@@ -74,9 +76,11 @@ attaches to the open file description: two threads on one handle would both be g
 
 ## "Allow third-party apps to take over mappings"
 
-**Done, and it is what makes Steam recognise the pad.** Command 16 reads it, command 17 writes it, and the switch is on the Controller page
-behind the firmware gate. A pad-side setting, not Steam's. Space
-Station's own words:
+**Done, and it is what lets Steam recognise the pad — necessary, but on its own not sufficient.**
+Command 16 reads it, command 17 writes it, and the switch is on the Controller page
+behind the firmware gate. A pad-side setting, not Steam's. Whether Steam then actually *names* the
+pad depends on a second thing entirely — see "Recognition depends on which identity the pad lands
+on" below. Space Station's own words:
 
 > When the switch is turned on and a third-party application (such as Steam, reWASD, etc.) is
 > opened, the controller mapping will be taken over, and all Space Station settings will be invalid
@@ -104,20 +108,45 @@ Three things fall out of that run:
     recognition comes from the acquire, not from any change of USB identity — nothing to do with
     descriptors or double-remapping.
 
-**Our switch is not yet doing what Space Station's does — open, and the next piece of work.**
-Enabling it *from Space Station* leaves the pad presenting **three** HID nodes: the controller
-itself, a keyboard and a mouse. Flipping the same flag from here does not produce that, so command
-17 is evidently not the whole of what Space Station sends. Two halves follow from it, and neither is
-started:
+**Our switch does exactly what Space Station's does, byte for byte.** Checked call site by call
+site:
 
-  * find what else Space Station writes (the keyboard/mouse composite is presumably a mode the pad
-    is put into, not a side effect of the flag) and make the toggle do the same;
-  * fix detection to match. `flydigi/device.py` finds the vendor node by report-descriptor prefix
-    and `flydigi/evdev.py` already has to filter three input nodes by capability -- with a third HID
-    node in play, anything picking "the first match by vendor id" will sooner or later write an Apex
-    5 config to a keyboard interface. The same guard the Vader 4 Pro needs.
+  * Space Station's toggle reaches `ControllerRepository.EnableThirdPartyAppControl`
+    (`ControllerRepository.cs:1533`), which calls
+    `EnableRawDataInput(controller, null, null, null, null, enable, ...)` — command 17, `[4]=7`,
+    `[5..8]=0xFF`, `[9]`=1/0. `gui/worker.py:149` sends the same bytes with the same checksum range.
+  * The whole service has **three** `EnableRawDataInput` call sites (`ControllerRepository.cs:1490`,
+    `1542`, `1563`) and none of them ever writes the keyboard or mouse flags — both go as `null`,
+    which the factory turns into `0xFF`, "leave alone".
+  * The Electron UI fires exactly one IPC command for the switch
+    (`case "controlByThirdPartyAppEnabled": IpcCommandEnum_EnableControlByThirdPartyApp`). No second
+    call.
+  * `KeyboardMouseInjectRunner` is host-side Windows `SendInput` simulation for keyboard/mouse
+    *mappings*. It sends nothing to the pad, and `ControllerBusinessService.cs:76` gates it **off**
+    while third-party control is active.
 
-**Steam then lists the pad twice, and that is not our bug.** Reported on Windows as well as here.
+**The keyboard/mouse composite is a separate, persistent pad mode.** Observed here with the pad
+presenting `if01-event-kbd`, `if01-event-mouse` and `if02-hidraw` while command 16 read
+`keyboard: False, mouse: False, third_party: False`. So the extra HID nodes coexist with the flag
+being off and with the transport flags for keyboard and mouse being off. Whatever puts the pad into
+that composite, it is not command 17 and not this switch.
+
+**What Space Station does that we do not, in full:**
+
+  * a read-only 30-second poll after the ACK (`StartThirdPartyMonitor`,
+    `ControllerRepository.cs:147`) that refreshes its own UI via command 16 and writes nothing;
+  * on Windows only, `DevconHelper.ExecuteDevconCommand` shells out to
+    `devcon.exe enable|disable "USB\VID_37D7&PID_2501&MI_00"` — interface 0, the XInput interface —
+    on every device connect and around DS mode. There is no Linux counterpart; the nearest
+    equivalent is unbinding xpad, which we deliberately do not do.
+
+Neither re-asserts the flag. **Space Station's connect handler only reads it** — `OnDeviceUpdateImpl`
+(`ControllerRepository.cs:92`) calls `StartThirdPartyMonitor` and nothing else third-party related,
+and the config-apply path (`PrepareMappingConfigs`) deals only with mapping blobs.
+
+**Steam then lists the pad twice, and that is not our bug** — when the flag is toggled on while
+Steam is already running. A reconnect with the flag already on produces **one** entry, the HIDAPI
+one; see the identity section below for why. Reported on Windows as well as here.
 Both paths are legitimately supported and Steam does not merge them:
 
 ```
@@ -127,6 +156,28 @@ Steam hidapi     -> hidraw4        -> "Apex 5"
 
 `steamwebhelper` holds both hidraw nodes open while this is on. Nothing sent to the pad changes it;
 the toggle only makes the second path exist.
+
+**The duplicate is deliberate, and upstream SDL says why.** `HIDAPI_IsDevicePresent`
+(`src/joystick/hidapi/SDL_hidapijoystick.c`) is what the Linux evdev backend calls, via
+`SDL_JoystickHandledByAnotherDriver`, to decide whether a raw joystick duplicates a HIDAPI-handled
+one. Every other claimed device gets its evdev twin suppressed. The Flydigi V2 is skipped on purpose:
+
+```c
+/* The HIDAPI functionality will be available when the FlyDigi Space Station app has
+   enabled third party controller mapping, so the driver needs to be active to watch
+   for that change. Since this is dynamic and we don't have a way to re-trigger device
+   changes when that happens, we'll pretend the driver isn't available so the XInput
+   interface will always show up (but won't have any input when the controller is in
+   enhanced mode) */
+if (device->vendor_id == USB_VENDOR_FLYDIGI_V2 && device->driver == &SDL_HIDAPI_DriverFlydigi) {
+    continue;
+}
+```
+
+Three things follow from that comment. The double listing is designed. The dead XInput entry is a
+known, accepted cost, and is exactly the `controller_data = False` behaviour measured below. And
+**SDL states outright that it cannot react to the flag changing** — which is the whole of the next
+section.
 
 **Mostly cosmetic, though.** Enabling Steam Input for the pad makes Steam grab the physical device
 and hand the game a single virtual controller, so the duplicate is visible in Steam's settings list
@@ -139,12 +190,96 @@ since re-enumeration rebinds. **Do not make it permanent with a udev rule**: the
 everything else here reads sticks and buttons — `tools/flydigi-ds5` relays them into the virtual
 DualSense, and `joystick-curve-probe` and `stick-feel` both depend on it.
 
+## Recognition depends on *which identity* the pad lands on, not just on the flag
+
+**The weird one, and it is reproducible.** The flag being on is necessary but not sufficient. Whether
+Steam shows "Apex 5" depends on which of two synthetic identities the HIDAPI device gets, and that is
+decided by a race at enumeration.
+
+**The pad reports no serial number, so Steam invents one.** Evidence throughout this section is
+Steam's own controller log —
+`~/.var/app/com.valvesoftware.Steam/.local/share/Steam/logs/controller.txt` on this Flatpak install,
+`~/.steam/steam/logs/` on a native one, with the display side in `controller_ui.txt` beside it:
+
+```
+Controller has an Invalid or missing unit serial number, setting to '37d7-2501-79acb62'
+```
+
+The base `37d7-2501-79acb62` is stable. When it is already taken by another controller at that
+moment, Steam appends a suffix and mints `37d7-2501-79acb62g` instead — a *separate* identity with a
+separate `configset_37d7-2501-79acb62<suffix>.vdf`. Whoever registers first gets the base.
+
+**Two orderings, and they give different results.** Observed live, with the two representations
+distinguishable in the log by mapping GUID — `...086804` with `paddle1-4`/`misc2`/`misc3` and a
+`Controller using HIDAPI driver` line is the native path; `...080000` named `Flydigi Apex 5` with no
+driver line is xpad:
+
+```
+toggle off -> on, Steam already running
+  01:24:30  flag off   index 0  GUID ...080000  (xpad)    -> 37d7-2501-79acb62
+  01:24:37  flag on    index 1  GUID ...086804  (HIDAPI)  -> 37d7-2501-79acb62g   <- shown as Apex 5
+  two entries
+
+reconnect with the flag already on
+  01:08:07             index 0  GUID ...086804  (HIDAPI)  -> 37d7-2501-79acb62
+  01:15:52             index 0  GUID ...086804  (HIDAPI)  -> 37d7-2501-79acb62
+  one entry
+```
+
+| | entries | holds `...79acb62` | holds `...62g` |
+|---|---|---|---|
+| flag off | 1 | xpad — "generic XInput" | — |
+| toggled on while Steam runs | 2 | xpad | **HIDAPI — "Apex 5"** |
+| reconnect, flag already on | 1 | **HIDAPI** | — |
+
+**So a reconnect leaves the native driver wearing the generic entry's clothes.** The HIDAPI device
+registers first, takes the base identity, and inherits `configset_37d7-2501-79acb62.vdf` — the config
+set that belongs to the xpad representation.
+
+**Nothing is actually broken when this happens, and that is the important part.** The identity is
+wrong; the driver is not. It is the native Flydigi HIDAPI driver in every case — `Controller using
+HIDAPI driver, vid=0x37d7, pid=0x2501` in `controller.txt`, `Type: 30` in `controller_ui.txt`, mapping
+GUID `...086804` with the paddles and `misc2`/`misc3` that only the native path exposes. Verified on
+hardware while in this state:
+
+  * **the full button set binds**, paddles included — the whole Steam Input binding UI works;
+  * **the pad reads as acquired**: command 16 returns `third_party=True`, `control_by='SDL'`;
+  * **SDL is live on it**, sending its 30-second acquire heartbeat — command 28 and command 1 ACKs
+    seen on the vendor stream;
+  * **everything this project drives over the vendor interface keeps working** — adaptive triggers,
+    profiles, lighting, curves, the motion stream. Same as the trade table below.
+
+What is lost is cosmetic plus one real consequence: the entry is not *labelled* Apex 5, and because
+it inherits the other identity's config set, Steam Input bindings saved under the `...62g` identity
+are not the ones applied. Re-toggling restores both. So this is a naming and config-set problem, not
+a functionality one — worth knowing before anyone goes hunting for a fault that is not there.
+
+**This is what the disable/re-enable ritual is actually for.** Reported first on Windows and
+reproduced here: toggling off and on reverses the order, letting xpad claim the base identity so the
+HIDAPI device is pushed onto `...62g` and its own config set. It is not superstition and it is not
+platform-specific — it is the only way to force the second ordering. It also lines up with SDL's own
+admission above that it cannot re-trigger device changes when the flag moves: a command-17 ACK
+crossing the wire is the only thing that makes `HandleStatusUpdate` re-query status.
+
+**Space Station does not solve this either.** Its connect handler only polls, so on Windows the same
+reconnect produces the same wrong identity, which is why the ritual was needed there in the first
+place. An option we have and it does not: re-assert the flag on connect — read command 16, and if it
+is already on, send off then on after SDL has enumerated. Not implemented, and it would be a
+workaround for Steam's identity assignment rather than a fix. The real fixes are upstream: a stable
+serial for the device, or Steam not reusing one config set across both representations.
+
+**Loose end.** Across the whole log a HIDAPI block and an xpad block for `37d7/2501` never appear at
+the same timestamp — they alternate — which sits awkwardly with a carve-out whose stated purpose is
+to make the XInput interface *always* show up. The evdev node itself is definitely still there
+(`usb-Flydigi_Flydigi_APEX5-event-joystick`, xpad bound to `3-4:1.0`, and Steam holding
+`/dev/input/event16` open). Not explained.
+
 **Tested, and it is a clean trade rather than a catch.** With the flag on:
 
 | | third-party off | third-party on |
 |---|---|---|
 | Steam's view | generic XInput controller | **Apex 5** |
-| standard gamepad path (xpad / evdev) | works | **dead** — the XInput entry accepts no input in Steam |
+| standard gamepad path (xpad / evdev) | works | **dead** — where the XInput entry exists at all, it accepts no input in Steam; after a reconnect there is no second entry |
 | adaptive triggers over the vendor interface | works | **works** — commands 81 and 82 ACK *and are felt* |
 | profiles, lighting, curves (config commands) | work | work |
 
@@ -208,8 +343,17 @@ as the four transport flags and `data[9]` as the third-party flag. Both halves a
 `flydigi/motion.py` has `CMD_READ_TRANSPORT = 16`, `parse_transport` and `read_transport`, and the
 switch is on the Controller page (`gui/models/device.py`, `thirdParty`).
 
-**One gate to honour.** `ControllerBusinessService.cs:1128` only offers this for `DeviceCode == "k5"`
-when the firmware is at or above **7.0.3.0**. Below that, hide it.
+**One gate to honour, and it is per device code.** `ControllerBusinessService.cs:1128` offers this
+for **`k5` (Apex 5) at 7.0.3.0** and **`f5` (Vader 5) at 7.1.4.1** — both transcribed into
+`motion.THIRD_PARTY_MIN_FIRMWARE`. Below the threshold, hide it. The version compared is the `main`
+component of the seven-component command-1 reply. Note the GUI currently applies the `k5` threshold
+whichever pad answered.
+
+**We compare versions numerically, and that is a deliberate divergence.** Flydigi's
+`DeviceUtil.CompareVersion` is `string.Compare(new, old, Ordinal) >= 0`, an ordinal *string*
+comparison, so their own gate rejects firmware **7.0.10.0** against a 7.0.3.0 minimum — "1" sorts
+below "3". `motion.version_at_least` parses the fields as integers, which differs from Space Station
+only where Space Station is wrong.
 
 `EnableMappingSwitchCommandFactory` (19 sub-function 4) is something else entirely and has no
 English UI string at all. It is **not** this feature.
@@ -220,7 +364,9 @@ Also relevant to the "extra buttons and gyro" part: `DeviceMaskCommandFactory` (
 ## SDL's own Flydigi driver, and why filling its trigger stub was ruled out
 
 `src/joystick/hidapi/SDL_hidapi_flydigi.c` upstream. It knows this pad well: device ids **128/129**
-are the Apex 5, and its sensor rates (**970 Hz wired**, 295 Hz dongle) match what we measured
+are the Apex 5, and its sensor rates (**970 Hz wired**, 295 Hz dongle) are the same stream at two
+transports — the ~300 Hz in `flydigi/motion.py`, which the DS5 relay's sensor-timestamp arithmetic is
+derived from, is the dongle figure. The wired number matches what we measured
 independently. `FLYDIGI_ACQUIRE_CONTROLLER_COMMAND 0x1C` on a 30-second heartbeat is our command 28,
 which is where the `0x1C` traffic in "Steam Input contention" comes from.
 

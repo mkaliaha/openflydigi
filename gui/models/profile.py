@@ -830,10 +830,11 @@ class ProfileModel(QObject):
         Command 166 carries a version and nothing else -- the SDK's
         SaveCurrentMappingConfigCommandFactory sets only array[5..6], while the
         slot-addressed variant is a different command (171, array[7] = cfgId).
-        So 166 commits whichever config the pad is *running*. Browsing restores
-        the pad deliberately, so the profile being edited is routinely not the
-        one running, and saving then would write the wrong slot to flash while
-        reporting success.
+        So 166 commits whichever config the pad is *running*. Opening a profile
+        switches the pad to it, so the two usually agree -- but the pad has its
+        own profile button, and the running slot can change underneath the app
+        between status reads. Saving then would write the wrong slot to flash
+        while reporting success.
         """
         return self._cfg_id >= 0 and self._cfg_id == self._slots.active
 

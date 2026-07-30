@@ -37,7 +37,7 @@ reply  90 165   3   1   0 251 123   1   0  15   0   2  17 ...
 | Xbox home button | yes | on | | stick auto-calibration | yes | on |
 | motion debounce | **no** | — | | stick rebound | yes | on |
 | mapping switch | yes | on | | status bar always on | yes | **off** |
-| off screen | yes | off | | audio | **no** | — |
+| always-on display (SDK: "off screen") | yes | off — **the panel is dark** | | audio | **no** | — |
 
 sleep time **15** (minutes), report rate **0**, stick precision **2**, stick sensitivity **17**.
 
@@ -105,19 +105,30 @@ decompiled writer puts the CRC at `[6]`, which would overwrite the second name b
 belongs at `5 + len`.
 
 **S3. Cooperative lock** — `AcquireControllerCommandFactory` **28**, `[5]=acquire`, `[6..25]` an
-ASCII tag; read the current holder from command **16**. Advisory only. **This also closes an open
+ASCII tag. Advisory only, and still outstanding. **This also closes an open
 question in PROTOCOL.md §5:** it is *not* a precondition for trigger commands — the SDK never calls
 it before `SetForceTrigger`, and our hardware tests already prove 81/82 work without it.
 
+The read half is **built**: `motion.read_transport` (command **16**) returns the four transport
+flags plus the 20-byte `control_by` tag, so "is something else driving the pad, and what" is one
+read. The tag fills in with `SDL` on its own once third-party control is allowed —
+[findings-steam.md](findings-steam.md).
+
 **S4. Device settings — the sub-command map.** Command **19** is a generic "set feature N":
-`[4]=4, [5]=subId, [6]=value, [7]=crc`, ACK matched on `data[2]==19 && data[5]==subId`.
+`[4]=4, [5]=subId, [6]=value, [7]=crc`.
+
+**The reply echoes the value, not the sub-id.** Measured: `5a a5 13 01 00 <value> <crc>`. So
+Flydigi's own `data[5]==subId` test never matches on this pad — match on `data[2]==19 &&
+data[5]==value` instead. The consequence matters more than the fix: **nothing in the reply says
+which sub-setting was written**, so an ACK means "a setting was written", not "this setting was
+written". Read command 3 back when it matters which, as `screen.read_screen_status` does.
 
 | sub | feature | sub | feature |
 |---|---|---|---|
 | 1 | **Quick-switch config** — `FN + A/B/X/Y` picks a profile, on the pad, nothing running | 6 | joystick auto-calibration |
 | 2 | Xbox home button (XInput-gated; unreachable in our mode) | 7 | joystick rebound |
 | 3 | motion debounce | 8 | status bar always on |
-| 4 | mapping switch (no UI string; *not* the third-party toggle) | 9 | off screen |
+| 4 | mapping switch (no UI string; *not* the third-party toggle) | 9 | **always-on display** — the SDK calls it `OffScreen` and the name is inverted: 1 keeps the picture up, 0 blanks the panel |
 | 5 | joystick debounce | 10 | audio (gated on the `AudioUsable` bit from command 3) |
 
 Standalone, `[4]=3, [5]=value, [6]=crc`: **20** report rate `{1000=1, 500=2, 250=4, 125=8}`,
@@ -148,8 +159,17 @@ Confirmed against the pad on the desk: wired, `battery_level: 5, charging: False
 What the same multi-packet reply *does* carry, in order after device type and connect type: MAC
 (4 bytes, reversed), the battery nibble, chip type, motion chip type, then seven BCD firmware
 versions — main, dongle, switch/SI, trigger, screen, ADC, NearLink. `IsAckFinished` is
-`data[4] > data[3] || data[4] == data[3] - 1`, so it is fragmented. That is a better device page
-than the one we have, at no protocol risk.
+`data[4] > data[3] || data[4] == data[3] - 1`, so it is fragmented.
+
+**The version decode is built**: `motion.parse_versions` / `read_versions`. Versions start at raw
+offset 16, two BCD bytes each, one version field per nibble — `0x70 0x45` is 7.0.4.5. **All-zero
+means "not present"**, not version zero, which is how a wired pad reports no dongle and an Apex 5
+reports no ADC chip (that one is a Vader 4 part).
+
+**Comparing them, do not copy Flydigi.** `DeviceUtil.CompareVersion` is
+`string.Compare(new, old, Ordinal) >= 0` — an ordinal *string* comparison, so their own gate rejects
+firmware 7.0.10.0 against a 7.0.3.0 minimum, because "1" sorts below "3". `motion.version_at_least`
+compares numerically, which differs from them only where they are wrong.
 
 ## An editor for the vibration bind
 
@@ -179,19 +199,31 @@ Most likely explanation: 245 lives in `command.test/` alongside TestScreen/TestJ
 is exposed as `IpcCommandEnum_TestRgb`. These are factory-test commands and may require the device
 to be in a diagnostic state first.
 
-**The real path is the persistent config**, which is how Space Station does it:
+**The real path is the persistent config, and it is built** — `flydigi/lighting.py`, with a Lighting
+page in the app. Three commands, sharing the blob transfer of PROTOCOL.md §9:
 
-  * `ReadLedConfigCommand` = **167**, `[4]=4, [5]=cfgId, [6]=pkgSize, [7]=sum`. Confirmed working --
-    the pad replied `04 5a a5 a7 0c 00 00 00 03 00 00 09 04 14 0c 07 01 ff ff ff ...`
+  * `ReadLedConfigCommand` = **167**, `[4]=4, [5]=cfgId, [6]=pkgSize, [7]=sum`
+  * `WriteRgbConfigStart` = **168**, `[cfgId, startIdx, nPkts, pkgSize]`
   * `WriteRgbConfigCommand` = **169**, written in packs: `[4]=len+3, [5]=packNum, [6..]=pack data`
-  * Structure `m_fdg_mapping_rgb_sturct_t`: `version[2], type, loop_start, loop_end, loop_time,
-    light_scale, rgb_num, rgb_type, reserve[11], id[16]` where each id is 10 x `{r,g,b}`.
-    `type` / `rgb_type` select the lighting mode -- that is what needs setting to a static mode
-    before a colour will stick.
 
-So bridging the DualSense lightbar to the pad means decoding that config, setting a static mode and
-writing it back -- a real job rather than a one-command bridge. The lightbar bytes themselves are
-already parsed (`data[45..47]` of the DS5 output report).
+**The Apex 5's config is 380 bytes**, and not the shape the older decompiled struct describes — do
+not assume `id[16]` × 10 or a 490-byte blob:
+
+```
+ 2      click feedback        7      LED count
+ 3, 4   loop start / end      8      mode
+ 5      cycle time            9      grip sync
+ 6      brightness           20..    frames: 10 x 12 LEDs, 3 bytes each, RGB
+```
+
+**The mode byte does not select an effect.** The pad has no animation generator — it plays the
+stored frames, cycling `loop_start`..`loop_end` every `cycle_time`. `mode` only records which of
+Space Station's generators produced the data, so writing a different mode number changes nothing
+visible. Changing the lighting means **writing frames**, which is what `set_breath`, `set_flow`,
+`set_rainbow` and `set_solid` do.
+
+So bridging the DualSense lightbar to the pad is a frame write (`set_solid`), not a mode write. The
+lightbar bytes themselves are already parsed (`data[45..47]` of the DS5 output report).
 
 
 ## Command inventory, by feature

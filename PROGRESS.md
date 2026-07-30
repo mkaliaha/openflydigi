@@ -15,13 +15,15 @@ Adaptive triggers are done and validated in real games. The desktop app covers p
 remapping, sticks, vibration, per-profile trigger effects, lighting, the screen, the game list and
 its own setup. The daemon detects a running game and applies its route unattended.
 
-**Left to build: macros, the device-settings page, and the charging dock.**
+**Left to build, in size order: macros, the device-settings page, and the charging dock** — plus
+the device-type guard, which is a safety item rather than polish, and the smaller entries in
+What's next.
 
 | Tier | Mechanism | Games | Validated in |
 |---|---|---|---|
 | 1. Vibration bind | cmd 82 `SyncWithGrip`, driven by game rumble | 33 | Death Stranding 2 |
 | 2. Forza telemetry | Data Out UDP 5300 → rule engine → cmd 81 | 4 | Forza Horizon 6 |
-| 2b. DSX listener | UDP 7878, any DSX-compatible mod | mod ecosystem | hardware |
+| 2b. DSX listener | UDP 7878, any DSX-compatible mod | mod ecosystem | self-tested (`tests/test_dsx.py`) |
 | 3. XGameMonitor | reads game process memory | 31 | Dark Souls: Remastered |
 | 4. Virtual DualSense | uhid DS5, effects translated | **any DS5-aware game** | Deathloop |
 | 4b. …over USB | usbip + vhci DS5, **plus haptic audio** | **any DS5-aware game** | Deathloop |
@@ -45,11 +47,14 @@ restores it.
 
 Roughly in order of value. Each is a fresh-context-sized piece of work.
 
- 0. **Third-party mode does not behave the way Space Station's does.** Observed on hardware: with it
-    enabled from Space Station the pad presents **three** HID nodes — the controller itself, a
-    keyboard and a mouse — which is not what this app's toggle produces. So both halves need work:
-    the switch has to write whatever Space Station writes, and `flydigi/device.py`'s detection has
-    to pick the right node afterwards rather than the first match by vendor id.
+ 0. **Third-party mode: optional polish, lowest value here.** Our command 17 is byte-identical to
+    Space Station's, so there is nothing to catch up on. The oddity is Steam's: after a reconnect
+    with the flag already on, the pad is not *labelled* Apex 5, because the native driver wins the
+    race for Steam's synthetic serial and inherits the xpad entry's config set. **Everything still
+    works in that state** — native HIDAPI driver attached, full button set including paddles, SDL
+    holding the pad, adaptive triggers, profiles, lighting, curves and motion all live. Cosmetic,
+    plus a bindings-storage nuisance. Optional workaround, which neither app does: re-assert the flag
+    on connect, off then on once SDL has enumerated. The real fixes are upstream.
     → [docs/findings-steam.md](docs/findings-steam.md)
  1. **Macros.** `ReadMacroConfig`, `WriteMarcoConfig`, `SetHardwareMacroEnable`. The profile blob
     already carries 230..768 through untouched, so this is a reader, a writer and a page.
@@ -104,7 +109,7 @@ game gets it, including games Flydigi has never heard of. Treating it as one of 
 was Flydigi's model leaking into a tier that does not share its constraints.
 
 So `isPS5` is no longer a route in `flydigi/prefs.py`, the daemon never starts this tier, and the
-app has a **DualSense** section with one switch. `flydigi/dsmode.py` is what the switch and the CLI
+app has a **DualSense** section: the mode switch, plus a haptics-to-motors switch that is read once at start and so has to be set *before* DS mode is turned on. `flydigi/dsmode.py` is what the switch and the CLI
 share.
 
 **The privilege model, as built.** The attach is the only privileged step, so the relay is started
@@ -125,8 +130,9 @@ once, at launch. Switching DS mode on mid-game gives it a pad it will use and an
 will never look for again, so triggers work and haptics stay silent until the game is restarted.
 
 **Not ours to fix.** Steam lists the pad twice (xpad *and* its own hidapi path — reported on Windows
-too), and Steam takes no lock on the hidraw node, so its writes can land between ours. Harmless for
-effects, which the next frame overwrites.
+too), which upstream SDL does deliberately, and Steam takes no lock on the hidraw node, so its writes
+can land between ours. Harmless for effects, which the next frame overwrites. Also Steam's: after a
+reconnect the pad loses the "Apex 5" label while remaining fully functional on the native driver.
 → [docs/findings-steam.md](docs/findings-steam.md)
 
 ## What's done
@@ -146,7 +152,7 @@ All command factories are decompiled under `decompiled/Flydigi.ControllerSdk/`.
 | Per-game auto mode | — | `tools/flydigid`, `tools/flydigi-auto` — [detail](docs/findings-games.md) |
 | Virtual DualSense (tier 4) | — | `flydigi/uhid.py`, `tools/flydigi-ds5` — [detail](docs/findings-haptics.md) |
 | Virtual DualSense over USB (tier 4b) | — | `flydigi/usbip.py`, `tools/flydigi-ds5-usbip` — adds haptic audio |
-| DualSense mode as one switch | — | `flydigi/dsmode.py`, the app's DualSense page |
+| DualSense mode as one switch for the whole system, not a per-game route | — | `flydigi/dsmode.py`, the app's DualSense page |
 
 ## The desktop app
 
@@ -159,11 +165,11 @@ python3 -m gui
 
 | Tab | What works |
 |---|---|
-| Profiles → Buttons | remap, turbo + hold/toggle, reset all to default |
-| Profiles → Vibration | master switch, per-grip enable, min/max window, strength |
+| Buttons | remap, turbo + hold/toggle, reset all to default |
+| Vibration | master switch, per-grip enable, min/max window, strength |
 | Controller → Selected profile / Other software | rename the open profile, back up / restore it to file; let Steam and similar take the pad over, and who currently holds it |
-| Profiles → Sticks | dead zone, outer dead zone, sensitivity curve presets, circular range |
-| Profiles → Triggers | stored effect — all six of Flydigi's, each with its own controls — plus a dead zone that writes the curve block at 123 and is not confirmed to reach this pad |
+| Sticks | dead zone, outer dead zone, sensitivity curve presets, circular range |
+| Triggers | stored effect — all six of Flydigi's, each with its own controls — plus a dead zone that writes the curve block at 123 and is not confirmed to reach this pad |
 | Games | all 94 games, searchable, filtered by route; vibration presets load onto the pad from here; per-game **Auto** toggle, a route picker where a game really has a choice, and a DualSense marker on the 23 games Flydigi lists as DS5-aware |
 | DualSense | the tier-4b switch: vhci-hcd's state, haptic audio to the motors, what the relay is doing, and the launch option to copy |
 | Setup | the daemon's unit, "running now" and "start at login" as separate switches, the application-menu entry, and the udev rules behind one authentication prompt |
@@ -187,6 +193,9 @@ in `gui/` is [gui/README.md](gui/README.md).
     between wired and dongle.
   * **Wine maps game PEs at their image base** (`0x140000000`), same as Windows, so Flydigi's memory
     offsets work unmodified.
+  * **The pad publishes keyboard, mouse and gamepad evdev nodes under one vendor/product id, and the
+    keyboard sorts first.** Resolve with `axes=True` (non-empty abs capabilities) or a relay binds a
+    node that never sends a gamepad event.
   * **Never match a game process by cmdline alone** — Steam/Proton wrappers (`reaper`, `bwrap`,
     `pv-adverb`, `steam.exe`) all carry the game's path. Require the PE to be mapped.
   * **Effects persist in controller state** until changed; there is no timeout.
@@ -337,6 +346,9 @@ a bad checksum by staying silent exactly as the pad does.
 ## Environment
 
 - Host: Aurora DX (nvidia-open), Fedora 44 atomic, KDE/Wayland
+- `apex-dev` distrobox (Fedora toolbox + python3-pyside6, kf6-kirigami, kf6-kirigami-addons,
+  kf6-qqc2-desktop-style). **The desktop app runs here, not on the host** — see `gui/README.md`.
+  Created with `distrobox create --name apex-dev --image registry.fedoraproject.org/fedora-toolbox:44`
 - `wine-arch` distrobox (Arch + wine-staging 11.14, winetricks, innoextract, dotnet-sdk 10,
   ilspycmd, sfextract, nodejs). Created with `distrobox create --name wine-arch --image archlinux:latest --nvidia`
 - **`sfextract` needs `DOTNET_ROLL_FORWARD=Major`** in that box. It targets .NET 8 and the box has
@@ -361,7 +373,7 @@ a bad checksum by staying silent exactly as the pad does.
 | Path | What |
 |---|---|
 | `PROTOCOL.md` | Full wire protocol + hardware verification results |
-| `flydigi/` | Library — `device.py` (transport), `blobs.py` (packetised config transfer), `effects.py` (live trigger commands), `mapping.py` (profiles, remapping, vibration, stored triggers), `lighting.py` (RGB), `screen.py` (160×80 screen: LVGL image format, settings, and the HID upload that this pad ignores), `screen_ota.py` (the serial upload that works), `games.py`, `forza.py` |
+| `flydigi/` | Library — `device.py` (transport), `blobs.py` (packetised config transfer), `effects.py` (live trigger commands), `mapping.py` (profiles, remapping, vibration, stored triggers), `lighting.py` (RGB), `screen.py` (160×80 screen: LVGL image format, settings, and the HID upload that this pad ignores), `screen_ota.py` (the serial upload that works), `games.py`, `forza.py`, `evdev.py` (the xpad evdev reader every relay's input comes from), `ds5.py` (DualSense report codec), `dsx.py` (DSX UDP protocol), `monitor.py` (process-memory engine), `motion.py` (battery, gyro/accel and the third-party toggle), `relay.py` (Apex 5 → DualSense translation) |
 | `gui/` | PySide6/QML desktop app (GPL-3.0-or-later) — `app.py` (the object graph), `main.py` (entry point), `worker.py` (all device I/O, on its own thread), `models/` (view-agnostic state; `screen.py` is the one that touches QtGui, for image decoding), `qml/` (`Main.qml`, `pages/`, `components/`) |
 | `tools/flydigi-mapping` | CLI for profiles — list/show/set/clear/rename/apply/backup/restore |
 | `tools/flydigi-forza` | Forza driver — UDP 5300 → rules → triggers (`--dump` for telemetry only) |
@@ -376,10 +388,10 @@ a bad checksum by staying silent exactly as the pad does.
 | `flydigi/haptics.py` | Haptic audio → motor levels: channel energy, the frequency split, the shaping |
 | `tools/flydigi-ds5` | Tier 4 — the uhid relay, for a machine with no `vhci-hcd` |
 | `tools/flydigi-haptics` | The original bridge, sampling a *real* DualSense's audio. Superseded as a delivery mechanism; the DSP it proved is what tier 4b feeds |
-| `tools/gen_ds5_usb.py` | Regenerates the above from a connected DualSense. Scrubs Bluetooth addresses unconditionally |
+| `tools/gen_ds5_usb.py` | Regenerates the above from a connected DualSense. Scrubs the Bluetooth addresses in report `0x09` **and the hardware address in `0x0B`**, unconditionally. Report `0x05`, this unit's IMU calibration, is kept deliberately — per-unit but not an identifier |
 | `tools/flydigi-ds5-usbip` | Tier 4b — the relay, with `--haptics` and `--motors` |
 | `tools/ds5-dump-features` | Re-reads a real DualSense and diffs it against what we serve |
-| `tests/` | `test_device.py`, `test_dsx.py`, `test_forza.py`, `test_games.py`, `test_mapping.py`, `test_monitor.py`, `test_prefs.py`, `test_relay.py`, `test_screen.py`, `test_screen_ota.py` need no Qt; `test_models.py`, `test_shell.py`, `test_qml.py` need PySide6 — all pass without hardware, each printing its own count |
+| `tests/` | `test_device.py`, `test_dsmode.py`, `test_dsx.py`, `test_forza.py`, `test_games.py`, `test_mapping.py`, `test_monitor.py`, `test_prefs.py`, `test_relay.py`, `test_screen.py`, `test_screen_ota.py` need no Qt; `test_models.py`, `test_shell.py`, `test_qml.py` need PySide6 — all pass without hardware, each printing its own count |
 | `tests/fake_pad.py` | Stand-in controller: multi-packet reads, diffed writes, apply, save, checksum rejection |
 | `tools/forza-simulate` | Synthetic telemetry generator, for testing without the game |
 | `tests/test_forza.py` | Self-test for the parser and rule engine (no hardware needed) |
@@ -391,6 +403,9 @@ a bad checksum by staying silent exactly as the pad does.
 | `flydigi/prefs.py` | Per-game preferences in `~/.config/flydigi/games.json` |
 | `tools/flydigi-run` | Steam launch wrapper — `flydigi-run "<name>" -- %command%` |
 | `tools/hid_probe.py` | Passive HID descriptor dump (writes nothing) |
+| `tools/ds5-channel-probe` | Plays a tone into one DualSense audio channel at a time, to map channel index to actuator or speaker (needs `paplay`) |
+| `tools/gyro-probe` | Vendor-stream IMU check — gyro and accel, live |
+| `tools/haptics-inspect`, `tools/haptics-simulate`, `tools/joystick-curve-probe`, `tools/stick-feel` | The remaining bench probes: per-channel haptic energy, synthetic haptic playback, stick-curve capture, stick feel |
 | `tools/flydigi_cmd.py` | Manual command tool — `info`, `race`, `normal`, `bind`, `rumble`, `game`, `raw`, plus `k6*` for the trigger family belonging to an Apex 6, which has not shipped ([device codes](docs/findings-other-devices.md)) |
 | `gamelist.json` | All 94 games + per-game configs (from the public API) |
 | `mods/` | All 46 downloadable mod zips (44 MB) |
@@ -406,7 +421,7 @@ a bad checksum by staying silent exactly as the pad does.
 | [docs/findings-profile-blob.md](docs/findings-profile-blob.md) | The 840-byte profile: layouts, factory defaults, sticks, gyro, triggers, the trigger-motor block |
 | [docs/device-settings.md](docs/device-settings.md) | Command 3, the small write commands, battery, the RGB test command, the command inventory |
 | [docs/findings-screen.md](docs/findings-screen.md) | Image format, the serial upload, and why the SDK's HID picture family is inert here |
-| [docs/findings-steam.md](docs/findings-steam.md) | Locking the hidraw node, the third-party takeover toggle, and SDL's own driver |
+| [docs/findings-steam.md](docs/findings-steam.md) | Locking the hidraw node, the third-party takeover toggle, why Steam still misnames the pad after a reconnect, and SDL's own driver |
 | [docs/findings-games.md](docs/findings-games.md) | Game detection, routes, and the per-game validation notes |
 | [docs/findings-haptics.md](docs/findings-haptics.md) | Tier 4's limits: haptic audio, the USB gadget question, M1-M4 |
 | [docs/findings-other-devices.md](docs/findings-other-devices.md) | **What `k5`/`k6`/`f4` mean**, the Vader 4, the charging dock, and firmware update |

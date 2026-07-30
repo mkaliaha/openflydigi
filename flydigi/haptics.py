@@ -17,8 +17,11 @@ playing tones into each channel and having a human report what happened:
     ch2  left haptic actuator
     ch3  right haptic actuator
 
-Deathloop drives ch3 only, so treat the haptic pair as one signal rather than
-assuming stereo content.
+Deathloop was first measured writing ch3 only, from the PipeWire side. Measured
+again at the device itself, both actuator channels carry signal and track each
+other closely, with ch2 often slightly stronger, while ch0 and ch1 stay at
+exactly zero. The direct observation is the better one. They are summed anyway,
+because the split below is by frequency rather than by side.
 
 **Conversion approach.** The DualSense's actuators are full-range voice coils;
 the Apex 5's motors are not interchangeable -- the left is a large low-frequency

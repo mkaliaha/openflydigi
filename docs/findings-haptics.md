@@ -42,6 +42,10 @@ Flydigi's: the game sent `type=0x25 p[0]=12` → `mode 3 [70,0,12]` and `type=0x
   > converts it to motor rumble. **The bridge works** — verified with `tools/haptics-simulate`, which
   > plays synthetic gunshots and engine rumble and produces correctly decaying motor values.
   >
+  > *(`tools/haptics-simulate`'s `tone()`/`sequence()` play into ch0/ch1 — headphone and speaker —
+  > which the DSP ignores, so it produces no motor output until those are moved onto channels 2 and
+  > 3. Its `--channels` identification mode works as-is.)*
+  >
   > **But games do not use it.** With the sink present and named "Wireless Controller", Deathloop
   > opened exactly one audio stream and routed it to the speakers; our sink measured absolute silence
   > (peak 0.00000). A virtual pad has no OS-level link between its HID device and an audio endpoint,
@@ -53,10 +57,18 @@ Flydigi's: the game sent `type=0x25 p[0]=12` → `mode 3 [70,0,12]` and `type=0x
   >
   > Two notes for anyone re-running this: `pw-record` prepends a file header and will silently
   > misalign a raw reader (use `parec --raw`), and `paplay --raw` declares no channel map so PipeWire
-  > remixes the channels — do not assume fixed haptic channel indices.
+  > remixes the channels — do not assume fixed haptic channel indices. **The capture side needs the
+  > same care**: `parec --raw` also wants `--channel-map=front-left,front-right,rear-left,rear-right`,
+  > or the ch0-3 readings are whatever PipeWire remixed them to. `tools/haptics-inspect` does not
+  > currently pass it.
 
   The DSP that bridge proved is not scaffolding any more: `flydigi/haptics.py` is what the virtual
-  device now feeds, unchanged.
+  device now feeds — the same DSP, with an s16/decimating front end added for it.
+
+  **The channel map itself was established with instruments, not guessed.** `tools/ds5-channel-probe`
+  plays a tone into each channel in turn so you can hear which is which (its `--freq` option is how
+  the speaker was identified), and `tools/haptics-inspect` measures per-channel energy from a live
+  capture.
 - **Gyro/accel: implemented.** The vendor input stream (command 17, "raw data transport in")
   carries the IMU at ~300 Hz, and enabling it does **not** disturb the xpad node, so sticks and
   buttons still come from evdev. Offsets follow `OperatorDataParser` for `NewXInput`, shifted by
@@ -103,7 +115,21 @@ ended:
   * `parec` buffers generously by default; ask for `--latency-msec`.
   * When falling behind, **drop stale audio** rather than working through the backlog.
 
-Useful settings: `--gain 1.5 --crossover 250`.
+**Two tuning findings that are not obvious from the signal, and both have a knob.** An ERM motor has
+no perceptual floor where the DualSense's voice coils do: below a threshold it does not spin, it just
+whines. So a noise gate is applied (`GATE = 0.015`, `--gate`) and the level is **rescaled above it**
+rather than merely clipped, or everything quiet lands in a dead band. And the shaping exponent moved
+from 0.5 — a square root, which made the pad feel markedly more sensitive than the DualSense it was
+imitating — to `CURVE = 0.7` (`--curve`).
+
+Useful settings, all four knobs: `--gain 1.5 --crossover 250 --gate 0.015 --curve 0.7`.
+
+**The two rumble sources are combined per motor with `max`, not summed.** HID rumble and haptic audio
+are held in separate slots and the larger of the two wins for each motor, so a loud HID rumble is
+never doubled by concurrent haptic audio, and no clamp-after-addition is needed.
+
+**Ruled out, and worth keeping ruled out:** deriving rumble from the *game's own main audio output*.
+Tried and rejected — it fires on music and dialogue, and does not resemble haptics.
 
 **Superseded as a delivery mechanism**, but not as work: this bridge needed a real DualSense present
 as the source, sampling the buzz off a controller sitting on the desk. The conversion it proved is
@@ -118,10 +144,10 @@ feature.
   * **GE-Proton 11-2** and **proton-cachyos** now ship wired PS5 haptics natively for real
     controllers. A WirePlumber rule may be needed to stop PipeWire collapsing the DS5 node to mono.
 
-**The mechanism**, from the patch discussions: games locate the haptic device by name, and the Wine
-patches "fetch the audio-side ContainerId from setupapi so HID and MMDevice agree by construction".
-That is precisely the association our null sink lacked — a uhid device and an unrelated PipeWire
-sink can never share a ContainerId.
+**The mechanism** is a ContainerId shared between the HID device and the audio endpoint — see *How
+Proton actually matches audio to a gamepad* below for how it is computed. A uhid device and an
+unrelated PipeWire sink can never share one, which is precisely the association our null sink
+lacked.
 
 **Nobody had emulated a virtual DualSense with a working audio device.** Every project either used
 real hardware or emulated HID only -- inputtino, DSX, and `VIIPER`, the one USB/IP DualSense, which
@@ -150,9 +176,8 @@ guessed:
     iface 3     HID                EP 0x84 IN + EP 0x03 OUT, interrupt, 64 B
     self-powered, 500 mA, iSerial 0 (no serial string)
 
-**It is USB Audio Class 1.** Everything written here before assumed `usb_f_uac2` was the missing
-module; the module actually needed is `usb_f_uac1`. Fedora ships neither, so the conclusion below
-does not change — but the target does.
+**It is USB Audio Class 1**, so the module needed is `usb_f_uac1`, not `usb_f_uac2`. Fedora ships
+neither.
 
 **The playback endpoint is Adaptive, with no explicit feedback endpoint.** So the whole device needs
 only four endpoints, and three if the mic is dropped. That matters on any controller with a small
@@ -161,32 +186,33 @@ endpoint budget.
 Channel config is `0x0033` = FL FR RL RR, consistent with the tone probing above: the haptic
 actuators are the RL/RR pair, ch2 and ch3.
 
-**The HID report descriptor is 289 bytes, and used not to be the one we emulated.** inputtino's copy
-was 273 bytes; the two are identical for 145 bytes and then diverge, because inputtino lacks feature
-reports `0x0B` and `0x0C` (usages `0x41`/`0x42`, 41 bytes each). Presumably an older firmware —
-its firmware string reads "Jun 19 2023" against this unit's "Jul  4 2025", 42 of 63 bytes apart.
-Nothing has been observed to care, but the real one is what a host compares against, so
-`flydigi/ds5_usb.py` holds the captured descriptor and both tiers use it. The inputtino data, and
+**The HID report descriptor is 289 bytes, captured from hardware.** Use the real one: a host
+compares against it, and the widely-copied inputtino descriptor is 273 bytes from older firmware —
+identical for 145 bytes, then divergent, because it lacks feature reports `0x0B` and `0x0C`
+(usages `0x41`/`0x42`, 41 bytes each). `flydigi/ds5_usb.py` holds the capture and both tiers use it.
+The inputtino data, and
 the `flydigi/ps5_data.py` that held it, are gone.
 
-Re-capture with:
+Re-capture goes through `tools/gen_ds5_usb.py`, with a real DualSense attached on hidraw:
 
-    cp /sys/bus/usb/devices/<n>/descriptors .
-    cp /sys/bus/hid/devices/0003:054C:0CE6.*/report_descriptor .
-    cat /proc/asound/Controller/stream0
+    cp /sys/bus/usb/devices/<n>/descriptors            work/ds5-usb/descriptors.bin
+    cp /sys/bus/hid/devices/0003:054C:0CE6.*/report_descriptor  work/ds5-usb/report_descriptor.bin
+    tools/gen_ds5_usb.py            # reads the feature reports from the live device
+
+The two `.bin` files are the only inputs taken from sysfs — the **feature reports are read from the
+attached device**, so the pad has to be connected at generation time, not merely have been once.
 
 ### How Proton actually matches audio to a gamepad
 
-Read out of the Proton source rather than inferred. **There are two strings, computed independently,
-and earlier notes here conflated them.**
+Read out of the Proton source. **There are two strings, computed independently — they are easy to
+conflate and mean different things.**
 
 **1. The MMDevice instance id** — `USB\VID_054C&PID_0CE6\...` versus `{1}.ROOT\MEDIA\NNNN`. In
 `winepulse.drv` this is **not** derived from sysfs. `get_device_path()` switches on `bus_type`,
 which `fill_device_info()` sets from the **PulseAudio proplist**: `device.bus` must be literally
 `"usb"`, plus `device.vendor.id` and `device.product.id`. Anything else falls through to
-`ROOT\MEDIA\%04u`. Sysfs parsing exists only in **winealsa**, which Proton does not use. So the
-older note here — "winepulse resolves identity through the sysfs path and looks it up in setupapi" —
-named the wrong driver and the wrong mechanism.
+`ROOT\MEDIA\%04u`. Sysfs parsing exists only in **winealsa**, which Proton does not use — so
+nothing here goes near sysfs or setupapi.
 
 **2. ContainerId** — `DEVPKEY_Device_ContainerId`, and *this* is the HID↔audio join. It is
 **Proton-only**; upstream Wine has never merged it. `winepulse.drv` takes the `sysfs.path` proplist
@@ -200,8 +226,13 @@ in `ValveSoftware/wine`: `e179606` (winepulse container id from udev) and `961d1
 specific container ids).
 
 **Why the null sink really failed.** Not the sysfs path — `device.bus` was not seen as `"usb"` by
-winepulse. `alsa.components` and the node name/description are never consulted for identity at all,
-so making them byte-identical to the real device was effort spent on fields nobody reads.
+winepulse. Note carefully what that does *not* mean: the sink config **already declares**
+`device.bus`, `device.vendor.id` and `device.product.id` in `node.props`
+(`pipewire/99-dualsense-haptics.conf`). What was observed is that those node properties do not reach
+the PulseAudio-compat proplist that `fill_device_info()` reads. So do not "fix" this by adding a
+property that is already there. `alsa.components` and the node name/description are never consulted
+for identity at all, so making them byte-identical to the real device was effort spent on fields
+nobody reads.
 
 **Why uhid can never close this — now confirmed from code, not argued.** A uhid node's parent chain
 is `/devices/virtual/misc/uhid/...`, so `udev_device_get_parent_with_subsystem_devtype(dev, "usb",
@@ -243,8 +274,7 @@ a gamepad:
 
     echo -n "0003:054C:0CE6.00XX" | sudo tee /sys/bus/hid/drivers/playstation/unbind
 
-It was written up as diagnostically decisive: writes anyway means matching is **by name**, silence
-means **by association**. That framing predates the setupapi finding above and does not survive it.
+It decides nothing, and the ContainerId mechanism above says why.
 Unbinding `hid-playstation` removes the hidraw node but leaves the USB device and its interfaces
 intact, so the audio side keeps the same sysfs path, instance id and ContainerId either way. The
 only thing that changes is that the game stops seeing a second gamepad — leaving it our uhid pad,
@@ -346,9 +376,16 @@ adopting one.
 
 ## What was built, and what it cost to get right
 
-`flydigi/usbip.py` is the transport (about 360 lines, no dependencies) and `flydigi/ds5_usbip.py` is
+`flydigi/usbip.py` is the transport (no dependencies) and `flydigi/ds5_usbip.py` is
 the device on top of it. `tools/flydigi-ds5-usbip` is the relay. Everything below was found by
 running it, not by reading a spec.
+
+  * **The haptic stream is s16le and needs decimating, which the DSP did not do before.** The
+    isochronous OUT on endpoint `0x01` is 4 channels of **s16le at 48 kHz** — not the float32 that
+    `parec` was asked for on the old bridge — so an s16 front end had to be added. It is then
+    decimated 8:1 **by block averaging**, not by dropping samples: plain decimation aliases content
+    above the new Nyquist down into the high band and drives the wrong motor. `Splitter` is
+    therefore constructed at `RATE // DECIMATE`, i.e. 6 kHz.
 
   * **Endpoint numbers are not addresses.** `usbip_header_basic` carries `ep` as the plain number
     0..15 with direction in its own field, so the high bit of a descriptor's `bEndpointAddress`
@@ -394,6 +431,16 @@ running it, not by reading a spec.
     the real pad: it binds usbhid, gets no hidraw node, and silently stops being a gamepad.
     Observed. The committed blobs carry inputtino's public addresses instead, which also keeps
     hardware identity out of the repo.
+  * **Scrub what identifies, not only what you recognise.** The sweep for report `0x09`'s
+    Bluetooth addresses missed a *third* six-byte field, in report `0x0B`, which is also a hardware
+    address. It is now replaced by position with inputtino's host address, unconditionally. Report
+    `0x05` — this unit's real gyro and accelerometer calibration — is committed **deliberately**: it
+    is per-unit but it is not an identifier, and serving someone else's calibration would make the
+    motion wrong.
+  * **Re-capturing the blobs goes through the generator, not through sysfs.** With a real DualSense
+    on hidraw, copy the device's `descriptors.bin` and `report_descriptor.bin` into `work/ds5-usb/`
+    and run `tools/gen_ds5_usb.py`. The **feature reports are read from the live device**, not from
+    sysfs — which is why the pad has to be attached rather than merely have been attached once.
 
 ### Turning it on: one authentication, and no standing privilege
 
@@ -433,6 +480,16 @@ privilege-escalation primitive, since one of those devices is a keyboard.
     Launch with `SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501`, or set it globally in Steam.
   * **Steam Input must be off** for that game: it masks the pad as an Xbox controller, which breaks
     DualSense semantics and the four-channel audio the haptics arrive on.
+  * **`--verify` is the first debugging step**, not the last. It reads our own `054c:0ce6` evdev node
+    back and counts events, which separates "our reports never reach the OS" from "the game bound the
+    wrong pad" — two failures that look identical from inside the game.
+  * **Where to look when it is not working.** The relay logs to
+    `~/.local/state/flydigi/ds5-relay.log`, truncated per run. Two counters answer "is this working":
+    `out` rises when the game is driving our pad, and `iso_urbs` rises when haptic audio is actually
+    arriving.
+  * **Create is not sacrificed — it is on a chord.** `SELECT` is touchpad click, and
+    **`SELECT`+`START`** sends Create, with Options suppressed while the chord is held. What M1-M4
+    would buy is freeing Create *from* the chord, not restoring it.
 
 ### The SBC route, superseded
 
@@ -472,8 +529,9 @@ Emulating a **DualSense Edge is the wrong answer**:
     this, and `ds5-edge-relay` exists to convert an Edge into a plain DualSense.
 
 What reading them is still worth:
-  * **M1 -> touchpad click**, which frees SELECT to be Create (its correct mapping). Today we
-    sacrifice Create because there is no other source for touchpad-click.
+  * **M1 -> touchpad click**, which would free SELECT to be Create outright (its correct mapping).
+    Create is not lost today — SELECT is touchpad click and **SELECT+START** sends Create, with
+    Options suppressed while the chord is held. What this buys is Create without a chord.
   * **daemon-side actions** that never reach the game: profile switching, toggling the relay,
     cycling trigger presets.
 

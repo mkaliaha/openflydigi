@@ -9,8 +9,14 @@
 Steam launch options:
     /path/to/flydigi-run "DEATH STRANDING 2" -- %command%
 
-Knowing the game up front removes detection entirely, which matters because
-many gamelist entries have no processGameNames at all.
+Knowing the game up front removes detection entirely. That is immediacy, not
+coverage: flydigid reaches all 94 entries, because games.process_index() indexes
+the singular processGameName as well as the plural list. What this buys is no
+1 s poll lag and surviving a renamed process.
+
+Scope: this applies a vibration preset. Every other tier is refused, and
+DualSense mode is not here at all -- it is a global switch (flydigi/dsmode.py,
+or the app's DualSense page).
 """
 import os
 import signal

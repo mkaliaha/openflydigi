@@ -60,8 +60,14 @@ distrobox enter apex-dev -- python3 -m gui
     app.py        the application graph: models, worker thread, the wiring
     main.py       QML entry point
     worker.py     device access, on its own thread
+    i18n.py       the i18n*() shim the engine needs -- PySide6 has no KLocalizedContext
     models/       view-agnostic state -- no QtWidgets, no QtQuick
     qml/          Main.qml, pages/, components/
+
+`i18n.py` is not optional and its absence is not a translation problem. Kirigami's form delegates
+evaluate `i18ndc(...)` inside a `TextMetrics` whose binding runs whether or not the label it feeds is
+visible, so without the shim **every text field in the application throws**
+`ReferenceError: i18ndc is not defined`. `main.py` installs it unconditionally.
 
 `models/` is where the logic lives, which is why most of the tests need no
 display and no QML engine at all. The QML binds to it through the `App`

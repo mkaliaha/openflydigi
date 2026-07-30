@@ -6,9 +6,11 @@
 // status at the top of it, and failures as an inline message over the page
 // rather than a status bar.
 //
-// No i18n() here. Kirigami apps get it from a KLocalizedContext installed on
-// the engine from C++, which a PySide6 app has no equivalent for -- calling it
-// would fail at load. Strings are plain until there is a translation story.
+// No i18n() on our own strings. Kirigami apps get it from a KLocalizedContext
+// installed on the engine from C++, which a PySide6 app has no equivalent for,
+// so gui/i18n.py installs a shim for Kirigami's own components. i18n() does
+// resolve -- it just does not translate. Strings are plain until there is a
+// translation story.
 
 import QtQuick
 import org.kde.kirigami as Kirigami

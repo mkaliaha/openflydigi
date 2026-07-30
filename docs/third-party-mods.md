@@ -8,6 +8,12 @@ system — distributed by Flydigi.
 `tools/flydigi-dsx` already accepts what they emit, so if you choose to install one yourself it will
 drive the controller with no further work.
 
+**What "accepts" covers, precisely: `TriggerUpdate` instructions and nothing else.** A DSX packet can
+also carry `RGBUpdate`, `PlayerLED`, `MicLED` and `TriggerThreshold`; `flydigi/dsx.py` parses those
+and discards them. So a mod's lightbar effects will not appear on the pad, even though this project
+drives the pad's RGB elsewhere (`flydigi/lighting.py`). `--dump` shows exactly what was decoded, and
+`--forward` relays the raw datagrams onward if something else wants the rest.
+
 ## How they work
 
 Each mod runs inside the game and sends DSX-protocol JSON over UDP to `127.0.0.1:7878`:

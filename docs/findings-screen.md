@@ -17,10 +17,21 @@ A test card and a 14-frame Bad Apple are both on a wired Apex 5's screen, writte
 exchanges a second, ~25 s a frame, 5 m 46 s for fourteen, and about 1.8 hours at the 255-frame
 ceiling. Space Station is stuck with the same arithmetic.
 
+**Where the 255-frame ceiling actually lives, because it is not where it reads.** The limit is the
+one-byte picture-count field. It is *enforced* in two places only: the dead HID path
+(`flydigi/screen.py`, `if len(frames) > 255: raise ScreenError`) and the GUI, which truncates at
+`MAX_FRAMES = 255` and says so. The serial path that works has **no check** —
+`flydigi/screen_ota.py` sends `len(frames) & 0xFF` as the count, and `tools/flydigi-screen
+animate/send` pass frames through uncapped. So a 300-frame GIF writes all 300 frames of data while
+telling the chip there are 44. The guard belongs in `screen_ota.upload`; until it is there, treat the
+ceiling as a rule the CLI does not keep for you.
+
 That is why the GUI page is shaped the way it is: the frame count and the time estimate sit next to
 the button rather than in a tooltip, because an upload runs for minutes and **cannot be stopped**;
 and the preview is the encoded frame decoded back, not a scaled copy of the source, so what you
-check is what the pad will get.
+check is what the pad will get. **Every** frame is encoded and decoded back to a cached PNG at load
+time, and the page plays them at the chosen frame interval — an animation is checked before a
+multi-minute upload, not after.
 
 **The image format is settled, and settled *hard*.** A frame is 25604 bytes: a 4-byte LVGL v8
 header (`cf=4 TRUE_COLOR, 160x80`, the constant `04 80 02 0A`) then 160x80 RGB565 with the **high
@@ -34,16 +45,18 @@ The hint in the old version of this entry was right — the encoding *is* in the
 the LVGL image converter, and their picker carries `ICF_TRUE_COLOR_ARGB8332 / 8565 / 8565_RBSWAP /
 8888` and `CF_RAW` verbatim.
 
-**The transport is the open question, and it is a bigger one than expected. Space Station does not
-upload to an Apex 5 over HID at all.** `upload_pic2screen` branches on the device code: everything
+**The transport was the open question, and the answer was that Space Station does not upload to an
+Apex 5 over HID at all.** `upload_pic2screen` branches on the device code: everything
 else gets `IpcCommandEnum_UploadPic` and the SDK's 208/209/210/211 family, and `k5` gets
 `SwitchUsb` — which is `SwitchToFirmwareUpgradeMode`, **command 31**, `chipModule = CHIP_SCREEN`,
 `chipType = FREQ` — followed five seconds later by `firmware/FirmwareConsole.exe --upgrade_type 2`
 over a temp file of the frames.
 
-So the pad's screen is written by the firmware updater. **That path is not implemented here and
-nothing in this project sends command 31** — but it has now been decompiled, and it is much less
-forbidding than the vendor DLLs sitting next to it suggested. Full protocol in PROTOCOL.md §8d.
+So the pad's screen is written by the firmware updater, and that is what this project does.
+`flydigi/screen_ota.py` sends command 31 (`CMD_SWITCH_USB`, `enter_upgrade_mode`), reached from
+`tools/flydigi-screen` and the GUI's Screen page. It targets **the screen chip only**
+(`CHIP_SCREEN`) — `enter_upgrade_mode` takes no chip argument, so no other chip is reachable through
+it. Full protocol in PROTOCOL.md §8d.
 
 `FirmwareConsole.exe` unpacks with `sfextract` and decompiles cleanly, and the screen work is all
 managed code in `FirmwareLibrary.dll`. It dispatches on chip type, and the screen's — `ChipType.Freq`
@@ -65,9 +78,13 @@ seconds restores a misbehaving pad. PROTOCOL.md §8e quotes all four.
 The one window where cutting power is worse than waiting is the **~15 second resource sync** after a
 successful write: "It will restart automatically when done. Please do not turn off the device."
 
-What is unproven is everything past command 31: whether this pad enumerates as `cdc_acm` on Linux,
-and whether it comes back. That is one cheap experiment — send 31, watch `/dev/serial/by-id` and
-`dmesg`, power-cycle, with the port never even opened — not another decompile.
+**Everything past command 31 is proven.** The pad enumerates as `cdc_acm`, `flydigi/screen_ota.py`
+finds the port with `wait_for_port()` and drives it through `OtaLink`, and each completed upload
+rebooted the pad by itself. The pad's own `37d7:2501` hidraw nodes stay enumerated with the
+bootloader tty live, so the two interfaces coexist.
+
+One thing is still open: whether the upgrade-mode flag is volatile — whether a pad switched with 31
+but never written to comes back on its own or needs the power switch.
 
 **The HID family answers on this pad and does not drive the screen. Settled on hardware, and it is
 a dead end — do not spend another session on it.** All four commands parse: the pad ACKs every
@@ -97,6 +114,11 @@ One trap in it: **the reply command byte is not always the command's own.** 210 
 themselves, but 208 and 209 answer as `0x18`/`0x19` — real command ids elsewhere, so not a
 "no such command". `screen.ACK_ID` maps it, and the fake pad models the pad rather than the SDK.
 
+**A second trap, and this one cost a picture. 211 is a commit, not punctuation.** 208 followed by
+211 commits picture metadata for a frame that was never sent, and on a wired Apex 5 that
+**destroys a stored custom image** — the screen falls back to its status view after the next reboot.
+`probe()` therefore sends only the start, and even that leaves an announced-but-unsent frame behind.
+
 Two things worth running first, neither of which uploads anything: `flydigi-screen status` (the
 screen bits out of command 3, read-only) and `flydigi-screen test ff8000` (command 242).
 
@@ -105,6 +127,30 @@ screen bits out of command 3, read-only) and `flydigi-screen test ff8000` (comma
 pad's own power switch. Both facts are hardware; the SDK says neither.
 
 Also confirmed: upload is **wired only**, refused in their UI before it reaches the device.
+
+## The two screen settings, and the one whose SDK name is a lie
+
+**`19` sub `9` is an always-on-display switch, not a screen-off switch — the SDK name is inverted.**
+Flydigi call the bit `OffScreen` (息屏显示). Measured on a wired Apex 5 while watching the panel:
+
+```
+19/9 = 1   the stored picture plays continuously — an always-on display
+19/9 = 0   the panel is dark; the logo button wakes the status view for ~2 seconds
+```
+
+So `enabled=False` is **a real screen blank**, and it is a control this project exposes that Space
+Station does not surface at all. `flydigi/screen.py` reports the command-3 bits as
+`always_on_usable`/`always_on` for this reason, and `set_off_screen` — which took the wire value
+under the SDK's name — was exactly backwards before it was measured. Anyone re-implementing this
+from the SDK name, from PROTOCOL.md §8c, or from `docs/device-settings.md` will get it inverted;
+that has already happened once here.
+
+`19` sub `8` is the other one, and is what puts the status-bar always-on flag back after the dead HID
+uploads flipped it.
+
+**An ACK to command 19 does not tell you which sub-setting was written.** The reply carries the
+command id, not the sub-id, so the family cannot be told apart by its acknowledgement — read command
+3 back if you need to know what actually landed.
 
 ## Why this sends command 31 when nothing else may
 

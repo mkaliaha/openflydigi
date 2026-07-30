@@ -24,9 +24,24 @@ which makes acting on detection too late by construction.
 daemon reads it and re-reads it about a second after it changes, and it now starts and stops the
 right helper for the route: `flydigi-monitor`, `flydigi-forza` or `flydigi-dsx`. Validated live in
 Dark Souls: Remastered — the daemon started the driver, which attached to the game and resolved its
-module base at `0x140000000`. The PS5 route is deliberately excluded: the virtual DualSense has to
-exist before the game enumerates pads, so reacting to a launch is already too late, and
-`tools/flydigi-run` stays the way in.
+module base at `0x140000000`. DualSense mode is deliberately not a route at all: the virtual pad has
+to exist before the game enumerates pads, so reacting to a launch is already too late. It is one
+switch for the whole system — the app's **DualSense** page (`flydigi/dsmode.py`), or
+`sudo tools/flydigi-ds5-usbip --haptics --motors`. **Not** `tools/flydigi-run`, which applies a
+vibration preset and refuses every other tier.
+
+**What Auto defaults to, which is not "on".** With nobody having chosen, only the **vibration**
+route acts on its own (`AUTO_BY_DEFAULT = ("vibration",)`) — writing a preset is what the daemon
+always did. Telemetry, monitor and bespoke default to **off**, because they spawn a process or read
+another process's memory. The coupling rule matters as much: a game's tier and its currently chosen
+route must *both* permit auto, and the more cautious of the two wins in either direction, so picking
+a route from the dropdown can never grant auto mode as a side effect. An explicit toggle overrides
+both.
+
+**The monitor route needs a download that is not in git.** For the 31 monitor games the daemon looks
+for `configs/monitor/<ProcessName>.*.json`, fetched with `tools/fetch-configs --monitor-configs`.
+Without it the daemon starts nothing and says so exactly once in its log. The vibration, telemetry
+and bespoke routes need no per-game download.
 
 **"Is the game running" and "which process is the game" are different questions, and only one
 route asks the second.** Starting Dark Souls: Remastered produced **eight** processes matching its
@@ -104,14 +119,14 @@ inventing something cleverer, because it is deliberately dull:
   * `ModStartType` says where the mod executable lives: 0 = game directory + mod path,
     1 = Space Station's own directory + mod path
 
-**Detection covers every game, and this closes an open issue.** PROGRESS.md used to list "many
-entries have empty `processGameNames`" as a gap needing a fallback — resolving the executable from
-the Steam manifest, the way Flydigi's bundled `GameFinder.StoreHandlers.Steam` does. Counting says
-otherwise, so no fallback is needed. All 94 entries carry a process name — 72 have only the singular
+**Detection covers every game, so no Steam-manifest fallback is needed** — the one Flydigi's bundled
+`GameFinder.StoreHandlers.Steam` provides. All 94 entries carry a process name — 72 have only the singular
 `processGameName` with an empty `processGameNames` list, which is why `games.process_index()` reads
 both. Most multi-store titles have no plural list at all, their executable being named the same
 everywhere. Polling can reach the whole list, so `flydigi-run` is a convenience (instant, no 1 Hz lag,
-survives a renamed process) rather than a requirement for coverage.
+survives a renamed process) rather than a requirement for coverage. The docstrings of
+`tools/flydigid` and `tools/flydigi-run` state the same rule, so the old "many entries cannot be
+detected" claim cannot drift back in through a tool header.
 
 **The plural list is not just graphics-API variants.** Nine entries add names
 beyond their singular, and they are three different things: API variants (Apex Legends, Forza
@@ -162,19 +177,30 @@ stored per game as `MapMode`):
 Note the tradeoff differs per mode: PS5 mode gives the game full DualSense semantics including
 battery reporting, while Flydigi mode uses their hand-tuned per-game effects.
 
-**But `MapMode` is not the whole story — nine games have a choice, not six.** Counting capability
-flags across the gamelist rather than assuming Space Station's pair was exhaustive turns up three
-more, because `games.tier()` returns only the winner of its priority chain and hides the rest:
+**The flag combinations are still worth knowing, but only one of them is a route choice now.**
+Counting capability flags across the gamelist rather than assuming Space Station's pair was
+exhaustive turns up three more pairings than `MapMode` has, because `games.tier()` returns only the
+winner of its priority chain and hides the rest:
 
-| Combination | Count | Games |
-|---|---|---|
-| `XGameMonitor` + `isPS5` | 6 | the `MapMode` six above |
-| vibration + `isPS5` | 2 | Apex Legends, Uncharted: Lost Legacy |
-| mod + vibration | 1 | Fallout 4 |
+| Combination | Count | Games | Still a choice? |
+|---|---|---|---|
+| `XGameMonitor` + `isPS5` | 6 | the `MapMode` six above | **No** — see below |
+| vibration + `isPS5` | 2 | Apex Legends, Uncharted: Lost Legacy | **No** |
+| mod + vibration | 1 | Fallout 4 | **Yes — the only one** |
 
-So the preference is a **route chosen from a list**, not a binary mode: `prefs.routes()` returns
-everything a game supports with its tier first, and a stored choice the gamelist no longer offers
-is ignored rather than honoured, since the list is refetched from Flydigi's API.
+**Exactly one game has a route to pick.** DualSense mode is a global switch, not something the
+daemon chooses per game, so the eight `isPS5` pairings are not alternatives to anything:
+`prefs.routes()` never returns a `ps5` route and `games.tier()` never yields one. Against the real
+94-entry gamelist, `prefs.has_choice()` is true for **Fallout 4 alone** — a mod *and* a vibration
+preset. The Games page dropdown and `tools/flydigi-auto route` apply to that one row.
+
+The flag itself survives as `games.ds5_aware()`, for display only: it is worth telling someone a game
+reads a DualSense directly, it is just not a decision. The six `MapMode` titles are covered by the
+global switch like everything else.
+
+The preference remains a **route chosen from a list** rather than a binary mode: `prefs.routes()`
+returns everything a game supports with its tier first, and a stored choice the gamelist no longer
+offers is ignored rather than honoured, since the list is refetched from Flydigi's API.
 
 Also worth knowing: **battery already reaches the desktop**. `hid-playstation` turns the virtual
 pad's reported battery into a power-supply device, so it appears in KDE's battery widget as
@@ -190,7 +216,10 @@ ships next.
 
 That is a better proposition than the mod-based tiers: Flydigi must author a mod per title, while
 this covers every DualSense-aware game for free, including ones released after any given Space
-Station update. The 15 in the game list are only the ones *Flydigi* flagged as PS5-mode.
+Station update. **23** of the 94 entries carry `isPS5` — the number `games.ds5_aware()` reports —
+and those are only the ones *Flydigi* flagged. Of them, 15 carry the flag and nothing else, which is
+why they land in the `unknown` tier and get no daemon route at all; the other 8 pair it with a mod
+or a preset.
 
 **What works, and what to tell users:**
 
@@ -201,7 +230,7 @@ Station update. The 15 in the game list are only the ones *Flydigi* flagged as P
 | Gyro / motion aiming | Works |
 | Battery reporting | Works, including the desktop battery widget |
 | Touchpad click | Works, mapped to SELECT |
-| HD / audio haptics | **Does not work** — structurally blocked, see below |
+| HD / audio haptics | **Works on tier 4b** (`tools/flydigi-ds5-usbip --haptics --motors`, or the app's DualSense switch). Structurally impossible on the uhid tier 4 — see [findings-haptics.md](findings-haptics.md) |
 | Touchpad gestures, finger position | Does not work — the Apex has no touchpad |
 
 Requirements per game: Steam Input **disabled** (it masks the pad and breaks DualSense semantics)
@@ -304,5 +333,7 @@ The compact version is in [PROGRESS.md](../PROGRESS.md); this is the long-form s
 | 1. Vibration bind | 33 | cmd `82` SyncWithGrip, config from API, driven by game rumble | **Done & automated** — verified in Death Stranding 2, triggers buzz with in-game rumble, daemon auto-detects and applies |
 | 2. ForzaDualSense | 4 | Forza "Data Out" UDP telemetry → JSON rule engine → cmd `81` | **Done — validated in Forza Horizon 6.** All 7 distinct rules fired in-game and the effects are felt on the pad |
 | 3. XGameMonitor | 31 | Generic engine + per-game config; reads game process memory | **Done — validated in Dark Souls: Remastered.** Weapon-specific filters fire from live memory reads; resistance differs correctly per weapon |
-| 4. PS5 emulation | 15 listed, **any DS5-aware game in practice** | Game natively speaks DualSense; needs uhid virtual DS5 | **Validated in Deathloop** — adaptive triggers work in-game. Input relay, DS5 binding, effect translation, rumble, gyro and battery all confirmed. Haptic-audio titles need the PipeWire bridge, and M1-M4 have no DualSense destination — see notes |
+| 2b. DSX listener | — | Game-side mods speak DSX JSON to 127.0.0.1:7878 | **Built, self-tested** — `tools/flydigi-dsx`; see [third-party-mods.md](third-party-mods.md) |
+| 4. PS5 emulation (uhid) | 23 flagged `isPS5`, **any DS5-aware game in practice** | Game natively speaks DualSense; uhid virtual DS5 | **Validated in Deathloop** — adaptive triggers work in-game. Input relay, DS5 binding, effect translation, rumble, gyro and battery all confirmed. **No haptic audio** — structurally impossible on uhid. Fallback for a machine with no `vhci-hcd`; M1-M4 have no DualSense destination |
+| 4b. PS5 emulation over USB | same, **any DS5-aware game** | usbip + `vhci-hcd` composite DS5: `hid-playstation` binds the HID interface, `snd-usb-audio` the audio ones | **Validated in Deathloop, and supersedes tier 4 wherever both work** — same input and triggers, *plus* the game's PS5 haptic audio reaching the pad's motors. This is what the app's DualSense switch turns on |
 | 5. Third-party mods | 11 | Game-side mods (REFramework, ScriptHookV, F4SE, Bannerlord module, F1 telemetry) | **No work needed** — they send DSX JSON to 127.0.0.1:7878, which `tools/flydigi-dsx` already accepts. Deliberately not shipped or supported; see [third-party-mods.md](third-party-mods.md) |

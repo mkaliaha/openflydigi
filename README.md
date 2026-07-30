@@ -53,6 +53,8 @@ tools/flydigi-monitor --probe configs/monitor/<game>.json   # check offsets firs
 tools/flydigi-monitor configs/monitor/<game>.json
 
 # present the pad to games as a DualSense (triggers, gyro, battery, haptics)
+# -- or flip the desktop app's DualSense switch, which does the same thing
+#    behind one authentication and keeps no standing privilege
 sudo tools/flydigi-ds5-usbip --haptics --motors
 #   root is given back as soon as the USB attach is done
 #   set per-game: SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501 %command%
@@ -71,8 +73,10 @@ tools/flydigi-screen off                # blank the panel -- Space Station canno
 ## Desktop app
 
 Profiles, button remapping, sticks, vibration, triggers, lighting, the 160x80
-screen and per-game trigger routes, without Space Station. QML on Kirigami, so
-it looks like the rest of a KDE desktop:
+screen and per-game trigger routes, without Space Station — plus a **DualSense**
+switch that turns the virtual-DualSense relay on for the whole system, and a
+**Setup** page for the daemon's unit, autostart, menu entry and udev rules.
+QML on Kirigami, so it looks like the rest of a KDE desktop:
 
 ```bash
 # Fedora / KDE

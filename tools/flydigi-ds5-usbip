@@ -68,8 +68,9 @@ class Haptics:
     """Per-channel peak of the isochronous stream.
 
     Channel map established by tone probing on real hardware: ch0 headphone,
-    ch1 speaker, ch2 left actuator, ch3 right actuator. Deathloop was measured
-    writing ch3 only, so treat haptics as mono rather than assuming stereo.
+    ch1 speaker, ch2 left actuator, ch3 right actuator. Measured at the device,
+    both actuator channels carry signal and track each other, ch2 often slightly
+    stronger; they are summed because the split is by frequency, not by side.
     """
 
     NAMES = ("ch0 headphone", "ch1 speaker",

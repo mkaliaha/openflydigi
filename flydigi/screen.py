@@ -24,19 +24,21 @@ picture -- `tools/flydigi-screen preview` will show you.
 Byte order is worth a sentence because LVGL calls it a build option rather than
 a format: this is `LV_COLOR_16_SWAP = 1`, the byte-swapped 16-bit true colour.
 
-**The transport is not settled, and this is the part to read before running it
-on hardware.** The SDK has one picture-upload family -- 208 start, 209 data, 210
-end, 211 finish -- and `ControllerSdk.UploadPicImpl` will send it to any pad
-whose `IsSupportScreen` is set, which includes the Apex 5. But Space Station
-never asks it to: `upload_pic2screen` in the Electron layer branches on the
-device code, and for `k5` it sends `SwitchUsb` -- which is
-`SwitchToFirmwareUpgradeMode`, command 31 -- and then runs `FirmwareConsole.exe`
-with `--upgrade_type 2` over the frames instead. Only the other pads take the
-HID path.
+**The transport is settled, and the answer is that this family does not drive
+the screen on an Apex 5. Use `flydigi/screen_ota.py`.** The SDK has one
+picture-upload family -- 208 start, 209 data, 210 end, 211 finish -- and
+`ControllerSdk.UploadPicImpl` will send it to any pad whose `IsSupportScreen` is
+set, which includes the Apex 5. But Space Station never asks it to:
+`upload_pic2screen` in the Electron layer branches on the device code, and for
+`k5` it sends `SwitchUsb` -- which is `SwitchToFirmwareUpgradeMode`, command 31
+-- and then runs `FirmwareConsole.exe` with `--upgrade_type 2` over the frames
+instead. Only the other pads take the HID path.
 
-So 208..211 may be dead firmware on this pad, or may work and merely be slower
-than Flydigi wanted. `probe()` answers that in one packet and without committing
-to anything, and it is the intended first contact. Nothing in this module sends
+Tested on hardware: all four commands parse, ACK and echo every field back, two
+complete uploads went out (9623 packets, no errors) and **the display never
+changed**. So 208..211 is live firmware that drives nothing here. This module is
+kept for other screen pads; `probe()` is a capability check for those rather
+than a first contact for this one. Nothing in this module sends
 command 31, and nothing should: it is a one-way door into a bootloader whose
 protocol we do not have. Flydigi's own failure text for a broken screen upload
 is "toggle the power switch on the back of the controller to restart it", which
@@ -389,10 +391,10 @@ def upload(ctrl, frames, period=1, dialect=DEFAULT_DIALECT, chunk=CHUNK,
            wait=0.5, progress=None):
     """Send frames to the screen. Returns the number of packets written.
 
-    Read the module docstring first: on an Apex 5 this path is unproven, since
-    Space Station uploads to a k5 through the firmware console instead. It is
-    the SDK's own sequence, so it is what the pad would be sent if Flydigi's
-    software asked -- but only hardware can say whether the firmware answers.
+    Read the module docstring first: on an Apex 5 this path is **proven inert**
+    -- every packet is acknowledged and the display never changes -- because
+    Space Station uploads to a k5 through the firmware console instead. Kept for
+    other screen pads. For an Apex 5 use `flydigi/screen_ota.py`.
 
     Held under one claim from the first packet to the last. The pad is tracking
     a byte count across the whole stream, so a config write from the desktop app

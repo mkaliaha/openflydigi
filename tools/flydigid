@@ -9,8 +9,10 @@
 Mirrors Flydigi's own AdapterTriggerRunner.CheckGameRunning (1 s poll on process
 names). Covers launchers the Steam wrapper cannot -- Heroic, umu, standalone.
 
-Games whose gamelist entry has no processGameNames cannot be detected this way;
-use tools/flydigi-run for those.
+Detection reaches every entry: 72 of the 94 carry only the singular
+processGameName with an empty processGameNames list, and games.process_index()
+indexes both. tools/flydigi-run is a convenience -- instant, no 1 s lag, and it
+survives a renamed process -- not a coverage requirement.
 """
 import argparse
 import os

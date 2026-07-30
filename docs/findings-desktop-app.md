@@ -24,6 +24,13 @@ written that has not reached flash. Bind both to dirty and pressing Apply immedi
 only way to keep the change you just made. The footer says which of the two states you are in rather
 than leaving it to be inferred.
 
+**Save has a third condition: the pad must be running the profile being edited** (`canSaveToFlash`).
+Command 166 carries no slot id — it commits whichever config the pad is *running*; the
+slot-addressed variant is a different command, 171. The pad has its own profile button, so the
+running slot can change underneath the app between status reads, and a mis-aimed 166 writes the
+wrong slot to flash while reporting success. The button is disabled and `write(save=True)` refuses
+when the edited slot is not the active one.
+
 The label is spelled out rather than "Apply & save": a bare `&` in a button label is taken as a
 mnemonic, swallowed, and drawn as an underline on the next character. Escaping it as `&&` works;
 in QML it is simpler to avoid the ampersand.
@@ -63,7 +70,7 @@ a socket pair for what a send does, two separate `open()`s of one path for what 
 The desktop tests come in three layers, cheapest first:
 
 ```bash
-for t in tests/test_{device,dsx,forza,games,mapping,monitor,prefs,relay,screen,screen_ota}.py; do python3 "$t"; done  # backend, no Qt
+for t in tests/test_{device,dsmode,dsx,forza,games,mapping,monitor,prefs,relay,screen,screen_ota}.py; do python3 "$t"; done  # backend, no Qt
 python3 tests/test_models.py     # headless -- no engine, no display
 python3 tests/test_shell.py      # the window, loaded the way main.py loads it
 python3 tests/test_qml.py        # QtQuickTest: real clicks on real delegates

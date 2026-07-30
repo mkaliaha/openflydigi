@@ -180,3 +180,7 @@ every later test run depends on it.
 3  port Lighting, then Profiles, then Games
 4  delete widgets, add the controller schematic
 ```
+
+**Step 4's schematic was dropped.** The Buttons page groups the 23 keys by where they sit on the
+shell instead: a drawing accurate enough to be useful is hard to keep clearly distinct from Flydigi's
+own artwork, which their service agreement claims.
