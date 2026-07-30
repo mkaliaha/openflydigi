@@ -73,10 +73,23 @@ with apply-and-no-save, sweep the stick, watch evdev; the three outcomes are unm
 stick precision rescales the profile's curve bytes — write a different precision, re-read a profile.
 Whether the firmware accepts 164/165 aimed at a slot it is not running.
 
-**Parked, with the reason recorded.** Haptic audio works but needs a real DualSense as the source;
-reviving it means emulating a USB composite device, and Fedora ships neither `usb_f_uac2` nor
-`raw_gadget`. The one cheap diagnostic left is unbinding a real DualSense's HID interface while
-keeping its audio card. → [docs/findings-haptics.md](docs/findings-haptics.md)
+**Haptic audio: unparked.** The conversion works and is proven against real game haptics; what it
+lacked was a source. Proton joins an audio endpoint to a gamepad by a ContainerId that both
+`winepulse` and `winebus` derive independently from the same `usb_device` — so only a real USB
+device works, and uhid can never match (it gets a random GUID, re-rolled per run). The DualSense's
+descriptors are captured; it is **UAC1, not UAC2**, which every note here previously assumed.
+
+Two routes remain, and every soft-UDC shortcut is a dead end: `dummy_hcd` has no isochronous
+endpoint, `usbip-vudc` fails iso with `-EXDEV`, and FunctionFS cannot express UAC descriptors at
+all. So which distros ship `usb_f_uac1` turns out not to matter.
+
+  1. **Real UDC.** `tools/ds5-gadget` binds cleanly on an Orange Pi PC 2 with every module prebuilt,
+     creating `/dev/hidg0` and a 4-channel `UAC1Gadget` capture device. Blocked on one micro-USB
+     *data* cable.
+  2. **Userspace USB/IP + `vhci-hcd`.** No UDC involved, so none of the blockers apply; `vhci-hcd`
+     is `=m` everywhere and does implement iso. Needs the device written.
+
+→ [docs/findings-haptics.md](docs/findings-haptics.md)
 
 **Not ours to fix.** Steam lists the pad twice (xpad *and* its own hidapi path — reported on Windows
 too), and Steam takes no lock on the hidraw node, so its writes can land between ours. Harmless for
@@ -209,6 +222,12 @@ in `gui/` is [gui/README.md](gui/README.md).
   * **M1–M4 and C/Z are remap sources, not targets.** They have no XInput equivalent, so mapping a
     face button onto one makes it send nothing. `APEX5_KEYS` is the source list, `XINPUT_TARGETS`
     is what a remap may point at.
+  * **A configfs binary attribute can store less than you wrote, and say nothing.** Writing the
+    DualSense's 289-byte HID report descriptor to `functions/hid.usb0/report_desc` stored 151 bytes;
+    the gadget then bound, enumerated and described itself as something else entirely. The write
+    method was not at fault — four different hex-to-binary methods all produce 289 identical bytes
+    off-device. So `tools/ds5-gadget` reads the attribute back, compares the length, and dies. Any
+    write of a NUL-laden blob through a shell deserves the same treatment: verify, do not assume.
   * **Never combine a `pkill -f` with the relaunch in one shell command** — the pattern matches the
     shell running it and kills the session (exit 144). Two separate commands, and the `'[p]attern'`
     bracket trick.
@@ -314,6 +333,7 @@ a bad checksum by staying silent exactly as the pad does.
 | `tools/flydigi-monitor` | Memory-reading driver using Flydigi's XGameMonitor configs (`--probe` to debug offsets) |
 | `tools/flydigi-screen` | The screen — `check`/`preview`/`convert` need no pad; then `status`, `test`, `show`, `animate`, `send`, `on`/`off`, `statusbar`. Sending goes over the serial route by default (`--via hid` is for other models, and inert here) |
 | `flydigi/uhid.py` | Pure-Python `/dev/uhid` binding (no dependencies) — creates kernel-side HID devices |
+| `tools/ds5-gadget` | configfs USB composite gadget (HID + UAC1) for an SBC in peripheral mode — the real-USB-topology route to haptic audio. Needs a UDC; inert on this laptop |
 | `flydigi/ps5_data.py` | Generated DualSense descriptor + feature blobs (from MIT inputtino) |
 | `tools/gen_ps5_data.py` | Regenerates the above from inputtino's `ps5.hpp` |
 | `work/ref/inputtino/` | MIT reference clone — DS5 output report layout, canned feature reports |
