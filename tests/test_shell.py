@@ -48,7 +48,7 @@ STARTED = []
 
 # The sections the global drawer offers, in order.
 SECTIONS = ["Controller", "Buttons", "Sticks", "Vibration", "Triggers",
-            "Lighting", "Screen", "Games", "Setup"]
+            "Lighting", "Screen", "Games", "DualSense", "Setup"]
 
 
 def check(name, condition, detail=""):
@@ -176,6 +176,35 @@ def test_every_section_opens(qt_app):
         check(f"the {name} section does not stack up",
               window.property("openPageCount") == 1,
               str(window.property("openPageCount")))
+    app_object.shutdown()
+
+
+def test_the_drawer_offers_every_section(qt_app):
+    """Every section must be reachable from the sidebar, under its own name.
+
+    `openSection(i)` working proves nothing about the drawer: the actions are
+    written out one by one, and when the Screen page was added without one,
+    every label after it shifted by a section and Setup fell off the end
+    entirely. The window still worked; you simply could not get to Setup.
+    """
+    pad = TestPad()
+    app_object, engine, window = load_shell(qt_app, pad)
+    pump(qt_app, rounds=20)
+
+    # A QML array arrives as a QJSValue, which is not iterable from here.
+    offered = window.property("drawerSections").toVariant() or []
+    check("the drawer offers every section, in order", offered == SECTIONS,
+          str(offered))
+
+    for index, name in enumerate(SECTIONS[:len(offered)]):
+        # And that each entry opens the page it is named after, rather than a
+        # neighbour: last time the labels and the indices shifted together, so
+        # a list of names alone would have looked right.
+        window.pressDrawerAction(index)
+        pump(qt_app, rounds=5)
+        check(f"the sidebar's {name} entry opens {name}",
+              window.property("openPageTitle") == name,
+              str(window.property("openPageTitle")))
     app_object.shutdown()
 
 
@@ -322,6 +351,7 @@ def main():
                      test_the_models_reflect_what_the_pad_reported,
                      test_a_charging_pad_says_so_rather_than_a_level,
                      test_every_section_opens,
+                     test_the_drawer_offers_every_section,
                      test_the_i18n_functions_are_installed,
                      test_a_game_list_update_that_fails_is_reported,
                      test_a_game_list_update_that_succeeds_replaces_the_list,

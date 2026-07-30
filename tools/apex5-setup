@@ -36,8 +36,13 @@ def show():
     failed = [c for c in checks if c.state == setup.FAIL]
     if failed:
         fixes = sorted({c.fix for c in failed if c.fix})
-        print("\n" + f"{len(failed)} problem(s). Fix with: "
-              + ", ".join(f"apex5-setup {f}" for f in fixes))
+        # Not every failure has a fix here -- a kernel without vhci-hcd is real
+        # and is not something this can install -- and printing "Fix with:" with
+        # nothing after it made the list look broken rather than the machine.
+        line = f"{len(failed)} problem(s)."
+        if fixes:
+            line += " Fix with: " + ", ".join(f"apex5-setup {f}" for f in fixes)
+        print("\n" + line)
         return 1
     print("\nnothing failing")
     return 0

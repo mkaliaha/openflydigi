@@ -21,7 +21,7 @@ from PySide6.QtQml import QmlElement, QmlSingleton
 
 from flydigi import games
 
-from .models import (DeviceModel, GameFilterModel, GameListModel,
+from .models import (DeviceModel, DsModeModel, GameFilterModel, GameListModel,
                      LightingModel, ProfileModel, ScreenModel, SetupModel)
 from .worker import DeviceThread
 
@@ -76,10 +76,16 @@ class App(QObject):
         self._games_view = GameFilterModel(self._games, self)
         self._screen = ScreenModel(self)
         self._setup = SetupModel(self)
+        self._dsmode = DsModeModel(self)
         # A failed setup action is the same kind of news as a failed device
         # one, so it goes to the same inline message rather than a second
         # channel the user has to learn to look at.
         self._setup.failed.connect(self._setup_failed)
+        self._dsmode.failed.connect(self._setup_failed)
+        # And its ordinary news goes where every other passing message goes,
+        # rather than through the error banner: stopping DualSense mode is
+        # something the user asked for, not something that went wrong.
+        self._dsmode.note.connect(self._status)
 
         self._profile.setSlotCount(PROFILE_COUNT)
         self._games.load()
@@ -146,6 +152,10 @@ class App(QObject):
         # its last reference is a qFatal, and installing rules can be sitting
         # on an authentication prompt when someone closes the window.
         self._setup.wait(5000)
+        # The relay is deliberately not stopped: it is a device the system has
+        # now, and closing this window is no reason to take a pad away from a
+        # game. Only the model's own short-lived thread is waited for.
+        self._dsmode.wait(5000)
         if self._fetch is not None:
             # Bounded because flydigi.games.fetch_gamelist has its own timeout;
             # dropping the last reference to a running QThread is a qFatal.
@@ -183,6 +193,10 @@ class App(QObject):
     @Property(SetupModel, constant=True)
     def setup(self):
         return self._setup
+
+    @Property(DsModeModel, constant=True)
+    def dsmode(self):
+        return self._dsmode
 
     # -- actions -----------------------------------------------------------
 

@@ -9,6 +9,7 @@ extraction is real, and `tests/test_models.py` asserts it. The widgets and the
 QML pages are both views onto these objects.
 """
 from .device import BATTERY_STEPS, DeviceModel
+from .dsmode import DsModeModel
 from .games import (ALL_ROUTES, APPLIABLE_ROUTE, ROUTE_NAMES, TIER_LABELS,
                     GameFilterModel, GameListModel, game_name, route_detail,
                     route_name)
@@ -33,8 +34,9 @@ __all__ = [
     "KEY_LABELS", "ROUTE_NAMES", "TARGETS", "TIER_LABELS", "TITLE_MAX_CHARS",
     "TRIGGER_MODES", "TURBO_MAX_HZ",
     "TURBO_MODES",
-    "ColourListModel", "DeviceModel", "GameFilterModel", "GameListModel",
-    "KeyMapModel", "LightingModel", "ProfileListModel", "ProfileModel",
+    "ColourListModel", "DeviceModel", "DsModeModel", "GameFilterModel",
+    "GameListModel", "KeyMapModel", "LightingModel", "ProfileListModel",
+    "ProfileModel",
     "ScreenModel", "SetupChecksModel", "SetupModel",
     "StickModel", "StickSideModel", "TriggerModel", "TriggerSideModel", "VibrationModel", "VibrationSideModel",
     "from_hex", "game_name", "invert_cycle", "key_label", "route_detail",

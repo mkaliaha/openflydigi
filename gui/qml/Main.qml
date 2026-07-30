@@ -35,6 +35,7 @@ Kirigami.ApplicationWindow {
         {name: "Lighting", icon: "color-management", url: "pages/LightingPage.qml"},
         {name: "Screen", icon: "video-display", url: "pages/ScreenPage.qml"},
         {name: "Games", icon: "applications-games", url: "pages/GamesPage.qml"},
+        {name: "DualSense", icon: "input-gaming-symbolic", url: "pages/DualSensePage.qml"},
         {name: "Setup", icon: "configure", url: "pages/SetupPage.qml"}
     ]
 
@@ -49,6 +50,22 @@ Kirigami.ApplicationWindow {
         // are only reachable once it is asserted back to what it really is.
         const page = pageStack.currentItem as Kirigami.Page
         return page ? page.title : ""
+    }
+
+    // What the sidebar actually offers, and a way to press one of its entries.
+    // Both exist for `test_the_drawer_offers_every_section`: the drawer's
+    // actions are written out one by one and nothing keeps them in step with
+    // `sections`, so the test has to read the drawer rather than the list it
+    // is supposed to mirror. Reaching in from Python cannot do it -- the
+    // drawer's own type has no Python converter.
+    // `globalDrawer` is typed as the base OverlayDrawer, which has no actions,
+    // so it is asserted back to what it really is -- the same move the page
+    // stack's `currentItem` needs below.
+    readonly property var drawerSections:
+        (globalDrawer as Kirigami.GlobalDrawer).actions.map(a => a.text)
+
+    function pressDrawerAction(index) {
+        (globalDrawer as Kirigami.GlobalDrawer).actions[index].trigger()
     }
 
     // Each page is built once, parented, and kept.
@@ -102,6 +119,13 @@ Kirigami.ApplicationWindow {
             objectName: "deviceStatus"
         }
 
+        // One action per entry in `sections`, in the same order, and there is no
+        // mechanism keeping them in step -- `actions` is a list of Action
+        // objects, not something a Repeater can fill. Adding the Screen page
+        // without adding its action here shifted every label after it by one
+        // and pushed Setup off the end entirely, where it stayed unreachable
+        // from the sidebar until a screenshot showed it missing. So
+        // `test_the_drawer_offers_every_section` asserts the pairing.
         actions: [
             Kirigami.Action {
                 objectName: "sectionController"
@@ -152,7 +176,7 @@ Kirigami.ApplicationWindow {
                 onTriggered: root.openSection(5)
             },
             Kirigami.Action {
-                objectName: "sectionGames"
+                objectName: "sectionScreen"
                 text: root.sections[6].name
                 icon.name: root.sections[6].icon
                 checkable: true
@@ -160,12 +184,28 @@ Kirigami.ApplicationWindow {
                 onTriggered: root.openSection(6)
             },
             Kirigami.Action {
-                objectName: "sectionSetup"
+                objectName: "sectionGames"
                 text: root.sections[7].name
                 icon.name: root.sections[7].icon
                 checkable: true
                 checked: root.currentSection === 7
                 onTriggered: root.openSection(7)
+            },
+            Kirigami.Action {
+                objectName: "sectionDualSense"
+                text: root.sections[8].name
+                icon.name: root.sections[8].icon
+                checkable: true
+                checked: root.currentSection === 8
+                onTriggered: root.openSection(8)
+            },
+            Kirigami.Action {
+                objectName: "sectionSetup"
+                text: root.sections[9].name
+                icon.name: root.sections[9].icon
+                checkable: true
+                checked: root.currentSection === 9
+                onTriggered: root.openSection(9)
             }
         ]
     }

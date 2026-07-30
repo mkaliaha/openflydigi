@@ -36,6 +36,8 @@ import os
 import shutil
 import subprocess
 
+from . import usbip
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 SERVICE = "flydigid.service"
@@ -152,7 +154,19 @@ def escalation(*args):
     hole worth avoiding; the app should prefer showing this command to running
     it when `is_flatpak()`.
     """
-    cmd = ["pkexec", SETUP_CLI, *args]
+    return escalation_for(SETUP_CLI, *args)
+
+
+def escalation_for(program, *args):
+    """The same, for any program in this checkout.
+
+    Split out for DualSense mode, whose privileged part is the relay itself
+    rather than a setup step: it attaches to vhci as root and then drops back to
+    the invoking user for the rest of its life. Routing that through
+    `apex5-setup` would only add a process between the app and the thing it has
+    to signal to stop.
+    """
+    cmd = ["pkexec", program, *args]
     if is_flatpak() and shutil.which("flatpak-spawn"):
         return ["flatpak-spawn", "--host", *cmd]
     if is_container():
@@ -546,6 +560,23 @@ def checks():
     else:
         out.append(Check("uhid", "Virtual DualSense (/dev/uhid)", FAIL,
                          "/dev/uhid is not writable", "install-rules"))
+
+    # DualSense mode's own requirement. Not loading it here: the relay does
+    # that as root at the moment the switch is turned on, so an unloaded module
+    # is a normal resting state rather than something to fix in advance. A
+    # kernel without one at all is worth saying, since nothing else here would
+    # explain a switch that cannot be turned on.
+    if usbip.module_loaded():
+        out.append(Check("vhci", "DualSense over USB (vhci-hcd)", OK,
+                         "loaded", None))
+    elif usbip.module_available():
+        out.append(Check("vhci", "DualSense over USB (vhci-hcd)", SKIP,
+                         "in this kernel, not loaded -- DualSense mode loads "
+                         "it when you turn it on", None))
+    else:
+        out.append(Check("vhci", "DualSense over USB (vhci-hcd)", FAIL,
+                         "not in this kernel -- haptic audio needs it, and "
+                         "nothing here can install a module", None))
 
     nodes = _dualsense_event_nodes()
     unreadable = [n for n in nodes if not os.access(n, os.R_OK)]

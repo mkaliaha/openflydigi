@@ -37,9 +37,15 @@ import errno
 import os
 import socket
 import struct
+import subprocess
 import threading
 
 VHCI_SYSFS = "/sys/devices/platform/vhci_hcd.0"
+
+# modprobe spells it with a dash, sysfs and lsmod with an underscore. Both names
+# refer to the same module and asking for the wrong one fails as "not found",
+# which reads as "this kernel does not have it".
+MODULE = "vhci-hcd"
 
 CMD_SUBMIT = 0x00000001
 CMD_UNLINK = 0x00000002
@@ -88,6 +94,59 @@ def _read_exactly(sock, count):
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
+
+
+def module_loaded():
+    """Whether vhci-hcd is loaded, asked of sysfs rather than of lsmod.
+
+    The platform device is what the attach actually needs, so its presence is
+    the honest test: a module listed by lsmod that failed to register would
+    still answer "loaded" to anything reading /proc/modules.
+    """
+    return os.path.isdir(VHCI_SYSFS)
+
+
+MODULES_ROOT = "/lib/modules"
+
+
+def module_available(release=None, root=MODULES_ROOT):
+    """Whether this kernel *has* the module, loaded or not.
+
+    Read out of modules.dep rather than by running modinfo: it is one file, it
+    needs no kmod in PATH, and it is the same list modprobe itself consults. The
+    distinction matters because "not loaded" is a one-line fix and "not built
+    for this kernel" is not -- and Fedora ships it, while a hardened or minimal
+    kernel may not.
+
+    `root` is a parameter so a test can point it at a tree it wrote; a distrobox
+    needs no such help, since it mounts the host's /lib/modules and shares its
+    kernel, so the default path is right in there too.
+    """
+    if module_loaded():
+        return True
+    release = release or os.uname().release
+    try:
+        with open(f"{root}/{release}/modules.dep") as handle:
+            for line in handle:
+                # Lines are "path/to/mod.ko[.xz]: deps...", so the module name
+                # is bounded by a slash and a dot on the left-hand side only.
+                path = line.split(":", 1)[0]
+                if os.path.basename(path).split(".", 1)[0] == MODULE:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def load_module():
+    """modprobe vhci-hcd. Needs root; returns whether it is loaded afterwards."""
+    if module_loaded():
+        return True
+    try:
+        subprocess.run(("modprobe", MODULE), capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return module_loaded()
 
 
 def free_port(speed=SPEED_HIGH):
@@ -165,7 +224,15 @@ class Server:
 
     # -- attach / detach ----------------------------------------------------
 
-    def attach(self, port=None):
+    def attach(self, port=None, serve=True):
+        """Hand the kernel one end of a socketpair. This is the privileged part.
+
+        `serve=False` returns before the transfer thread starts, so a caller
+        that means to drop privileges can do it in a single-threaded process --
+        glibc's setuid applies to every thread, but doing it while one is
+        already reading URBs is a race nobody needs to reason about. Call
+        `start()` afterwards.
+        """
         if os.geteuid() != 0:
             raise UsbIpError("attaching to vhci needs root")
 
@@ -184,11 +251,26 @@ class Server:
             theirs.close()
             raise UsbIpError(f"attach failed ({line!r}): {exc}") from None
 
-        self._thread = threading.Thread(target=self._serve, daemon=True)
-        self._thread.start()
+        if serve:
+            self.start()
         return self.port
 
+    def start(self):
+        """Begin answering URBs. Needs no privilege -- the socket is already ours."""
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
     def detach(self):
+        """Take the device away, and do not depend on being allowed to.
+
+        The sysfs write needs root and the serving process deliberately may not
+        have it any more, so closing the socket is the mechanism and the write
+        is only a courtesy: vhci's receive loop sees EOF, raises VDEV_EVENT_DOWN
+        and resets the port to VDEV_ST_NULL by itself, which is exactly the
+        state `free_port` looks for. Detaching by hand only makes it immediate.
+        """
         self._stop.set()
         if self.port is not None:
             try:

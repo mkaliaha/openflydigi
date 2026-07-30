@@ -19,10 +19,17 @@ Proton can derive a matching ContainerId for both and a game will write haptics
 to it. A uhid pad has no USB parent and gets a random container id, so it never
 matches. See docs/findings-haptics.md.
 
-Needs root -- the vhci attach is a privileged sysfs write:
+Started as root, and does not stay that way:
 
-    sudo modprobe vhci-hcd
-    sudo tools/flydigi-ds5-usbip --haptics
+    sudo tools/flydigi-ds5-usbip --haptics --motors
+
+The attach is a privileged sysfs write and the module load may be one too, so
+both happen first -- then the process drops back to the invoking user, before it
+opens the pad, starts a thread or serves a URB. Everything after that runs with
+no more privilege than the game does. `--stay-root` opts out, for debugging.
+
+Stop it with SIGTERM (or Ctrl-C): the triggers and motors are put back, and the
+vhci port frees itself when the socket closes.
 
 Tell games to ignore the physical pad so they bind to the virtual one:
     SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501 %command%
@@ -39,7 +46,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flydigi import ds5, effects, evdev, haptics as haptics_dsp  # noqa: E402
+from flydigi import ds5, dsmode, effects, evdev  # noqa: E402
+from flydigi import haptics as haptics_dsp  # noqa: E402
 from flydigi import motion, relay, usbip  # noqa: E402
 from flydigi.device import Controller, DeviceNotFound  # noqa: E402
 from flydigi.ds5_usbip import EP_HID_IN, DualSense  # noqa: E402
@@ -137,35 +145,26 @@ def main():
     ap.add_argument("--crossover", type=float, default=250.0)
     ap.add_argument("--gate", type=float, default=haptics_dsp.GATE)
     ap.add_argument("--curve", type=float, default=haptics_dsp.CURVE)
+    ap.add_argument("--stay-root", action="store_true",
+                    help="do not drop back to the invoking user after the "
+                         "attach (for debugging; the relay needs no privilege "
+                         "once the port is up)")
     ap.add_argument("--verify", action="store_true",
                     help="read our own virtual pad back from evdev, to prove "
                          "input reaches the OS independently of any game")
     args = ap.parse_args()
 
     if os.geteuid() != 0:
-        sys.exit("needs root (the vhci attach is a privileged sysfs write)")
+        sys.exit("needs root: attaching to vhci is a privileged sysfs write.\n"
+                 "  sudo tools/flydigi-ds5-usbip --haptics --motors\n"
+                 "Root is given up again as soon as the attach is done, unless "
+                 "--stay-root says otherwise.")
 
     def _terminate(_signum, _frame):
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, _terminate)
     signal.signal(signal.SIGHUP, _terminate)
-
-    path, name = evdev.find_device(vendor=FLYDIGI_VID, product=FLYDIGI_PID,
-                                   axes=True)
-    if not path:
-        path, name = evdev.find_device(name="Apex", axes=True)
-    if not path:
-        sys.exit("Apex 5 gamepad not found in /dev/input -- is it connected?")
-    log(f"input: {name} ({path})")
-
-    ctrl = None
-    if not args.dump:
-        try:
-            ctrl = Controller()
-            log(f"controller: {ctrl.path}")
-        except DeviceNotFound:
-            log("vendor interface not found; effects will not be applied")
 
     # Output reports arrive on the server's own thread. Hand them to the main
     # loop rather than touching the Apex 5 from there: a blocking hidraw write
@@ -207,6 +206,68 @@ def main():
 
     device = DualSense(on_output=on_output,
                        on_haptics=on_haptics if (haptics or args.motors) else None)
+    server = usbip.Server(device)
+
+    # -- the privileged part, and the only one -------------------------------
+    #
+    # Everything root is needed for happens here, before a single device is
+    # opened and before any thread exists: load the module, take a port, hand
+    # the kernel one end of a socketpair. Then give root back. What runs for the
+    # length of a play session is an ordinary user process holding a socket the
+    # kernel already accepted -- so the pad, the DSP and the 4 ms serving loop
+    # are no more privileged than the game they serve.
+    #
+    # `serve=False` because setuid must happen while this is single-threaded.
+    if not usbip.module_loaded() and not usbip.load_module():
+        sys.exit(f"vhci-hcd is not loaded and modprobe could not load it. "
+                 f"Kernel module present: {usbip.module_available()}")
+
+    port = server.attach(serve=False)
+    log(f"virtual DualSense attached on vhci port {port}")
+
+    if not args.stay_root:
+        uid = dsmode.drop_privileges()
+        if uid is not None:
+            log(f"dropped to uid {uid}; the attach is done and nothing else "
+                f"here needs root")
+        elif os.environ.get("PKEXEC_UID") or os.environ.get("SUDO_UID"):
+            log("could not tell who invoked this -- staying root")
+
+    server.start()
+    log(f"games: set {dsmode.IGNORE_DEVICES}")
+
+    path, name = evdev.find_device(vendor=FLYDIGI_VID, product=FLYDIGI_PID,
+                                   axes=True)
+    if not path:
+        path, name = evdev.find_device(name="Apex", axes=True)
+    if not path:
+        server.detach()
+        sys.exit("Apex 5 gamepad not found in /dev/input -- is it connected?")
+    # Checked rather than left to fail on open: this is the first thing done
+    # after giving root back, so an unreadable node here means the session's own
+    # permissions are not enough -- which is exactly what the udev rules are
+    # for. As root it would have opened regardless and the rules would look
+    # unnecessary right up until DS mode was started any other way.
+    if not os.access(path, os.R_OK):
+        server.detach()
+        sys.exit(f"{path} is not readable as uid {os.getuid()}.\n"
+                 f"Install the udev rules: tools/apex5-setup install-rules")
+    log(f"input: {name} ({path})")
+
+    ctrl = None
+    if not args.dump:
+        try:
+            ctrl = Controller()
+            log(f"controller: {ctrl.path}")
+        except DeviceNotFound:
+            log("vendor interface not found; effects will not be applied")
+        except OSError as exc:
+            # Permission, most likely, and for the same reason as above. Not
+            # fatal: input still reaches the game, only the Apex 5's own motors
+            # and triggers go unwritten.
+            log(f"vendor interface not usable ({exc}); effects will not be "
+                f"applied -- tools/apex5-setup install-rules")
+
     # The DSP runs on decimated audio, so the filter must know the real rate.
     # The Apex 5's motors are ERMs with a mechanical spin-up; they cannot
     # express changes faster than this, so anything quicker is pure cost.
@@ -271,7 +332,6 @@ def main():
         rate=haptics_dsp.RATE // haptics_dsp.DECIMATE, crossover=args.crossover)
     last_motors = None
     dropped = [0]
-    server = usbip.Server(device)
 
     motion_on = False
     if ctrl and not args.no_motion:
@@ -293,10 +353,6 @@ def main():
     # input report that should have gone out, because they share a thread.
     spent = {"rumble": 0.0, "motion": 0.0, "dsp": 0.0, "loop_max": 0.0}
     slow_iters = [0]
-
-    port = server.attach()
-    log(f"virtual DualSense attached on vhci port {port}")
-    log("games: set SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501")
 
     # Read back our own virtual pad's evdev node and count events. This splits
     # the problem cleanly: if pressing a button on the Apex 5 moves this counter,
