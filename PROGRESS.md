@@ -24,7 +24,12 @@ its own setup. The daemon detects a running game and applies its route unattende
 | 2b. DSX listener | UDP 7878, any DSX-compatible mod | mod ecosystem | hardware |
 | 3. XGameMonitor | reads game process memory | 31 | Dark Souls: Remastered |
 | 4. Virtual DualSense | uhid DS5, effects translated | **any DS5-aware game** | Deathloop |
+| 4b. …over USB | usbip + vhci DS5, **plus haptic audio** | **any DS5-aware game** | Deathloop |
 | 5. Third-party mods | game-side mods speaking DSX | 11 | works via 2b; not supported |
+
+Tier 4b is what the app's **DualSense** switch turns on, and it supersedes tier 4 wherever both
+work: same input, same triggers, and a game's PS5 haptics reach the pad's motors as well. Tier 4
+remains for a machine with no `vhci-hcd`.
 
 Long-form state per tier, and the notes from each validating game, are in
 [docs/findings-games.md](docs/findings-games.md).
@@ -40,6 +45,12 @@ restores it.
 
 Roughly in order of value. Each is a fresh-context-sized piece of work.
 
+ 0. **Third-party mode does not behave the way Space Station's does.** Observed on hardware: with it
+    enabled from Space Station the pad presents **three** HID nodes — the controller itself, a
+    keyboard and a mouse — which is not what this app's toggle produces. So both halves need work:
+    the switch has to write whatever Space Station writes, and `flydigi/device.py`'s detection has
+    to pick the right node afterwards rather than the first match by vendor id.
+    → [docs/findings-steam.md](docs/findings-steam.md)
  1. **Macros.** `ReadMacroConfig`, `WriteMarcoConfig`, `SetHardwareMacroEnable`. The profile blob
     already carries 230..768 through untouched, so this is a reader, a writer and a page.
  2. **A device-settings page.** Command 3 returns the whole block in one read — supported *and*
@@ -86,26 +97,32 @@ to matter. What works is the USB/IP *client*: `flydigi/usbip.py` serves a device
 `vhci-hcd` enumerates it locally. Measured against Deathloop with `tools/flydigi-ds5-usbip
 --haptics --motors`. → [docs/findings-haptics.md](docs/findings-haptics.md)
 
-**DS mode is a switch, not a route.** Tiers 1-3 need per-game data -- vibration binds, telemetry
-rules, memory offsets -- which is why the gamelist exists and why the daemon picks a route per game.
-The DualSense tiers need none of it: they present a DualSense, and *any* DS5-aware game gets it,
-including games Flydigi has never heard of. Treating it as one of nine per-game routes was Flydigi's
-model leaking into a tier that does not share its constraints.
+**DS mode is a switch, not a route — and it is built.** Tiers 1-3 need per-game data -- vibration
+binds, telemetry rules, memory offsets -- which is why the gamelist exists and why the daemon picks
+a route per game. The DualSense tiers need none of it: they present a DualSense, and *any* DS5-aware
+game gets it, including games Flydigi has never heard of. Treating it as one of nine per-game routes
+was Flydigi's model leaking into a tier that does not share its constraints.
 
-So it belongs in the GUI as a global toggle, and it comes out of the automatic tier entirely. That
-also removes the hard problem: the usbip relay needs root for the vhci attach, and an unattended
-per-game attach would mean granting the desktop session standing permission to emulate USB devices
--- which is a local privilege-escalation primitive, since one of those devices is a keyboard. A
-user-driven switch needs one authentication and grants nothing lasting.
+So `isPS5` is no longer a route in `flydigi/prefs.py`, the daemon never starts this tier, and the
+app has a **DualSense** section with one switch. `flydigi/dsmode.py` is what the switch and the CLI
+share.
 
-**Still to build:** the GUI switch itself, and the privilege plumbing behind it (a polkit-authorised
-helper that performs the attach and passes the socket back, so the serving process stays
-unprivileged).
+**The privilege model, as built.** The attach is the only privileged step, so the relay is started
+through pkexec, does the module load and the attach as root, and then `setuid`s back to the invoking
+user before it opens a device or starts a thread. What runs for the length of a play session is an
+ordinary user process; stopping it is a plain SIGTERM, and the vhci port frees itself when the
+socket closes. This is the intent of the earlier note about a socket-passing helper, reached without
+one: `SCM_RIGHTS` does not survive `host-spawn`, so a helper would have failed exactly where the app
+runs today -- in the `apex-dev` distrobox.
 
 **Known, and not fixable from here:** with DS mode on, a game sees *both* the Apex 5 and the virtual
 DualSense. Nothing can hide the physical pad from a game that enumerates it, so the instruction is
 part of the feature: launch with `SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501`, or set it
 globally in Steam.
+
+**Turn it on before starting the game.** A game opens its stream to the controller's audio device
+once, at launch. Switching DS mode on mid-game gives it a pad it will use and an audio endpoint it
+will never look for again, so triggers work and haptics stay silent until the game is restarted.
 
 **Not ours to fix.** Steam lists the pad twice (xpad *and* its own hidapi path — reported on Windows
 too), and Steam takes no lock on the hidraw node, so its writes can land between ours. Harmless for
@@ -129,6 +146,7 @@ All command factories are decompiled under `decompiled/Flydigi.ControllerSdk/`.
 | Per-game auto mode | — | `tools/flydigid`, `tools/flydigi-auto` — [detail](docs/findings-games.md) |
 | Virtual DualSense (tier 4) | — | `flydigi/uhid.py`, `tools/flydigi-ds5` — [detail](docs/findings-haptics.md) |
 | Virtual DualSense over USB (tier 4b) | — | `flydigi/usbip.py`, `tools/flydigi-ds5-usbip` — adds haptic audio |
+| DualSense mode as one switch | — | `flydigi/dsmode.py`, the app's DualSense page |
 
 ## The desktop app
 
@@ -146,7 +164,8 @@ python3 -m gui
 | Controller → Selected profile / Other software | rename the open profile, back up / restore it to file; let Steam and similar take the pad over, and who currently holds it |
 | Profiles → Sticks | dead zone, outer dead zone, sensitivity curve presets, circular range |
 | Profiles → Triggers | stored effect — all six of Flydigi's, each with its own controls — plus a dead zone that writes the curve block at 123 and is not confirmed to reach this pad |
-| Games | all 94 games, searchable, filtered by route; vibration presets load onto the pad from here; per-game **Auto** toggle and a route picker for the nine multi-route games |
+| Games | all 94 games, searchable, filtered by route; vibration presets load onto the pad from here; per-game **Auto** toggle, a route picker where a game really has a choice, and a DualSense marker on the 23 games Flydigi lists as DS5-aware |
+| DualSense | the tier-4b switch: vhci-hcd's state, haptic audio to the motors, what the relay is doing, and the launch option to copy |
 | Setup | the daemon's unit, "running now" and "start at login" as separate switches, the application-menu entry, and the udev rules behind one authentication prompt |
 | Lighting | effect, up to 5 colours, brightness, cycle time, react-to-rumble |
 | Screen | pick a picture or GIF, choose how it fits, preview the encoded frame, and send it over the serial link — with the frame count and a time estimate before you start; plus the always-on display and the status bar |
@@ -304,7 +323,7 @@ Tests, cheapest first. Each skips with exit 0 when PySide6 is absent, so the bac
 dependency-free:
 
 ```bash
-for t in tests/test_{device,dsx,forza,games,mapping,monitor,prefs,relay,screen,screen_ota}.py; do python3 "$t"; done
+for t in tests/test_{device,dsmode,dsx,forza,games,mapping,monitor,prefs,relay,screen,screen_ota}.py; do python3 "$t"; done
 distrobox enter apex-dev -- bash -lc 'cd ~/Projects/ApexExperiments && \
   python3 tests/test_models.py && python3 tests/test_shell.py && python3 tests/test_qml.py'
 tools/generate-qmltypes
@@ -353,6 +372,10 @@ a bad checksum by staying silent exactly as the pad does.
 | `flydigi/usbip.py` | Pure-Python USB device served to this machine's own kernel via `vhci-hcd` — no dependencies, no `usbip` tool |
 | `flydigi/ds5_usbip.py` | The DualSense on top of it: descriptors, feature reports, endpoints, the haptic stream |
 | `flydigi/ds5_usb.py` | Generated DualSense descriptors + feature blobs, captured off hardware |
+| `flydigi/dsmode.py` | DualSense mode as a switch: the module, what counts as running, start/stop, and giving root back |
+| `flydigi/haptics.py` | Haptic audio → motor levels: channel energy, the frequency split, the shaping |
+| `tools/flydigi-ds5` | Tier 4 — the uhid relay, for a machine with no `vhci-hcd` |
+| `tools/flydigi-haptics` | The original bridge, sampling a *real* DualSense's audio. Superseded as a delivery mechanism; the DSP it proved is what tier 4b feeds |
 | `tools/gen_ds5_usb.py` | Regenerates the above from a connected DualSense. Scrubs Bluetooth addresses unconditionally |
 | `tools/flydigi-ds5-usbip` | Tier 4b — the relay, with `--haptics` and `--motors` |
 | `tools/ds5-dump-features` | Re-reads a real DualSense and diffs it against what we serve |

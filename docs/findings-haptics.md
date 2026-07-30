@@ -12,9 +12,7 @@ Adaptive triggers **work in game**. Confirmed the transcribed mapping behaves ex
 Flydigi's: the game sent `type=0x25 p[0]=12` → `mode 3 [70,0,12]` and `type=0x21 p[1]=3` →
 `mode 1 [140,1]`, both matching their table's branches. Zero unmapped patterns.
 
-Two gaps remain, neither in the transport:
-
-- **No rumble — investigated and closed as a known limitation of virtual DualSense emulation.**
+- **Rumble: the gap that defined this document, and it is closed.**
 
   The DualSense has no conventional rumble motors; its voice coils do both jobs. Games can drive
   them two ways: `motor_left`/`motor_right` in the HID output report (the compatibility path, which
@@ -25,34 +23,40 @@ Two gaps remain, neither in the transport:
   a menu button press — so it does emit motor rumble, just not to a DualSense. Our own output path
   is proven: a direct cmd `0x12` rumbles the pad and ACKs.
 
-  What the audio path needs is in *Haptic audio* below; the null-sink attempt that came first is
-  recorded here because its negative result still stands.
+  **On the uhid tier (4) this cannot be fixed**, for the reason worked out below: a uhid node has no
+  USB parent, so no audio endpoint can ever share its container id. On the USB/IP tier (4b) it
+  works, because the virtual pad *is* a USB device with an audio interface beside its HID one. So
+  the per-game trade-off this section used to state — adaptive triggers or rumble, pick one — no
+  longer exists; it applied to `tools/flydigi-ds5` and applies to nothing now that
+  `tools/flydigi-ds5-usbip` is the tier the app switches on.
 
-  **Built, tested, negative result.** Neither Flydigi nor DSX implements audio haptics — verified
-  by decompilation: Space Station bundles no audio libraries at all, and its `EnableAudio` command
-  is a device feature toggle, not PC audio capture.
+  The null-sink attempt that came first is kept because its negative result still stands and still
+  explains why the composite device was necessary:
 
-  We built the missing piece anyway (`tools/flydigi-haptics`): a fake 4-channel DualSense sink
-  (`pipewire/99-dualsense-haptics.conf`) plus a bridge that measures haptic-channel energy and
-  converts it to motor rumble. **The bridge works** — verified with `tools/haptics-simulate`, which
-  plays synthetic gunshots and engine rumble and produces correctly decaying motor values.
+  > **Built, tested, negative result.** Neither Flydigi nor DSX implements audio haptics — verified
+  > by decompilation: Space Station bundles no audio libraries at all, and its `EnableAudio` command
+  > is a device feature toggle, not PC audio capture.
+  >
+  > We built the missing piece anyway (`tools/flydigi-haptics`): a fake 4-channel DualSense sink
+  > (`pipewire/99-dualsense-haptics.conf`) plus a bridge that measures haptic-channel energy and
+  > converts it to motor rumble. **The bridge works** — verified with `tools/haptics-simulate`, which
+  > plays synthetic gunshots and engine rumble and produces correctly decaying motor values.
+  >
+  > **But games do not use it.** With the sink present and named "Wireless Controller", Deathloop
+  > opened exactly one audio stream and routed it to the speakers; our sink measured absolute silence
+  > (peak 0.00000). A virtual pad has no OS-level link between its HID device and an audio endpoint,
+  > and an unassociated sink is not picked up.
+  >
+  > Cannot distinguish "looked for a controller endpoint and rejected ours" from "never looks on PC".
+  > The outcome is the same either way. Tooling is kept because it is proven working — if a game is
+  > ever found that does write to such a sink, only the sink config needs reinstalling.
+  >
+  > Two notes for anyone re-running this: `pw-record` prepends a file header and will silently
+  > misalign a raw reader (use `parec --raw`), and `paplay --raw` declares no channel map so PipeWire
+  > remixes the channels — do not assume fixed haptic channel indices.
 
-  **But games do not use it.** With the sink present and named "Wireless Controller", Deathloop
-  opened exactly one audio stream and routed it to the speakers; our sink measured absolute silence
-  (peak 0.00000). A virtual pad has no OS-level link between its HID device and an audio endpoint,
-  and an unassociated sink is not picked up.
-
-  Cannot distinguish "looked for a controller endpoint and rejected ours" from "never looks on PC".
-  The outcome is the same either way. Tooling is kept because it is proven working — if a game is
-  ever found that does write to such a sink, only the sink config needs reinstalling.
-
-  Two notes for anyone re-running this: `pw-record` prepends a file header and will silently
-  misalign a raw reader (use `parec --raw`), and `paplay --raw` declares no channel map so PipeWire
-  remixes the channels — do not assume fixed haptic channel indices.
-
-  **Practical consequence, per game:** for titles using haptic audio, choose adaptive triggers
-  (DS5 mode) or rumble (plain Xbox mode). Titles using the HID motor path get both, and that is
-  the majority.
+  The DSP that bridge proved is not scaffolding any more: `flydigi/haptics.py` is what the virtual
+  device now feeds, unchanged.
 - **Gyro/accel: implemented.** The vendor input stream (command 17, "raw data transport in")
   carries the IMU at ~300 Hz, and enabling it does **not** disturb the xpad node, so sticks and
   buttons still come from evdev. Offsets follow `OperatorDataParser` for `NewXInput`, shifted by
@@ -157,12 +161,13 @@ endpoint budget.
 Channel config is `0x0033` = FL FR RL RR, consistent with the tone probing above: the haptic
 actuators are the RL/RR pair, ch2 and ch3.
 
-**The HID report descriptor is 289 bytes and is not the one we emulate.** inputtino's copy in
-`flydigi/ps5_data.py` is 273 bytes; the two are identical for 145 bytes and then diverge, because
-inputtino lacks feature reports `0x0B` and `0x0C` (usages `0x41`/`0x42`, 41 bytes each). Presumably
-an older firmware. Nothing has been observed to care, but the real one is what a host compares
-against, so `flydigi/ds5_usb.py` holds the captured descriptor and both tiers now use it. The
-inputtino copy is gone.
+**The HID report descriptor is 289 bytes, and used not to be the one we emulated.** inputtino's copy
+was 273 bytes; the two are identical for 145 bytes and then diverge, because inputtino lacks feature
+reports `0x0B` and `0x0C` (usages `0x41`/`0x42`, 41 bytes each). Presumably an older firmware —
+its firmware string reads "Jun 19 2023" against this unit's "Jul  4 2025", 42 of 63 bytes apart.
+Nothing has been observed to care, but the real one is what a host compares against, so
+`flydigi/ds5_usb.py` holds the captured descriptor and both tiers use it. The inputtino data, and
+the `flydigi/ps5_data.py` that held it, are gone.
 
 Re-capture with:
 
@@ -313,22 +318,121 @@ a UAC function driver *and* an isochronous-capable UDC, and no distro ships the 
 
 The one software route with no such wall, because **it has no UDC in it at all**. Rather than build
 a gadget, fabricate the device in a userspace process speaking the USB/IP protocol, and let
-`vhci-hcd` — the client-side virtual *host* controller — enumerate it locally over loopback TCP.
+`vhci-hcd` — the client-side virtual *host* controller — enumerate it locally.
 `vhci-hcd` implements isochronous fully, and it is `=m` on every distro checked without exception.
 None of the three blockers above applies: no descriptor whitelist, no endpoint autoconfiguration, no
 gadget bind.
+
+**And it needs no network.** The survey assumed loopback TCP, because that is what the `usbip` tool
+does, and a loopback round trip was measured at p50 10.7 µs against the 1000 µs budget to show it
+would fit. As built it does not use TCP at all: the vhci attach is a sysfs write of
+`"port sockfd devid speed"`, and the kernel only requires that the fd be a `SOCK_STREAM` socket in
+the writing process's table — it never checks the address family. An `AF_UNIX` socketpair therefore
+works, so nothing listens on a port and there is nothing for anything else on the machine to connect
+to. It also skips the `OP_REQ_IMPORT` negotiation entirely: the socket handed over is already
+connected, so the conversation starts in the transfer phase.
 
 The resulting device is an ordinary USB device in sysfs, so `snd-usb-audio` and `hid-playstation`
 bind to it as true siblings and both container ids derive by construction. Prior art:
 **`usbipdcpp`** (C++, LGPL-3.0, active) implements per-packet iso on the virtual-device path and
 reports iso streaming through `vhci-hcd` demonstrated with a virtual UVC camera — the same transport
-problem as UAC1. Loopback round-trip measured here at p50 10.7 µs against a 1000 µs budget.
+problem as UAC1.
 
 Two cautions. `VIIPER` is the only existing USB/IP DualSense emulator and is **HID-only**
 (`bInterfaceClass = 0x03`, no audio interfaces), so the device itself still has to be written. And
 several popular USB/IP libraries `recv()` a fixed 48 bytes and never consume iso packet descriptors,
-which desynchronises the TCP stream rather than failing cleanly — check for iso handling before
+which desynchronises the stream rather than failing cleanly — check for iso handling before
 adopting one.
+
+## What was built, and what it cost to get right
+
+`flydigi/usbip.py` is the transport (about 360 lines, no dependencies) and `flydigi/ds5_usbip.py` is
+the device on top of it. `tools/flydigi-ds5-usbip` is the relay. Everything below was found by
+running it, not by reading a spec.
+
+  * **Endpoint numbers are not addresses.** `usbip_header_basic` carries `ep` as the plain number
+    0..15 with direction in its own field, so the high bit of a descriptor's `bEndpointAddress`
+    never appears on the wire. Comparing against `0x84` stalls every input report — and only the IN
+    endpoints, because an OUT address already equals its number. It looks like "output works, input
+    is broken" rather than like a masking error.
+  * **`number_of_packets` is a signed field carrying -1 for a non-isochronous URB.** Spelling that
+    `0xFFFFFFFF` is wrong twice: it will not pack, and it never compares equal to what comes back.
+    Older kernels sent 0 instead, so the test is `> 0`.
+  * **`actual_length` on an OUT transfer is what the host sent and we accepted**, not the length of
+    any reply. Reporting 0 for an accepted 47-byte SET_FEATURE makes the host see a short transfer
+    and retry it forever — visible as Wine logging
+    `err:hid:hidraw_device_set_feature_report id 8 write failed` twice a second while the pad never
+    finishes configuring.
+  * **Stalling the microphone endpoint is a trap.** We declare it because the config descriptor is
+    the real device's, served verbatim, and we have nothing to put in it. Stalling makes the host
+    resubmit immediately: measured at 1.5 million stalls, with the haptic stream starving alongside.
+    Answering with silence costs nothing and ends it.
+  * **A parked URB is the only thing that can carry an input report.** The kernel keeps a few
+    interrupt-IN URBs outstanding; each report completes the oldest. Answering inline from current
+    state is what real hardware does and removes a clock, but it coincided with the game losing the
+    pad, so it is still done on our own 4 ms cadence pending a bisect.
+  * **Keep the vendor node off the loop that owes the host input reports.** Writing rumble or a
+    trigger effect means `claim()` + drain + write, and the drain has to eat whatever the 300 Hz
+    motion stream has queued. On the main loop that cost 36% of wall-clock and produced a 605 ms
+    stall while the host was waiting on a report every 4 ms. It now has its own thread with a
+    single-slot mailbox — latest value wins, because a superseded motor level is worthless.
+  * **Two sources want those motors** — the output report's `motor_left`/`motor_right` and the
+    haptic audio — and a game may use both. They are kept apart and combined, rather than letting
+    whichever wrote last win.
+  * **Drop stale audio rather than working through it.** The haptic queue is bounded and discards
+    the oldest. Falling behind and catching up is what made the pad feel sluggish and keep buzzing
+    after an effect ended.
+  * **The DSP runs at the rate the motors can accept**, 60 Hz, not per URB. URBs arrive about 1100
+    times a second, so per-URB processing was eighteen times more work than could ever reach a
+    motor.
+  * **Feature reports come from hardware and carry no report id.** `flydigi/ds5_usb.py` holds the
+    real controller's blobs; whoever serves them prepends the id exactly once. inputtino's copies
+    include it, and prefixing those shifted every byte of calibration by one — after which the pad
+    still enumerated and Steam still showed the correct artwork, so nothing looked wrong.
+  * **Do not serve a perfect twin of a real DualSense.** `hid-playstation` keys a controller by the
+    MAC in feature report `0x09` and names its sysfs entries after it, so an identical one evicts
+    the real pad: it binds usbhid, gets no hidraw node, and silently stops being a gamepad.
+    Observed. The committed blobs carry inputtino's public addresses instead, which also keeps
+    hardware identity out of the repo.
+
+### Turning it on: one authentication, and no standing privilege
+
+Attaching to vhci is a privileged sysfs write, and it is the *only* privileged step. The relay is
+started through pkexec, loads `vhci-hcd`, takes a port and hands the kernel one end of the
+socketpair — all before it opens a device or starts a thread — and then `setuid`s back to the
+invoking user. What runs for the length of a play session is an ordinary user process holding a
+socket the kernel has already accepted.
+
+Three consequences worth knowing:
+
+  * **Stopping it is a plain SIGTERM** from the session that started it. `setuid` from root sets the
+    real, effective and saved uid together, so the process is genuinely the user's afterwards; a
+    process that had only dropped its effective uid would keep root as its saved uid and refuse the
+    signal.
+  * **Detaching needs no privilege either.** vhci's receive loop sees the socket close, raises
+    `VDEV_EVENT_DOWN` and resets the port to `VDEV_ST_NULL` — which is exactly the state a free port
+    is in. The explicit detach write is a courtesy that makes it immediate.
+  * **The pad is opened as the user, not as root.** This is deliberate: opening it before the drop
+    would work regardless of the udev rules and make them look unnecessary until DS mode was started
+    any other way. An unreadable node is reported with the rule to install.
+
+**It is a switch, not a per-game route.** Tiers 1-3 need per-game data — vibration binds, telemetry
+rules, memory offsets — which is why the gamelist exists and why the daemon picks a route per game.
+This tier needs none of it, so it is one control for the whole system and `isPS5` is no longer a
+route in `flydigi/prefs.py`. That also removes the hard problem: an unattended per-game attach would
+mean granting the desktop session standing permission to emulate USB devices, which is a local
+privilege-escalation primitive, since one of those devices is a keyboard.
+
+### Using it
+
+  * **Turn it on before starting the game.** A game opens its stream to the controller's audio
+    device once, at launch. Switching DS mode on while it is already running gives it a pad it will
+    happily use and an endpoint it will never look for again — triggers work, haptics stay silent,
+    and it reads as a broken feature rather than a missed handshake. Restart the game.
+  * **A game sees both pads**, and nothing can hide a physical one from a game that enumerates it.
+    Launch with `SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501`, or set it globally in Steam.
+  * **Steam Input must be off** for that game: it masks the pad as an Xbox controller, which breaks
+    DualSense semantics and the four-channel audio the haptics arrive on.
 
 ### The SBC route, superseded
 

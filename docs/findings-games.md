@@ -12,8 +12,13 @@ This is what the games tab was missing, and what its
 the right thing for it without me*. Concretely, on detecting the game:
 
   * vibration → load its preset onto the pad
-  * telemetry / monitor / ps5 / bespoke → start `flydigi-forza`, `flydigi-monitor`, `flydigi-ds5`
-    or `flydigi-dsx`, and stop it again when the game exits
+  * telemetry / monitor / bespoke → start `flydigi-forza`, `flydigi-monitor` or `flydigi-dsx`, and
+    stop it again when the game exits
+
+`ps5` was in that list and is not a route any more. DualSense mode is one switch for the whole
+system — see [findings-haptics.md](findings-haptics.md) — because unlike every other route it needs
+no per-game data at all, and because the virtual pad has to exist *before* a game enumerates pads,
+which makes acting on detection too late by construction.
 
 **Done.** The toggle exists (`prefs.py`, the Games tab's Auto switch, `tools/flydigi-auto`), the
 daemon reads it and re-reads it about a second after it changes, and it now starts and stops the
@@ -61,7 +66,7 @@ Measured per route, from inside the distrobox:
 | vibration | write the vendor hidraw node | works |
 | telemetry | bind UDP 127.0.0.1:5300 | works — the network namespace is the host's |
 | bespoke | bind UDP 127.0.0.1:7878 | works |
-| ps5 | `/dev/uhid` | works, and **the host sees the device** — a HID node created inside the container appeared on the host as `hidraw7`, since there is no device namespacing. The full relay was not run from in there, as it would take the pad over |
+| DualSense (no longer a route) | `/dev/uhid`, or `vhci-hcd` for tier 4b | works, and **the host sees the device** — a HID node created inside the container appeared on the host as `hidraw7`, since there is no device namespacing. The full relay was not run from in there, as it would take the pad over. The distrobox also shares the host's pid namespace, which is what lets the app's switch find and stop a relay it did not start |
 | monitor | read another process's memory | **denied** |
 
 The `ps5` row was checked properly rather than by inference: a device with Sony's IDs and the real

@@ -18,7 +18,7 @@ for the wire protocol and [PROGRESS.md](PROGRESS.md) for project state.
 | Forza telemetry | 4 | Validated in Forza Horizon 6 |
 | DSX protocol listener | third-party mods | Built, self-tested |
 | Game-memory monitor | 31 | Validated in Dark Souls: Remastered; pointer chains are per-build |
-| Virtual DualSense | 15 listed, any DS5-aware game | Validated in Deathloop; HD/audio haptics blocked |
+| Virtual DualSense | any DS5-aware game | Validated in Deathloop — **including PS5 haptic audio**, played on the pad's motors |
 
 The pad's **160x80 screen** works too — pictures and animations, over the same
 serial route Space Station uses, plus the always-on display and status bar. It
@@ -52,10 +52,13 @@ tools/fetch-configs --monitor-configs
 tools/flydigi-monitor --probe configs/monitor/<game>.json   # check offsets first
 tools/flydigi-monitor configs/monitor/<game>.json
 
-# present the pad to games as a DualSense (triggers, gyro, battery)
-tools/flydigi-ds5
+# present the pad to games as a DualSense (triggers, gyro, battery, haptics)
+sudo tools/flydigi-ds5-usbip --haptics --motors
+#   root is given back as soon as the USB attach is done
 #   set per-game: SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501 %command%
-#   and disable Steam Input for that game
+#   disable Steam Input for that game, and start the game *after* this
+tools/flydigi-ds5                       # the same without haptics, no root,
+#                                         for a machine with no vhci-hcd
 
 # the 160x80 screen
 tools/flydigi-screen status
@@ -94,7 +97,9 @@ tool that talks to the pad, keeps working on a machine with no Qt installed.
 - Linux with `hidraw` (`/dev/hidraw*` readable — usually already the case)
 - Python 3.9+
 - For the memory monitor: `kernel.yama.ptrace_scope = 0`
-- For the virtual DualSense: `/dev/uhid` writable
+- For the virtual DualSense with haptics: the `vhci-hcd` module (every distribution checked ships
+  it), and one authentication to attach the virtual USB device
+- For the virtual DualSense without haptics: `/dev/uhid` writable
 - For the screen: the udev rule in `udev/`, since the pad's picture bootloader
   appears as a `root:dialout` tty and nothing can check for it in advance
 
@@ -151,10 +156,11 @@ listed above — since GPL costs nothing there. The GUI importing
 `flydigi/` does not make `flydigi/` GPL; those files stay independently
 reusable. See [LICENSE](LICENSE) for the full reasoning.
 
-The DualSense report descriptor and feature-report blobs in
-`flydigi/ps5_data.py` are generated from
-[inputtino](https://github.com/games-on-whales/inputtino), MIT licensed — see
-[NOTICE](NOTICE).
+The DualSense report layouts in `flydigi/ds5.py` follow
+[inputtino](https://github.com/games-on-whales/inputtino), MIT licensed, and the
+placeholder Bluetooth addresses in `flydigi/ds5_usb.py` are inputtino's public
+ones. The descriptors and feature-report blobs themselves are read from
+hardware — see [NOTICE](NOTICE).
 
 ## Building a release
 

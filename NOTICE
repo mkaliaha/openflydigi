@@ -4,9 +4,17 @@ This project includes material from third-party open source software.
 inputtino
 https://github.com/games-on-whales/inputtino
 
-flydigi/ps5_data.py is generated (see tools/gen_ps5_data.py) from
-src/uhid/include/uhid/ps5.hpp: the DualSense HID report descriptors and the
-calibration / pairing / firmware feature-report blobs.
+flydigi/ds5.py follows src/uhid/include/uhid/ps5.hpp for the DualSense's input
+and output report layouts.
+
+flydigi/ds5_usb.py carries inputtino's PS5_PAIRING_INFO Bluetooth addresses as
+placeholders. They are substituted for the real controller's by
+tools/gen_ds5_usb.py, unconditionally, so no hardware identity is committed --
+inputtino's are already public in their repository.
+
+The descriptors and feature-report blobs in that file are otherwise read from a
+real controller, not derived from inputtino. flydigi/ps5_data.py, which was, has
+been removed.
 
     MIT License
 

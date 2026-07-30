@@ -104,6 +104,19 @@ Three things fall out of that run:
     recognition comes from the acquire, not from any change of USB identity — nothing to do with
     descriptors or double-remapping.
 
+**Our switch is not yet doing what Space Station's does — open, and the next piece of work.**
+Enabling it *from Space Station* leaves the pad presenting **three** HID nodes: the controller
+itself, a keyboard and a mouse. Flipping the same flag from here does not produce that, so command
+17 is evidently not the whole of what Space Station sends. Two halves follow from it, and neither is
+started:
+
+  * find what else Space Station writes (the keyboard/mouse composite is presumably a mode the pad
+    is put into, not a side effect of the flag) and make the toggle do the same;
+  * fix detection to match. `flydigi/device.py` finds the vendor node by report-descriptor prefix
+    and `flydigi/evdev.py` already has to filter three input nodes by capability -- with a third HID
+    node in play, anything picking "the first match by vendor id" will sooner or later write an Apex
+    5 config to a keyboard interface. The same guard the Vader 4 Pro needs.
+
 **Steam then lists the pad twice, and that is not our bug.** Reported on Windows as well as here.
 Both paths are legitimately supported and Steam does not merge them:
 
