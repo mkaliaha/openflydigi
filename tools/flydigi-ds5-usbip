@@ -226,6 +226,11 @@ def main():
     # last win -- that silently drops one source's effects.
     ctrl_lock = threading.Lock()
     rumble_src = {"hid": (0, 0), "haptic": (0, 0)}
+    # Trigger-effect payloads queue here for the same reason rumble does: each
+    # is a claim() + _drain() + write on the vendor node, and a game dumps a
+    # burst of them on events like being minimised. Inline on the main loop
+    # that produced a 605 ms stall.
+    effect_q = queue.Queue()
     rumble_wake = threading.Event()
     rumble_stop = threading.Event()
 
@@ -234,14 +239,27 @@ def main():
         while not rumble_stop.is_set():
             rumble_wake.wait(0.1)
             rumble_wake.clear()
+            if ctrl is None:
+                continue
             hid, haptic = rumble_src["hid"], rumble_src["haptic"]
             value = (max(hid[0], haptic[0]), max(hid[1], haptic[1]))
-            if value == last or ctrl is None:
-                continue
-            last = value
             try:
                 with ctrl_lock:
-                    effects.rumble(ctrl, value[0], value[1], wait=0.0)
+                    # Trigger effects are one-shot state changes and must never
+                    # be gated on rumble: an earlier version drained this queue
+                    # only when the motor value also changed, so effects were
+                    # applied at whatever moment rumble happened to move.
+                    while True:
+                        try:
+                            payload = effect_q.get_nowait()
+                        except queue.Empty:
+                            break
+                        ctrl.send(payload, wait=0.0)
+                    # Rumble, by contrast, is a level: resending an unchanged
+                    # one is pure cost.
+                    if value != last:
+                        last = value
+                        effects.rumble(ctrl, value[0], value[1], wait=0.0)
             except OSError:
                 pass
             rumble_stop.wait(1.0 / RUMBLE_HZ)
@@ -269,6 +287,7 @@ def main():
     sent = 0
     next_info_poll = 0.0
     next_report = 0.0
+    next_dsp = 0.0
     next_status = time.monotonic() + 10.0
     # Where the loop's time actually goes. A stall in any of these delays the
     # input report that should have gone out, because they share a thread.
@@ -380,7 +399,12 @@ def main():
                         dropped[0] += 1
                     newest = buf
                 _t0 = time.monotonic()
-                if args.motors and newest is not None:
+                # Compute motor levels at the rate we can actually send them.
+                # Every haptic URB arrives ~1100 times a second and the worker
+                # writes at 60 Hz, so per-URB DSP was eighteen times more work
+                # than could ever reach a motor.
+                if args.motors and newest is not None and now >= next_dsp:
+                    next_dsp = now + 1.0 / RUMBLE_HZ
                     low, high = splitter.process(
                         haptics_dsp.unpack_s16(newest,
                                                decimate=haptics_dsp.DECIMATE))
@@ -388,13 +412,9 @@ def main():
                         low, high, args.gain, args.gate, args.curve)
                     if motors != last_motors:
                         last_motors = motors
-                        if ctrl:
-                            # wait=0 is mandatory when driving continuously:
-                            # the 100 ms ACK wait puts the motors far behind.
-                            _tr = time.monotonic()
-                            effects.rumble(ctrl, motors[0], motors[1],
-                                           wait=0.0)
-                            spent["rumble"] += time.monotonic() - _tr
+                        # Post, never write. The worker owns the vendor node.
+                        rumble_src["haptic"] = motors
+                        rumble_wake.set()
                 spent["dsp"] += time.monotonic() - _t0
 
                 while True:
@@ -429,9 +449,9 @@ def main():
                         if not args.quiet:
                             log(f"{effect} -> mode={mode} params={params}")
                         if ctrl:
-                            ctrl.send(
-                                effects.common_effect_payload(side, mode, params),
-                                wait=0.0)
+                            effect_q.put(
+                                effects.common_effect_payload(side, mode, params))
+                            rumble_wake.set()
 
                 _elapsed = time.monotonic() - after_select
                 if _elapsed > spent["loop_max"]:
