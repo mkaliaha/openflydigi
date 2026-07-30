@@ -1,7 +1,8 @@
-# Haptic audio, and the virtual DualSense that cannot carry it
+# Haptic audio on a virtual DualSense
 
-Tier 4 works; its one structural gap is haptics. What was measured, what was built,
-what it is blocked on, and the untested experiment that would settle it.
+Tier 4's structural gap is closed: a game writes haptics to a DualSense that is a userspace
+process, and the Apex 5's motors reproduce them. This is what was measured on the way, what
+turned out to be wrong, and what it cost to find out.
 
 Index: [PROGRESS.md](../PROGRESS.md).
 
@@ -78,8 +79,12 @@ the first attempt wrong:
     ch0  headphone jack        ch2  left haptic actuator
     ch1  speaker               ch3  right haptic actuator
 
-Deathloop writes **ch3 only** (active in 87% of 373 sampled windows; ch1 never touched). Treat
-haptics as mono rather than assuming stereo.
+Deathloop was first measured writing **ch3 only** (active in 87% of 373 sampled windows; ch1 never
+touched), through a real DualSense's PipeWire monitor. Measured again at the device itself, both
+actuator channels carry signal and track each other closely, with ch2 often slightly stronger --
+while ch0 and ch1 stay at *exactly* zero. The direct observation is the better one, and the fact
+that the two silent channels are silent to the last bit is also the check that the channel offsets
+are aligned: misalignment would smear energy across all four.
 
 **Conversion** (`flydigi/haptics.py`, `tools/flydigi-haptics`): the DualSense's actuators are
 full-range voice coils, but the Apex 5's motors are not interchangeable — left is a large
@@ -96,9 +101,10 @@ ended:
 
 Useful settings: `--gain 1.5 --crossover 250`.
 
-**What this does not do:** it requires a real DualSense present as the haptic source. Making the
-Apex work standalone needs the game to write haptics to a device we control — see the USB gadget
-note below.
+**Superseded as a delivery mechanism**, but not as work: this bridge needed a real DualSense present
+as the source, sampling the buzz off a controller sitting on the desk. The conversion it proved is
+exactly what the virtual device now feeds. What was scaffolding is now the second half of a working
+feature.
 
   * **`DualSense-haptic-helper`** (MIT) — real hardware; independently found haptics on channels
     2 and 3 of a 4.0 stream, matching our tone probing. Warns that **Steam Input masks the
@@ -113,11 +119,12 @@ patches "fetch the audio-side ContainerId from setupapi so HID and MMDevice agre
 That is precisely the association our null sink lacked — a uhid device and an unrelated PipeWire
 sink can never share a ContainerId.
 
-**Nobody has emulated a virtual DualSense with a working audio device.** Every project either uses
-real hardware or emulates HID only (inputtino, DSX). The audio half of virtual emulation is
-unexplored, consistent with the blockers below.
+**Nobody had emulated a virtual DualSense with a working audio device.** Every project either used
+real hardware or emulated HID only -- inputtino, DSX, and `VIIPER`, the one USB/IP DualSense, which
+declares `bInterfaceClass = 0x03` and no audio interfaces at all. That is no longer true; the rest
+of this document is how.
 
-## Virtual USB composite device (not built)
+## Virtual USB composite device
 
 Our PipeWire null sink was ignored by the game even when named "Wireless Controller", while a real
 DualSense was used immediately. That points at device identity/association rather than name
@@ -154,7 +161,8 @@ actuators are the RL/RR pair, ch2 and ch3.
 `flydigi/ps5_data.py` is 273 bytes; the two are identical for 145 bytes and then diverge, because
 inputtino lacks feature reports `0x0B` and `0x0C` (usages `0x41`/`0x42`, 41 bytes each). Presumably
 an older firmware. Nothing has been observed to care, but the real one is what a host compares
-against, so `tools/ds5-gadget` embeds the captured descriptor rather than the inputtino one.
+against, so `flydigi/ds5_usb.py` holds the captured descriptor and both tiers now use it. The
+inputtino copy is gone.
 
 Re-capture with:
 
@@ -322,86 +330,29 @@ several popular USB/IP libraries `recv()` a fixed 48 bytes and never consume iso
 which desynchronises the TCP stream rather than failing cleanly — check for iso handling before
 adopting one.
 
-### The SBC route
+### The SBC route, superseded
 
-Both blockers are properties of *this machine*, not of the idea. An SBC in peripheral mode has a
-**real** UDC, and on Armbian building a module is `apt install linux-headers-*` — no Secure Boot, no
-ostree, no signing.
+Before the USB/IP route worked, the plan was an SBC in peripheral mode: a real UDC, a configfs
+gadget with `hid.usb0` + `uac1.usb0`, and one cable to the PC. It was proven as far as it could be
+without a cable -- on an Orange Pi PC 2 (Allwinner H5, Armbian, kernel 6.18) every module ships
+prebuilt (`CONFIG_USB_F_UAC1=m`, `CONFIG_USB_F_HID=m`, `CONFIG_USB_RAW_GADGET=m`), there is a real
+UDC at `musb-hdrc.4.auto` with `dr_mode = otg`, and the gadget bound cleanly with no host attached,
+producing `/dev/hidg0` and a 4-channel `UAC1Gadget` capture device.
 
-That makes the pad a self-contained dongle. The Apex 5 plugs into a type-A port; a single cable goes
-to the PC; the PC needs no software at all:
+Two things from that work are worth keeping:
 
-    Apex 5 --USB-A--> SBC --OTG--> PC
-                      gadget 054c:0ce6 = hid.usb0 + uac1.usb0
+  * **The configfs direction convention, settled by measurement.** `c_*` is host→gadget and arrives
+    on the board as an ALSA **capture** device. Getting it backwards yields a gadget that enumerates
+    perfectly and carries no audio, which is indistinguishable from success until you look for
+    samples.
+  * **A configfs binary attribute can store less than you wrote, silently.** The 289-byte report
+    descriptor stored as 151 bytes; the gadget then bound, enumerated, and described itself as
+    something else. Read attributes back and compare lengths.
 
-The board reads the pad (evdev + vendor stream, as tier 4 does now), writes DualSense reports to
-`/dev/hidg0`, receives haptic audio on the gadget's ALSA capture side, runs the conversion in
-`flydigi/haptics.py`, and drives the pad's motors over its own USB. `/dev/hidg0` is read-write, so
-output reports come back on the same fd — simpler than the uhid path, not harder. Steam's
-double-listing problem disappears with it, since the pad is not on the PC at all.
-
-`tools/ds5-gadget` sets this up: `up`, `down`, `status`.
-
-### The board, and what it has already proved
-
-**Orange Pi PC 2** (Allwinner H5, aarch64 — *not* the H3 "PC"), Armbian 26.5.1 trixie, kernel
-6.18.33-current-sunxi64. It arrives with everything needed already built:
-
-    CONFIG_USB_F_UAC1=m     CONFIG_USB_F_HID=m     CONFIG_USB_RAW_GADGET=m
-    CONFIG_USB_CONFIGFS_F_UAC1=y                   CONFIG_USB_MUSB_DUAL_ROLE=y
-
-    /sys/class/udc/musb-hdrc.4.auto -> .../soc/1c19000.usb/musb-hdrc.4.auto
-    /proc/device-tree/soc/usb@1c19000/dr_mode = otg
-
-No building, no headers, no signing. The whole reason this was parked on Fedora does not exist here.
-
-**`tools/ds5-gadget up` binds cleanly with no host attached** — writing to `UDC` succeeds whether or
-not anything is plugged into the OTG port, so most of the stack is testable without a cable. That
-run produced:
-
-  * `/dev/hidg0`
-  * a new ALSA card, `UAC1Gadget`
-  * `c_chmask` reading back `51` = `0x33`, the real device's channel config
-  * `phy phy-1c19400.phy.0: Changing dr_mode to 2` — the PHY switching to peripheral on bind
-
-**The configfs direction convention is settled, by measurement.** `c_*` is host→gadget and arrives
-on the board as an ALSA **capture** device: `arecord -l` lists `card 2: UAC1Gadget [UAC1_Gadget],
-device 0`. So the haptics bridge reads a capture device. Getting this backwards would have produced
-a gadget that enumerates perfectly and carries no audio, which is indistinguishable from success
-until you look for the samples.
-
-**Only the type-A ports are host-only.** There is exactly one UDC and it is USB0 at `1c19000.usb`,
-the micro-USB. The type-A ports hang off separate EHCI/OHCI blocks, which have no device-side state
-machine in silicon — no software can make one act as a peripheral.
-
-**`state: not attached` means no VBUS session**, and note a charge-only cable still carries VBUS. So
-this reads as either nothing plugged in at the far end, or no `usb0_vbus_det` wired — common on
-H3/H5 boards, and if so a perfect data cable will show the same thing. The fix in that case is
-forcing `dr_mode = "peripheral"` so musb stops waiting for a session it cannot detect.
-
-**Remaining risk is the controller.** musb, not dwc2; its gadget-side isochronous support is far
-less travelled. sunxi musb has roughly five endpoints against the four this device wants — three
-with `p_chmask=0` to drop the mic. If isochronous streaming fails there, dwc2 (Pi Zero 2 W, Pi 4) is
-the well-trodden platform for gadget audio.
-
-What is left, in order:
-
- 1. **A micro-USB *data* cable.** The only thing blocking everything below. Not an OTG adapter —
-    that is micro-B to A-*female* and selects host mode, the opposite of what is wanted.
- 2. **Confirm enumeration.** `state` goes to `configured` and the PC shows `054c:0ce6`.
- 3. **Does the game write ch3?** *The experiment nobody has run* — every existing project uses real
-    hardware or emulates HID only. A positive result decides the whole question.
- 4. **Wire the conversion**, `--gain 1.5 --crossover 250`, `rumble(wait=0)`.
-
-**A real PS5 is out of scope regardless.** It does signed challenge/response over feature reports;
-none of this touches that.
-
-**Deliberately not pursued:** deriving rumble from the game's own audio output. It fires on music
-and dialogue and does not resemble real haptics.
-
-**Status: unparked, at step 1.** The conversion works and is proven against real game haptics; what
-it lacked was a source. The SBC route above is the source, and it is blocked on nothing but a
-micro-USB cable and an evening. The descriptors are captured and `tools/ds5-gadget` is written.
+The tooling is gone because the USB/IP route needs no hardware, no cable and no root on the SBC --
+only `vhci-hcd`, which every distro ships. The route would still work; it is just strictly more
+expensive. It remains the only option for presenting the pad to a machine that is not running our
+software at all -- a console, a Windows box, or a Steam Deck.
 
 ## M1-M4 buttons: no DualSense destination
 

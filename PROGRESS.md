@@ -73,23 +73,39 @@ with apply-and-no-save, sweep the stick, watch evdev; the three outcomes are unm
 stick precision rescales the profile's curve bytes — write a different precision, re-read a profile.
 Whether the firmware accepts 164/165 aimed at a slot it is not running.
 
-**Haptic audio: unparked.** The conversion works and is proven against real game haptics; what it
-lacked was a source. Proton joins an audio endpoint to a gamepad by a ContainerId that both
-`winepulse` and `winebus` derive independently from the same `usb_device` — so only a real USB
-device works, and uhid can never match (it gets a random GUID, re-rolled per run). The DualSense's
-descriptors are captured; it is **UAC1, not UAC2**, which every note here previously assumed.
+**Haptic audio: working.** A game writes haptics to a virtual DualSense, and the Apex 5's motors
+reproduce them. Nothing else does this -- every other project either uses real hardware or emulates
+HID only.
 
-Two routes remain, and every soft-UDC shortcut is a dead end: `dummy_hcd` has no isochronous
-endpoint, `usbip-vudc` fails iso with `-EXDEV`, and FunctionFS cannot express UAC descriptors at
-all. So which distros ship `usb_f_uac1` turns out not to matter.
+Proton joins an audio endpoint to a gamepad by a ContainerId that `winepulse` and `winebus` each
+derive independently from the same `usb_device`, so only genuine USB topology matches; uhid gets a
+random GUID, re-rolled per run, and never can. Every soft-UDC shortcut to that topology is a dead
+end -- `dummy_hcd` declares no isochronous endpoint, `usbip-vudc` fails iso with `-EXDEV`, and
+FunctionFS cannot express UAC descriptors at all -- so which distros ship `usb_f_uac1` turns out not
+to matter. What works is the USB/IP *client*: `flydigi/usbip.py` serves a device from userspace and
+`vhci-hcd` enumerates it locally. Measured against Deathloop with `tools/flydigi-ds5-usbip
+--haptics --motors`. → [docs/findings-haptics.md](docs/findings-haptics.md)
 
-  1. **Real UDC.** `tools/ds5-gadget` binds cleanly on an Orange Pi PC 2 with every module prebuilt,
-     creating `/dev/hidg0` and a 4-channel `UAC1Gadget` capture device. Blocked on one micro-USB
-     *data* cable.
-  2. **Userspace USB/IP + `vhci-hcd`.** No UDC involved, so none of the blockers apply; `vhci-hcd`
-     is `=m` everywhere and does implement iso. Needs the device written.
+**DS mode is a switch, not a route.** Tiers 1-3 need per-game data -- vibration binds, telemetry
+rules, memory offsets -- which is why the gamelist exists and why the daemon picks a route per game.
+The DualSense tiers need none of it: they present a DualSense, and *any* DS5-aware game gets it,
+including games Flydigi has never heard of. Treating it as one of nine per-game routes was Flydigi's
+model leaking into a tier that does not share its constraints.
 
-→ [docs/findings-haptics.md](docs/findings-haptics.md)
+So it belongs in the GUI as a global toggle, and it comes out of the automatic tier entirely. That
+also removes the hard problem: the usbip relay needs root for the vhci attach, and an unattended
+per-game attach would mean granting the desktop session standing permission to emulate USB devices
+-- which is a local privilege-escalation primitive, since one of those devices is a keyboard. A
+user-driven switch needs one authentication and grants nothing lasting.
+
+**Still to build:** the GUI switch itself, and the privilege plumbing behind it (a polkit-authorised
+helper that performs the attach and passes the socket back, so the serving process stays
+unprivileged).
+
+**Known, and not fixable from here:** with DS mode on, a game sees *both* the Apex 5 and the virtual
+DualSense. Nothing can hide the physical pad from a game that enumerates it, so the instruction is
+part of the feature: launch with `SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501`, or set it
+globally in Steam.
 
 **Not ours to fix.** Steam lists the pad twice (xpad *and* its own hidapi path — reported on Windows
 too), and Steam takes no lock on the hidraw node, so its writes can land between ours. Harmless for
@@ -112,6 +128,7 @@ All command factories are decompiled under `decompiled/Flydigi.ControllerSdk/`.
 | Battery, gyro, accel | 1, and the vendor input stream | `flydigi/motion.py` |
 | Per-game auto mode | — | `tools/flydigid`, `tools/flydigi-auto` — [detail](docs/findings-games.md) |
 | Virtual DualSense (tier 4) | — | `flydigi/uhid.py`, `tools/flydigi-ds5` — [detail](docs/findings-haptics.md) |
+| Virtual DualSense over USB (tier 4b) | — | `flydigi/usbip.py`, `tools/flydigi-ds5-usbip` — adds haptic audio |
 
 ## The desktop app
 
@@ -226,7 +243,7 @@ in `gui/` is [gui/README.md](gui/README.md).
     DualSense's 289-byte HID report descriptor to `functions/hid.usb0/report_desc` stored 151 bytes;
     the gadget then bound, enumerated and described itself as something else entirely. The write
     method was not at fault — four different hex-to-binary methods all produce 289 identical bytes
-    off-device. So `tools/ds5-gadget` reads the attribute back, compares the length, and dies. Any
+    off-device. So anything writing one reads it back and compares the length before trusting it. Any
     write of a NUL-laden blob through a shell deserves the same treatment: verify, do not assume.
   * **Never combine a `pkill -f` with the relaunch in one shell command** — the pattern matches the
     shell running it and kills the session (exit 144). Two separate commands, and the `'[p]attern'`
@@ -333,10 +350,12 @@ a bad checksum by staying silent exactly as the pad does.
 | `tools/flydigi-monitor` | Memory-reading driver using Flydigi's XGameMonitor configs (`--probe` to debug offsets) |
 | `tools/flydigi-screen` | The screen — `check`/`preview`/`convert` need no pad; then `status`, `test`, `show`, `animate`, `send`, `on`/`off`, `statusbar`. Sending goes over the serial route by default (`--via hid` is for other models, and inert here) |
 | `flydigi/uhid.py` | Pure-Python `/dev/uhid` binding (no dependencies) — creates kernel-side HID devices |
-| `tools/ds5-gadget` | configfs USB composite gadget (HID + UAC1) for an SBC in peripheral mode — the real-USB-topology route to haptic audio. Needs a UDC; inert on this laptop |
-| `flydigi/ps5_data.py` | Generated DualSense descriptor + feature blobs (from MIT inputtino) |
-| `tools/gen_ps5_data.py` | Regenerates the above from inputtino's `ps5.hpp` |
-| `work/ref/inputtino/` | MIT reference clone — DS5 output report layout, canned feature reports |
+| `flydigi/usbip.py` | Pure-Python USB device served to this machine's own kernel via `vhci-hcd` — no dependencies, no `usbip` tool |
+| `flydigi/ds5_usbip.py` | The DualSense on top of it: descriptors, feature reports, endpoints, the haptic stream |
+| `flydigi/ds5_usb.py` | Generated DualSense descriptors + feature blobs, captured off hardware |
+| `tools/gen_ds5_usb.py` | Regenerates the above from a connected DualSense. Scrubs Bluetooth addresses unconditionally |
+| `tools/flydigi-ds5-usbip` | Tier 4b — the relay, with `--haptics` and `--motors` |
+| `tools/ds5-dump-features` | Re-reads a real DualSense and diffs it against what we serve |
 | `tests/` | `test_device.py`, `test_dsx.py`, `test_forza.py`, `test_games.py`, `test_mapping.py`, `test_monitor.py`, `test_prefs.py`, `test_relay.py`, `test_screen.py`, `test_screen_ota.py` need no Qt; `test_models.py`, `test_shell.py`, `test_qml.py` need PySide6 — all pass without hardware, each printing its own count |
 | `tests/fake_pad.py` | Stand-in controller: multi-packet reads, diffed writes, apply, save, checksum rejection |
 | `tools/forza-simulate` | Synthetic telemetry generator, for testing without the game |
