@@ -113,8 +113,14 @@ def main():
     # A real process, because the point of running_pids is that it survives the
     # app being restarted while DS mode is on: the state comes from the process
     # table, not from a handle the app happens to still hold.
-    results.append(check("nothing is running to begin with", not dsmode.running(),
-                         str(dsmode.running_pids())))
+    # Everything below is relative to what is already running. Asserting that
+    # nothing is fails on the one machine most likely to run this: DS mode was
+    # simply switched on in the app, and the test called a correct answer a
+    # failure.
+    already = set(dsmode.running_pids())
+    if already:
+        print(f"  note  DualSense mode is on ({len(already)} relay); "
+              f"working around it")
 
     # The escalation wrapper carries the relay's path as an argument, so a
     # substring test for it reported "running" while the password dialog was
@@ -144,9 +150,15 @@ def main():
                              proc.pid in dsmode.running_pids(),
                              str(dsmode.running_pids())))
         results.append(check("and reported as running", dsmode.running()))
+        # By pid, never `stop()` with no argument: that would take down a relay
+        # the person running the tests is using.
         results.append(check("stopping it stops it", dsmode.stop([proc.pid])))
         results.append(check("and it is gone from the process table",
                              proc.pid not in dsmode.running_pids()))
+        results.append(check("without disturbing anything else that was running",
+                             already <= set(dsmode.running_pids()) | {
+                                 p for p in already if not dsmode._alive(p)},
+                             str(sorted(already))))
     finally:
         if proc.poll() is None:
             proc.kill()

@@ -66,6 +66,13 @@ LANGIDS = (0x0409,)
 # report id -- whoever serves these prepends it exactly once. inputtino's copies
 # included the id, which is a trap: prefixing those shifts every byte of
 # calibration data by one and the pad still enumerates.
+#
+# Every Bluetooth address here is a placeholder. 0x09 and 0x0B each carry the
+# controller's own and its paired host's, swept and replaced; 0x0B also has a
+# third six-byte field of unestablished meaning, which is replaced by position
+# because no sweep could recognise it. 0x05 is this unit's gyro and accel
+# calibration -- particular to the controller, but not an identifier, and what
+# makes the emulation read correctly.
 FEATURE_REPORTS = {
     0x05: bytes.fromhex(
         "00000a00000092226edd8a228add8a2276dd1c021c020320f8dfe51fe7dff21f"

@@ -41,6 +41,23 @@ FEATURE_LENGTHS = {0x05: 40, 0x09: 19, 0x0B: 41, 0x0C: 41, 0x20: 63}
 SCRUB_CONTROLLER_BDADDR = bytes.fromhex("74e7d63a5335")
 SCRUB_HOST_BDADDR = bytes.fromhex("1e00ee74d0bc")
 
+# Report 0x0B carries a third six-byte field that is nobody's address we know:
+# it sits between a `01` and a `00`, ahead of the host address, exactly where
+# another entry would. What it is has not been established -- a previously
+# paired host, part of a link key -- and that is precisely why it is replaced.
+#
+# The sweep below cannot find it. That looks for the values read out of report
+# 0x09, and this is neither, so it went into a public repository unscrubbed and
+# was only noticed by dumping the committed blob and asking what every byte was.
+# The lesson is the general one: scrubbing what you recognise is not the same as
+# scrubbing what identifies, and the second needs every field accounted for.
+#
+# inputtino publishes no 0x0B at all, so there is no matching placeholder to
+# borrow; their host address goes in instead. Nothing reads this -- 0x0B is a
+# newer-firmware report the playstation driver never asks for -- so a plausible
+# shape is all it has to be.
+SCRUB_UNKNOWN_FIELDS = {0x0B: [(10, 16)]}
+
 
 def _hidiocgfeature(size):
     """_IOWR('H', 0x07, size)"""
@@ -109,6 +126,19 @@ def read_features():
                     b[start:start + 6] = fake
                     start = b.find(real, start + 1)
             out[rid] = bytes(b)
+
+    # Then the fields no sweep could find, by position. See
+    # SCRUB_UNKNOWN_FIELDS: the sweep replaces values it recognises, and an
+    # address this controller was paired with before is not one of them.
+    for rid, spans in SCRUB_UNKNOWN_FIELDS.items():
+        body = out.get(rid)
+        if body is None:
+            continue
+        b = bytearray(body)
+        for start, end in spans:
+            if end <= len(b):
+                b[start:end] = SCRUB_HOST_BDADDR[:end - start]
+        out[rid] = bytes(b)
     return target, out
 
 
@@ -214,6 +244,13 @@ LANGIDS = (0x0409,)
 # report id -- whoever serves these prepends it exactly once. inputtino's copies
 # included the id, which is a trap: prefixing those shifts every byte of
 # calibration data by one and the pad still enumerates.
+#
+# Every Bluetooth address here is a placeholder. 0x09 and 0x0B each carry the
+# controller's own and its paired host's, swept and replaced; 0x0B also has a
+# third six-byte field of unestablished meaning, which is replaced by position
+# because no sweep could recognise it. 0x05 is this unit's gyro and accel
+# calibration -- particular to the controller, but not an identifier, and what
+# makes the emulation read correctly.
 FEATURE_REPORTS = {{
 {feature_block}
 }}
