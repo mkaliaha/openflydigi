@@ -70,11 +70,17 @@ class AbsInfo:
         return lo + frac * (hi - lo)
 
 
-def find_device(name=None, vendor=None, product=None):
+def find_device(name=None, vendor=None, product=None, axes=False):
     """Return the /dev/input/eventN path of a matching device.
 
     Numbering shifts as devices come and go, so always resolve by name or
     vendor/product rather than hardcoding a path.
+
+    Pass axes=True to require absolute axes, i.e. to accept only a gamepad. The
+    Apex 5 publishes three input nodes -- "Flydigi APEX5 Keyboard", "... Mouse"
+    and "Flydigi Apex 5" -- all under the same vendor and product id, and the
+    keyboard sorts first. Matching on ids alone therefore relays a device that
+    never sends a single gamepad event, which looks exactly like a dead pad.
     """
     for path in sorted(glob.glob("/dev/input/event*"),
                        key=lambda p: int(p.rsplit("event", 1)[1])):
@@ -98,6 +104,16 @@ def find_device(name=None, vendor=None, product=None):
             if vendor and vid != vendor:
                 continue
             if product and pid != product:
+                continue
+        if axes:
+            # capabilities/abs is a hex bitmask of the absolute axes the device
+            # reports; a keyboard or mouse node has none and reads "0".
+            try:
+                with open(f"{base}/capabilities/abs") as fh:
+                    mask = fh.read().strip().replace(" ", "")
+            except OSError:
+                continue
+            if not mask or int(mask, 16) == 0:
                 continue
         return path, dev_name
     return None, None

@@ -1,0 +1,511 @@
+#!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
+"""Present the Apex 5 as a DualSense that is a real USB device.
+
+    Apex 5 ──evdev──► relay ──► virtual DualSense (usbip + vhci) ──► game
+                        ▲                    │            │
+                        └── DS5 output ◄─────┘            │
+                        │   (effects, rumble)             │
+                        ▼                                 ▼
+                  Flydigi cmd 81 / 0x12          haptic audio, ch2/ch3
+
+The same job as tools/flydigi-ds5, with one difference that is the entire point:
+this pad is a genuine USB device with an audio interface beside its HID one, so
+Proton can derive a matching ContainerId for both and a game will write haptics
+to it. A uhid pad has no USB parent and gets a random container id, so it never
+matches. See docs/findings-haptics.md.
+
+Needs root -- the vhci attach is a privileged sysfs write:
+
+    sudo modprobe vhci-hcd
+    sudo tools/flydigi-ds5-usbip --haptics
+
+Tell games to ignore the physical pad so they bind to the virtual one:
+    SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501 %command%
+"""
+
+import argparse
+import os
+import queue
+import select
+import signal
+import sys
+import threading
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from flydigi import ds5, effects, evdev, haptics as haptics_dsp  # noqa: E402
+from flydigi import motion, relay, usbip  # noqa: E402
+from flydigi.device import Controller, DeviceNotFound  # noqa: E402
+from flydigi.ds5_usbip import EP_HID_IN, DualSense  # noqa: E402
+
+FLYDIGI_VID, FLYDIGI_PID = relay.FLYDIGI_VID, relay.FLYDIGI_PID
+
+# The DualSense's interrupt IN endpoint declares bInterval 6, i.e. 32 microframes
+# = 4 ms. Offering a report more often than the host polls just wastes work; a
+# parked URB is the only thing that can carry one.
+POLL_INTERVAL = 0.004
+
+
+def log(msg):
+    print(f"[ds5] {msg}", flush=True)
+
+
+class Haptics:
+    """Per-channel peak of the isochronous stream.
+
+    Channel map established by tone probing on real hardware: ch0 headphone,
+    ch1 speaker, ch2 left actuator, ch3 right actuator. Deathloop was measured
+    writing ch3 only, so treat haptics as mono rather than assuming stereo.
+    """
+
+    NAMES = ("ch0 headphone", "ch1 speaker",
+             "ch2 left actuator", "ch3 right actuator")
+
+    # A window counts as "active" above this RMS. Chosen well clear of dither
+    # and comfortably below anything audible as an effect.
+    ACTIVE_RMS = 200
+
+    def __init__(self):
+        self.urbs = 0
+        self.frames = 0
+        self.peaks = [0, 0, 0, 0]
+        self._reset_window()
+
+    def _reset_window(self):
+        self.sumsq = [0.0, 0.0, 0.0, 0.0]
+        self.samples = 0
+        self.active = [0, 0, 0, 0]
+        self.windows = 0
+
+    def feed(self, data):
+        sumsq, peaks, frames = haptics_dsp.channel_energy(data)
+        if not frames:
+            return
+        self.urbs += 1
+        self.frames += frames
+        self.windows += 1
+        self.samples += frames
+        for ch in range(4):
+            self.sumsq[ch] += sumsq[ch]
+            if peaks[ch] > self.peaks[ch]:
+                self.peaks[ch] = peaks[ch]
+            if (sumsq[ch] / frames) ** 0.5 >= self.ACTIVE_RMS:
+                self.active[ch] += 1
+
+    def summary(self):
+        """RMS and activity over the window, then reset.
+
+        Peak alone is a trap: a single sample sets it and nothing ever lowers
+        it, so a momentary click at stream open looks identical to continuous
+        haptics. Activity fraction is what the original hardware measurement
+        used -- "ch3 active in 87% of 373 sampled windows".
+        """
+        if not self.windows:
+            return "no isochronous data this window"
+        parts = []
+        for ch, name in enumerate(self.NAMES):
+            rms = (self.sumsq[ch] / max(1, self.samples)) ** 0.5
+            pct = 100.0 * self.active[ch] / self.windows
+            parts.append(f"{name}: rms={rms:7.1f} active={pct:5.1f}% "
+                         f"peak={self.peaks[ch]}")
+        out = f"{self.windows} urbs\n       " + "\n       ".join(parts)
+        self._reset_window()
+        return out
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--dump", action="store_true",
+                    help="print decoded effects, do not drive the Apex 5")
+    ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--no-motion", action="store_true",
+                    help="do not enable the vendor motion stream (no gyro)")
+    ap.add_argument("--gyro-scale", type=float, default=1.0)
+    ap.add_argument("--accel-scale", type=float, default=motion.ACCEL_SCALE)
+    ap.add_argument("--haptics", action="store_true",
+                    help="analyse the haptic stream and report peaks per channel")
+    ap.add_argument("--motors", action="store_true",
+                    help="drive the Apex 5's motors from the haptic stream")
+    ap.add_argument("--gain", type=float, default=1.5)
+    ap.add_argument("--crossover", type=float, default=250.0)
+    ap.add_argument("--gate", type=float, default=haptics_dsp.GATE)
+    ap.add_argument("--curve", type=float, default=haptics_dsp.CURVE)
+    ap.add_argument("--verify", action="store_true",
+                    help="read our own virtual pad back from evdev, to prove "
+                         "input reaches the OS independently of any game")
+    args = ap.parse_args()
+
+    if os.geteuid() != 0:
+        sys.exit("needs root (the vhci attach is a privileged sysfs write)")
+
+    def _terminate(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _terminate)
+    signal.signal(signal.SIGHUP, _terminate)
+
+    path, name = evdev.find_device(vendor=FLYDIGI_VID, product=FLYDIGI_PID,
+                                   axes=True)
+    if not path:
+        path, name = evdev.find_device(name="Apex", axes=True)
+    if not path:
+        sys.exit("Apex 5 gamepad not found in /dev/input -- is it connected?")
+    log(f"input: {name} ({path})")
+
+    ctrl = None
+    if not args.dump:
+        try:
+            ctrl = Controller()
+            log(f"controller: {ctrl.path}")
+        except DeviceNotFound:
+            log("vendor interface not found; effects will not be applied")
+
+    # Output reports arrive on the server's own thread. Hand them to the main
+    # loop rather than touching the Apex 5 from there: a blocking hidraw write
+    # inside the serve path would stall every URB behind it, which is the same
+    # class of bug as putting device I/O on a GUI thread.
+    outbox = queue.Queue()
+    haptics = Haptics() if args.haptics else None
+
+    # Count every output report, not just the ones that change something. The
+    # driver sends a handful at init; a game sending them is the signal that it
+    # has actually bound to this pad and is driving it.
+    out_reports = [0]
+
+    def on_output(data):
+        out_reports[0] += 1
+        outbox.put(data)
+
+    # Haptic buffers cross to the main loop the same way output reports do.
+    # The DSP is a per-sample Python loop over 48 kHz of audio -- running it in
+    # the callback would put it on the serve thread and stall every URB behind
+    # it, which is what the microphone stall storm already demonstrated.
+    #
+    # Bounded, and dropping the OLDEST when full. Falling behind and then
+    # working through a backlog is what made this feel sluggish and "keep going"
+    # after effects ended; stale haptics are worse than none.
+    haptic_q = queue.Queue(maxsize=8)
+
+    def on_haptics(data, _packets):
+        # Runs on the serve thread, so it does the minimum possible: hand the
+        # buffer over and return. Measuring here cost 3.8% of a core inside URB
+        # servicing -- not a throughput problem, but jitter injected into the
+        # one place that cannot absorb it.
+        if haptic_q.full():
+            try:
+                haptic_q.get_nowait()
+            except queue.Empty:
+                pass
+        haptic_q.put(data)
+
+    device = DualSense(on_output=on_output,
+                       on_haptics=on_haptics if (haptics or args.motors) else None)
+    # The DSP runs on decimated audio, so the filter must know the real rate.
+    # The Apex 5's motors are ERMs with a mechanical spin-up; they cannot
+    # express changes faster than this, so anything quicker is pure cost.
+    RUMBLE_HZ = 60
+
+    # Writing rumble means claim() + _drain() + write on the vendor node, and
+    # _drain() has to eat whatever the 300 Hz motion stream has queued. Doing
+    # that on the main loop cost 36% of wall-clock and produced a 601 ms stall
+    # -- while the host was waiting on an input report every 4 ms.
+    #
+    # So: its own thread, with a single-slot mailbox. Latest value wins; there
+    # is no queue, because a superseded motor level is worthless.
+    # Two independent sources want these motors: the DS5 output report's
+    # motor_left/motor_right (the compatibility path most PC ports use) and the
+    # haptic audio stream. A game can use either, and nothing stops it using
+    # both. Keep them apart and combine, rather than letting whichever wrote
+    # last win -- that silently drops one source's effects.
+    ctrl_lock = threading.Lock()
+    rumble_src = {"hid": (0, 0), "haptic": (0, 0)}
+    rumble_wake = threading.Event()
+    rumble_stop = threading.Event()
+
+    def rumble_worker():
+        last = None
+        while not rumble_stop.is_set():
+            rumble_wake.wait(0.1)
+            rumble_wake.clear()
+            hid, haptic = rumble_src["hid"], rumble_src["haptic"]
+            value = (max(hid[0], haptic[0]), max(hid[1], haptic[1]))
+            if value == last or ctrl is None:
+                continue
+            last = value
+            try:
+                with ctrl_lock:
+                    effects.rumble(ctrl, value[0], value[1], wait=0.0)
+            except OSError:
+                pass
+            rumble_stop.wait(1.0 / RUMBLE_HZ)
+
+    rumble_thread = threading.Thread(target=rumble_worker, daemon=True)
+    rumble_thread.start()
+
+    splitter = haptics_dsp.Splitter(
+        rate=haptics_dsp.RATE // haptics_dsp.DECIMATE, crossover=args.crossover)
+    last_motors = None
+    dropped = [0]
+    server = usbip.Server(device)
+
+    motion_on = False
+    if ctrl and not args.no_motion:
+        motion_on = motion.enable(ctrl)
+        log(f"motion stream: {'enabled' if motion_on else 'FAILED to enable'}")
+
+    state = ds5.InputState()
+    applied = {}
+    last_rumble = None
+    left_motor = 0
+    frames = 0
+    motion_frames = 0
+    sent = 0
+    next_info_poll = 0.0
+    next_report = 0.0
+    next_status = time.monotonic() + 10.0
+    # Where the loop's time actually goes. A stall in any of these delays the
+    # input report that should have gone out, because they share a thread.
+    spent = {"rumble": 0.0, "motion": 0.0, "dsp": 0.0, "loop_max": 0.0}
+    slow_iters = [0]
+
+    port = server.attach()
+    log(f"virtual DualSense attached on vhci port {port}")
+    log("games: set SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501")
+
+    # Read back our own virtual pad's evdev node and count events. This splits
+    # the problem cleanly: if pressing a button on the Apex 5 moves this counter,
+    # then report -> kernel -> hid-playstation -> evdev all works and anything
+    # still broken is above the OS (Steam Input, SDL device selection, the game
+    # binding the wrong pad). If it stays at zero, the fault is ours.
+    loopback = None
+    if args.verify:
+        time.sleep(1.5)  # let the input nodes appear
+        vpath, vname = evdev.find_device(vendor=0x054C, product=0x0CE6)
+        if vpath:
+            try:
+                loopback = evdev.Reader(vpath)
+                log(f"verify: reading back {vname} ({vpath})")
+            except OSError as exc:
+                log(f"verify: cannot open {vpath}: {exc}")
+        else:
+            log("verify: no 054c:0ce6 input node found -- "
+                "hid-playstation did not create one")
+    loopback_events = 0
+
+    try:
+        with evdev.Reader(path) as reader:
+            relay.build_state(reader, state)
+            watch = [reader.fileno()]
+            if motion_on:
+                watch.append(ctrl.fd)
+            if loopback:
+                watch.append(loopback.fileno())
+
+            while True:
+                if server.failed:
+                    log(f"serve thread died: {server.failed!r}")
+                    break
+
+                iter_start = time.monotonic()
+                ready, _, _ = select.select(watch, [], [], POLL_INTERVAL)
+                after_select = time.monotonic()
+
+                if motion_on and ctrl.fd in ready:
+                    _t0 = time.monotonic()
+                    with ctrl_lock:
+                        report = motion.read_report(ctrl)
+                    spent["motion"] += time.monotonic() - _t0
+                    if report and report[0] == "motion":
+                        _kind, gyro, accel = report
+                        state.gyro = [v * args.gyro_scale for v in gyro]
+                        state.accel = [v * args.accel_scale for v in accel]
+                        state.sensor_timestamp += 188
+                        motion_frames += 1
+                    elif report and report[0] == "info":
+                        info = report[1]
+                        level = info["battery_level"]
+                        if info["charging"]:
+                            state.battery_status = ds5.BATTERY_CHARGING
+                            state.battery_charge = 10
+                        else:
+                            state.battery_charge = min(10, level * 2)
+                            state.battery_status = (
+                                ds5.BATTERY_FULL if level >= motion.MAX_LEVEL
+                                else ds5.BATTERY_DISCHARGING)
+
+                if motion_on and time.time() >= next_info_poll:
+                    next_info_poll = time.time() + 30.0
+                    motion.request_info(ctrl)
+
+                if reader.fileno() in ready and reader.read():
+                    relay.build_state(reader, state)
+                    frames += 1
+
+                if loopback and loopback.fileno() in ready:
+                    if loopback.read():
+                        loopback_events += 1
+
+                # Complete whatever URB the host has parked, on our own 4 ms
+                # cadence. This double-paces -- the host already polls at 4 ms,
+                # so two clocks beat against each other and a report can land up
+                # to a full interval late. Answering inline from current state
+                # fixes that and is what real hardware does, but it coincided
+                # with the game losing the pad, so it stays this way until a
+                # bisect says otherwise.
+                now = time.monotonic()
+                if now >= next_report:
+                    next_report = now + POLL_INTERVAL
+                    if server.complete_one(EP_HID_IN, state.pack()):
+                        sent += 1
+
+                # Drain everything: measure each buffer, but drive the motors
+                # only from the newest. Working through a backlog is what made
+                # this feel sluggish and keep going after effects ended.
+                newest = None
+                while True:
+                    try:
+                        buf = haptic_q.get_nowait()
+                    except queue.Empty:
+                        break
+                    if haptics:
+                        haptics.feed(buf)
+                    if newest is not None:
+                        dropped[0] += 1
+                    newest = buf
+                _t0 = time.monotonic()
+                if args.motors and newest is not None:
+                    low, high = splitter.process(
+                        haptics_dsp.unpack_s16(newest,
+                                               decimate=haptics_dsp.DECIMATE))
+                    motors = haptics_dsp.levels_to_motors(
+                        low, high, args.gain, args.gate, args.curve)
+                    if motors != last_motors:
+                        last_motors = motors
+                        if ctrl:
+                            # wait=0 is mandatory when driving continuously:
+                            # the 100 ms ACK wait puts the motors far behind.
+                            _tr = time.monotonic()
+                            effects.rumble(ctrl, motors[0], motors[1],
+                                           wait=0.0)
+                            spent["rumble"] += time.monotonic() - _tr
+                spent["dsp"] += time.monotonic() - _t0
+
+                while True:
+                    try:
+                        data = outbox.get_nowait()
+                    except queue.Empty:
+                        break
+                    parsed = ds5.parse_output(data)
+                    rumble = parsed["rumble"]
+                    if rumble:
+                        left_motor = rumble[0]
+                    if rumble and rumble != last_rumble:
+                        last_rumble = rumble
+                        if not args.quiet:
+                            log(f"rumble {rumble}")
+                        # Through the mailbox, never inline: this call site used
+                        # the default wait=0.1, so every HID rumble update cost
+                        # a 100 ms ACK wait on the thread that owes the host an
+                        # input report every 4 ms.
+                        rumble_src["hid"] = (rumble[0], rumble[1])
+                        rumble_wake.set()
+                    for effect in parsed["effects"]:
+                        if applied.get(effect.side) == effect.key():
+                            continue
+                        applied[effect.side] = effect.key()
+                        mapped = relay.translate(effect, left_motor)
+                        if mapped is None:
+                            if not args.quiet:
+                                log(f"{effect} -> unmapped, trigger unchanged")
+                            continue
+                        side, mode, params = mapped
+                        if not args.quiet:
+                            log(f"{effect} -> mode={mode} params={params}")
+                        if ctrl:
+                            ctrl.send(
+                                effects.common_effect_payload(side, mode, params),
+                                wait=0.0)
+
+                _elapsed = time.monotonic() - after_select
+                if _elapsed > spent["loop_max"]:
+                    spent["loop_max"] = _elapsed
+                if _elapsed > 0.010:
+                    slow_iters[0] += 1
+
+                if now >= next_status:
+                    next_status = now + 10.0
+                    line = (f"reports={sent} evdev={frames} motion={motion_frames}"
+                            f" out={out_reports[0]} iso_urbs={device.haptic_urbs}")
+                    if args.verify:
+                        line += f" loopback={loopback_events}"
+                    if haptics:
+                        line += f"\n       {haptics.summary()}"
+                    if args.motors:
+                        line += (f"\n       motors={last_motors} "
+                                 f"stale_dropped={dropped[0]}")
+                    line += (f"\n       time: motion={spent['motion']*1000:.0f}ms "
+                             f"dsp={spent['dsp']*1000:.0f}ms "
+                             f"worst_iter={spent['loop_max']*1000:.1f}ms "
+                             f"over10ms={slow_iters[0]}")
+                    spent.update(rumble=0.0, motion=0.0, dsp=0.0, loop_max=0.0)
+                    slow_iters[0] = 0
+                    if device.stalls:
+                        line += f"\n       STALLS {device.stalls}"
+                    log(line)
+    except KeyboardInterrupt:
+        log("stopping")
+    finally:
+        log(f"{sent} reports served, {frames} evdev frames, "
+            f"{motion_frames} motion frames, {out_reports[0]} output reports")
+        if haptics:
+            log(f"haptics: {haptics.urbs} URBs, {haptics.frames} frames")
+            log(f"peaks: {haptics.summary()}")
+        if device.first_iso:
+            # The isochronous wire layout was written from the spec and has
+            # never been checked against real traffic. If the packet descriptors
+            # do not tile the buffer exactly then the unpacking is wrong, and
+            # all-zero peaks would be a parsing artefact rather than silence --
+            # a distinction worth not guessing at.
+            i = device.first_iso
+            log(f"first iso URB: packets={i['packets']} data_len={i['data_len']} "
+                f"sum(length)={i['sum_length']} contiguous={i['tiles']}")
+            for desc in i["descriptors"]:
+                log(f"  descriptor (offset,len,actual,status): {desc}")
+            if i["sum_length"] != i["data_len"]:
+                log("  !! descriptors do not account for the data -- "
+                    "unpacking is WRONG, zero peaks mean nothing")
+        if device.stalls:
+            log(f"stalled endpoints: {device.stalls}")
+        if loopback:
+            loopback.close()
+        rumble_stop.set()
+        rumble_wake.set()
+        if args.motors and ctrl:
+            try:
+                with ctrl_lock:
+                    effects.rumble(ctrl, 0, 0)
+            except OSError:
+                pass
+        server.detach()
+        if ctrl:
+            if motion_on:
+                try:
+                    motion.disable(ctrl)
+                except OSError:
+                    pass
+            try:
+                effects.clear_all(ctrl)
+            except OSError:
+                pass
+            ctrl.close()
+
+
+if __name__ == "__main__":
+    main()

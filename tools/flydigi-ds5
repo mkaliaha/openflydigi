@@ -67,9 +67,10 @@ def main():
     signal.signal(signal.SIGTERM, _terminate)
     signal.signal(signal.SIGHUP, _terminate)
 
-    path, name = evdev.find_device(vendor=FLYDIGI_VID, product=FLYDIGI_PID)
+    path, name = evdev.find_device(vendor=FLYDIGI_VID, product=FLYDIGI_PID,
+                                   axes=True)
     if not path:
-        path, name = evdev.find_device(name="Apex")
+        path, name = evdev.find_device(name="Apex", axes=True)
     if not path:
         sys.exit("Apex 5 gamepad not found in /dev/input -- is it connected?")
     log(f"input: {name} ({path})")
