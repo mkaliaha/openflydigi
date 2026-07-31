@@ -283,10 +283,21 @@ routes. Wording was fixed; the numbers still cannot be edited from the GUI, only
 **The persistent form exists, and it is settled** — see J4 in
 [findings-profile-blob.md](findings-profile-blob.md). The profile blob's force-trigger section holds
 a `bind` sub-struct at **offset 185** + 20 per side of `type, filter, scale + 5 params`, against live
-command 82's `bindType, filter, scale + 4 params`: the same structure with one spare byte. So an
-editor can write the bind into the profile and have it survive a sleep, instead of being re-applied
-every session. That is the work remaining here — today the Games page applies a preset with live
-command 82, which the pad forgets when it sleeps.
+command 82's `bindType, filter, scale + 4 params`: the same structure with one spare byte. It is
+where a *profile's* own Vibration effect belongs — Space Station's stored trigger type 5 — and
+`MappingConfig.set_trigger_effect(..., bind=)` already writes it.
+
+**It is not, however, where a per-game preset belongs, and Space Station agrees.** Their game path
+is `ControllerBusinessService.OnTriggerBindGrip` → `UpdateAdapterTriggerConfig(left, right)` →
+`SetForceTriggerConfig(..., onlyPreview: true)`: a live 82 per side, no config bean touched, nothing
+written or saved. The only bind they store is the profile's, and even that they do not trust the pad
+to re-arm — `OnAppliedConfigRead` rebuilds a live 82 from the stored bytes 500 ms after every
+applied-config read, including the `fromDeviceChanged: true` one on reconnect. Store and replay.
+
+So what the Games page was missing was never the storage. It was the replay: the pad leaves the USB
+bus when it sleeps, the vibration route leaves no driver running to notice, and the game played on
+with loose triggers. `tools/flydigid` now does the reconnect half —
+[findings-games.md](findings-games.md).
 
 ## RGB: not working via the test command
 

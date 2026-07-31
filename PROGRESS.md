@@ -61,17 +61,13 @@ Roughly in order of value. Each is a fresh-context-sized piece of work.
     writes the curve block at 123, which on an Apex 5 Space Station never shows — so it is very
     likely writing where this pad does not read. One piece of work: add the start/end pair, then
     verify the dead zone by feel or drop it. → [docs/findings-profile-blob.md](docs/findings-profile-blob.md)
- 2. **Persist the vibration bind.** The stored form is settled — same structure as live command 82
-    with one spare byte — so a per-game preset can survive a sleep instead of being re-applied.
-    Today the Games page applies it with live 82, which the pad forgets.
-    → [docs/device-settings.md](docs/device-settings.md)
- 3. **Gyro mapped to a stick (J2).** Offset 137, 8 bytes, smoothing curve at 830. Works in any game
+ 2. **Gyro mapped to a stick (J2).** Offset 137, 8 bytes, smoothing curve at 830. Works in any game
     with nothing running, which on Linux is otherwise Steam Input only.
- 4. **The charging dock.** The gen-2 dock is on the desk; blocked only on decompiling
+ 3. **The charging dock.** The gen-2 dock is on the desk; blocked only on decompiling
     `Flydigi.ChargerSdk.dll` / `Flydigi.CoolerSdk.dll`. It is a *lighting* problem, not a screen
     one — 162 addressable LEDs over the ordinary config path, and `cd2_led_sync` keeps it in step
     with the pad. → [docs/findings-other-devices.md](docs/findings-other-devices.md)
- 5. **Multiple pads.** A Vader 4 Pro is on the desk. **The device-type guard is built** —
+ 4. **Multiple pads.** A Vader 4 Pro is on the desk. **The device-type guard is built** —
     `flydigi/identity.py` reads command 1 and refuses anything that is not a k5, and the app, the
     mapping CLI and the settings CLI all go through it, so an Apex 5 config can no longer reach a
     Vader. What remains is driving the Vader deliberately, which `identity.require(ctrl, "f4")`
@@ -81,7 +77,7 @@ Roughly in order of value. Each is a fresh-context-sized piece of work.
     `IsSupportTriggerVibration` is a Vader flag and this pad has no such motors. The Vader is
     likewise the machine for the ADC calibration command, which `GenerateControllerVader4` is the
     only factory to set. → [docs/findings-profile-blob.md](docs/findings-profile-blob.md) J5
- 6. **An interactive crop for the Screen page.** Everything else there is done.
+ 5. **An interactive crop for the Screen page.** Everything else there is done.
 
 **Small, testable, an afternoon each.** These came out of diffing Space Station's own English locale
 file — its complete user-facing string set — and the 22 factories in `command.setting/` against what
@@ -120,6 +116,19 @@ Whether the firmware accepts 164/165 aimed at a slot it is not running. What the
 toggle does (19 sub 2): the pad reports it supported *and* on, and the NewXInput command exists for
 our mode — it is Flydigi's own wrapper that declines to send it — so sending it and watching whether
 Home still reaches evdev costs one line.
+
+**The vibration bind is re-applied when the pad comes back, and that is the whole of what was
+owed.** "Persist the vibration bind" used to sit in this list on the theory that the stored form
+at offset 185 would let a per-game preset survive a sleep. Space Station does not work that way and
+does not need to: its game presets go through `OnTriggerBindGrip` → live command 82 with no blob
+write at all, exactly as our Games page does, and the only bind it stores is the user's own
+per-profile choice — which it then *re-sends* as a live 82 five hundred milliseconds after every
+applied-config read, including the one that fires on reconnect. Store-and-replay, not store-and-trust.
+So the gap was never storage; it was that nothing re-asserted the bind after the pad left the bus
+mid-game, since the vibration route by design leaves no driver running to notice. `tools/flydigid`
+now watches for that and re-applies once the pad is back, retrying each poll until it takes.
+`--reassert` stays what it was, a timer for Steam Input clobbering our state, and is still off by
+default. → [docs/findings-games.md](docs/findings-games.md)
 
 **Haptic audio: working.** A game writes haptics to a virtual DualSense, and the Apex 5's motors
 reproduce them. Nothing else does this -- every other project either uses real hardware or emulates
@@ -277,6 +286,16 @@ in `gui/` is [gui/README.md](gui/README.md).
     difference.** Mode 2 vibrates on press with the bind suppressed and is settled. Mode 5 is not:
     see PROTOCOL.md §3a. Note that mode 5 ACKs and visibly seats the triggers either way, so "the
     pad took it" is not evidence that it does anything.
+  * **Stored trigger type 5 is *not* a Vader feature, unlike the control sitting next to it.**
+    Worth checking because the Feedback lighting mode was exactly that, but the gate is not there:
+    Space Station's trigger-mode picker emits all six modes with no `deviceCode` test on any of
+    them, and the only device gating in that tab is `supportAdaptTrigger`, which hides the whole
+    box. What *is* Vader-only is the neighbouring block in the same panel — the one whose string
+    keys are literally `trigger_vibration_f4_*` — and it is a different structure entirely:
+    `vibrationTriggerConfigParam` (→ `SaveTriggerVibrationConfig`, the trigger *motors*, J5 at
+    offset 154, gated on `IsSupportTriggerVibration`) rather than `adapterTriggerConfigParam`,
+    where type 5 lives. Two features, adjacent in one UI, one of them ours. And stored type 5 is
+    live here in the only sense that matters: it becomes command **82**, which is tier 1.
   * **hidraw replies go to every reader of the node.** An ACK you receive is not necessarily an
     answer to anything you sent — hence `Controller.claim()` and the drain before each write.
   * **`flock` attaches to the open file description, not the fd or the process.** A `dup`'d handle

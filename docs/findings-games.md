@@ -141,6 +141,18 @@ wrong game's memory config, and its own entry — a different route entirely —
 Verified after the fix by running a process named `tll` with the daemon up; it applied Lost
 Legacy's vibration preset and cleared it on exit. `tests/test_games.py` guards all four clashes.
 
+**The daemon re-applies a vibration bind when the pad comes back.** The bind is live state — command
+82, held in controller state until something changes it — so it does not survive the pad leaving the
+USB bus, which is what a sleeping Apex 5 does. Every other route has a driver holding the pad and
+therefore fails loudly; the vibration route deliberately has nothing running, so a mid-game sleep
+used to end with the game still up, auto mode still "active", and the triggers loose until the game
+was restarted. `flydigid` now checks presence each poll while a vibration game is active (a
+`find_device()` that opens nothing), logs the pad leaving, and re-applies the preset once it is back,
+retrying each poll until a write takes. This is Space Station's own arrangement narrowed to the one
+route that needs it: they rebuild a live 82 from the stored bind after every applied-config read,
+reconnect included (`OnAppliedConfigRead`, `fromDeviceChanged: true`). Distinct from `--reassert`,
+which is a timer against Steam Input overwriting our state and stays off by default.
+
 So 1 Hz is enough and `flydigid`'s approach is already the right one. Two things they do not have
 to deal with that we do: Proton wrappers carrying the game's path in their cmdline (see
 `monitor.find_process`, which requires the PE to actually be mapped), and no equivalent of their

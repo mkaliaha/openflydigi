@@ -25,7 +25,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from flydigi import effects, games, monitor, prefs  # noqa: E402
-from flydigi.device import Controller, DeviceNotFound  # noqa: E402
+from flydigi.device import Controller, DeviceNotFound, find_device  # noqa: E402
 
 
 def log(msg):
@@ -310,6 +310,20 @@ class Driver:
         return self.proc is not None and self.proc.poll() is None
 
 
+def pad_present():
+    """Whether the pad is on the bus at all.
+
+    A sleeping Apex 5 leaves USB entirely, so this is also how "the pad went
+    to sleep mid-game" looks. Costs two small reads per hidraw node and opens
+    nothing, so it is cheap enough for the poll loop.
+    """
+    try:
+        find_device()
+        return True
+    except DeviceNotFound:
+        return False
+
+
 def clear_triggers():
     """Put the triggers back. Named apart from Scanner.reset, which is unrelated."""
     try:
@@ -338,6 +352,8 @@ def main():
     driver = Driver()
     active = None
     last_assert = 0.0
+    pad_up = True
+    armed = True
     ignored = set()
     unsupported = set()
     waiting = set()
@@ -385,6 +401,7 @@ def main():
                     if apply_for(game, route):
                         active = game
                         last_assert = time.time()
+                        pad_up = armed = True
                 elif argv is not None:
                     if route in NEEDS_GAME_PROCESS and game_pid is None:
                         # Only the launcher chain is up so far. Starting the
@@ -397,6 +414,7 @@ def main():
                     elif driver.start(game, argv):
                         active = game
                         waiting.discard(key)
+                        pad_up = armed = True
                 elif key not in unsupported:
                     unsupported.add(key)
                     # Says which part is missing. The drivers themselves are
@@ -406,6 +424,7 @@ def main():
                         f"'{route}' route — start it before the game "
                         f"(see tools/flydigi-run)")
         else:
+            route = settings.route(active)
             if driver.died():
                 # The driver is gone but the game is not: do not restart it in
                 # a loop, since a config whose offsets a patch broke would fail
@@ -414,9 +433,32 @@ def main():
                     "run the driver by hand to see why")
                 clear_triggers()
                 active = None
-            elif args.reassert and time.time() - last_assert >= args.reassert:
-                apply_for(active, settings.route(active))
-                last_assert = time.time()
+            else:
+                # The vibration route leaves nothing running, so nothing would
+                # notice the pad sleeping mid-game. A bind is live state --
+                # command 82, not something the profile carries -- so it does
+                # not come back with the pad, and the game plays on with loose
+                # triggers. Space Station re-sends its own bind after every
+                # reconnect; this is that, narrowed to the route that needs it.
+                # The other routes have a driver holding the pad, which is a
+                # louder failure and its own problem.
+                if route == "vibration":
+                    present = pad_present()
+                    if present != pad_up:
+                        pad_up = present
+                        log(f"{active.get('enGameName')}: pad " + (
+                            "is back — re-applying the bind" if present
+                            else "left the bus (asleep, or unplugged)"))
+                        armed = armed and present
+                    # Retried each poll until it takes: a pad that has just
+                    # re-enumerated can still refuse the first write.
+                    if present and not armed and apply_for(active, route):
+                        armed = True
+                        last_assert = time.time()
+                if args.reassert and pad_up and (
+                        time.time() - last_assert >= args.reassert):
+                    apply_for(active, route)
+                    last_assert = time.time()
 
         time.sleep(args.interval)
 
