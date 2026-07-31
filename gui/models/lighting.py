@@ -176,7 +176,7 @@ class LightingModel(QObject):
     effectChanged = Signal()
     brightnessChanged = Signal()
     cycleTimeChanged = Signal()
-    clickFeedbackChanged = Signal()
+    gripSyncChanged = Signal()
     infoChanged = Signal()
 
     # (blob, previous, save) -- what the worker's write_lighting slot takes.
@@ -288,19 +288,25 @@ class LightingModel(QObject):
     def speedMax(self):
         return CYCLE_MAX
 
-    @Property(bool, notify=clickFeedbackChanged)
-    def clickFeedback(self):
-        return bool(self._edited.click_feedback) if self._edited else False
+    @Property(bool, notify=gripSyncChanged)
+    def gripSync(self):
+        """The lighting's reaction to vibration -- LED-blob byte 9.
 
-    @clickFeedback.setter
-    def clickFeedback(self, value):
+        This was bound to byte 2 for its whole life, under the name "React to
+        rumble". Byte 2 is inert on this pad; byte 9 is the one that measurably
+        dims the ring while a motor runs. See flydigi/lighting.py.
+        """
+        return bool(self._edited.grip_sync) if self._edited else False
+
+    @gripSync.setter
+    def gripSync(self, value):
         if self._edited is None:
             return
         value = bool(value)
-        if bool(self._edited.click_feedback) == value:
+        if bool(self._edited.grip_sync) == value:
             return
-        self._edited.click_feedback = value
-        self.clickFeedbackChanged.emit()
+        self._edited.grip_sync = value
+        self.gripSyncChanged.emit()
         self._mark()
 
     # -- loading and writing -----------------------------------------------
@@ -321,7 +327,7 @@ class LightingModel(QObject):
             "generator — choosing an effect rewrites the frames it plays.")
         for signal in (self.loadedChanged, self.effectChanged,
                        self.brightnessChanged, self.cycleTimeChanged,
-                       self.clickFeedbackChanged, self.infoChanged):
+                       self.gripSyncChanged, self.infoChanged):
             signal.emit()
         self._mark()
 

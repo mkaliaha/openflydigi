@@ -13,7 +13,7 @@ Moved exactly like a mapping profile, with its own command ids:
 **Blob layout**, verified against hardware (380 bytes, 19 packets):
 
     0..2   version, little endian (0x0300 seen)
-    2      click feedback -- light reacts to rumble
+    2      click feedback -- set when the mode is Feedback; see below
     3      loop start frame
     4      loop end frame
     5      cycle time -- Space Station calls this "Cycle time", so a
@@ -21,7 +21,9 @@ Moved exactly like a mapping profile, with its own command ids:
     6      brightness
     7      LED count (12 on an Apex 5)
     8      mode
-    9..20  reserved
+    9      grip sync -- the lights react to vibration. **This is the rumble
+           switch**, and byte 2 is not; both are measured, see below
+    10..20 reserved
     20..   animation frames of `LED count` LEDs, 3 bytes each, RGB
            (10 frames x 12 LEDs on an Apex 5 -- see below)
 
@@ -32,6 +34,17 @@ computes the frames from them before uploading, so the `mode` byte only records
 which of its modes produced the data. Writing a different mode number changes
 nothing visible -- to change the lighting you have to write frames, which is
 what `set_breath`, `set_flow`, `set_rainbow` and `set_solid` do.
+
+**The rumble switch is byte 9, and this module had it at byte 2 for its whole
+life.** Byte 9 is `GripSync`, which Flydigi call "Vibration light effect", and it
+is the one that works: at a fixed brightness, with the same left-grip rumble and
+nothing else changed, the ring dimmed a segment with it set and did nothing with
+it clear. Byte 2 is `ClickFeedback`, which Space Station sets *because* the mode
+is Feedback rather than as a control of its own -- and setting it alone over the
+pad's stock frames produced no reaction to any button, paddle, stick or trigger,
+with third-party control on and again off. It is kept because it is a real field
+a Feedback-mode writer would need, not because it does anything by itself.
+-> docs/device-settings.md
 """
 from . import blobs
 from .blobs import ProtocolError, build          # re-exported for callers
@@ -48,6 +61,7 @@ OFF_LOOP_TIME = 5      # "cycle time": bigger is slower
 OFF_BRIGHTNESS = 6
 OFF_LED_COUNT = 7
 OFF_MODE = 8
+OFF_GRIP_SYNC = 9
 OFF_FRAMES = 20
 
 BRIGHTNESS_MAX = 100
@@ -169,11 +183,38 @@ class LedConfig:
         return self.blob[OFF_LED_COUNT]
 
     @property
-    def click_feedback(self):
-        """Whether the lighting reacts to rumble.
+    def grip_sync(self):
+        """Whether the lighting reacts to vibration. Flydigi: "Vibration light
+        effect", "there will be a special light effect when the grip vibrates".
 
-        Worth knowing about: with this on, the pad drives the LEDs itself in
-        response to vibration, which can mask a colour set from the host.
+        The real switch, and measured: with the same rumble at the same
+        brightness, the ring dims a segment with this set and does nothing with
+        it clear. Which segment did not reproduce between runs, so the side
+        mapping is open -- see docs/device-settings.md.
+
+        It lives at byte 9, inside what this module used to call reserved, which
+        is why `click_feedback` wore the label for so long.
+        """
+        return self.blob[OFF_GRIP_SYNC] == 1
+
+    @grip_sync.setter
+    def grip_sync(self, value):
+        self.blob[OFF_GRIP_SYNC] = 1 if value else 0
+
+    @property
+    def click_feedback(self):
+        """Byte 2. **Not the rumble switch** -- that is `grip_sync`.
+
+        Space Station sets this exactly when the chosen mode is `Feedback`
+        (`ClickFeedback = config.Mode == LedType.Feedback`), so it is a record of
+        the generator rather than a control. Set on its own over the pad's stock
+        frames it did nothing for any button, paddle, stick or trigger, with
+        third-party control on and again off.
+
+        Kept because a writer that reproduced Space Station's Feedback mode
+        would need it -- that mode is byte 2 set, the one colour in frame 0,
+        every other frame black and `loop_end = 1`, and what the pad then does
+        is still unknown.
         """
         return self.blob[OFF_CLICK_FEEDBACK] == 1
 

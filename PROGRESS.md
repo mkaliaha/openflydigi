@@ -87,10 +87,6 @@ file — its complete user-facing string set — and the 22 factories in `comman
 we ship. Every one is verifiable on the hardware here, and several were already written up in
 [docs/device-settings.md](docs/device-settings.md) without ever reaching this index.
 
-  * **Put the vibration light effect on the Lighting page, and take "React to rumble" off it.**
-    LED-blob byte **9** is the switch and it is measured working; byte 2, which the page writes
-    today, does nothing on its own. `lighting.py` treats `9..20` as reserved, so this is an accessor,
-    a relabel and a line of GUI. → [docs/device-settings.md](docs/device-settings.md)
   * **Restore a profile slot to factory** — `ResetMappingConfigByCfgId`, command **175** (S1). The
     Buttons page's "reset all" only clears key mappings in the in-memory blob; Space Station's
     resets the whole slot on the pad. It is also the only repair for a blob written into 123..137,
@@ -200,7 +196,7 @@ All command factories are decompiled under `decompiled/Flydigi.ControllerSdk/`.
 | Macros, played by the pad | the profile's macro page at 230, plus 162 to make one live | `flydigi/mapping.py`, `flydigi/macros.py` (the recorder), GUI — [detail](docs/findings-profile-blob.md) |
 | Live trigger effects, all six | 81, 82 | `flydigi/effects.py` — [PROTOCOL.md](PROTOCOL.md) §3a |
 | Device settings | read 3, write 19 by sub-id, 20/21/22/23, restart 29 | `flydigi/settings.py`, `tools/flydigi-settings`, GUI — [detail](docs/device-settings.md) |
-| RGB lighting | read 167, write 168/169 | `flydigi/lighting.py`, GUI |
+| RGB lighting | read 167, write 168/169 | `flydigi/lighting.py`, GUI — including the vibration light effect at blob byte 9 |
 | The screen | 31 + UART OTA over CDC; `TestScreen` 242; 19/9 and 19/8 | `flydigi/screen_ota.py` — [detail](docs/findings-screen.md) |
 | Arbitration between our own writers | advisory `flock` on the node | `Controller.claim()` — [detail](docs/findings-steam.md) |
 | Third-party takeover toggle | read 16, write 17 | `flydigi/motion.py`, GUI — [detail](docs/findings-steam.md) |
@@ -257,6 +253,14 @@ in `gui/` is [gui/README.md](gui/README.md).
   * **Never match a game process by cmdline alone** — Steam/Proton wrappers (`reaper`, `bwrap`,
     `pv-adverb`, `steam.exe`) all carry the game's path. Require the PE to be mapped.
   * **Effects persist in controller state** until changed; there is no timeout.
+  * **A trigger command addressed to `Both` (side 3) does nothing.** It is in Flydigi's own
+    `ForceTriggerSide` enum, it ACKs like everything else, and the triggers stay loose. Measured with
+    rumble pulses marking the phases so they could not be confused: `side=3` at full resistance gave
+    nothing, twice, while `side=1` and `side=2` sent separately gave resistance every time in
+    between. Flydigi never send it either — `SetForceTriggerConfigImpl` takes a left config and a
+    right config and issues two commands. **One command per trigger.** Everything here already does
+    that, so nothing shipped was broken; `device.SIDE_BOTH` is an unused constant and a trap, and it
+    cost most of a debugging session posing as "third-party mode breaks adaptive triggers".
   * **Trigger effects 2 and 3 are named the other way round by Flydigi's own UI.** The SDK enum
     says `Sniper=2, Recoil=3`; Space Station's picker shows mode 2 as "Recoil" (zh 机枪, machine
     gun) and mode 3 as "Sniper" (狙击), and the behaviour follows the label — 2 rattles, 3 breaks
@@ -339,9 +343,11 @@ in `gui/` is [gui/README.md](gui/README.md).
     brightness 80 with only that byte differing, and the ring dimmed a segment with it on and did
     nothing with it off. Byte 2 is `ClickFeedback`, which Space Station sets *because* the mode is
     Feedback rather than as a control of its own, and setting it alone over the stock frames did
-    nothing for any button, paddle, stick or trigger, third-party control on or off. **So
-    `lighting.py`'s "click feedback — light reacts to rumble" and the Lighting page's "React to
-    rumble" are both on the wrong byte.** → [docs/device-settings.md](docs/device-settings.md)
+    nothing for any button, paddle, stick or trigger, third-party control on or off. The switch has
+    been moved: `LedConfig.grip_sync` writes byte 9 and the Lighting page says **"Vibration light
+    effect"**, Flydigi's own name for it. `click_feedback` stays as an accessor, since a writer
+    reproducing their Feedback mode would need it, but nothing binds to it.
+    → [docs/device-settings.md](docs/device-settings.md)
   * **Lighting effects are frame data, not a mode byte.** The pad has no animation generator; it
     plays the stored frames. Space Station computes them from (mode, colours) and uploads them, so
     writing a different mode number alone changes nothing visible.

@@ -327,9 +327,10 @@ lightbar bytes themselves are already parsed (`data[45..47]` of the DS5 output r
 
 ### Byte 9 is the vibration light effect and it works; byte 2 is not, and does nothing alone
 
-Two bytes near each other, both about the lighting reacting to something, and this project has them
-confused: `flydigi/lighting.py` calls byte **2** "click feedback — light reacts to rumble" and the
-app's Lighting page labels it **"React to rumble"**. Both are on the wrong byte.
+Two bytes near each other, both about the lighting reacting to something, and this project had them
+confused for its whole life: `flydigi/lighting.py` called byte **2** "click feedback — light reacts
+to rumble" and the app's Lighting page labelled it **"React to rumble"**. Both were on the wrong
+byte. **Fixed**: `LedConfig.grip_sync` writes byte 9 and the page now says "Vibration light effect".
 
 **Byte 9 is `GripSync`.** Flydigi's own English string for it is **"Vibration light effect"**,
 described as "There will be a special light effect when the grip vibrates". `LedConfigParser`'s v3.0
@@ -361,11 +362,16 @@ paddles, C/Z, stick clicks and stick movement — with third-party control **on,
 off** so the gamepad report was definitely live. No reaction of any kind. Rumble and a live
 trigger-vibration effect produced only the byte-9 dimming above.
 
-So byte 2 is not a rumble switch, and by itself it is not a click switch either. What is **not**
-tested is whether it does anything sent the way Space Station sends it: mode byte 4, one colour in
-frame 0, every other frame black, `loop_end = 1`. That is the experiment that would settle what
-"Feedback" means, and it needs the whole frame set rather than the flag. None of the twelve locales
-carries a description for the mode — just the bare word.
+So byte 2 is not a rumble switch, and by itself it is not a click switch either. It is kept as an
+accessor, because a writer reproducing Space Station's Feedback mode would need it, and nothing
+binds to it.
+
+**What "Feedback" actually is remains open.** What is not tested is whether byte 2 does anything sent
+the way Space Station sends it: mode byte 4, one colour in frame 0, every other frame black,
+`loop_end = 1`. That needs the whole frame set rather than the flag, and it overwrites whatever
+lighting is on the pad. None of the twelve locales carries a description for the mode — just the bare
+word — so the cheapest answer is not on this side at all: **watch Space Station drive it on Windows**
+and see what the ring does. Until then, treat the mode as unexplained rather than as understood.
 
 
 ## Command inventory, by feature

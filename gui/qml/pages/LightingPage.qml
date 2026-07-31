@@ -123,13 +123,21 @@ Kirigami.ScrollablePage {
 
             FormCard.FormDelegateSeparator {}
 
+            // Flydigi's own name for it, rather than one invented here: their
+            // string is "Vibration light effect", described as "there will be a
+            // special light effect when the grip vibrates".
+            //
+            // This switch spent its whole life bound to the wrong byte, under
+            // "React to rumble", writing byte 2 -- which is inert on this pad.
+            // Byte 9 is the one that measurably dims the ring while a motor
+            // runs. See docs/device-settings.md for the measurement.
             FormCard.FormSwitchDelegate {
-                objectName: "clickFeedback"
-                text: "React to rumble"
-                description: "With this on the pad drives the lights from "
-                             + "vibration itself, which can override a colour set here."
-                checked: App.lighting.clickFeedback
-                onToggled: App.lighting.clickFeedback = checked
+                objectName: "gripSync"
+                text: "Vibration light effect"
+                description: "The pad dims part of the ring while a grip motor "
+                             + "runs, on top of whatever effect is playing."
+                checked: App.lighting.gripSync
+                onToggled: App.lighting.gripSync = checked
             }
         }
 

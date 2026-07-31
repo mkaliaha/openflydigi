@@ -110,6 +110,17 @@ Effect vocabulary — `params[0]`=side, `params[1]`=mode:
 
 `ForceTriggerSide { Left=1, Right=2, Both=3 }`
 
+**`Both=3` is in the enum and the pad ignores it.** Measured on a wired Apex 5 with rumble pulses
+marking each phase, so the phases could not be confused: one command with `side=3` at full
+resistance produced **no resistance at all**, twice, while two commands with `side=1` and `side=2`
+between them produced it every time. All three ACKed — this is the pad's usual answer, where a reply
+means the firmware parsed the shape of what you sent and nothing more.
+
+Flydigi corroborate it by construction: `SetForceTriggerConfigImpl` takes a *left* config and a
+*right* config and sends **two separate commands**, so `side=3` is a value their own code never
+produces. **Send one command per trigger.** `device.SIDE_BOTH` exists because the enum has it, and
+nothing in this repository uses it.
+
 | Effect | mode | params after `side, mode` |
 |---|---|---|
 | `Normal` | 0 | — |

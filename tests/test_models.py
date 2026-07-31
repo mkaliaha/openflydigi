@@ -697,11 +697,31 @@ def test_brightness_and_speed_write_through():
     check("editing lighting marks dirty", model.dirty)
 
 
-def test_click_feedback_toggles():
+def test_the_vibration_light_effect_is_byte_nine():
+    """The switch spent its life on byte 2, which does nothing on this pad.
+
+    Asserted against the blob offset rather than the accessor, because the whole
+    defect was an accessor pointing one field away from the one that works.
+    """
+    from flydigi import lighting as led_backend
+
     model = make_lighting()
-    model.clickFeedback = True
-    check("react-to-rumble reaches the config", model._edited.click_feedback)
+    check("the fake pad ships with it on, as the real one does", model.gripSync)
+    check("and a freshly read config is clean", not model.dirty)
+
+    model.gripSync = False
+    check("turning it off reaches byte 9",
+          model._edited.blob[led_backend.OFF_GRIP_SYNC] == 0)
+    check("and leaves byte 2 alone",
+          model._edited.blob[led_backend.OFF_CLICK_FEEDBACK] == 0)
+    check("the accessor agrees", not model._edited.grip_sync)
     check("toggling it marks dirty", model.dirty)
+
+    model.gripSync = True
+    check("and back on lands on byte 9 again",
+          model._edited.blob[led_backend.OFF_GRIP_SYNC] == 1)
+    check("byte 2 never moved",
+          model._edited.blob[led_backend.OFF_CLICK_FEEDBACK] == 0)
 
 
 def test_colour_list_respects_what_the_effect_allows():
@@ -1644,7 +1664,7 @@ def main():
                  test_lighting_loads_clean,
                  test_choosing_an_effect_rewrites_the_frames,
                  test_brightness_and_speed_write_through,
-                 test_click_feedback_toggles,
+                 test_the_vibration_light_effect_is_byte_nine,
                  test_colour_list_respects_what_the_effect_allows,
                  test_rainbow_and_off_use_no_colours,
                  test_colours_cross_the_boundary_as_hex,

@@ -51,6 +51,13 @@ CMD_K6_TRIGGER_REALTIME = 87
 
 SIDE_LEFT = 1
 SIDE_RIGHT = 2
+# **The pad ignores this one.** It is in Flydigi's `ForceTriggerSide` enum, and a
+# trigger command carrying it ACKs and does nothing -- measured at full
+# resistance with rumble pulses marking the phases, twice, against per-side
+# commands that worked every time in between. Their own SDK never produces it
+# either: `SetForceTriggerConfigImpl` takes a left config and a right config and
+# sends two commands. So send one command per trigger; everything in this
+# repository does, which is why the trap went unnoticed for so long.
 SIDE_BOTH = 3
 
 # How long to wait for another process to finish its exchange. Generous on

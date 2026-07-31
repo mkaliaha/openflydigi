@@ -73,6 +73,9 @@ class FakePad:
         self.led_blob[lighting.OFF_LED_COUNT] = 12
         self.led_blob[lighting.OFF_MODE] = 7
         self.led_blob[lighting.OFF_CLICK_FEEDBACK] = 0
+        # On, as the pad on the desk reports it -- the vibration light effect
+        # ships enabled, which is part of why it went unnoticed for so long.
+        self.led_blob[lighting.OFF_GRIP_SYNC] = 1
         self.led_blob[lighting.OFF_LOOP_START] = 0
         self.led_blob[lighting.OFF_LOOP_END] = 9
         self.led_blob[lighting.OFF_LOOP_TIME] = 4
