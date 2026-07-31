@@ -87,6 +87,10 @@ file — its complete user-facing string set — and the 22 factories in `comman
 we ship. Every one is verifiable on the hardware here, and several were already written up in
 [docs/device-settings.md](docs/device-settings.md) without ever reaching this index.
 
+  * **Put the vibration light effect on the Lighting page, and take "React to rumble" off it.**
+    LED-blob byte **9** is the switch and it is measured working; byte 2, which the page writes
+    today, does nothing on its own. `lighting.py` treats `9..20` as reserved, so this is an accessor,
+    a relabel and a line of GUI. → [docs/device-settings.md](docs/device-settings.md)
   * **Restore a profile slot to factory** — `ResetMappingConfigByCfgId`, command **175** (S1). The
     Buttons page's "reset all" only clears key mappings in the in-memory blob; Space Station's
     resets the whole slot on the pad. It is also the only repair for a blob written into 123..137,
@@ -330,6 +334,14 @@ in `gui/` is [gui/README.md](gui/README.md).
     per slot with no side effect at all.
   * **The config commands are checksummed and the trigger-effect commands are not.** A mapping or
     lighting packet with a bad checksum gets no reply — the pad stays silent rather than erroring.
+  * **The lighting's rumble reaction is LED-blob byte 9, not byte 2** — `GripSync`, whose own
+    English string is "Vibration light effect". Pinned on hardware: identical left-grip rumble at
+    brightness 80 with only that byte differing, and the ring dimmed a segment with it on and did
+    nothing with it off. Byte 2 is `ClickFeedback`, which Space Station sets *because* the mode is
+    Feedback rather than as a control of its own, and setting it alone over the stock frames did
+    nothing for any button, paddle, stick or trigger, third-party control on or off. **So
+    `lighting.py`'s "click feedback — light reacts to rumble" and the Lighting page's "React to
+    rumble" are both on the wrong byte.** → [docs/device-settings.md](docs/device-settings.md)
   * **Lighting effects are frame data, not a mode byte.** The pad has no animation generator; it
     plays the stored frames. Space Station computes them from (mode, colours) and uploads them, so
     writing a different mode number alone changes nothing visible.

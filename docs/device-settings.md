@@ -325,6 +325,48 @@ visible. Changing the lighting means **writing frames**, which is what `set_brea
 So bridging the DualSense lightbar to the pad is a frame write (`set_solid`), not a mode write. The
 lightbar bytes themselves are already parsed (`data[45..47]` of the DS5 output report).
 
+### Byte 9 is the vibration light effect and it works; byte 2 is not, and does nothing alone
+
+Two bytes near each other, both about the lighting reacting to something, and this project has them
+confused: `flydigi/lighting.py` calls byte **2** "click feedback — light reacts to rumble" and the
+app's Lighting page labels it **"React to rumble"**. Both are on the wrong byte.
+
+**Byte 9 is `GripSync`.** Flydigi's own English string for it is **"Vibration light effect"**,
+described as "There will be a special light effect when the grip vibrates". `LedConfigParser`'s v3.0
+branch reads it at index 9 — inside the `9..20 reserved` range this module never touched, and set to
+**1** on the pad here all along.
+
+**Measured, with the causality pinned.** Brightness raised to 80 so nothing subtle could be missed,
+the same left-grip-only rumble run twice, and *only byte 9 differing* between the two:
+
+| byte 9 | what the ring did while the motor ran |
+|---|---|
+| 0 | nothing at all |
+| 1 | **a segment of the bar dimmed**, and came back when the rumble stopped |
+
+An earlier pass at brightness 20 saw the same dimming. Which segment dims did not reproduce between
+runs — left in one, right in another, not obviously following the motor that was running — so the
+side mapping is open. That the effect exists, and that byte 9 is what causes it, is not.
+
+**Byte 2 is `ClickFeedback`, and Space Station sets it as a consequence rather than as a control**:
+`configBean.ClickFeedback = config.Mode == LedType.Feedback` — true exactly when the user picks the
+**Feedback** lighting mode, `LedType` 4 of `Unknown, Flow, Breath, Gradient, Feedback, On, Close,
+Default`. Feedback and `On` generate byte-identical frames — the one chosen colour in frame 0 and
+every other frame black, since the v3 builder blacks out `frame != 0` for both — so the only wire
+difference between the two modes is byte 2 and `loop_end` (1 for Feedback, 0 for On).
+
+**Setting byte 2 on its own does nothing on this pad.** Written as a one-packet diff over the pad's
+stock Default frames, read back as 1, then exercised against face buttons, shoulders, triggers,
+paddles, C/Z, stick clicks and stick movement — with third-party control **on, and again with it
+off** so the gamepad report was definitely live. No reaction of any kind. Rumble and a live
+trigger-vibration effect produced only the byte-9 dimming above.
+
+So byte 2 is not a rumble switch, and by itself it is not a click switch either. What is **not**
+tested is whether it does anything sent the way Space Station sends it: mode byte 4, one colour in
+frame 0, every other frame black, `loop_end = 1`. That is the experiment that would settle what
+"Feedback" means, and it needs the whole frame set rather than the flag. None of the twelve locales
+carries a description for the mode — just the bare word.
+
 
 ## Command inventory, by feature
 
