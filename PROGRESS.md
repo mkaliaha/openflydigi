@@ -16,9 +16,8 @@ remapping, macros, sticks, vibration, per-profile trigger effects, the pad's own
 lighting, the screen, the game list and its own setup. The daemon detects a running game and applies
 its route unattended.
 
-**Left to build, in size order: the charging dock** — plus the device-type guard, which is a safety
-item rather than polish, and a group of small pieces that are an afternoon each, all listed in
-What's next.
+**Left to build, in size order: the charging dock** — plus a group of small pieces that are an
+afternoon each, all listed in What's next. The device-type guard is done.
 
 | Tier | Mechanism | Games | Validated in |
 |---|---|---|---|
@@ -72,9 +71,11 @@ Roughly in order of value. Each is a fresh-context-sized piece of work.
     `Flydigi.ChargerSdk.dll` / `Flydigi.CoolerSdk.dll`. It is a *lighting* problem, not a screen
     one — 162 addressable LEDs over the ordinary config path, and `cd2_led_sync` keeps it in step
     with the pad. → [docs/findings-other-devices.md](docs/findings-other-devices.md)
- 5. **Multiple pads.** A Vader 4 Pro is on the desk. The prerequisite is the device-type guard:
-    `flydigi/device.py` matches on vendor id plus report-descriptor prefix today, neither of which
-    tells the models apart, so it would happily write an Apex 5 config to a Vader. It also unlocks
+ 5. **Multiple pads.** A Vader 4 Pro is on the desk. **The device-type guard is built** —
+    `flydigi/identity.py` reads command 1 and refuses anything that is not a k5, and the app, the
+    mapping CLI and the settings CLI all go through it, so an Apex 5 config can no longer reach a
+    Vader. What remains is driving the Vader deliberately, which `identity.require(ctrl, "f4")`
+    already allows. It also unlocks
     work that is already written: the **trigger-vibration editor** (J5, offset 154) is in
     `MappingConfig.trigger_motor()` with the layout asserted in tests and no UI, because
     `IsSupportTriggerVibration` is a Vader flag and this pad has no such motors. The Vader is
@@ -348,6 +349,27 @@ in `gui/` is [gui/README.md](gui/README.md).
     effect"**, Flydigi's own name for it. `click_feedback` stays as an accessor, since a writer
     reproducing their Feedback mode would need it, but nothing binds to it.
     → [docs/device-settings.md](docs/device-settings.md)
+  * **The Feedback lighting mode is a Vader feature, and is unreachable on an Apex 5.**
+    `GetDefaultLedConfigsByDevice` adds `LedType.Feedback` to the picker **only** when
+    `deviceCode == "f4"`, so Space Station never offers it for a k5. That is the answer to a long
+    hardware session in which mode 4 did nothing: it was never for this pad. The Vader 4 Pro on the
+    desk is the machine that can answer what it does — its defaults are brightness 50, period 15,
+    colour (0, 0, 100).
+  * **LED-blob byte 2 latches the display.** `ClickFeedback` freezes the ring on the frame it is
+    showing and later frame writes do not appear — measured by writing blue/white frames while it
+    was set (panel stayed red) and clearing it (panel became blue/white at once). It matters for
+    testing more than for use: `write_config` sends packet 0 first, so setting byte 2 in the same
+    write freezes the pad *before* its own frames arrive, and every observation made in that state
+    is of a stale panel. A save (171, then 166) re-renders past the latch.
+  * **Space Station's lighting write is four steps, not one**: `WriteMappingConfig` (164/165, and
+    **undiffed** — it passes `null` as the old config, so all 42 packets go every time),
+    `WriteRgbConfig` (168/169), **command 171** `SaveCurrentSwitchMappingConfig`
+    `[ver_lo, ver_hi, cfgId]`, then 250 ms later **command 166** with a *second* new data version.
+    171 is a command this project did not have; both ACK on hardware.
+  * **`OldLedConfig` is mapping-profile bytes 3..13**, a ten-byte region `mapping.py` skips entirely
+    (it goes from offset 2 to the key table at 13). On this pad it reads
+    `[32, 4, 40, 160, 0, 0, 255, 0, 0, 0]`. Nothing outside `MappingConfigParser` computes it, so it
+    looks like a stale mirror of the older LED format — undecoded, and now at least recorded.
   * **Lighting effects are frame data, not a mode byte.** The pad has no animation generator; it
     plays the stored frames. Space Station computes them from (mode, colours) and uploads them, so
     writing a different mode number alone changes nothing visible.
@@ -443,7 +465,7 @@ Tests, cheapest first. Each skips with exit 0 when PySide6 is absent, so the bac
 dependency-free:
 
 ```bash
-for t in tests/test_{device,dsmode,dsx,forza,games,macros,mapping,monitor,prefs,relay,screen,screen_ota,settings}.py; do python3 "$t"; done
+for t in tests/test_{device,dsmode,dsx,forza,games,identity,macros,mapping,monitor,prefs,relay,screen,screen_ota,settings}.py; do python3 "$t"; done
 distrobox enter apex-dev -- bash -lc 'cd ~/Projects/ApexExperiments && \
   python3 tests/test_models.py && python3 tests/test_shell.py && python3 tests/test_qml.py'
 tools/generate-qmltypes

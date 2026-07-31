@@ -379,6 +379,48 @@ def test_a_changed_macro_is_applied_and_a_remap_is_not(qt_app):
     app_object.shutdown()
 
 
+def test_a_vader_is_refused_before_anything_is_written(qt_app):
+    """The guard, exercised through the worker rather than the library.
+
+    Every Flydigi pad opens the same way -- one vendor id, one report descriptor
+    -- so this is the only thing that stops the app streaming an Apex 5 profile
+    into a Vader 4 Pro. The other cases here replace `_controller` wholesale and
+    so never reach it; this one lets the worker open a device for real, with
+    `device.Controller` standing in for the bus.
+    """
+    from gui import worker as gui_worker
+
+    pad = TestPad(device_type=85)                    # a Vader 4
+    app_object, engine, window = load_shell(qt_app, TestPad())
+    worker = app_object.thread.worker
+    # Undo the harness's shortcut so the guard is actually reached.
+    del worker._controller
+    worker._ctrl = None
+    real_controller = gui_worker.device.Controller
+    gui_worker.device.Controller = lambda *a, **k: pad
+
+    failures = []
+    # Direct, not the default queued connection: the worker lives on another
+    # thread, so a queued `failed` would sit in its event queue and never reach
+    # this assertion. `_attempt` is being called on this thread anyway.
+    from PySide6.QtCore import Qt
+    worker.failed.connect(failures.append, Qt.DirectConnection)
+    try:
+        result = worker._attempt(lambda ctrl: "written", "writing something")
+        check("the write never ran", result is None, str(result))
+        check("and it was reported", failures, str(failures))
+        check("naming the pad that answered",
+              failures and "Vader 4" in failures[0], str(failures))
+        check("and what was expected",
+              failures and "Apex 5" in failures[0], str(failures))
+        # A refusal is not a stale handle: retrying would ask the same device
+        # the same question, so it must be reported on the first attempt.
+        check("without a second attempt", len(failures) == 1, str(failures))
+    finally:
+        gui_worker.device.Controller = real_controller
+    app_object.shutdown()
+
+
 def main():
     QQuickStyle.setStyle("org.kde.desktop")
     qt_app = QGuiApplication.instance() or QGuiApplication([])
@@ -395,6 +437,7 @@ def main():
                      test_a_changed_macro_is_applied_and_a_remap_is_not,
                      test_an_unexpected_worker_error_is_reported,
                      test_shutdown_stops_the_thread_before_closing_the_device,
+                     test_a_vader_is_refused_before_anything_is_written,
                      test_loading_the_window_is_warning_free):
             try:
                 test(qt_app)

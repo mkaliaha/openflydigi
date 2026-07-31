@@ -54,8 +54,14 @@ class TestPad(FakePad):
     """
 
     def __init__(self, battery=5, charging=False, wired=True,
-                 firmware=(0x70, 0x45), acquirer="SDL"):
+                 firmware=(0x70, 0x45), acquirer="SDL", device_type=128):
         super().__init__()
+        # 128 is an Apex 5 -- the base model, and one of the two ids SDL's own
+        # Flydigi driver recognises. It used to be 0x59, which is not a
+        # DeviceType any Flydigi product has, so the identify guard could not
+        # have been exercised against it. A test wanting a different pad passes
+        # one: 85 or 91 is a Vader 4.
+        self.device_type = device_type
         self.switches = []
         self.reads = []
         self.binds = []
@@ -90,7 +96,7 @@ class TestPad(FakePad):
             body = bytearray(32)
             body[0] = motion.INPUT_REPORT_ID
             body[3] = motion.CMD_GET_INFO
-            body[6] = 0x59                       # device type
+            body[6] = self.device_type
             body[7] = 1 if self.wired else 2
             body[12] = 0x10 if self.charging else (self.battery & 0x0F)
             # Seven BCD firmware versions follow the chip types. Only the main

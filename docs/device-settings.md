@@ -366,12 +366,63 @@ So byte 2 is not a rumble switch, and by itself it is not a click switch either.
 accessor, because a writer reproducing Space Station's Feedback mode would need it, and nothing
 binds to it.
 
-**What "Feedback" actually is remains open.** What is not tested is whether byte 2 does anything sent
-the way Space Station sends it: mode byte 4, one colour in frame 0, every other frame black,
-`loop_end = 1`. That needs the whole frame set rather than the flag, and it overwrites whatever
-lighting is on the pad. None of the twelve locales carries a description for the mode — just the bare
-word — so the cheapest answer is not on this side at all: **watch Space Station drive it on Windows**
-and see what the ring does. Until then, treat the mode as unexplained rather than as understood.
+**Settled: Feedback is not an Apex 5 feature.** `ControllerDataMapper.GetDefaultLedConfigsByDevice`
+builds the mode picker per device, and adds `LedType.Feedback` behind exactly one condition:
+
+```csharp
+if (deviceCode == "f4")        // Vader 4 -- and nothing else
+{
+    ledConfigs.LedConfig.Add(new LedConfig { Mode = LedType.Feedback,
+                                             Brightness = 50, Period = 15,
+                                             Color = { new Color { Blue = 100 } } });
+}
+```
+
+The Apex 5 is `k5`, so Space Station never offers the mode for this pad, and mode 4 doing nothing
+here is the expected result rather than a failure to reproduce. The Vader 4 Pro is the machine that
+can answer what it does.
+
+**What byte 2 does do on a k5: it latches the display.** With it set the ring freezes on the frame it
+is showing and later frame writes do not appear. Measured directly -- blue and white frames written
+while it was set left the panel on the previous red, and clearing the byte alone made the new frames
+appear at once, then setting it again froze them. This is a testing trap more than a feature:
+`write_config` sends packet 0 first, and byte 2 lives there, so setting it in the same write freezes
+the pad **before its own frames arrive**. Every observation made in that state is of a stale panel.
+A save (171, then 166) re-renders past the latch.
+
+**The full sequence Space Station sends for a lighting change**, which took several passes to get
+right and is worth writing down:
+
+| # | call | wire | note |
+|---|---|---|---|
+| 1 | `WriteMappingConfig` | 164/165 | **undiffed** — passes `null` as the old config, so all 42 packets go every time |
+| 2 | `WriteRgbConfigById` | 168/169 | the LED blob |
+| 3 | `PermanentSaveSwitchMappingConfig` | **171** | `[ver_lo, ver_hi, cfgId]`, 10 s timeout, a fresh random data version |
+| 4 | `SaveConfig` → `PermanentSaveMappingConfig` | **166** | 250 ms later, a *second* new data version |
+
+**171 is a command this project did not have** — we only ever had 166. Both ACK on hardware; 171's
+builder has the same self-contradiction as command 242, with a length byte of 4 implying a checksum
+at offset 7 while `cfgId` sits there and the crc goes at 8 over a range that excludes it. The pad
+answers the literal bytes, so their placement wins over their length byte.
+
+**`OldLedConfig` is mapping-profile bytes 3..13**, ten bytes `flydigi/mapping.py` skips entirely --
+it goes from offset 2 straight to the key table at 13. On the pad here it reads
+`[32, 4, 40, 160, 0, 0, 255, 0, 0, 0]`; the `4` matches the LED config's `cycle_time` and `255, 0, 0`
+looks like a colour, so it is probably a stale mirror of the older LED format. Nothing outside
+`MappingConfigParser` computes it, and both applications preserve it unchanged. Undecoded, recorded.
+
+**What remains open.** The full sequence *was* sent on hardware, exactly as the table above
+describes it — undiffed 42-packet mapping write, the RGB config with mode 4, byte 2 set, one colour
+in frame 0 and every other frame black, `loop_end = 1`, then 171, 250 ms, 166 — and the ring rendered
+the colour and held it. Nothing reacted: not a face button, shoulder, trigger, paddle, C/Z, stick
+click, D-pad or motion, and not rumble either. Given that the mode is gated to `f4` in Space
+Station's own picker, the reasonable reading is that the k5 firmware has no Feedback behaviour to
+trigger, and byte 2 on this pad is only the latch described above.
+
+What would settle it beyond argument is the **Vader 4 Pro**, where the mode is offered — and, more
+cheaply, watching Space Station on Windows to confirm the picker really does not list Feedback for a
+connected Apex 5. None of the twelve locales carries a description for the mode, just the bare word,
+so there is nothing else to read.
 
 
 ## Command inventory, by feature

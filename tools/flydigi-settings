@@ -33,7 +33,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flydigi import device, settings  # noqa: E402
+from flydigi import device, identity, settings  # noqa: E402
 
 # The switches, as the command line spells them. Everything unsupported on a k5
 # is still here -- the pad says what it supports and `show` prints that, which
@@ -128,6 +128,12 @@ def main():
 
     try:
         with device.Controller() as ctrl:
+            # Every Flydigi pad opens the same way -- one vendor id, one report
+            # descriptor -- so the only thing that keeps these writes off a
+            # Vader is the identify read. `show` is gated too: reporting a
+            # Vader's settings block under this pad's field names would be
+            # worse than refusing.
+            identity.require(ctrl)
             if args.cmd == "show":
                 return show(settings.read_status(ctrl))
             if args.cmd == "restart":
@@ -155,7 +161,8 @@ def main():
                 name, value = "report_rate", rate[args.hz]
 
             return show(settings.apply(ctrl, name, value))
-    except (device.DeviceNotFound, device.DeviceBusy, settings.SettingsError) as exc:
+    except (device.DeviceNotFound, device.DeviceBusy, settings.SettingsError,
+            identity.WrongDevice) as exc:
         print(exc, file=sys.stderr)
         return 1
     except ValueError as exc:

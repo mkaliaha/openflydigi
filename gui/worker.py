@@ -18,8 +18,8 @@ from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 import time
 
-from flydigi import (blobs, device, effects, lighting, macros, mapping, motion,
-                     screen, screen_ota, settings)
+from flydigi import (blobs, device, effects, identity, lighting, macros,
+                     mapping, motion, screen, screen_ota, settings)
 
 # The one piece of user-facing text this file needs. It lives with the model
 # because a label that only existed in a QML page would leave the status line
@@ -74,8 +74,25 @@ class DeviceWorker(QObject):
         self._stopping = True
 
     def _controller(self):
+        """Open the pad, and refuse it if it is not the one this app drives.
+
+        The check is here rather than at each write because this is the only
+        place a handle is opened, and the device on the far end of an open
+        handle does not change. One command-1 exchange per connection.
+
+        It is not paranoia: `find_device` matches on the vendor id and the
+        vendor collection's report descriptor, and every Flydigi pad shares
+        both -- so a Vader 4 Pro opens exactly like an Apex 5 and would take an
+        840-byte Apex 5 profile into its flash without a word.
+        """
         if self._ctrl is None:
-            self._ctrl = device.Controller()
+            ctrl = device.Controller()
+            try:
+                identity.require(ctrl)
+            except identity.WrongDevice:
+                ctrl.close()
+                raise
+            self._ctrl = ctrl
         return self._ctrl
 
     def _drop(self):
@@ -91,6 +108,13 @@ class DeviceWorker(QObject):
         for attempt in (1, 2):
             try:
                 return work(self._controller())
+            except identity.WrongDevice as exc:
+                # Not a stale handle and not worth a second attempt: the pad
+                # answered, and it is the wrong pad. Retrying would ask the same
+                # device the same question and hide the answer behind a delay.
+                self._drop()
+                self.failed.emit(str(exc))
+                return None
             except (OSError, device.DeviceNotFound, device.DeviceBusy,
                     blobs.ProtocolError) as exc:
                 self._drop()

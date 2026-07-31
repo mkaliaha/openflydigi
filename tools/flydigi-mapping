@@ -28,7 +28,7 @@ import sys
 
 sys.path.insert(0, __file__.rsplit("/", 2)[0])
 
-from flydigi import device, macros as macro_recorder, mapping
+from flydigi import device, identity, macros as macro_recorder, mapping
 
 MACRO_TYPES = {"once": mapping.MACRO_ONCE,
                "held": mapping.MACRO_WHILE_HELD,
@@ -36,10 +36,22 @@ MACRO_TYPES = {"once": mapping.MACRO_ONCE,
 
 
 def open_pad():
+    """Open the pad, having first checked it is the pad this tool writes to.
+
+    One command-1 exchange. Without it the tool would happily stream an 840-byte
+    Apex 5 profile into a Vader 4 Pro: `find_device` matches the vendor id and
+    the vendor report descriptor, and every Flydigi pad has the same pair.
+    """
     try:
-        return device.Controller()
+        ctrl = device.Controller()
     except device.DeviceNotFound as exc:
         sys.exit(f"error: {exc}")
+    try:
+        identity.require(ctrl)
+    except identity.WrongDevice as exc:
+        ctrl.close()
+        sys.exit(f"error: {exc}")
+    return ctrl
 
 
 def read(ctrl, cfg_id):
