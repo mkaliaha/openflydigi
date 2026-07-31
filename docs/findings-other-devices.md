@@ -32,7 +32,8 @@ and `Fp3PNaruto = 97`, which neither the table above nor `flydigi/identity.py` m
 
 ## Multiple pads
 
-Nothing here drives a Vader 4 Pro yet. The SDK gives it 26 keys to the Apex 5's 27 over an
+Nothing here drives a Vader 4 Pro, and after measuring what that would take, nothing will. The SDK
+gives it 26 keys to the Apex 5's 27 over an
 identical 20-key standard core; beyond that core only M1-M4 are common to both, the Vader adds C
 and Z, the Apex 5 adds Turbo, M5 and M6.
 
@@ -121,6 +122,53 @@ fails an absent rules file unconditionally.
 why Switch is 1. NewXInput only — there is no XInput or DInput builder. `IsSupportNs` is true, but
 the switch changes the report descriptor and probably the hidraw node. Treat as a one-way trip
 until proven otherwise.
+
+### An older pad is one dialect away, and still not worth it
+
+**`IsOldProtocol()` is `VendorId != 0x37D7`.** The Apex 5, Apex 6 and Vader 5 speak the `5a a5`
+protocol in [PROTOCOL.md](../PROTOCOL.md); the Apex 3, Apex 4, Vader 3, Vader 4 and Direwolf speak
+an older dialect of it — same blob, same parsers, different envelope and different command numbers.
+Measured on a Vader 4 Pro, `DeviceType 85`, firmware 6.9.3.3, on its 2.4 GHz dongle:
+
+  * **No HID interface, so nothing here can see it.** `045e:028e`, product string `Flydigi VADER4`,
+    one configuration, one interface — class `ff` sub `5d` proto `01`, claimed by `xpad` — and two
+    64-byte interrupt endpoints. `wTotalLength` is 49 and all 49 bytes are accounted for, so nothing
+    hides behind an alternate setting. Without `06 a0 ff`, `find_device` cannot match it, and
+    neither can Space Station: its transport is hidapi and nothing else (`HidApi.Hid.Enumerate`,
+    `Read(64)`, `Write`). Windows reaches the pad anyway because `xusb22` synthesises the HID front
+    end that makes Xbox pads visible to DirectInput, and Space Station talks to that — which is why
+    configuring it there costs no XInput. `xpad` synthesises nothing. String descriptor `0xEE`
+    STALLs, so this is not a pad hiding a second personality from Linux. Other models may differ:
+    `FindSpecialHidDevice` also matches a `0xFFA0` collection at interface 1 or 2, so a cabled Vader
+    or an Apex 4 could present a node `find_device` would open, and the guard in `identity.py` still
+    earns its keep.
+  * **The commands answer on the xpad endpoints.** usbfs, `USBDEVFS_DISCONNECT` to take the
+    interface from `xpad`, then a claim on interface 0 — no root, since the uaccess ACL on
+    `/dev/bus/usb/*` is enough. A frame is 15 bytes, `[0]=0xA5`, `[1]=cmdId`, `[2]=sub`, no
+    checksum, written to endpoint `0x05`. Replies come back on `0x81` **inside the 32-byte gamepad
+    input report, from offset 14**, which is why the SDK reads acks at `data[15]`. Identify is
+    command **16** — `DeviceType` at `data[16]`, uid 17..20, firmware 21/22, battery 23, connect
+    type 25 (1 wired, else dongle), active slot 27 — and the config version read is **80 sub 4**
+    with the ids at 17..24. Both answered twice. The Apex's `5a a5` envelope and the DInput framing
+    went out in the same run and drew nothing, so the pad answers one dialect rather than echoing
+    whatever it is sent.
+  * **The blob is this pad's blob, ten bytes to a packet instead of twenty.** Read is command **33**,
+    ack **34**, packet index at `data[16]`, payload 17..26. The packet count comes from the first
+    packet: `data[18] == 3` with `data[17]` of 0 or 1 means 79 or 84 packets, so 790 or 840 bytes.
+    No parser in the SDK branches on device code, type or serial, so the layout, key ids, stick bank
+    and macro pages carry over, and `blobs.py` already takes a `pkg_size`. Writes over this dialect
+    were not tried and are unverified.
+
+**What rules it out is the pad, not the work.** The dialect is transcription rather than discovery:
+62 of the SDK's 80 command files carry an XInput variant beside their NewXInput twin, against 49 for
+the new protocol. But a Vader 4 has neither adaptive triggers nor a screen, so the two features that
+earn this pad an app do not exist on that one, and what is left is configured once and forgotten.
+Reaching it also means taking interface 0 from `xpad` for every read and write, so it stops being a
+gamepad for as long as the app holds it. Serving its input from a virtual pad in the meantime is
+exactly what tiers 4 and 4b do here, and is explicitly not wanted.
+
+**Only an Apex 5 and a Vader 4 Pro are available to test with**, so everything above about the Vader
+is measured and everything said here about any other model is read out of the SDK.
 
 ## Features that belong to other models
 

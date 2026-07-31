@@ -16,8 +16,8 @@ remapping, macros, sticks, the gyro mapped to a stick, vibration, per-profile tr
 pad's own device settings, lighting, the screen, the game list and its own setup. The daemon detects
 a running game and applies its route unattended.
 
-**Left to build:** the charging dock, driving a second pad deliberately, an interactive crop for the
-Screen page, and the smaller pieces under What's next.
+**Left to build:** the charging dock, an interactive crop for the Screen page, and the smaller
+pieces under What's next. Supporting an older pad is [ruled out](#ruled-out).
 
 | Tier | Mechanism | Games | State |
 |---|---|---|---|
@@ -50,21 +50,8 @@ Roughly in order of value.
     `Flydigi.CoolerSdk.dll`. It is a *lighting* problem, not a screen one — 162 addressable LEDs
     over the ordinary config path, and `cd2_led_sync` keeps it in step with the pad.
     → [docs/findings-other-devices.md](docs/findings-other-devices.md)
- 2. **Multiple pads.** The device-type guard in `flydigi/identity.py` refuses to write anything that
-    is not a k5, and the app, the mapping CLI and the settings CLI all go through it, so an Apex 5
-    config cannot reach a Vader. Refusing is not selecting:
-    `find_device` returns the first `/dev/hidraw*` in sorted-by-name order carrying the vendor
-    descriptor prefix — `hidraw10` before `hidraw2` — and only `tools/flydigi_cmd.py` surfaces the
-    `Controller(path=...)` override as `--device`, so with both pads attached everything else opens
-    whichever the sort reaches first. What remains is driving
-    the Vader deliberately, which `identity.require(ctrl, "f4")` already allows. It also unlocks
-    the **trigger-vibration editor** (J5, offset 154), written in `MappingConfig.trigger_motor()`
-    with the layout asserted in tests and no UI, because `IsSupportTriggerVibration` is a Vader
-    flag and this pad has no such motors. The Vader is likewise the machine for the ADC calibration
-    command, which `GenerateControllerVader4` is the only factory to set.
-    → [docs/findings-profile-blob.md](docs/findings-profile-blob.md) J5
- 3. **An interactive crop for the Screen page.** Everything else there is done.
- 4. **Third-party mode: optional polish.** Command 17 here is byte-identical to Space Station's.
+ 2. **An interactive crop for the Screen page.** Everything else there is done.
+ 3. **Third-party mode: optional polish.** Command 17 here is byte-identical to Space Station's.
     After a reconnect with the flag already on, Steam stops *labelling* the pad Apex 5 while
     everything keeps working — cosmetic, plus a bindings-storage nuisance. The optional workaround,
     which neither app does, is to re-assert the flag off then on once SDL has enumerated; the real
@@ -193,6 +180,14 @@ one would fail exactly where the app runs — in the `apex-dev` distrobox.
   * **Steam lists the pad twice** with the third-party flag on, and after a reconnect stops labelling
     it "Apex 5" while it keeps working on the native driver. Neither is fixable from here.
     → [docs/findings-steam.md](docs/findings-steam.md)
+  * **The guard refuses the wrong pad; it cannot pick the right one.** `find_device` returns the
+    first `/dev/hidraw*` in sorted-by-name order carrying the vendor prefix — `hidraw10` before
+    `hidraw2` — and only `tools/flydigi_cmd.py` surfaces the `Controller(path=...)` override, as
+    `--device`. Two pads with that prefix get whichever the sort reaches first, and
+    `identity.require` turns that into a refusal rather than a wrong write. A Vader 4 Pro on its
+    dongle never gets that far, having no HID interface at all — but an Apex 4 or a cabled Vader
+    might, so the guard is not decoration.
+    → [docs/findings-other-devices.md](docs/findings-other-devices.md)
 
 ## The desktop app
 
@@ -398,6 +393,14 @@ argument, the hardware proof of 166, and the QML testing traps are in
 
 ## Ruled out
 
+  * **Older pads are ruled out by the pad, not by the protocol.** `IsOldProtocol()` is
+    `VendorId != 0x37D7`: everything before this generation speaks an older dialect of the same
+    protocol — same 840-byte blob and parsers, but a 15-byte `a5 <cmd> <sub>` frame, renumbered
+    commands, replies at offset 14 of the gamepad report, and 10-byte blob packets. Measured on a
+    Vader 4 Pro, and transcribable rather than unknown. It stays unbuilt because that pad has
+    neither adaptive triggers nor a screen, and because reaching it takes interface 0 from `xpad`
+    for every operation. Only an Apex 5 and a Vader 4 Pro are available to test with.
+    → [docs/findings-other-devices.md](docs/findings-other-devices.md)
   * **Keyboard and mouse remapping is not a pad feature on any of them.** `KeyMapType.Keyboard` and
     `MultiFunction` both serialise to the single byte `254`, with no key code anywhere in the blob.
     The injection is host-side, in `KeyboardMouseInjectRunner.cs`. Same for `MotionMapType.Mouse`.
