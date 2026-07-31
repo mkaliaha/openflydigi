@@ -196,7 +196,7 @@ def test_deleting_a_macro_gives_the_key_back():
 def test_the_page_stops_offering_more_than_the_pad_holds():
     profile, _ = make_profile()
     macros = profile.macros
-    for name in ("m1", "m2", "m3", "m4", "c"):
+    for name in ("m1", "m2", "m3", "m4", "m5"):
         macros.record(key_index(name))
         macros.recorded(RECORDED)
     check("all five slots are used", macros.count == mapping.MACRO_SLOTS,

@@ -57,16 +57,20 @@ TITLE_MAX_CHARS = mapping.TITLE_BYTES // 2
 KEY_CLUSTERS = [
     ("Face buttons", ["a", "b", "x", "y"]),
     ("D-pad", ["up", "down", "left", "right"]),
-    ("Shoulders and triggers", ["lb", "rb", "lt", "rt"]),
+    ("Shoulders and triggers", ["lb", "rb", "lt", "rt", "m5", "m6"]),
     ("Sticks", ["thl", "thr"]),
     ("System", ["select", "start", "home"]),
-    ("Paddles and extra buttons", ["c", "z", "m1", "m2", "m3", "m4"]),
+    ("Paddles", ["m1", "m2", "m3", "m4"]),
 ]
 
 CLUSTER_OF = {key: title for title, keys in KEY_CLUSTERS for key in keys}
 
 # The pad's own short names are what the protocol uses; these are what the
 # shell is silkscreened with, or what a person would call the button.
+#
+# M5 and M6 are the shoulder pair, not paddles. Space Station labels them LM
+# and RM, which is what its k5 hitbox map puts at the top edge of the shell
+# either side of the triggers; "M5"/"M6" appear only in the SDK's key ids.
 KEY_LABELS = {
     "a": "A", "b": "B", "x": "X", "y": "Y",
     "up": "Up", "down": "Down", "left": "Left", "right": "Right",
@@ -74,8 +78,8 @@ KEY_LABELS = {
     "lt": "Left trigger", "rt": "Right trigger",
     "thl": "Left stick click", "thr": "Right stick click",
     "select": "Select", "start": "Start", "home": "Home",
-    "c": "C", "z": "Z",
     "m1": "M1", "m2": "M2", "m3": "M3", "m4": "M4",
+    "m5": "LM", "m6": "RM",
 }
 
 

@@ -230,25 +230,55 @@ KEY_NAMES = {
 }
 KEY_IDS = {name: key_id for key_id, name in KEY_NAMES.items()}
 
-# Physical buttons on an Apex 5, in the order a UI should present them. The key
-# table has 32 slots but most are unpopulated on this model.
+# Remappable buttons on an Apex 5, in the order a UI should present them. The
+# key table has 32 slots but most are unpopulated on this model.
+#
+# Two lists decide this and they are not the same. `GenerateControllerApex5`
+# (FlydigiControllerFactory.cs:525) enumerates the keys the pad *has*: no C and
+# no Z -- those are Vader parts, declared only by the Vader3/4/5 factories --
+# and it does carry M5 and M6. Space Station's own UI then marks which of those
+# may be *rebound*, as a `clickable` flag per key in the renderer's k5 hitbox
+# map (asar/.vite/renderer/main_window/assets/device_config_k5-*.js), and three
+# are false there: Fn (24), Turbo (25) and Home (27). Having a button is not the
+# same as being able to rebind it.
+#
+# Fn is what the pad is silkscreened with for key id 24, which the SDK calls
+# Menu; it switches profiles. Turbo arms the per-key turbo modes rather than
+# being a mappable input of its own. Neither is listed below. Both are probably
+# rebindable in the same way Home turned out to be, but neither has been tried
+# on this pad and nothing here needs the answer.
+#
+# Home *is* listed, because that flag is Space Station's policy and not the
+# firmware's refusal -- measured on a wired Apex 5, both directions:
+#
+#   m1 -> home   pressing M1 fired the Guide button
+#   home -> a    pressing Home sent A, with no Guide event reaching the pad's
+#                evdev node at all
+#
+# So the firmware honours Home as a remap source and as a target. It is worth
+# offering for a pad whose Home button has failed, which is the one case Space
+# Station's UI leaves no way out of.
+#
+# Not listed, and a genuine gap rather than a deliberate omission: Space Station
+# also treats JsLeft (240) and JsRight (241) as rebindable, which is stick-as-
+# button and has no support here.
 APEX5_KEYS = [
     "a", "b", "x", "y",
     "up", "down", "left", "right",
     "lb", "rb", "lt", "rt",
     "thl", "thr",
     "select", "start", "home",
-    "c", "z",
     "m1", "m2", "m3", "m4",
+    "m5", "m6",
 ]
 
 # What a key may be remapped *to*. Deliberately smaller than APEX5_KEYS: the
-# extra buttons (M1-M4, and the C/Z pair by the bumpers) have no XInput
-# equivalent, so a host cannot receive them. They are sources -- you map a
-# paddle onto a real button, which is what the pad ships doing -- and offering
-# them as targets would let someone map A to something nothing can see, which
-# reads as "A stopped working".
-EXTRA_KEYS = ["c", "z", "m1", "m2", "m3", "m4"]
+# extra buttons -- the M1-M4 paddles on the back and the M5/M6 shoulder pair --
+# have no XInput equivalent, so a host cannot receive them. They are sources:
+# you map a paddle onto a real button, which is what the pad ships doing.
+# Offering them as targets would let someone map A to something nothing can
+# see, which reads as "A stopped working".
+EXTRA_KEYS = ["m1", "m2", "m3", "m4", "m5", "m6"]
 XINPUT_TARGETS = [key for key in APEX5_KEYS if key not in EXTRA_KEYS]
 
 

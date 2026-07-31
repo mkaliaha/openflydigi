@@ -814,12 +814,46 @@ def test_editing_extras_does_not_disturb_buttons():
 
 
 def test_targets_exclude_buttons_xinput_cannot_send():
-    for key in ("m1", "m2", "m3", "m4", "c", "z"):
+    for key in ("m1", "m2", "m3", "m4", "m5", "m6"):
         check(f"{key} is not offered as a target",
               key not in mapping.XINPUT_TARGETS)
         check(f"{key} is still a source", key in mapping.APEX5_KEYS)
     for key in ("a", "b", "lb", "start"):
         check(f"{key} is a valid target", key in mapping.XINPUT_TARGETS)
+
+
+def test_the_key_list_is_this_pad_s_and_not_another_s():
+    """APEX5_KEYS once held C and Z and omitted M5/M6, which meant the app drew
+    two buttons this pad does not have and could not rebind two that it does.
+
+    Both halves come from Flydigi's own data. `GenerateControllerApex5` lists
+    the keys the pad has -- M1..M6, no C, no Z -- while C and Z appear only in
+    the Vader3/4/5 factories. Space Station's k5 hitbox map then marks which of
+    them may be rebound, and Fn (24), Turbo (25) and Home (27) are false there.
+    Neither source is in the repository, so this pins the conclusion instead.
+    """
+    for key in mapping.APEX5_KEYS:
+        check(f"{key} has a ControllerKey id", key in mapping.KEY_IDS)
+
+    for key in ("c", "z"):
+        check(f"{key} is a Vader key and not this pad's",
+              key not in mapping.APEX5_KEYS)
+    for key in ("m5", "m6"):
+        check(f"{key} is one of this pad's shoulder buttons",
+              key in mapping.APEX5_KEYS)
+    for key in ("menu", "turbo"):
+        check(f"{key} is not rebindable, so it is not offered",
+              key not in mapping.APEX5_KEYS)
+
+    check("the extras are all real keys",
+          set(mapping.EXTRA_KEYS) <= set(mapping.APEX5_KEYS))
+    check("a key is either a target or an extra, never both",
+          not set(mapping.XINPUT_TARGETS) & set(mapping.EXTRA_KEYS))
+    check("and the two together account for every key",
+          set(mapping.XINPUT_TARGETS) | set(mapping.EXTRA_KEYS)
+          == set(mapping.APEX5_KEYS))
+    check("no key is listed twice",
+          len(mapping.APEX5_KEYS) == len(set(mapping.APEX5_KEYS)))
 
 
 def test_lighting_round_trip():
@@ -1037,7 +1071,7 @@ def test_macro_delays_are_quantised_not_summed():
 def test_the_macro_page_is_bounded():
     config = mapping.MappingConfig(blank_blob())
     too_many = [{"key": key, "type": mapping.MACRO_ONCE, "steps": TAP_A}
-                for key in ("m1", "m2", "m3", "m4", "c", "z")]
+                for key in ("m1", "m2", "m3", "m4", "m5", "m6")]
     check("a sixth macro is refused", _raises(lambda: config.set_macros(too_many)))
 
     step = dict(TAP_A[0])
@@ -1058,7 +1092,7 @@ def test_the_macro_page_is_bounded():
 def test_a_macro_step_cannot_send_what_xinput_has_no_id_for():
     """Same reasoning as the remap targets -- and the same silent failure."""
     config = mapping.MappingConfig(blank_blob())
-    for key in ("m1", "c"):
+    for key in ("m1", "m5"):
         check(f"a step on {key} is refused",
               _raises(lambda: config.set_macro("m2", [
                   {"delay": 0, "key": key, "event": mapping.MACRO_PRESS}])))
