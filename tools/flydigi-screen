@@ -47,12 +47,18 @@ import time
 
 sys.path.insert(0, __file__.rsplit("/", 2)[0])
 
-from flydigi import device, screen, screen_ota
+from flydigi import device, registry, screen, screen_ota
 
 
-def open_pad():
+def open_pad(args):
+    """The pad `--device` names, or the first one.
+
+    Takes the parsed arguments rather than a selector because every caller here
+    has them and none of them has anything else -- one parameter that is always
+    available beats a global set by `main`.
+    """
     try:
-        return device.Controller()
+        return registry.open_pad(getattr(args, "device", None))
     except device.DeviceNotFound as exc:
         sys.exit(f"error: {exc}")
 
@@ -188,7 +194,7 @@ def do_convert(args):
 
 
 def do_probe(args):
-    ctrl = open_pad()
+    ctrl = open_pad(args)
     print("asking each envelope whether this pad knows command 208.")
     print("this announces a frame it never sends -- harmless, but not nothing; "
           "power-cycle or do a real upload afterwards")
@@ -216,7 +222,7 @@ def do_probe(args):
 
 def do_status(args):
     try:
-        status = screen.read_screen_status(open_pad(), wait=args.wait)
+        status = screen.read_screen_status(open_pad(args), wait=args.wait)
     except screen.ScreenError as exc:
         sys.exit(f"error: {exc}")
     print(f"display          {'shows your picture' if status['always_on'] else 'dark when idle'}"
@@ -233,7 +239,7 @@ def do_power(args):
     `OffScreen`, and setting it is what keeps the display *on*.
     """
     on = args.command == "on"
-    ok = screen.set_always_on(open_pad(), on, wait=args.wait)
+    ok = screen.set_always_on(open_pad(args), on, wait=args.wait)
     if not ok:
         print("no reply -- nothing changed")
         return 1
@@ -243,14 +249,14 @@ def do_power(args):
 
 
 def do_statusbar(args):
-    ok = screen.set_status_bar_always_on(open_pad(), args.state == "on", wait=args.wait)
+    ok = screen.set_status_bar_always_on(open_pad(args), args.state == "on", wait=args.wait)
     print(f"status bar {'always on' if args.state == 'on' else 'auto'}"
           if ok else "no reply -- nothing changed")
     return 0 if ok else 1
 
 
 def do_test(args):
-    ctrl = open_pad()
+    ctrl = open_pad(args)
     if args.colour == "off":
         ok = screen.test_screen(ctrl, False, faithful=args.faithful, wait=args.wait)
         print("sent -- but on a wired Apex 5 this ACKs without clearing anything.\n"
@@ -284,7 +290,7 @@ def upload_over_hid(args, frames, interval):
     print(f"over HID, period {period}. On an Apex 5 this ACKs every packet and "
           "changes nothing; the serial path is the one that works")
     try:
-        screen.upload(open_pad(), frames, period=period, dialect=args.dialect,
+        screen.upload(open_pad(args), frames, period=period, dialect=args.dialect,
                       wait=args.wait, progress=report_progress)
     except screen.ScreenError as exc:
         print()
@@ -304,7 +310,7 @@ def upload_over_serial(args, frames, interval):
         print("switching the screen chip into upgrade mode (command 31) -- the "
               "pad will leave the HID bus and come back as a serial device")
         try:
-            screen_ota.enter_upgrade_mode(open_pad())
+            screen_ota.enter_upgrade_mode(open_pad(args))
         except device.DeviceNotFound as exc:
             sys.exit(f"error: {exc}")
         time.sleep(screen_ota.SWITCH_SETTLE)
@@ -359,6 +365,7 @@ def main():
     pad = argparse.ArgumentParser(add_help=False)
     pad.add_argument("--wait", type=float, default=0.5,
                      help="seconds to wait for each reply (default 0.5)")
+    registry.add_device_argument(pad)
     sending = argparse.ArgumentParser(add_help=False, parents=[pad])
     sending.add_argument("--via", choices=("serial", "hid"), default="serial",
                          help="serial is Space Station's own route and the one "

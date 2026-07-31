@@ -30,7 +30,7 @@ import sys
 sys.path.insert(0, __file__.rsplit("/", 2)[0])
 
 from flydigi import (device, effects, identity, macros as macro_recorder,
-                     mapping)
+                     mapping, registry)
 
 MACRO_TYPES = {"once": mapping.MACRO_ONCE,
                "held": mapping.MACRO_WHILE_HELD,
@@ -43,15 +43,20 @@ GYRO_TARGETS = {"off": mapping.MOTION_OFF,
                 "right": mapping.MOTION_RIGHT_STICK}
 
 
-def open_pad():
+def open_pad(selector=None):
     """Open the pad, having first checked it is the pad this tool writes to.
 
     One command-1 exchange. Without it the tool would happily stream an 840-byte
     Apex 5 profile into a Vader 4 Pro: `find_device` matches the vendor id and
     the vendor report descriptor, and every Flydigi pad has the same pair.
+
+    The guard refuses; `--device` chooses. With two pads attached, a bare run
+    still takes whichever node sorts first -- so the guard is what stops a
+    profile landing in the wrong pad, and the selector is what puts it in the
+    right one.
     """
     try:
-        ctrl = device.Controller()
+        ctrl = registry.open_pad(selector)
     except device.DeviceNotFound as exc:
         sys.exit(f"error: {exc}")
     try:
@@ -170,6 +175,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--profiles", type=int, default=4,
                         help="how many profile slots to scan (default 4)")
+    registry.add_device_argument(parser)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("list", help="show every profile")
@@ -253,7 +259,7 @@ def main():
     p.add_argument("--save", action="store_true")
 
     args = parser.parse_args()
-    ctrl = open_pad()
+    ctrl = open_pad(args.device)
 
     if args.cmd == "list":
         for cfg_id in range(args.profiles):

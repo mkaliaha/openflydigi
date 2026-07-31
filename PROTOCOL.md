@@ -962,3 +962,65 @@ packets in every case, about five seconds.
 The eight computable effects, their frame counts and the lattice the two geometric ones use are in
 [docs/findings-other-devices.md](docs/findings-other-devices.md). `Default` is not computable by
 anyone: Space Station uploads a file its installer ships.
+
+---
+
+## 11. Identity — telling one pad from another
+
+Three names, and only one of them is worth keying anything on. All measured on the Apex 5 here,
+firmware 7.0.4.5, on its 2.4 GHz dongle.
+
+**Command 1 carries a four-byte address at raw 8..11, and this pad reports zeroes.**
+`HeartBeatControllerCommandNewXInput.ParseAckData` reads them least-significant last and reverses:
+
+```
+TX  03 5a a5 01 02 47 …
+RX  04 5a a5 01 01 00 80 02 | 00 00 00 00 | 05 45 01 00 70 45 21 31 45 25 00 00 01 28 00 00 11 31 1f 00
+                              ^^^^^^^^^^^ DeviceMac    ^^ battery      ^^^^^ main firmware 7.0.4.5
+```
+
+Every neighbouring field decodes — device type 128, connect type 2 (dongle), battery 5, and all
+seven firmware components — so the field is empty rather than misplaced. Whether a cable fills it
+in is untested. `motion.parse_mac` answers None for all-zero, the same convention Flydigi already
+use for an absent firmware version.
+
+**Command 4 is the uid: 13 bytes at raw 6.** One exchange, and the only per-unit identifier this
+pad actually gives up.
+
+```
+TX  03 5a a5 04 02 4a …
+RX  04 5a a5 04 01 00 | 14 20 6e 7a 1c 00 00 00 00 dc ba 3e 00 | 00 …
+```
+
+`ReadUidControllerCommandNewXInput` puts it at its own data[5], which is raw 6 with the report-id
+byte kept — the same slot as every other single-frame payload. The dock's uid read is the same
+command with the same shape (§10b).
+
+**Command 2 is the nickname, and it starts one byte earlier than everything else.**
+`ReadNickNameControllerCommandNewXInput` slices `data.Slice(4, data.Length - 6)` — raw 5 here —
+where `Flydigi.ChargerSdk`'s equivalent slices from its own data[6]. An unnamed pad answers:
+
+```
+RX  04 5a a5 02 01 00 01 01 09 09 09 64 04 5e 00 00 …
+                     ^^ raw 5
+```
+
+Raw 5 is 0x00, which is Flydigi's own test for an erased name. Raw 6 is 0x01, which under the
+charger's offset would have decoded as the first byte of a name that is not there — so the
+controller SDK's offset is right for a controller and the charger's for a charger.
+
+**Command 24 writes a nickname, and Flydigi's builder for it is broken in both SDKs.** Byte for
+byte the same code in `Flydigi.ControllerSdk` and `Flydigi.ChargerSdk`:
+
+```csharp
+array[4] = (byte)(2 + bytes.Length);
+Array.Copy(bytes, 0, array, 5, bytes.Length);
+array[6] = array.Crc(3, 3 + array[4]);     // fixed index, not 3 + array[4]
+```
+
+Index 6 is the right slot only for a one-byte name. For anything longer the checksum lands inside
+the name, over its second byte, and the real slot stays zero — and a config-family packet with a
+bad checksum draws no reply from this pad at all (§7). So either 24 is not checksummed, or Space
+Station's rename has never worked past one character. `identity.nickname_packet` builds the packet
+the framing implies and takes `reference=True` for theirs; **neither has been sent to hardware**.
+

@@ -157,6 +157,8 @@ def collect():
 
     types = [
         (App, True),
+        (models.DevicesModel, False),
+        (models.DockModel, False),
         (models.DeviceModel, False),
         (models.ProfileModel, False),
         (models.ProfileListModel, False),

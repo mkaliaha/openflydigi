@@ -112,6 +112,38 @@ ACCEL_SCALE = DS5_ACCEL_RAW_PER_G / APEX5_ACCEL_PER_G   # ~2.441
 GYRO_SCALE = 1.0
 
 
+# The pad's own address, four bytes, stored **most-significant last** and
+# reversed on the way out -- `Array.Reverse` then `BitConverter.ToString` with
+# ':' for '-', which is where the upper-case colon form below comes from.
+#
+# **This pad reports all zeroes**, measured on its dongle, firmware 7.0.4.5:
+#
+#   04 5a a5 01 01 00 80 02 | 00 00 00 00 | 05 45 01 00 70 45 ...
+#                              ^^^^^^^^^^^ the address
+#
+# and it was going to be the cheap way to tell two pads apart, since it rides
+# the same reply as the battery. It is not one. Whether a cable fills it in is
+# unmeasured -- the pad was on the dongle -- and the surrounding fields all
+# decode correctly there, so this is the field being empty rather than the
+# offset being wrong. Read `flydigi/identity.py:read_uid` instead: command 4
+# costs an exchange and answered with thirteen bytes that differ per unit.
+#
+# None rather than "00:00:00:00" for the empty case, following the same rule
+# the firmware fields already follow -- Flydigi null an all-zero version rather
+# than reporting version zero -- so that a caller cannot accidentally key a
+# config file on a value every pad shares.
+MAC_OFFSET = 8                 # raw index; their data[7], ours one later
+MAC_LEN = 4
+
+
+def parse_mac(data):
+    """The four address bytes of a command-1 reply, or None when unreported."""
+    raw = bytes(data[MAC_OFFSET : MAC_OFFSET + MAC_LEN])
+    if len(raw) < MAC_LEN or not any(raw):
+        return None
+    return ":".join(f"{b:02X}" for b in reversed(raw))
+
+
 def parse_info(data):
     """Decode a command-1 reply into a dict, or None if it is not one."""
     if len(data) < 14 or data[0] != INPUT_REPORT_ID or data[3] != CMD_GET_INFO:
@@ -128,6 +160,7 @@ def parse_info(data):
         "connect_type": "wired" if connect_type == 1 else "dongle",
         "battery_level": min(level, CHARGING_LEVEL),
         "charging": charging,
+        "mac": parse_mac(data),
     }
 
 
@@ -206,6 +239,18 @@ CMD_READ_TRANSPORT = 16
 THIRD_PARTY_MIN_FIRMWARE = {"k5": "7.0.3.0", "f5": "7.1.4.1"}
 
 
+# The five flags command 17 writes and command 16 reads back, in wire order.
+# Named once because they are five consecutive unlabelled bytes: a reader and a
+# writer that each counted them out by hand could disagree, and the symptom of
+# that is a pad whose keyboard output is switched off by something aiming at its
+# third-party flag.
+TRANSPORT_FLAGS = ("controller_data", "raw_data", "keyboard", "mouse",
+                   "third_party")
+TRANSPORT_OFFSET = 6           # raw index of the first flag in a 16 reply
+HOLDER_OFFSET = 11
+HOLDER_LEN = 20
+
+
 def parse_transport(data):
     """Decode a command-16 reply: what the pad is transporting, and to whom."""
     if len(data) < 30 or data[0] != INPUT_REPORT_ID or data[3] != CMD_READ_TRANSPORT:
@@ -213,15 +258,11 @@ def parse_transport(data):
     # `control_by` is the same 20-byte ASCII tag the cooperative-lock command
     # carries, so this answers "is something else driving the pad" *and* "what"
     # in one read -- worth more to a UI than the bare flag.
-    holder = bytes(data[11:31]).split(b"\x00", 1)[0]
-    return {
-        "controller_data": data[6] == 1,
-        "raw_data": data[7] == 1,
-        "keyboard": data[8] == 1,
-        "mouse": data[9] == 1,
-        "third_party": data[10] == 1,
-        "control_by": holder.decode("ascii", "replace"),
-    }
+    holder = bytes(data[HOLDER_OFFSET : HOLDER_OFFSET + HOLDER_LEN])
+    state = {name: data[TRANSPORT_OFFSET + index] == 1
+             for index, name in enumerate(TRANSPORT_FLAGS)}
+    state["control_by"] = holder.split(b"\x00", 1)[0].decode("ascii", "replace")
+    return state
 
 
 def read_transport(ctrl, wait=0.6):

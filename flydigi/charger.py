@@ -44,7 +44,7 @@ does costs nothing.
 import math
 import os
 
-from . import device
+from . import device, motion
 from .device import DeviceBusy, DeviceNotFound      # re-exported for callers
 
 PACKET_LEN = 32
@@ -241,52 +241,42 @@ def find_dock():
     return device.find_device(device.FAMILY_DOCK)
 
 
+# Enumerating and choosing are `flydigi/registry.py`'s now, for every kind of
+# device at once. These two keep their names and their shapes because they are
+# what `tools/flydigi-charger` and the tests call, and because a dock is still
+# the only device with a uid this project has actually read off hardware -- but
+# the matching, the ambiguity refusal and the error messages are the shared
+# ones, so `--device` means the same thing whatever it is pointed at.
+#
+# The import is late: `flydigi/registry.py` reaches into this module for the
+# dock's own probe, and a cycle at import time would be the price of tidiness.
+
 def list_docks():
     """Every dock on the bus: {path, uid, nickname, info} for each.
 
-    Opens each node in turn and asks it what it is, so this costs one exchange
-    per dock and needs the node free. A dock that does not answer is reported
-    with `info` None rather than omitted, because "there is a device here and
-    it will not talk" is the thing a caller most needs to see.
+    Costs three exchanges per dock -- heartbeat, uid, nickname -- and needs the
+    node free. A dock that does not answer is reported with `info` None rather
+    than omitted, because "there is a device here and it will not talk" is the
+    thing a caller most needs to see.
 
     **Only one dock has ever been measured**, so ordering between two of them
     is `find_nodes`' sorted-node order and nothing better. Selecting by uid is
     the stable way to name one; the node number is not.
     """
-    found = []
-    for path in device.find_nodes(device.FAMILY_DOCK):
-        entry = {"path": path, "uid": None, "nickname": None, "info": None,
-                 "product": device.hid_name(os.path.basename(path))}
-        try:
-            with Dock(path) as dock:
-                entry["info"] = read_info(dock)
-                entry["uid"] = read_uid(dock)
-                entry["nickname"] = read_nickname(dock)
-        except (OSError, ProtocolError, DeviceBusy):
-            pass
-        found.append(entry)
-    return found
+    from . import registry
+    return registry.list_devices(registry.KIND_DOCK, deep=True)
 
 
 def open_dock(path=None, uid=None):
     """Open one dock, by node or by uid. Bare, it takes the first one.
 
     A uid is matched case-insensitively and may be given as a prefix, since the
-    full 26 hex digits are not something anyone types.
+    full 26 hex digits are not something anyone types. A nickname works here
+    too now, since both arguments are handed to the same resolver -- so
+    `--uid shelf` finds the dock somebody named Shelf.
     """
-    if path is not None:
-        return Dock(path)
-    if uid is None:
-        return Dock()
-    wanted = uid.lower().replace(":", "")
-    matches = [d for d in list_docks()
-               if d["uid"] and d["uid"].startswith(wanted)]
-    if not matches:
-        raise DeviceNotFound(f"no charging dock with a uid starting {uid!r}")
-    if len(matches) > 1:
-        names = ", ".join(d["uid"] for d in matches)
-        raise DeviceNotFound(f"{uid!r} matches more than one dock: {names}")
-    return Dock(matches[0]["path"])
+    from . import registry
+    return registry.open_device(path or uid, registry.KIND_DOCK)
 
 
 def build(cmd_id, payload=b"", size=PACKET_LEN):
@@ -307,10 +297,14 @@ class Dock(device.Controller):
     Everything about holding the node -- the advisory `flock`, the re-entrant
     claim, draining stale replies -- is `device.Controller`'s and is right here
     unchanged. Only the node it opens and the packet it builds differ.
+
+    The node it opens is now declared rather than looked up: `FAMILY` is what
+    the base class resolves a bare construction with, so `Dock()` finds a dock
+    and `Dock("mock:dock0")` gets the fake one, both through the single path in
+    `device.Controller.__new__`.
     """
 
-    def __init__(self, path=None):
-        super().__init__(path or find_dock())
+    FAMILY = device.FAMILY_DOCK
 
     def command(self, cmd_id, payload=b"", wait=0.5, size=PACKET_LEN):
         return self.send(build(cmd_id, payload, size), wait=wait,
@@ -373,14 +367,52 @@ def read_nickname(dock, wait=0.5):
 
     `data[3] > 4` is Flydigi's own test for "there is a name here", and the
     first byte being 0x00 or 0xff is their test for an erased one.
+
+    **The length is one shorter than Flydigi take.** They slice
+    `data[6 : 6 + data[3] - 3]`, and the framing says that runs onto the
+    checksum: the unset reply measured here is `5a a5 02 04 01 00 07`, so a
+    length byte of 4 covers a two-byte payload with the checksum at `[2 +
+    length]`. A name of n bytes therefore makes the length `4 + n` and puts the
+    checksum at `[6 + n]` -- immediately after it. Taking `data[3] - 3` bytes
+    from 6 takes the name and then the checksum, which shows up as one
+    replacement character on the end of every name. Differing from the
+    reference only where it is demonstrably wrong is the same call
+    `motion.version_at_least` makes.
     """
     data = _ask(dock, CMD_READ_NICKNAME, "nickname", wait=wait)
     if data[3] <= 4:
         return None
-    raw = data[6:6 + data[3] - 3]
+    raw = data[6:6 + data[3] - 4]
     if not raw or raw[0] in (0x00, 0xFF):
         return None
     return raw.decode("utf-8", "replace").strip()
+
+
+def write_nickname(dock, name, wait=0.5):
+    """Name a dock, so two of them can be told apart by eye. Returns the name.
+
+    Command 24, and **Flydigi's own builder for it is broken in both SDKs** --
+    byte for byte the same code in `Flydigi.ChargerSdk` and
+    `Flydigi.ControllerSdk`, putting the checksum at a fixed index 6 rather
+    than at `3 + length`, which is only the same slot for a one-byte name. Here
+    the packet comes from `build`, which puts it where the framing says; see
+    `flydigi/identity.py:nickname_packet` for the same note on the pad's side
+    and for the flag that sends their bytes instead.
+
+    Never sent to hardware. The dock on this desk has no name, which is also
+    why `read_nickname`'s set-name path is inferred rather than measured.
+    """
+    raw = name.encode("utf-8")
+    if not raw:
+        raise ValueError("a nickname cannot be empty")
+    if len(raw) > PACKET_LEN - 6:
+        raise ValueError(
+            f"{name!r} is {len(raw)} bytes and the packet holds "
+            f"{PACKET_LEN - 6}")
+    replies = dock.send(build(CMD_WRITE_NICKNAME, raw), wait=wait)
+    if not any(reply_for(r, CMD_WRITE_NICKNAME) for r in replies):
+        raise ProtocolError(f"the dock did not acknowledge the name {name!r}")
+    return read_nickname(dock, wait=wait)
 
 
 def parse_status(data):
@@ -393,6 +425,29 @@ def parse_status(data):
     if not reply_for(data, REPORT_STATUS):
         return None
     return {"docked": bool(data[7]), "battery": data[8]}
+
+
+def describe_battery(level):
+    """A docked pad's charge, in the pad's own steps rather than as a bare byte.
+
+    The byte in report 239 is a *controller's* battery, reported by the dock, so
+    it is read the way the controller's own is: `flydigi/motion.py` decodes
+    command 1's battery nibble as 0..5 with **6 meaning charging**, and Space
+    Station draws exactly that domain. A number printed on its own reads as a
+    percentage or as one of eight steps, and this project has already had that
+    bug once -- the app reported a full pad as five-eighths for months.
+
+    **The scale is inferred, and the inference is the honest part.** Nothing has
+    ever seen this byte with a pad actually seated: measured here with the dock
+    empty it reads 0, and `docked` reads false, which fits and settles nothing.
+    A seated pad is by definition charging, so 6 is what it is expected to say,
+    which is precisely the value a bare number would render as "battery 6" --
+    one more than full.
+    """
+    level = int(level)
+    if level >= motion.CHARGING_LEVEL:
+        return "charging"
+    return f"{level}/{motion.MAX_LEVEL}"
 
 
 def read_status(dock, wait=1.5):
@@ -416,7 +471,21 @@ def _set_flag(dock, cmd_id, enable, what, wait=0.5):
 
 
 def set_sleep_when_charging(dock, enable, wait=0.5):
-    """Space Station calls this "Intelligent start"."""
+    """Put both devices to sleep while a pad is docked. "Intelligent start".
+
+    **What it actually does is turn the lighting off on both of them.**
+    Observed on the hardware here: with this on, docking a pad takes the
+    lighting down on the pad *and* on the dock for as long as it sits there.
+    Flydigi's name for it says none of that, which is why nothing in this
+    project uses their name without saying what it means.
+
+    That makes it exclusive with the other two lighting switches in practice:
+    `set_led_sync` has nothing to keep in step and
+    `set_show_animation_when_charging` has nothing to play, precisely while a
+    pad is docked -- which is the only time either of them matters. See
+    `set_show_animation_when_charging` for what that means for Space Station's
+    own UI rule.
+    """
     return _set_flag(dock, CMD_SLEEP_WHEN_CHARGING, enable,
                      "sleep-when-charging", wait=wait)
 
@@ -437,12 +506,20 @@ def set_close_with_system(dock, enable, wait=0.5):
 
 
 def set_show_animation_when_charging(dock, enable, wait=0.5):
-    """"Power Display".
+    """"Power Display" -- the charge animation while a pad is docked.
 
     Space Station makes this and sleep-when-charging mutually exclusive in its
-    UI, forcing the other off whenever one goes on. That is a UI rule, not a
-    firmware one -- nothing in the SDK enforces it -- so it is not enforced
-    here; a caller that wants the pairing should do it in its own UI.
+    UI, forcing the other off whenever one goes on, and **that turns out to be
+    a real conflict rather than a house style**: sleep-when-charging takes the
+    lighting down on both devices for exactly as long as a pad is docked, which
+    is the whole of the window this animation would play in. Their UI is
+    enforcing something the firmware does.
+
+    Still not enforced here. Nothing in the SDK enforces it either -- it is
+    their view layer -- and a library that quietly turned off a switch its
+    caller did not mention would be worse than one that lets both be set and
+    says what happens. The desktop app says so on the page; `flydigi-charger`
+    says so in its help.
     """
     return _set_flag(dock, CMD_SHOW_ANIMATION, enable,
                      "show-animation-when-charging", wait=wait)
@@ -532,8 +609,13 @@ def serialise(config):
     return bytes(out)
 
 
-def write_led_config(dock, config, wait=1.0):
+def write_led_config(dock, config, wait=1.0, progress=None):
     """Upload a whole LED config: one start packet, then the data in packs.
+
+    `progress` is called with a fraction from 0 to 1 as the packs go out. It
+    exists because this is 487 packets and several seconds for an ordinary
+    effect -- long enough that a window with no progress bar reads as hung, and
+    long enough that a person needs to know it is not.
 
     **The frame count in the header must match the frames actually sent.**
     Measured here: a header claiming zero frames, with none supplied, left the
@@ -571,6 +653,8 @@ def write_led_config(dock, config, wait=1.0):
                     f"the dock stopped acknowledging at pack {index} of "
                     f"{total} -- its frame memory now holds a partial "
                     f"animation, so write a whole config before trusting it")
+            if progress is not None:
+                progress((index + 1) / total)
     return total
 
 

@@ -17,13 +17,37 @@ tests/qml/, inside a window QtQuickTest shows and activates.
 
     python3 tests/test_shell.py
 """
+import json
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QT_QUICK_BACKEND", "software")
 os.environ.setdefault("QSG_RENDER_LOOP", "basic")
+
+# **Before anything imports gui.** Two environment variables, both about not
+# letting this suite touch the machine it runs on.
+#
+# The app now enumerates the bus at startup and writes the chosen pad into the
+# preferences file, so without these a test run would probe whatever is plugged
+# into the developer's desk -- and could rewrite their auto-mode preferences.
+# Neither is a thing a test may do, and the second is the kind of damage nobody
+# notices for a week.
+#
+# The mock bus is the answer to both halves of "what is attached": `hide_real`
+# means the window sees these three devices and nothing else, on any machine.
+_CONFIG_HOME = tempfile.mkdtemp(prefix="apex5-test-config-")
+os.environ["XDG_CONFIG_HOME"] = _CONFIG_HOME
+_BUS = os.path.join(_CONFIG_HOME, "mock-bus.json")
+with open(_BUS, "w") as _fh:
+    json.dump({"hide_real": True, "devices": [
+        {"kind": "pad", "code": "k5", "nickname": "Desk"},
+        {"kind": "pad", "code": "k5", "nickname": "Couch", "battery": 2},
+        {"kind": "dock", "type": 0, "nickname": "Shelf"},
+    ]}, _fh)
+os.environ["FLYDIGI_MOCK_BUS"] = _BUS
 
 try:
     from PySide6.QtCore import QThread, QUrl
@@ -47,10 +71,20 @@ WARNINGS = []
 # failure message. Nothing may be left running.
 STARTED = []
 
-# The sections the global drawer offers, in order.
-SECTIONS = ["Controller", "Device", "Buttons", "Macros", "Sticks", "Gyro",
-            "Vibration", "Triggers", "Lighting", "Screen", "Games", "DualSense",
-            "Setup"]
+# Every section the window knows, in the order `Main.qml` lists them. Not what
+# the sidebar shows at any given moment: a section belongs to a kind of device,
+# and the drawer offers the ones belonging to whichever device is selected.
+ALL_SECTIONS = ["Devices", "Controller", "Device", "Buttons", "Macros",
+                "Sticks", "Gyro", "Vibration", "Triggers", "Lighting",
+                "Screen", "Games", "DualSense", "Dock", "Setup"]
+
+# What the sidebar offers with a pad selected, which is how the window starts.
+SECTIONS = [name for name in ALL_SECTIONS if name != "Dock"]
+
+# And with a dock selected. Three, because a pad's pages have nothing to say
+# about a dock -- offering Buttons and Macros there would be offering to edit
+# something that is not on screen.
+DOCK_SECTIONS = ["Devices", "Dock", "Setup"]
 
 # The real poll intervals, kept so the tests that shorten them can put them
 # back -- they are module globals, and leaving one at 50 ms would have every
@@ -184,8 +218,10 @@ def test_every_section_opens(qt_app):
 
     # Spelled out rather than read back off the window: the drawer's contents
     # are part of what this is checking, so taking the expected list from the
-    # thing under test would assert nothing.
-    for index, name in enumerate(SECTIONS):
+    # thing under test would assert nothing. Every section, including the ones
+    # the sidebar is not offering right now -- opening one has to work whether
+    # or not its device is the selected one, since that is what the picker does.
+    for index, name in enumerate(ALL_SECTIONS):
         window.openSection(index)
         pump(qt_app, rounds=5)
         check(f"the {name} section opens",
@@ -223,6 +259,84 @@ def test_the_drawer_offers_every_section(qt_app):
         check(f"the sidebar's {name} entry opens {name}",
               window.property("openPageTitle") == name,
               str(window.property("openPageTitle")))
+    app_object.shutdown()
+
+
+def test_the_sidebar_follows_the_selected_device(qt_app):
+    """Choosing a dock must not leave the pad's pages on offer.
+
+    The window drives one pad and one dock at a time, and the pages of the two
+    have nothing to do with each other -- a sidebar offering Buttons and Macros
+    while a dock is selected is offering to edit something that is not on
+    screen. So the sections belong to a kind of device, and the drawer shows
+    the kind that is selected.
+
+    The bus here is the mock one (see the top of this file), which is the only
+    way this runs at all: it needs two pads and a dock.
+    """
+    pad = TestPad()
+    app_object, engine, window = load_shell(qt_app, pad)
+    pump(qt_app, rounds=40)
+
+    devices = app_object.devices
+    check("the mock bus is what the window sees", devices.count == 3,
+          str(devices.count))
+    check("two pads and a dock",
+          (devices.padCount, devices.dockCount) == (2, 1),
+          f"{devices.padCount}/{devices.dockCount}")
+    check("and it says they are not real", devices.hasMock)
+    check("a pad is selected to begin with", not devices.currentIsDock)
+    offered = window.property("drawerSections").toVariant() or []
+    check("so the pad's sections are offered", offered == SECTIONS, str(offered))
+
+    # The dock is last, after the two pads.
+    devices.select(2)
+    pump(qt_app, rounds=10)
+    check("the window follows it", devices.currentIsDock)
+    offered = window.property("drawerSections").toVariant() or []
+    check("the sidebar is the dock's", offered == DOCK_SECTIONS, str(offered))
+    check("and the Dock page is what is open",
+          window.property("openPageTitle") == "Dock",
+          str(window.property("openPageTitle")))
+    check("the dock model was pointed at it",
+          app_object.dock.selector == devices.dock,
+          f"{app_object.dock.selector} vs {devices.dock}")
+
+    # And back. Choosing a pad returns the pad's pages and the page it was on.
+    devices.select(1)
+    pump(qt_app, rounds=10)
+    check("choosing a pad brings its sections back",
+          (window.property("drawerSections").toVariant() or []) == SECTIONS)
+    check("and the window is on a pad page again",
+          window.property("openPageTitle") == "Controller",
+          str(window.property("openPageTitle")))
+    check("the dock is still remembered", devices.dock != "", devices.dock)
+    # The picker reaching the worker at all. The re-read that follows is hung
+    # off the worker's own reply rather than off the picker's signal -- see
+    # `worker.select_pad` -- because a request queued from here would arrive
+    # ahead of the switch and read the pad that was just switched away from.
+    check("the worker was told which pad to open",
+          app_object.thread.worker._selector == devices.pad,
+          f"{app_object.thread.worker._selector} vs {devices.pad}")
+    app_object.shutdown()
+
+
+def test_choosing_another_pad_does_not_move_the_page(qt_app):
+    """Only a change of *kind* navigates.
+
+    Switching between two pads while editing lighting should leave you on
+    Lighting; it is the same page, about a different device.
+    """
+    pad = TestPad()
+    app_object, engine, window = load_shell(qt_app, pad)
+    pump(qt_app, rounds=40)
+
+    window.openSection(ALL_SECTIONS.index("Lighting"))
+    pump(qt_app, rounds=5)
+    app_object.devices.select(1)
+    pump(qt_app, rounds=10)
+    check("the page stays put", window.property("openPageTitle") == "Lighting",
+          str(window.property("openPageTitle")))
     app_object.shutdown()
 
 
@@ -643,6 +757,8 @@ def main():
                      test_a_charging_pad_says_so_rather_than_a_level,
                      test_every_section_opens,
                      test_the_drawer_offers_every_section,
+                     test_the_sidebar_follows_the_selected_device,
+                     test_choosing_another_pad_does_not_move_the_page,
                      test_the_i18n_functions_are_installed,
                      test_a_game_list_update_that_fails_is_reported,
                      test_a_game_list_update_that_succeeds_replaces_the_list,

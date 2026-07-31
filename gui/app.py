@@ -13,17 +13,19 @@ opening the device is a separate `start()` rather than something `__init__`
 does. A test needs a window in between: build the graph, put a fake pad behind
 the worker, and only then let it talk to anything.
 
-Scope is the controller itself. The charging dock is a separate SDK we have not
-decompiled, and nothing here talks to it.
+**Scope is every Flydigi device attached, not "the pad".** `devices` is the list
+behind the picker; `device` and the pages under it are whichever pad is chosen,
+and `dock` is whichever charging dock is. Two selections, because a pad and a
+dock are not alternatives -- see `gui/models/devices.py`.
 """
 from PySide6.QtCore import Property, QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtQml import QmlElement, QmlSingleton
 
 from flydigi import games
 
-from .models import (DeviceModel, DsModeModel, GameFilterModel, GameListModel,
-                     LightingModel, ProfileModel, ScreenModel, SettingsModel,
-                     SetupModel)
+from .models import (DeviceModel, DevicesModel, DockModel, DsModeModel,
+                     GameFilterModel, GameListModel, LightingModel,
+                     ProfileModel, ScreenModel, SettingsModel, SetupModel)
 from .worker import DeviceThread
 
 # See gui/models/device.py for what these two names do.
@@ -39,6 +41,12 @@ PROFILE_COUNT = 4
 # seconds to notice one that was just woken reads as never noticing it.
 INFO_INTERVAL_MS = 30_000
 SEARCH_INTERVAL_MS = 2_000
+# How often the whole bus is re-enumerated, as opposed to the selected pad being
+# asked how it is. Slower than either, and for a different reason: this is three
+# exchanges with *every* attached device, so it is a hotplug check rather than a
+# poll. The pad's own info poll is what notices the selected pad coming and
+# going, and it runs every two seconds while one is missing.
+DEVICES_INTERVAL_MS = 10_000
 
 
 class FetchThread(QThread):
@@ -78,6 +86,8 @@ class App(QObject):
         super().__init__(parent)
         self.thread = None
         self._fetch = None
+        self._devices = DevicesModel(self)
+        self._dock = DockModel(self)
         self._device = DeviceModel(self)
         self._profile = ProfileModel(self)
         self._lighting = LightingModel(self)
@@ -103,8 +113,20 @@ class App(QObject):
         self._profile.setSlotCount(PROFILE_COUNT)
         self._games.load()
 
+        # The picker feeding the worker, and the worker feeding it back. The
+        # dock model asks for its own reads, because which dock it is showing
+        # is its own state and nothing else needs to know.
+        #
+        # The pad's re-read is deliberately *not* hung off the picker's signal:
+        # see `worker.select_pad`. It is hung off the worker's reply, in
+        # `start()`, so the reads are queued behind a switch that has happened.
+        self._devices.dockSelected.connect(self._dock.setSelector)
+
         self._info_timer = QTimer(self)
         self._info_timer.timeout.connect(self.requestInfo)
+        self._devices_timer = QTimer(self)
+        self._devices_timer.setInterval(DEVICES_INTERVAL_MS)
+        self._devices_timer.timeout.connect(self._devices.refreshRequested)
         self._polling = False
         # Our own copy, because `connectedChanged` is not an edge: both
         # `infoReceived` and `failed` emit it unconditionally so that `summary`
@@ -146,6 +168,12 @@ class App(QObject):
         self._screen.uploadRequested.connect(self._screen_upload_starting)
         self._screen.uploadRequested.connect(worker.upload_screen)
         self._screen.settingRequested.connect(worker.set_screen_setting)
+        self._devices.refreshRequested.connect(worker.refresh_devices)
+        self._devices.padSelected.connect(worker.select_pad)
+        worker.pad_selected.connect(self._pad_selected)
+        self._dock.refreshRequested.connect(worker.load_dock)
+        self._dock.switchRequested.connect(worker.set_dock_switch)
+        self._dock.lightingRequested.connect(worker.write_dock_lighting)
 
         # -- replies in -----------------------------------------------------
         worker.info_changed.connect(self._device.infoReceived)
@@ -164,6 +192,10 @@ class App(QObject):
         worker.screen_status.connect(self._screen.statusReceived)
         worker.screen_progress.connect(self._screen.progressReceived)
         worker.screen_finished.connect(self._screen_finished)
+        worker.devices_changed.connect(self._devices.devicesReceived)
+        worker.dock_state.connect(self._dock.stateReceived)
+        worker.dock_progress.connect(self._dock.progressReceived)
+        worker.dock_finished.connect(self._dock.writeFinished)
 
         if poll:
             self.beginPolling()
@@ -184,6 +216,13 @@ class App(QObject):
         """
         self._polling = True
         self._resume_polling()
+        # The bus first: the pad the worker opens is the one the picker last
+        # chose, and until the list has arrived nothing knows whether that pad
+        # is here. Asking for the info in the same breath is deliberate --
+        # neither answer waits on the other, and the header should not sit
+        # blank for a whole enumeration.
+        self._devices_timer.start()
+        self._devices.refreshRequested.emit()
         self.requestInfo.emit()
 
     @Slot()
@@ -250,6 +289,16 @@ class App(QObject):
             self._read_the_rest(keep_edits=True)
 
     # -- what QML binds to -------------------------------------------------
+
+    @Property(DevicesModel, constant=True)
+    def devices(self):
+        """Everything attached, and which pad and dock are selected."""
+        return self._devices
+
+    @Property(DockModel, constant=True)
+    def dock(self):
+        """The charging dock the dock pages are showing, if one is selected."""
+        return self._dock
 
     @Property(DeviceModel, constant=True)
     def device(self):
@@ -374,6 +423,19 @@ class App(QObject):
         self._device.status = f"Game list updated: {self._games.count} games"
 
     # -- worker replies that need a sentence rather than a model ------------
+
+    def _pad_selected(self, _selector):
+        """A different pad is on screen: read it as though it had just arrived.
+
+        Edits are deliberately not kept. `keep_edits` exists for a pad that
+        dozed off mid-remap and came back, where dropping the work would be the
+        app losing something nobody asked it to lose. Choosing another pad is
+        someone asking, and carrying a half-finished remap across from one pad
+        to another would be the app inventing an intention.
+        """
+        self._device.connected = False
+        self.requestInfo.emit()
+        self._read_the_rest(keep_edits=False)
 
     def _screen_upload_starting(self, _frames, _interval, _restore):
         self._info_timer.stop()

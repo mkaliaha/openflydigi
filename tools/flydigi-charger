@@ -31,12 +31,13 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flydigi import charger, device  # noqa: E402
+from flydigi import charger, device, registry  # noqa: E402
 
 SWITCHES = {
     "sleep-when-charging": (
         charger.set_sleep_when_charging, "sleep_when_charging",
-        'Flydigi call this "Intelligent start"'),
+        "both devices go dark while a pad is docked, which overrides "
+        "lighting-sync and power-display; Flydigi call it \"Intelligent start\""),
     "lighting-sync": (
         charger.set_led_sync, "led_sync",
         "keep the dock's lighting in step with the pad's"),
@@ -108,7 +109,8 @@ def show(dock):
     if status is None:
         print("  no status report in the last second")
     elif status["docked"]:
-        print(f"  a controller is docked, battery {status['battery']}")
+        print(f"  a controller is docked, battery "
+              f"{charger.describe_battery(status['battery'])}")
     else:
         print("  nothing docked")
     return 0
@@ -184,9 +186,13 @@ def main():
         description=__doc__.splitlines()[0],
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="\n".join(__doc__.splitlines()[1:]))
-    ap.add_argument("--device", metavar="PATH",
-                    help="hidraw node, when more than one dock is attached")
-    ap.add_argument("--uid", help="pick a dock by uid, or a prefix of one")
+    registry.add_device_argument(ap)
+    # Kept as its own flag rather than folded into --device: it is what the
+    # dock's own docs and this tool's help have said since before there was a
+    # shared selector, and it takes the same values that selector does.
+    ap.add_argument("--uid", metavar="SELECTOR",
+                    help="the same thing as --device, under the name this tool "
+                         "used first")
     sub = ap.add_subparsers(dest="cmd")
 
     sub.add_parser("show", help="everything the dock will report")

@@ -103,15 +103,17 @@ def test_the_reply_a_real_dock_gave_decodes_field_by_field():
 
 
 def test_an_all_zero_firmware_reads_as_not_reported():
-    dock = FakeDock()
-    import fake_dock
-    original = fake_dock.FIRMWARE
-    fake_dock.FIRMWARE = (0x00, 0x00)
-    try:
-        check("all-zero firmware is None",
-              charger.read_info(dock)["firmware"] is None)
-    finally:
-        fake_dock.FIRMWARE = original
+    """Flydigi treat an all-zero version as "not reported", not as zero.
+
+    The version is the dock's own now rather than a module constant a test
+    reaches in and swaps, because two mock docks on one bus may run different
+    firmware -- and a test that patched a global was testing the patch as much
+    as the parser.
+    """
+    check("all-zero firmware is None",
+          charger.read_info(FakeDock(firmware=(0x00, 0x00)))["firmware"] is None)
+    check("and a real one still parses",
+          charger.read_info(FakeDock(firmware="0.0.3.9"))["firmware"] == "0.0.3.9")
 
 
 def test_uid_and_nickname():

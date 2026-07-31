@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
+"""Every Flydigi device attached, and what to call each one.
+
+    tools/flydigi-devices list                       # the bus, one line each
+    tools/flydigi-devices show                       # the first device, in full
+    tools/flydigi-devices show --device Couch        # a particular one
+    tools/flydigi-devices name "Sofa" --device Couch # rename it
+
+Every other tool here takes `--device` with the same meaning: a node path, a
+uid or a prefix of one, a mac, or a nickname. `list` is what prints all four.
+
+**Nothing here writes except `name`**, and that one is unproven -- command 24
+has never been acknowledged by hardware, and Flydigi's own builder for it is
+broken past a one-character name in both of their SDKs. It asks before sending.
+
+Devices that are not there can be conjured with `FLYDIGI_MOCK_BUS`, which is how
+the multi-device paths are exercised on a desk with one pad and one dock:
+
+    FLYDIGI_MOCK_BUS='pad,pad:f5=Couch,dock=Shelf' tools/flydigi-devices list
+
+See flydigi/mock/__init__.py for the longer, editable form.
+"""
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from flydigi import charger, device, identity, mock, motion, registry  # noqa: E402
+
+
+def kinds_from(args):
+    if args.pads:
+        return (registry.KIND_PAD,)
+    if args.docks:
+        return (registry.KIND_DOCK,)
+    return registry.KINDS
+
+
+def listing(args):
+    note = mock.summary()
+    if note:
+        print(note)
+    found = registry.list_devices(kinds_from(args), deep=True)
+    if not found:
+        print("nothing attached -- a sleeping pad has left the USB bus "
+              "entirely, so press a button", file=sys.stderr)
+        return 1
+    width = max(len(registry.key(e)) for e in found)
+    for entry in found:
+        print(f"{registry.key(entry):<{width}}  {registry.describe(entry)}")
+    return 0
+
+
+def show(args):
+    entry = registry.find(args.device, kinds_from(args))
+    print(f"{registry.label(entry)}")
+    print(f"  kind        {entry['kind']}"
+          + ("   (on the mock bus, not real hardware)" if entry["mock"] else ""))
+    print(f"  node        {entry['path']}")
+    print(f"  product     {entry['product'] or '(unnamed)'}")
+    print(f"  model       {entry['model'] or 'unrecognised'}"
+          f"   device type {entry['device_type']}")
+    print(f"  uid         {entry['uid'] or '(no answer)'}")
+    if entry["kind"] == registry.KIND_PAD:
+        # Named as what it is: all-zero on the pad measured here, so a blank
+        # line would read as a bug rather than as the finding it is.
+        print(f"  address     {entry['mac'] or 'not reported by this pad'}")
+    print(f"  nickname    {entry['nickname'] or '(none set)'}")
+    print(f"  firmware    {entry['firmware'] or 'not reported'}")
+    if entry["battery"] is not None:
+        charge = ("charging" if entry["charging"]
+                  else "{}/{}".format(entry["battery"], motion.MAX_LEVEL))
+        print(f"  battery     {charge}   over {entry['connect_type']}")
+    print(f"  selector    {registry.key(entry)}")
+    if not entry["supported"]:
+        print("  -- this project does not drive it; writes are refused")
+    if entry["error"]:
+        print(f"  -- {entry['error']}")
+    return 0
+
+
+def name(args):
+    entry = registry.find(args.device, kinds_from(args))
+    what = registry.label(entry)
+    if not args.yes:
+        print(f"Naming {what} ({entry['path']}) {args.nickname!r}.")
+        print("Command 24 has never been acknowledged by hardware from here, "
+              "and Flydigi's own\nbuilder for it puts the checksum inside the "
+              "name for anything past one character.\nThis sends the packet "
+              "the framing says is right.")
+        if input("Go ahead? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("nothing sent")
+            return 1
+    with registry.open_device(entry["path"], entry["kind"]) as handle:
+        if entry["kind"] == registry.KIND_DOCK:
+            charger.require(handle)
+            written = charger.write_nickname(handle, args.nickname)
+        else:
+            identity.require(handle)
+            written = identity.write_nickname(handle, args.nickname,
+                                              reference=args.reference)
+    if written == args.nickname:
+        print(f"{what} is now {written!r}")
+        return 0
+    print(f"the write was acknowledged and the device reads back {written!r}, "
+          f"not {args.nickname!r}", file=sys.stderr)
+    return 1
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="\n".join(__doc__.splitlines()[1:]))
+
+    # One shared parent, so `--device`, `--pads` and `--docks` may be written
+    # after the subcommand -- which is where a hand puts them -- and mean the
+    # same thing in every one of them.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--pads", action="store_true", help="controllers only")
+    common.add_argument("--docks", action="store_true",
+                        help="charging docks only")
+    registry.add_device_argument(common)
+    sub = ap.add_subparsers(dest="cmd")
+
+    sub.add_parser("list", parents=[common],
+                   help="every device on the bus, one line each")
+    sub.add_parser("show", parents=[common],
+                   help="everything one device will say")
+
+    rename = sub.add_parser("name", parents=[common],
+                            help="give a device a nickname")
+    rename.add_argument("nickname")
+    rename.add_argument("--yes", action="store_true", help="do not ask first")
+    rename.add_argument("--reference", action="store_true",
+                        help="send Flydigi's own bytes, checksum bug included, "
+                             "to find out what the pad makes of them")
+
+    args = ap.parse_args()
+    if not args.cmd:
+        ap.print_help()
+        return 2
+    try:
+        if args.cmd == "list":
+            return listing(args)
+        if args.cmd == "show":
+            return show(args)
+        return name(args)
+    except (device.DeviceNotFound, device.DeviceBusy, identity.WrongDevice,
+            identity.NicknameRefused, charger.ProtocolError,
+            charger.WrongDock, ValueError) as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

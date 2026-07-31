@@ -17,12 +17,19 @@ pad's own device settings, lighting, the screen, the game list and its own setup
 a running game and applies its route unattended.
 
 The **CD2 charging dock** is driven too, as a device of its own: its four switches and all eight
-of its computable lighting effects, from `tools/flydigi-charger`. There is no GUI page for it
-yet, and no custom images or animations.
+of its computable lighting effects, from `tools/flydigi-charger` and from the app's Dock page.
+No custom images or animations yet.
 
-**Left to build:** a dock page in the app and the dock's image/animation path, an interactive
-crop for the Screen page, and the smaller pieces under What's next. Supporting an older pad is
-[ruled out](#ruled-out).
+**More than one device is handled properly**, which used to be the largest hole in all of this.
+Every pad and dock on the bus is enumerated and named, a device is chosen by uid, nickname or node
+rather than by whichever hidraw minor sorted first, the app has a picker and shows the pages of
+whichever device is selected, and the daemon fans a tier-1 vibration bind out to every pad that
+takes one while every other route acts on the pad the picker chose. There is one pad and one dock
+on this desk, so `FLYDIGI_MOCK_BUS` serves the rest — see
+[Mock devices](#mock-devices-for-the-ones-nobody-owns).
+
+**Left to build:** the dock's image/animation path, an interactive crop for the Screen page, and
+the smaller pieces under What's next. Supporting an older pad is [ruled out](#ruled-out).
 
 | Tier | Mechanism | Games | State |
 |---|---|---|---|
@@ -51,13 +58,13 @@ true — `gui/` may import `flydigi/` and never the reverse, and nothing Flydigi
 
 Roughly in order of value.
 
- 1. **A dock page in the app, and the dock's custom images.** The backend is done and measured;
-    what is left is a Kirigami page over `flydigi/charger.py`, and the image/GIF path — one
-    pixel sampled per LED onto the 162-LED wedge, one frame per GIF frame. That decoding cannot
-    live in the zero-dependency backend, so it belongs in `gui/`, where Qt already reads both
-    formats, with `flydigi/` taking colour arrays. The dock's `default` mode stays out of reach
-    until someone copies `Configs/Charger/cd2/default/default_mapping_0.dat` off a Windows
-    install: Space Station does not compute that one either, it uploads that file.
+ 1. **The dock's custom images.** The page and the eight computable effects are done; what is left
+    is the image/GIF path — one pixel sampled per LED onto the 162-LED wedge, one frame per GIF
+    frame. That decoding cannot live in the zero-dependency backend, so it belongs in `gui/`,
+    where Qt already reads both formats, with `flydigi/` taking colour arrays. The dock's
+    `default` mode stays out of reach until someone copies
+    `Configs/Charger/cd2/default/default_mapping_0.dat` off a Windows install: Space Station does
+    not compute that one either, it uploads that file.
     → [docs/findings-other-devices.md](docs/findings-other-devices.md)
  2. **An interactive crop for the Screen page.** Everything else there is done.
  3. **Third-party mode: optional polish.** Command 17 here is byte-identical to Space Station's.
@@ -72,8 +79,13 @@ the settings block" in [docs/device-settings.md](docs/device-settings.md).
   * **Restore a profile slot to factory** — `ResetMappingConfigByCfgId`, command **175**. The
     Buttons page's "reset all" only clears key mappings in the in-memory blob; Space Station's
     resets the whole slot on the pad.
-  * **Controller nickname** — read **2**, write **24**. Self-verifying, and it makes a two-pad
-    desk legible.
+  * **Naming a pad on the pad** — write **24**, `identity.write_nickname` and
+    `tools/flydigi-devices name`, built and never acknowledged by hardware. The read half
+    (command 2) *is* measured. Worth one run because **Flydigi's own builder for it is broken in
+    both SDKs**: `array[6] = Crc(3, 3 + array[4])` puts the checksum at a fixed index, which is
+    only the right slot for a one-character name, so for anything longer their packet overwrites
+    the name's second byte and leaves the checksum slot at zero. This sends the packet the framing
+    says is right; `--reference` sends theirs, byte for byte, to find out which the pad takes.
   * **The cooperative lock** — `AcquireController`, command **28**, with a 20-byte ASCII tag. The
     read half is built as `motion.read_transport`; the write half is not.
   * **Custom stick curves.** The page offers presets and a Custom label; Space Station drags the two
@@ -116,6 +128,8 @@ All command factories are decompiled under `decompiled/Flydigi.ControllerSdk/`.
 |---|---|---|
 | Mapping profiles | status 161, apply 162, read 163, write 164/165, save 166 | `flydigi/mapping.py`, `tools/flydigi-mapping`, GUI |
 | Device-type guard | identify read 1 | `flydigi/identity.py` — `require()` refuses anything but a k5, and `flydigi/` calls it nowhere itself; `flydigi-mapping`, `flydigi-settings` and the app take it once per connection, so their reads are refused too |
+| **Choosing between devices** | uid 4, nickname 2 / 24, and the command-1 address | `flydigi/registry.py` — one list over pads and docks, selection by node, uid, mac or nickname with an ambiguous name refused; `tools/flydigi-devices`, `--device` on every tool, the app's picker, and `prefs.primary_pad` for the daemon. Uid and nickname reads **measured on the pad**; the address reads all-zero and the nickname write has never been acked — [detail](docs/findings-other-devices.md) |
+| **Devices that are not there** | — | `flydigi/mock/` behind `FLYDIGI_MOCK_BUS` — the fakes moved out of `tests/` so the app, the tools and the daemon can all run against a bus with several pads and docks on it. Off unless the variable is set |
 | Buttons, sticks, vibration, stored triggers | inside the 840-byte profile blob | same module — [detail](docs/findings-profile-blob.md) |
 | Gyro mapped to a stick | the profile's motion block at 137 | `flydigi/mapping.py` (`motion`/`set_motion`), `tools/flydigi-mapping gyro`, GUI — **measured on the pad** with `tools/gyro-map-probe`: it plays the block, both enable keys gate it, Click toggles, and the response curve at 830 is inert — [detail](docs/findings-profile-blob.md) J2 |
 | Macros, played by the pad | the profile's macro page at 230, plus 162 to make one live | `flydigi/mapping.py`, `flydigi/macros.py` (the recorder), GUI — [detail](docs/findings-profile-blob.md) |
@@ -130,7 +144,7 @@ All command factories are decompiled under `decompiled/Flydigi.ControllerSdk/`.
 | Virtual DualSense (tier 4) | — | `flydigi/uhid.py`, `tools/flydigi-ds5` — [detail](docs/findings-haptics.md) |
 | Virtual DualSense over USB (tier 4b) | — | `flydigi/usbip.py`, `tools/flydigi-ds5-usbip` — adds haptic audio |
 | DualSense mode as one switch for the whole system, not a per-game route | — | `flydigi/dsmode.py`, the app's DualSense page |
-| The CD2 charging dock | heartbeat 1, nickname 2/24, uid 4, switches 17/18/19/25, LED read 20, LED write 97/98, RGB write 22/23 | `flydigi/charger.py`, `tools/flydigi-charger` — **measured on the dock**: firmware 0.0.3.9, the reply checksum position predicted correctly on all five reads (the command-97 ack is the one exception, a slot later), and its eight computable effects reproduced closely enough that Space Station's own Breath and this port's were indistinguishable side by side — [detail](docs/findings-other-devices.md) |
+| The CD2 charging dock | heartbeat 1, nickname 2/24, uid 4, switches 17/18/19/25, LED read 20, LED write 97/98, RGB write 22/23 | `flydigi/charger.py`, `tools/flydigi-charger`, the app's Dock page — **measured on the dock**: firmware 0.0.3.9, the reply checksum position predicted correctly on all five reads (the command-97 ack is the one exception, a slot later), and its eight computable effects reproduced closely enough that Space Station's own Breath and this port's were indistinguishable side by side — [detail](docs/findings-other-devices.md) |
 
 **The vibration bind is live state, and is re-applied when the pad comes back.** It is command 82
 with no blob write, so `tools/flydigid` watches for the pad leaving the bus mid-game and re-applies
@@ -194,15 +208,11 @@ one would fail exactly where the app runs — in the `apex-dev` distrobox.
   * **Steam lists the pad twice** with the third-party flag on, and after a reconnect stops labelling
     it "Apex 5" while it keeps working on the native driver. Neither is fixable from here.
     → [docs/findings-steam.md](docs/findings-steam.md)
-  * **The guard refuses the wrong pad; it cannot pick the right one.** Within a device family,
-    `find_device` returns the first `/dev/hidraw*` in sorted-by-name order — `hidraw10` before
-    `hidraw2` — and only `tools/flydigi_cmd.py` surfaces the `Controller(path=...)` override, as
-    `--device`. Two pads get whichever the sort reaches first, and `identity.require` turns that
-    into a refusal rather than a wrong write. The pads that can collide are the other `5a a5`
-    ones — a Vader 5 or an Apex 6 — since `IsOldProtocol()` is `VendorId != 0x37D7` and nothing
-    older carries a HID vendor collection on Linux at all, cabled or on a dongle. The dock is a
-    solved case rather than an instance of this one: families are told apart by the product id's
-    top nibble, and `tools/flydigi-charger --uid` picks between docks.
+  * **A pad's own address is all zeroes**, so the free identifier is not one. The command-1 reply
+    carries four MAC bytes at raw 8..11 and this pad answers `00 00 00 00` on its dongle, with
+    every surrounding field decoding correctly — measured, firmware 7.0.4.5. Whether a cable fills
+    it in is untested. `identity.read_uid` (command 4) is the one that works: thirteen bytes,
+    one exchange, and `registry.key` prefers it for exactly this reason.
     → [docs/findings-other-devices.md](docs/findings-other-devices.md)
 
 ## The desktop app
@@ -220,6 +230,7 @@ distrobox exists. Setup, the package list and the symbol detail are in
 
 | Tab | What works |
 |---|---|
+| Devices | every pad and dock attached, with its model, node, uid, firmware and battery; which one the window is showing, and a note when any of them is a mock. The picker in the sidebar header is the same selection |
 | Controller | Device (connection, battery level, reload from the pad); Profiles (the four slots — opening one is how you switch the running profile); Selected profile (rename the open profile, back up / restore it to file); Other software (let Steam and similar take the pad over, and who currently holds it) |
 | Device | the pad's own settings, not a profile's: switching profile from the pad with `FN + A/B/X/Y`, sleep time, the mapping switch (sub-id 4, undocumented in every locale Flydigi ships), stick debounce, auto-calibration, the rebound filter, stick resolution and centre sensitivity — plus the polling rate, shown and not offered |
 | Buttons | remap, turbo + hold/toggle, reset all to default |
@@ -230,6 +241,7 @@ distrobox exists. Setup, the package list and the symbol detail are in
 | Triggers | stored effect — all six of Flydigi's, each with its own controls, engaged on the pad as well as stored — plus the travel window, Flydigi's "Stroke Setting", as a start/end pair |
 | Lighting | effect, up to 5 colours, brightness, cycle time, react-to-rumble |
 | Screen | pick a picture or GIF, choose how it fits, preview the encoded frame, and send it over the serial link — with the frame count and a time estimate before you start; plus the always-on display and the status bar |
+| Dock | whichever dock is selected: its identity and uid, the four switches (written as they move, read back afterwards), and its lighting — eight effects with colours, brightness, frame interval and direction, computed here and uploaded with a progress bar. Says which switch wins when Sleep-while-docked is on beside the other two |
 | Games | all 94 games, searchable, filtered by route; **Update list** refetches the gamelist from Flydigi's public API; vibration presets load onto the pad from here; per-game **Auto** toggle, a route picker where a game really has a choice, and a DualSense marker on the 23 games Flydigi lists as DS5-aware |
 | DualSense | the tier-4b switch: vhci-hcd's state, haptic audio to the motors, what the relay is doing, and the launch option to copy |
 | Setup | the daemon's unit, "running now" and "start at login" as separate switches, the application-menu entry, and the udev rules behind one authentication prompt |
@@ -237,6 +249,13 @@ distrobox exists. Setup, the package list and the symbol detail are in
 **Everything device-facing runs on the worker thread** (`gui/worker.py`) and requests cross as
 signals. Calling a worker slot directly runs it on the caller's thread, which silently puts blocking
 HID traffic back on the UI thread.
+
+**The sidebar shows the sections of the device that is selected** — a pad's twelve, or the dock's
+one — because a window offering Buttons and Macros while a dock is on screen is offering to edit
+something that is not there. A pad and a dock are remembered separately, so choosing a dock does
+not make the pad pages go blank and choosing a pad does not forget which of two docks was being
+worked on. Only a change of *kind* moves the page; switching between two pads leaves you where you
+were, on the same page about a different device.
 
 **Three pages are shut off while another driver holds the pad** — **Buttons**, **Macros** and the
 **DualSense** switch. Everything else stays live: triggers, lighting, sticks and the screen all keep
@@ -252,8 +271,52 @@ argument, the hardware proof of 166, and the QML testing traps are in
 [docs/findings-desktop-app.md](docs/findings-desktop-app.md); how to work in `gui/` is
 [gui/README.md](gui/README.md).
 
+## Mock devices, for the ones nobody owns
+
+One Apex 5 and one CD2 are on this desk, and every multi-device path needs more. `FLYDIGI_MOCK_BUS`
+puts fakes on the bus that the tools, the daemon and the desktop app all see, because
+`device.find_nodes` is the one place any of them asks what is attached:
+
+```bash
+FLYDIGI_MOCK_BUS='pad=Desk,pad:f5=Couch,dock:1=Shelf' tools/flydigi-devices list
+FLYDIGI_MOCK_BUS=~/bus.json distrobox enter apex-dev -- python3 -m gui
+```
+
+The JSON form is re-read on every enumeration, so editing `"present": false` and saving is a
+device being unplugged — which is how the app's reconnect path and a picker whose device vanishes
+get exercised at all. State survives that: a mock pad keeps its profiles across an absence, the way
+a real one keeps everything but an unsaved config across a sleep. Identity is derived from a
+device's place in the spec, so a `uid:` selector stored in a config file still resolves next run.
+
+**Nothing appears unless the variable is set**, and everything that comes out of it is marked
+`mock` — in `flydigi-devices list`, in the picker, and on the Devices page. The fakes are
+`flydigi/mock/pad.py` and `flydigi/mock/dock.py`, which is where `tests/fake_pad.py` moved to;
+the test files are re-export shims and the tests import them by the old names.
+
 ## Facts about the pad, the wire and this code
 
+  * **A pad answers command 4 with a real uid, and its address field with nothing.** Measured on
+    this pad: `04 5a a5 04 01 00 | 14 20 6e 7a 1c 00 00 00 00 dc ba 3e 00`, thirteen bytes at the
+    offset the SDK predicts, and command 1's four address bytes are all zero. So the identifier
+    that costs an exchange is the one that works and the free one is not usable.
+  * **A pad's nickname starts one byte earlier than every other payload, and the pad's own reply
+    proves it.** `ReadNickNameControllerCommandNewXInput` slices from its data[4] — raw 5 here —
+    where the charger SDK slices from 6, and an unnamed pad answered
+    `04 5a a5 02 01 00 01 01 09 09 09 64 04 5e ...`: raw 5 is 0x00, which is Flydigi's own test for
+    an erased name, while raw 6 is 0x01 and would have decoded as a name that is not there. Each
+    SDK is right about its own device.
+  * **The dock's "Intelligent start" turns the lighting off on both devices.** Observed on the
+    hardware here: with it on, docking a pad takes the lighting down on the pad *and* on the dock
+    for as long as it sits there — so it overrides Lighting sync and Power display during the only
+    window either of them matters in. Space Station forcing it and Power display apart in its UI
+    is enforcing something the firmware does, not a house style; this project sets both as asked
+    and says which wins. Named "Sleep while docked" in the app, since their label describes none
+    of that.
+  * **The dock's battery byte is a controller's charge, on the controller's scale** — 0..5 with 6
+    meaning charging, decoded by `charger.describe_battery`. Never seen with a pad actually
+    seated, so the scale is inferred from the pad's own; printing the raw byte would repeat the
+    bug that reported a full pad as five-eighths, and worse, since a docked pad is charging and
+    would render as "battery 6".
   * **Report id is `0x03`** on the vendor interface, not the `6` the decompiled
     `TakeEndpointByDevice()` suggests. Find the node by report-descriptor prefix `06 a0 ff`; it moves
     between wired and dongle.
@@ -457,11 +520,13 @@ Everything gitignored is reproducible: `tools/fetch-configs --monitor-configs --
 `gamelist.json`, `configs/` and `mods/`. The decompile toolchain lives in the `wine-arch` distrobox;
 `decompiled/` is only needed for new protocol work, not to run anything.
 
-Tests, cheapest first. The fourteen backend tests import no Qt. The three Qt tests skip with exit 0
-when PySide6 is absent, so the backend run stays dependency-free:
+Tests, cheapest first. The seventeen backend tests import no Qt. The three Qt tests skip with exit 0
+when PySide6 is absent, so the backend run stays dependency-free. `test_registry` and `test_daemon`
+run against the mock bus and set `FLYDIGI_MOCK_BUS` themselves, so a pad on the desk changes
+nothing about what they assert:
 
 ```bash
-for t in tests/test_{device,dsmode,dsx,forza,games,identity,macros,mapping,monitor,prefs,relay,screen,screen_ota,settings}.py; do python3 "$t"; done
+for t in tests/test_{charger,daemon,device,dsmode,dsx,forza,games,identity,macros,mapping,monitor,prefs,registry,relay,screen,screen_ota,settings}.py; do python3 "$t"; done
 distrobox enter apex-dev -- bash -lc 'cd ~/Projects/ApexExperiments && \
   python3 tests/test_models.py && python3 tests/test_shell.py && python3 tests/test_qml.py && \
   tools/generate-qmltypes && \
@@ -469,8 +534,14 @@ distrobox enter apex-dev -- bash -lc 'cd ~/Projects/ApexExperiments && \
   reuse lint'
 ```
 
-`tests/fake_pad.py` answers reads, diffed writes, apply and save, models switch-on-read, and refuses
-a bad checksum by staying silent exactly as the pad does.
+`flydigi/mock/pad.py` — imported by the tests as `tests/fake_pad.py` — answers reads, diffed writes,
+apply and save, models switch-on-read, and refuses a bad checksum by staying silent exactly as the
+pad does. It answers the identity commands too, so two of them can be told apart.
+
+The Qt tests set `XDG_CONFIG_HOME` and `FLYDIGI_MOCK_BUS` before importing `gui`: the app
+enumerates the bus at startup and writes the chosen pad into the preferences file, and neither
+probing the developer's hardware nor rewriting their auto-mode preferences is a thing a test may
+do.
 
 ## Environment
 
@@ -505,6 +576,7 @@ a bad checksum by staying silent exactly as the pad does.
 | `PROTOCOL.md` | Full wire protocol + hardware verification results |
 | `flydigi/` | Library — `device.py` (transport), `identity.py` (the command-1 device-type guard), `blobs.py` (packetised config transfer), `effects.py` (live trigger commands), `mapping.py` (profiles, remapping, macros, vibration, stored triggers), `macros.py` (recording one off the pad's evdev node), `lighting.py` (RGB), `screen.py` (160x80 screen: LVGL image format, settings, and the HID upload that puts no picture on this pad), `screen_ota.py` (the serial upload that works), `settings.py` (the pad's own settings: command 3 and the small writes behind it), `games.py`, `forza.py`, `evdev.py` (the xpad evdev reader every relay's input comes from), `ds5.py` (DualSense report codec), `dsx.py` (DSX UDP protocol), `monitor.py` (process-memory engine), `motion.py` (battery, gyro/accel and the third-party toggle), `relay.py` (Apex 5 → DualSense translation, and `PadLink`: holding a pad that leaves the bus every time it sleeps) |
 | `gui/` | PySide6/QML desktop app (GPL-3.0-or-later) — `app.py` (the object graph), `main.py` (entry point), `worker.py` (all device I/O, on its own thread), `i18n.py` (the `i18n*()` shim the engine needs; without it every Kirigami form delegate throws `ReferenceError: i18ndc is not defined`, so `main.py` installs it unconditionally), `models/` (view-agnostic state; `screen.py` is the one that touches QtGui, for image decoding), `qml/` (`Main.qml`, `pages/`, `components/`) |
+| `tools/flydigi-devices` | Every device attached — `list`, `show`, and `name` to write a nickname (unproven; it asks first). The `--device` selector every other tool takes is defined here |
 | `tools/flydigi-mapping` | CLI for profiles — list/show/set/clear/rename/apply/backup/restore, plus `macros`, `macro-record`, `macro-set`, `macro-clear`, `gyro` |
 | `tools/gyro-map-probe` | What the pad does with the motion block at 137: five windows answering whether it plays it, whether each enable key gates it, whether Click toggles, and whether the curve at 830 is read. Transitions counted out on the motors, in `stick-feel`'s grammar |
 | `tools/flydigi-forza` | Forza driver — UDP 5300 → rules → triggers (`--port`, `--config` for a rule file other than `configs/forza.json`, `--dump` for telemetry only, `--quiet`; `--accept LEN:OFFSET`, e.g. `--accept 331:12`, for a newer Forza shipping an unknown packet size) |
@@ -523,14 +595,16 @@ a bad checksum by staying silent exactly as the pad does.
 | `tools/gen_ds5_usb.py` | Regenerates the above from a connected DualSense. Scrubs the Bluetooth addresses in report `0x09` **and the hardware address in `0x0B`**, unconditionally. Report `0x05`, this unit's IMU calibration, is kept deliberately — per-unit but not an identifier |
 | `tools/flydigi-ds5-usbip` | Tier 4b — the relay, with `--haptics` and `--motors` |
 | `tools/ds5-dump-features` | Re-reads a real DualSense and diffs it against what this project serves |
-| `tests/` | `test_device.py`, `test_dsmode.py`, `test_dsx.py`, `test_forza.py`, `test_games.py`, `test_identity.py`, `test_macros.py`, `test_mapping.py`, `test_monitor.py`, `test_prefs.py`, `test_relay.py`, `test_screen.py`, `test_screen_ota.py`, `test_settings.py` need no Qt; `test_models.py` needs PySide6, and `test_shell.py` and `test_qml.py` with `qml_harness.py` and `qml/tst_*.qml` need Kirigami as well, so those two run inside `apex-dev` — all pass without hardware, each printing its own count |
-| `tests/fake_pad.py` | Stand-in controller: multi-packet reads, diffed writes, apply, save, checksum rejection |
+| `tests/` | `test_charger.py`, `test_daemon.py`, `test_device.py`, `test_dsmode.py`, `test_dsx.py`, `test_forza.py`, `test_games.py`, `test_identity.py`, `test_macros.py`, `test_mapping.py`, `test_monitor.py`, `test_prefs.py`, `test_registry.py`, `test_relay.py`, `test_screen.py`, `test_screen_ota.py`, `test_settings.py` need no Qt; `test_models.py` needs PySide6, and `test_shell.py` and `test_qml.py` with `qml_harness.py` and `qml/tst_*.qml` need Kirigami as well, so those two run inside `apex-dev` — all pass without hardware, each printing its own count |
+| `tests/fake_pad.py`, `tests/fake_dock.py` | Re-export shims. The fakes themselves are `flydigi/mock/pad.py` and `flydigi/mock/dock.py`, so the app and the tools can run against them too |
 | `tools/forza-simulate` | Synthetic telemetry generator, for testing without the game |
 | `configs/forza.json` | Flydigi's own 15-rule Forza config, reused verbatim |
 | `tools/flydigid` | Polling daemon — auto-detects a running game and applies its config |
 | `tools/apex5-setup` | Setup checklist: udev rules, the daemon's unit, start at login, menu entry |
 | `tools/flydigi-auto` | Per-game auto mode and route — `list`, `on`, `off`, `reset`, `route` |
 | `flydigi/setup.py` | What the two above share: checks, unit generation, escalation. The unit and the menu entry are generated with this checkout's path in them, and `unit_installed()` is a byte comparison against what the checkout would write now, so moving the repository makes Setup report the daemon unit as out of date until it is installed again |
+| `flydigi/registry.py` | Every Flydigi device attached, and which one a caller meant: one list over pads and docks, `list_devices`/`drivable_pads`, selection by node, uid, mac or nickname, and the `--device` argument every tool shares |
+| `flydigi/mock/` | Devices that are not there, behind `FLYDIGI_MOCK_BUS` — the bus (`__init__.py`), the fake pad and the fake dock. Nothing appears unless the variable is set |
 | `flydigi/prefs.py` | Per-game preferences in `$XDG_CONFIG_HOME/flydigi/games.json`, falling back to `~/.config`. Keyed by the gamelist's `id`, which is unique across all 94 entries where names are not, and rewritten atomically because the daemon re-reads it while the app is editing it |
 | `tools/flydigi-run` | Steam launch wrapper — `flydigi-run "<name>" -- %command%` |
 | `tools/fetch-configs` | Restores everything gitignored — `gamelist.json`, `configs/`, `mods/` |

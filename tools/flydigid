@@ -24,8 +24,8 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from flydigi import effects, games, monitor, prefs  # noqa: E402
-from flydigi.device import Controller, DeviceNotFound, find_device  # noqa: E402
+from flydigi import device, effects, games, monitor, prefs, registry  # noqa: E402
+from flydigi.device import DeviceNotFound  # noqa: E402
 
 
 def log(msg):
@@ -216,22 +216,30 @@ def monitor_config(game):
     return None
 
 
-def driver_argv(game, route):
+def driver_argv(game, route, pad=None):
     """The helper to run beside a game, or None when there is nothing to run.
 
     These are the same drivers `tools/` already ships and that were each
     validated by hand; the daemon only starts and stops them.
+
+    `pad` is the primary pad's selector, passed straight through as `--device`.
+    Every driver holds one pad for the length of a session and rewrites its
+    trigger effects continuously, so on a two-pad desk the question "which one"
+    has an answer that is not "whichever node sorted first".
     """
+    where = ["--device", pad] if pad else []
     if route == "monitor":
         config = monitor_config(game)
         if config is None:
             return None
         return [sys.executable, os.path.join(TOOLS, "flydigi-monitor"),
-                config, "--quiet"]
+                config, "--quiet"] + where
     if route == "telemetry":
-        return [sys.executable, os.path.join(TOOLS, "flydigi-forza"), "--quiet"]
+        return [sys.executable, os.path.join(TOOLS, "flydigi-forza"),
+                "--quiet"] + where
     if route == "bespoke":
-        return [sys.executable, os.path.join(TOOLS, "flydigi-dsx"), "--quiet"]
+        return [sys.executable, os.path.join(TOOLS, "flydigi-dsx"),
+                "--quiet"] + where
     # DualSense mode is not here, and is not a route at all. It is a switch for
     # the whole system (flydigi/dsmode.py, and the app's DualSense page): the
     # virtual pad has to exist *before* a game enumerates pads, so acting on
@@ -241,19 +249,47 @@ def driver_argv(game, route):
 
 
 def apply_for(game, tier=None):
+    """Write a game's rumble-to-trigger bind into **every** pad that takes one.
+
+    Tier 1 is the one route that scales for free. The bind is command 82 and
+    nothing else: a pad-side setting, driven by the pad's own rumble, with no
+    host process in the loop once it is written. So two pads in a local co-op
+    game both get adaptive triggers, and neither has to be chosen. Every other
+    route holds one pad -- a driver rewriting effects at 20 Hz, a relay
+    presenting one DualSense -- and acts on the primary one instead.
+
+    True when at least one pad took it. A desk with two pads where one is
+    asleep is the ordinary case, not a failure, so a pad that is not there is
+    simply not written to; `registry.drivable_pads` only lists what answered.
+
+    One pad refusing does not stop the others: they are separate devices, and
+    the failure worth avoiding is the second pad going unbound because the
+    first one had gone to sleep between the enumeration and the write.
+    """
     tier = tier or games.tier(game)
     if tier != "vibration":
         return False
-    try:
-        with Controller() as ctrl:
-            results = effects.apply_game(ctrl, game)
-        log(f"applied {game.get('enGameName')}: " + ", ".join(
-            f"{s}={'ok' if ok else 'no-ack' if ok is False else 'skip'}" for s, ok in results
-        ))
-        return True
-    except (DeviceNotFound, OSError) as exc:
-        log(f"could not apply: {exc}")
+    name = game.get("enGameName")
+    pads = registry.drivable_pads()
+    if not pads:
+        log("could not apply: no controller this project drives is attached")
         return False
+    applied = 0
+    for entry in pads:
+        # The node too: with two pads and no nicknames set, "Apex 5" twice
+        # is a log nobody can act on.
+        label = f"{registry.label(entry)} ({entry['path']})"
+        try:
+            with registry.open_device(entry["path"], registry.KIND_PAD) as ctrl:
+                results = effects.apply_game(ctrl, game)
+        except (DeviceNotFound, OSError) as exc:
+            log(f"could not apply to {label}: {exc}")
+            continue
+        applied += 1
+        log(f"applied {name} to {label}: " + ", ".join(
+            f"{s}={'ok' if ok else 'no-ack' if ok is False else 'skip'}"
+            for s, ok in results))
+    return applied > 0
 
 
 class Driver:
@@ -311,27 +347,40 @@ class Driver:
 
 
 def pad_present():
-    """Whether the pad is on the bus at all.
+    """Whether any pad is on the bus at all.
 
     A sleeping Apex 5 leaves USB entirely, so this is also how "the pad went
     to sleep mid-game" looks. Costs two small reads per hidraw node and opens
     nothing, so it is cheap enough for the poll loop.
+
+    Deliberately "any" rather than "all". What it guards is the re-apply after
+    a reconnect, and `apply_for` writes to whatever is attached when it runs --
+    so one pad coming back is reason enough to run it, and a second still
+    asleep is not reason to hold off.
     """
-    try:
-        find_device()
-        return True
-    except DeviceNotFound:
-        return False
+    # `find_nodes` is a generator: truth-testing it would be true even for an
+    # empty bus, which reads as "the pad is always here" and would have quietly
+    # disabled the whole reconnect path.
+    return next(iter(device.find_nodes(device.FAMILY_PAD)), None) is not None
 
 
 def clear_triggers():
-    """Put the triggers back. Named apart from Scanner.reset, which is unrelated."""
-    try:
-        with Controller() as ctrl:
-            effects.clear_all(ctrl)
-        log("triggers reset")
-    except (DeviceNotFound, OSError) as exc:
-        log(f"reset skipped: {exc}")
+    """Put the triggers back, on every pad that was written to.
+
+    The counterpart of `apply_for` and it has to match it: a bind was written
+    to each attached pad, so clearing one would leave the others playing a
+    trigger effect for a game that has exited.
+    """
+    cleared = []
+    for entry in registry.drivable_pads():
+        try:
+            with registry.open_device(entry["path"], registry.KIND_PAD) as ctrl:
+                effects.clear_all(ctrl)
+            cleared.append(f"{registry.label(entry)} ({entry['path']})")
+        except (DeviceNotFound, OSError) as exc:
+            log(f"reset skipped for {registry.label(entry)}: {exc}")
+    if cleared:
+        log("triggers reset on " + ", ".join(cleared))
 
 
 def main():
@@ -340,6 +389,10 @@ def main():
     ap.add_argument("--reassert", type=float, default=0.0,
                     help="re-apply config every N seconds (counters Steam Input "
                          "resetting controller state; 0 disables)")
+    registry.add_device_argument(
+        ap, help="the pad the single-pad routes drive, overriding the app's "
+                 "choice. The tier-1 vibration bind ignores this and goes to "
+                 "every pad that takes one")
     args = ap.parse_args()
 
     index = games.process_index()
@@ -347,6 +400,16 @@ def main():
 
     settings = prefs.Prefs()
     settings_mtime = settings.mtime()
+
+    def primary():
+        """Which pad the single-pad routes drive, re-read as the file changes.
+
+        A function rather than a value because the app writes the choice into
+        the same file auto mode lives in, and that file is re-read below while
+        the daemon runs -- so switching pads in the picker moves the next
+        driver this starts, without a restart.
+        """
+        return args.device or settings.primary_pad()
 
     scanner = Scanner(index)
     driver = Driver()
@@ -394,7 +457,7 @@ def main():
                     log(f"{game.get('enGameName')}: auto mode off, leaving it alone")
             else:
                 route = settings.route(game)
-                argv = driver_argv(game, route)
+                argv = driver_argv(game, route, primary())
                 if route == "vibration":
                     # Nothing to start by design: the pad drives itself once
                     # the preset is written.

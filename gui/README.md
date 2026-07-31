@@ -134,7 +134,7 @@ still be in `select()` on it. On a timeout the handle is left open deliberately.
 
 `qml/Main.qml` is a `Kirigami.ApplicationWindow` with a persistent global
 drawer and one page per section. Pages are listed in its `sections` array as
-`{name, icon, url}` and built once by `pageFor()` with
+`{name, icon, url, kinds}` and built once by `pageFor()` with
 `Qt.createComponent(url, Component.PreferSynchronous)`, parented to the page
 stack and kept, so a section remembers its scroll position. Handing `pageStack`
 a URL or a `Component` instead creates the page with no visual parent, which the
@@ -148,6 +148,27 @@ in the same order, with nothing keeping them in step: adding a page means adding
 both the `sections` entry and its `Kirigami.Action`, or every label after it
 shifts by one and the last section becomes unreachable from the sidebar.
 `test_the_drawer_offers_every_section` asserts the pairing.
+
+**A section belongs to a kind of device.** `kinds` is `["pad"]`, `["dock"]`, or
+null for one that belongs to the installation, and `sectionVisible()` hides the
+ones that do not match `App.devices.currentKind` — a sidebar offering Buttons
+and Macros while a dock is selected is offering to edit something that is not on
+screen. Hidden rather than removed, so the list stays the same length and every
+action's index and the page cache stay valid. `drawerActions` filters to the
+visible ones, which is what the tests read and press.
+
+Only a change of *kind* moves the page: `onDeviceKindChanged` opens Controller
+or Dock, so picking a dock takes you to it and picking a pad brings you back,
+while switching between two pads leaves you on the page you were on. That
+handler is a bound `readonly property` rather than a `Connections` block on
+`App.devices`, because `Connections.target` is typed `QObject` and qmllint
+cannot see that a `QAbstractListModel` is one — the generated qmltypes names the
+prototype and stops there.
+
+**The device picker is the status block**, not a combo box above it: a combo
+would have named the device twice, once in the control and once in the heading
+under it. With one device attached it is an ordinary block with no chevron and
+no menu, which is the state most desks are in.
 
 Device status — battery, connection, active profile — is the global drawer's
 header rather than `ApplicationWindow.header`: with the drawer as a persistent
@@ -181,7 +202,9 @@ same, `tests/qml_harness.py` included.
 
 | Module | Classes | What they hold |
 |---|---|---|
-| `device.py` | `DeviceModel` | connection, battery, and the transient status and error line |
+| `device.py` | `DeviceModel` | connection, battery, and the transient status and error line, for the selected pad |
+| `devices.py` | `DevicesModel` | every Flydigi device attached, and which pad and dock the window is showing. Two selections behind one picker — see below |
+| `dock.py` | `DockModel` | the selected charging dock: its four switches, its lighting, and what is sitting in it |
 | `dsmode.py` | `DsModeModel` | the DualSense switch's state |
 | `games.py` | `GameListModel`, `GameFilterModel` | one row per game with its route resolved; the search text and route filter |
 | `lighting.py` | `LightingModel`, `ColourListModel` | one lighting config, edited in memory until written; the up-to-five colours an effect cycles through |

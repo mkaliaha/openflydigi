@@ -182,6 +182,42 @@ class Prefs:
                 + ", ".join(available))
         self._update(game, "route", route)
 
+    # -- which pad ---------------------------------------------------------
+    #
+    # Not per game: a desk's pads do not change between titles, and a per-game
+    # pad would be a setting nobody could keep straight. It lives here rather
+    # than in the daemon's own file because the app's device picker is what
+    # writes it and the daemon is what reads it, which is exactly the split
+    # this file already bridges for auto mode.
+    #
+    # **Only the routes that hold one pad read it.** The vibration bind is a
+    # pad-side setting with nothing host-side in the loop, so the daemon writes
+    # it to every attached pad that supports it and this is not consulted; a
+    # driver that rewrites trigger effects at 20 Hz, or a relay presenting one
+    # DualSense, has to pick, and picks this one.
+
+    def primary_pad(self):
+        """The selector for the pad single-pad routes act on, or None.
+
+        None means "whichever the bus offers first", which is what every
+        installation with one pad wants and what this did before it could
+        answer anything else.
+        """
+        value = self.data.get("primary_pad")
+        return str(value) if value else None
+
+    def set_primary_pad(self, selector):
+        """Remember which pad to act on. `None` goes back to the first one.
+
+        Stored as a selector string rather than a node path -- see
+        `flydigi/registry.py:key` -- because node numbers move on every
+        reconnect and this file outlives them.
+        """
+        if selector:
+            self.data["primary_pad"] = str(selector)
+        else:
+            self.data.pop("primary_pad", None)
+
     # -- persistence ------------------------------------------------------
 
     def save(self):

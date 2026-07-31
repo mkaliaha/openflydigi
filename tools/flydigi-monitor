@@ -24,7 +24,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flydigi import effects, monitor  # noqa: E402
-from flydigi.device import Controller, DeviceNotFound  # noqa: E402
+from flydigi import registry  # noqa: E402
+from flydigi.device import DeviceNotFound  # noqa: E402
 
 
 def log(msg):
@@ -55,6 +56,8 @@ def main():
                     help="print resolved base and define values, no HID writes")
     ap.add_argument("--process", help="override the config's process_name")
     ap.add_argument("--quiet", action="store_true")
+    registry.add_device_argument(ap)
+
     args = ap.parse_args()
 
     config = monitor.load_config(args.config)
@@ -81,7 +84,7 @@ def main():
         ctrl = DryRunController()
     else:
         try:
-            ctrl = Controller()
+            ctrl = registry.open_pad(args.device)
         except DeviceNotFound:
             sys.exit("controller not found")
         log(f"controller: {ctrl.path}")

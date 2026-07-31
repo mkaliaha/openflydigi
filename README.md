@@ -57,7 +57,7 @@ reads are refused too; the trigger-effect and screen tools are ungated, and `fly
 gates nothing — the caller decides. With two Flydigi pads attached, nothing chooses between
 them by itself: `find_device` returns the first match in sorted-by-name `/dev/hidraw*` order
 (`hidraw10` before `hidraw2`). `Controller(path=...)` takes a node, but of the day-to-day tools
-only `tools/flydigi_cmd.py` takes a `--device` path.
+every tool takes `--device`, which resolves a node, a uid, a mac or a nickname.
 
 **The nibble is what keeps the charging dock out.** Flydigi number their device families in the
 top nibble of the product id — controllers `2`, chargers `6`, coolers `1` — and their three
@@ -68,7 +68,14 @@ every time the pad sleeps and leaves the USB bus. Measured on this desk, with th
 it returned the dock. Pad-framed packets carry report id `0x03` where the dock expects `0x00`,
 so the dock ignores them rather than acting on them — the damage was confusion, not corruption,
 but the tools sat there getting silence from a device that was wide awake.
-`tools/flydigi-charger` drives the dock deliberately, and picks between docks with `--uid`.
+`tools/flydigi-charger` drives the dock deliberately, and picks between docks with `--device`.
+
+**Two of the same kind are told apart by uid.** `flydigi/registry.py` enumerates every Flydigi
+device on the bus and resolves a selector — a node path, a uid or a prefix of one, a mac, or a
+nickname — to exactly one of them, refusing an ambiguous name rather than guessing;
+`tools/flydigi-devices list` prints all four. The pad's own address field, which would have been
+free, reads all zeroes on this hardware, so the uid (one exchange) is what anything stable is
+keyed on. The desktop app has a picker, and the daemon reads the pad it chose.
 
 ## Quick start
 
@@ -155,7 +162,18 @@ tools/flydigi-charger lighting-sync on  # keep the dock in step with the pad
 #   which is why `light` takes seconds rather than being one write
 #   `default` (the Flydigi logo) is not offered -- Space Station does not compute that one
 #   either, it uploads a file its installer ships and this repository does not have it
-tools/flydigi-charger list              # every dock on the bus; --uid picks one
+tools/flydigi-charger list              # every dock on the bus; --device picks one
+
+# every Flydigi device attached, whichever kind
+tools/flydigi-devices list              # node, uid, model, firmware, battery, nickname
+tools/flydigi-devices show --device Couch
+tools/flydigi-devices name "Couch" --device uid:1420   # unproven; it asks first
+#   every other tool takes the same --device: a node, a uid or a prefix, a mac, or a nickname
+
+# devices nobody owns, for trying any of the above with more than one attached
+FLYDIGI_MOCK_BUS='pad=Desk,pad:f5=Couch,dock:1=Shelf' tools/flydigi-devices list
+#   the same variable works for the daemon and the desktop app; a JSON file re-read on every
+#   scan lets a device be unplugged mid-session. Nothing appears unless it is set
 
 # system setup: udev rules, the daemon's unit, autostart, the menu entry
 tools/apex5-setup                       # the checklist
@@ -171,6 +189,7 @@ tools/apex5-setup install-rules         # the one subcommand that needs root
 | `tools/flydigi_cmd.py` | one-off vendor commands: device info, trigger effects, rumble |
 | `tools/flydigi-auto` | which games the daemon may act on by itself, and which route it takes |
 | `tools/flydigi-charger` | the CD2 charging dock: `show`, `list`, its four switches, and `light <mode>` over the eight computable effects |
+| `tools/flydigi-devices` | every device attached: `list`, `show`, and `name` to nickname one |
 | `tools/flydigid` | daemon: detect a running game, apply its route, reset on exit |
 | `tools/flydigi-ds5` | virtual DualSense over uhid |
 | `tools/flydigi-ds5-usbip` | virtual DualSense over usbip + vhci, with haptic audio |
@@ -192,9 +211,11 @@ simulators `forza-simulate` and `haptics-simulate`, `gen_ds5_usb.py` (regenerate
 ## Desktop app
 
 Profiles, remapping, macros, sticks, the gyro, vibration, triggers, lighting, device settings, the
-screen and per-game routes — plus a **DualSense** switch that turns the virtual-DualSense relay on for
-the whole system, and a **Setup** page for the daemon's unit, autostart, menu entry and udev
-rules. QML on Kirigami:
+screen and per-game routes — plus a **Devices** page and a picker for every pad and dock attached, a
+**Dock** page for whichever charging dock is selected, a **DualSense** switch that turns the
+virtual-DualSense relay on for the whole system, and a **Setup** page for the daemon's unit,
+autostart, menu entry and udev rules. The sidebar shows the pages of the device you have
+selected. QML on Kirigami:
 
 ```bash
 # Fedora / KDE

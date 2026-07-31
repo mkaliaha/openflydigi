@@ -149,6 +149,18 @@ def hid_name(node):
     return ""
 
 
+def is_mock(path):
+    """Whether a path belongs to the mock bus rather than to the kernel.
+
+    A separate question from "is the mock bus on": a real pad and a fake one
+    are enumerated together, so what matters about a given device is which of
+    the two it is. Everything a person can see it through says so --
+    `registry.describe`, `flydigi-devices list`, the app's device list.
+    """
+    from . import mock
+    return mock.is_mock(path)
+
+
 def find_nodes(family=FAMILY_PAD):
     """Every Flydigi command interface of one device family, in node order.
 
@@ -160,7 +172,22 @@ def find_nodes(family=FAMILY_PAD):
     vendor id and the nibble and nothing else, so requiring a usage page of a
     dock would be this project inventing a condition Flydigi do not have, and
     would silently hide any dock that ordered its collections differently.
+
+    **Mock devices come out of here too, and only when asked for.** This is the
+    one place the whole stack agrees on what is attached -- the tools, the
+    daemon and the app all reach the bus through it -- so it is the one place a
+    device that is not there has to be added, or they would disagree about what
+    exists. `FLYDIGI_MOCK_BUS` unset means not a line of this runs.
     """
+    from . import mock
+    mocking = mock.enabled()
+    if not (mocking and mock.hide_real()):
+        yield from _real_nodes(family)
+    if mocking:
+        yield from mock.nodes(family)
+
+
+def _real_nodes(family):
     for path in sorted(glob.glob("/dev/hidraw*")):
         node = os.path.basename(path)
         ids = hid_ids(node)
@@ -227,8 +254,42 @@ class Controller:
     talking over each other; see below.
     """
 
+    # What a bare construction goes looking for. A subclass that drives another
+    # kind of device says so here rather than resolving a path of its own, so
+    # that the resolving happens once, in `__new__`, where the mock bus is also
+    # consulted. `flydigi/charger.py:Dock` is the one subclass.
+    FAMILY = FAMILY_PAD
+
+    def __new__(cls, path=None):
+        """Resolve which device this is, and hand back a fake for a fake one.
+
+        The resolving moved up here from `__init__` because the answer decides
+        whether there is an `__init__` to run at all: a mock path has no file
+        behind it, so what comes back is the in-process device from
+        `flydigi/mock/`, and Python skips `__init__` for a `__new__` that
+        returned something that is not an instance of the class. That fake
+        answers `send`, `command`, `claim` and `close` -- the whole of what
+        anything here asks of a handle.
+
+        Doing it in `__init__` instead would mean opening the file first and
+        deciding afterwards, which cannot work: there is no file. Doing it in
+        every caller would mean every caller knowing about mock devices, which
+        is the coupling this avoids -- `Controller()` is written in a dozen
+        places and none of them should have to care.
+        """
+        path = path or find_device(cls.FAMILY)
+        from . import mock
+        fake = mock.instance(path)
+        if fake is not None:
+            return fake
+        handle = super().__new__(cls)
+        handle.path = path
+        return handle
+
     def __init__(self, path=None):
-        self.path = path or find_device()
+        # `path` is deliberately not read here: `__new__` had to resolve it to
+        # decide whether this is a real device, and asking the bus a second
+        # time could get a second answer -- the node numbers move.
         self.fd = os.open(self.path, os.O_RDWR | os.O_NONBLOCK)
         # flock is per *open file description*, so two Controllers in one
         # process already exclude each other -- but two threads sharing one

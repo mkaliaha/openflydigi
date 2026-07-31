@@ -21,7 +21,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flydigi import effects, forza  # noqa: E402
-from flydigi.device import Controller, DeviceNotFound  # noqa: E402
+from flydigi import registry  # noqa: E402
+from flydigi.device import DeviceNotFound  # noqa: E402
 
 DEFAULT_CONFIG = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "forza.json"
@@ -54,6 +55,8 @@ def main():
                     help="treat datagrams of LEN bytes as telemetry with the given "
                          "post-sled offset, e.g. --accept 331:12. Use when a newer "
                          "Forza ships a packet size we do not know yet")
+    registry.add_device_argument(ap)
+
     args = ap.parse_args()
 
     for spec in args.accept:
@@ -72,7 +75,7 @@ def main():
         log("dry run: no HID writes")
     else:
         try:
-            ctrl = Controller()
+            ctrl = registry.open_pad(args.device)
         except DeviceNotFound:
             sys.exit("controller not found -- is it connected?")
         log(f"controller: {ctrl.path}")

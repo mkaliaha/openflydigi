@@ -15,7 +15,7 @@ import os
 import threading
 import time
 
-from . import ds5, effects, evdev, motion
+from . import ds5, effects, evdev, motion, registry
 from .device import Controller, DeviceNotFound
 
 FLYDIGI_VID, FLYDIGI_PID = 0x37D7, 0x2501
@@ -276,9 +276,22 @@ class PadLink:
     CHECK_INTERVAL = 2.0
 
     def __init__(self, want_ctrl=True, want_motion=True, log=None,
-                 clock=time.monotonic):
+                 clock=time.monotonic, pad=None):
         self.want_ctrl = want_ctrl
         self.want_motion = want_motion
+        # Which pad, on a desk with more than one. A selector -- see
+        # `flydigi/registry.py` -- or None for "whichever the bus offers
+        # first", which is what one pad means and what this always did.
+        #
+        # It has to pin *both* nodes or it is worse than nothing. Two Apex 5s
+        # share a vendor id, a product id and all three input-node names, so
+        # every filter `evdev.find_device` has matches both, and a relay that
+        # chose the vendor node by uid and the input node by name would read
+        # one pad's sticks while writing the other pad's triggers. What links
+        # them is the USB device they both hang off.
+        self.pad = pad
+        self.usb_root = None
+        self.path = None
         self.reader = None
         self.ctrl = None
         self.name = None
@@ -323,6 +336,10 @@ class PadLink:
         """
         with self.lock:
             problem = None
+            if self.pad and self.path is None:
+                problem = self._resolve()
+                if problem:
+                    return False, problem
             if self.reader is None:
                 reader, name, problem = self._open_reader()
                 if reader is None:
@@ -346,12 +363,33 @@ class PadLink:
                         self.motion_on = motion.enable(self.ctrl)
             return True, problem
 
+    def _resolve(self):
+        """Find the pad this link is pinned to. A problem string, or None.
+
+        Run once per reconnect rather than once per open, since it costs a
+        handful of exchanges with everything on the bus -- and nothing at all
+        when the pad is away, because there is nothing to ask.
+        """
+        try:
+            entry = registry.find(self.pad, registry.KIND_PAD)
+        except DeviceNotFound:
+            return (f"no controller matching {self.pad!r} is attached -- it "
+                    f"leaves the USB bus entirely when it sleeps, so a button "
+                    f"press may be all it needs")
+        root = evdev.usb_device_of_hidraw(entry["path"])
+        if root is None:
+            return (f"{entry['path']} has no USB device behind it, so its "
+                    f"input node cannot be told from another pad's")
+        self.path, self.usb_root = entry["path"], root
+        return None
+
     def _open_reader(self):
         """(reader, name, problem). Resolved by id every time, never cached."""
         path, name = evdev.find_device(vendor=FLYDIGI_VID, product=FLYDIGI_PID,
-                                       axes=True)
+                                       axes=True, usb_root=self.usb_root)
         if not path:
-            path, name = evdev.find_device(name="Apex", axes=True)
+            path, name = evdev.find_device(name="Apex", axes=True,
+                                           usb_root=self.usb_root)
         if not path:
             return None, None, (
                 "Apex 5 gamepad not found in /dev/input -- is it connected? "
@@ -374,7 +412,9 @@ class PadLink:
 
     def _open_ctrl(self):
         try:
-            return Controller(), None
+            # By node when this link is pinned: the path came from the same
+            # resolve that chose the input node, so both are the one device.
+            return (Controller(self.path) if self.path else Controller()), None
         except DeviceNotFound:
             return None, "vendor interface not found; effects will not be applied"
         except OSError as exc:
@@ -505,6 +545,9 @@ class PadLink:
                     pass
         self.reader = self.ctrl = self.name = None
         self.motion_on = False
+        # Resolved again on the way back in. A pad that has re-enumerated is on
+        # a different node, and may be on a different USB port entirely.
+        self.path = self.usb_root = None
 
     def close(self, restore=True):
         """Give the pad back the way we found it, if it is still here at all.

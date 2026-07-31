@@ -1438,6 +1438,227 @@ def test_battery_is_clamped():
 
 # -- the extraction itself -------------------------------------------------
 
+# --------------------------------------------------------------------------
+# The device list and the dock
+# --------------------------------------------------------------------------
+#
+# No bus here: these are handed the entries `flydigi/registry.py` would have
+# produced, because what is under test is the selection -- which device the
+# window shows, what survives a re-enumeration, and what gets written where.
+# `tests/test_registry.py` is where the entries themselves come from hardware
+# or from the mock bus.
+
+def pad_entry(index, nickname=None, path=None, supported=True):
+    return {"path": path or f"/dev/hidraw{index}", "kind": "pad", "family": 2,
+            "product": "Flydigi APEX5 Wireless", "mock": False,
+            "device_type": 128 if supported else 130,
+            "code": "k5" if supported else "f5",
+            "model": "Apex 5" if supported else "Vader 5 Pro",
+            "uid": f"{index:02x}" * 13, "mac": None, "nickname": nickname,
+            "firmware": "7.0.4.5", "battery": 4, "charging": False,
+            "connect_type": "wired", "supported": supported, "info": {},
+            "error": None}
+
+
+def dock_entry(index, nickname=None):
+    return {"path": f"/dev/hidraw{index}", "kind": "dock", "family": 6,
+            "product": "flydigi Flydigi CD2", "mock": False, "device_type": 0,
+            "code": None, "model": "Controller Charging Dock 2 Pro",
+            "uid": f"{index:02x}" * 13, "mac": None, "nickname": nickname,
+            "firmware": "0.0.3.9", "battery": None, "charging": None,
+            "connect_type": None, "supported": True, "info": {}, "error": None}
+
+
+def devices_model():
+    """A DevicesModel writing to a preferences file of its own.
+
+    Injected rather than defaulted: this model writes the chosen pad into the
+    file the daemon reads, and a test that used the real one would rewrite the
+    developer's own auto-mode preferences.
+    """
+    settings = prefs.Prefs(os.path.join(tempfile.mkdtemp(), "games.json"))
+    return models.DevicesModel(settings=settings), settings
+
+
+def test_the_device_list_shows_what_each_device_is():
+    model, _settings = devices_model()
+    model.devicesReceived([pad_entry(2, "Desk"), pad_entry(4),
+                           dock_entry(6, "Shelf")])
+    check("every device is listed", model.count == 3, str(model.count))
+    check("pads and docks are counted apart",
+          (model.padCount, model.dockCount) == (2, 1),
+          f"{model.padCount}/{model.dockCount}")
+    labels = [model.data(model.index(row, 0), models.DevicesModel.LabelRole)
+              for row in range(model.count)]
+    check("a nickname wins over the model name",
+          labels == ["Desk", "Apex 5", "Shelf"], str(labels))
+    detail = model.data(model.index(1, 0), models.DevicesModel.DetailRole)
+    check("an unnamed pad is told apart by its node", "/dev/hidraw4" in detail,
+          detail)
+    check("nothing is marked as a mock", not model.hasMock)
+
+
+def test_choosing_a_pad_tells_the_daemon_and_choosing_a_dock_does_not():
+    """The pad choice is shared state; the dock choice is this window's."""
+    model, settings = devices_model()
+    model.devicesReceived([pad_entry(2, "Desk"), pad_entry(4, "Couch"),
+                           dock_entry(6, "Shelf")])
+    asked = []
+    model.padSelected.connect(asked.append)
+    docks = []
+    model.dockSelected.connect(docks.append)
+
+    model.select(1)
+    check("the pad selector moves", model.pad == "uid:" + "04" * 13, model.pad)
+    check("the worker is told once", len(asked) == 1, str(asked))
+    check("and the daemon's file has it",
+          prefs.Prefs(settings.path).primary_pad() == model.pad,
+          str(prefs.Prefs(settings.path).primary_pad()))
+
+    model.select(2)
+    check("choosing a dock does not move the pad",
+          model.pad == "uid:" + "04" * 13, model.pad)
+    check("and does not write to the file again",
+          prefs.Prefs(settings.path).primary_pad() == "uid:" + "04" * 13)
+    check("the dock selector moves", model.dock == "uid:" + "06" * 13,
+          model.dock)
+    check("and the dock page is told", docks == [model.dock], str(docks))
+    check("the window follows the dock", model.currentIsDock)
+    check("and names it", model.currentLabel == "Shelf", model.currentLabel)
+
+
+def test_the_selection_survives_a_pad_moving_to_another_node():
+    """The reason a selection is a uid and not a row.
+
+    A pad that sleeps and comes back lands on a different node and may sort
+    somewhere else entirely; a picker holding a row number would silently be
+    showing a different device.
+    """
+    model, _settings = devices_model()
+    model.devicesReceived([pad_entry(2, "Desk"), pad_entry(4, "Couch")])
+    model.select(1)
+    chosen = model.pad
+
+    # Same two pads, other way round, on new nodes.
+    moved = pad_entry(4, "Couch")
+    moved["path"] = "/dev/hidraw11"
+    model.devicesReceived([moved, pad_entry(2, "Desk")])
+    check("the same pad is still selected", model.pad == chosen, model.pad)
+    check("at its new row", model.currentIndex == 0, str(model.currentIndex))
+    check("and it is still the one named", model.currentLabel == "Couch",
+          model.currentLabel)
+
+
+def test_a_pad_that_goes_away_is_not_forgotten():
+    """Losing a half-finished remap because the pad dozed off is the bug here."""
+    model, _settings = devices_model()
+    model.devicesReceived([pad_entry(2, "Desk"), pad_entry(4, "Couch")])
+    model.select(1)
+    chosen = model.pad
+
+    model.devicesReceived([pad_entry(2, "Desk")])
+    check("the selection is kept", model.pad == chosen, model.pad)
+    check("while the list shows what is there", model.count == 1)
+    check("and something is shown rather than nothing",
+          model.currentIndex == 0, str(model.currentIndex))
+
+    model.devicesReceived([pad_entry(2, "Desk"), pad_entry(4, "Couch")])
+    check("and it is selected again when it returns",
+          model.currentIndex == 1 and model.currentLabel == "Couch",
+          f"{model.currentIndex} {model.currentLabel}")
+
+
+def test_an_empty_bus_still_shows_the_pad_pages():
+    model, _settings = devices_model()
+    model.devicesReceived([])
+    check("nothing is selected", model.currentIndex == -1)
+    check("and the window stays on the pad's pages",
+          model.currentKind == "pad" and not model.currentIsDock)
+
+
+def test_a_dock_switch_moves_at_once_and_asks_the_worker():
+    model = models.DockModel()
+    asked = []
+    model.switchRequested.connect(lambda sel, name, value:
+                                  asked.append((sel, name, value)))
+    reads = []
+    model.refreshRequested.connect(reads.append)
+
+    model.setSelector("uid:aa")
+    check("pointing it at a dock reads it", reads == ["uid:aa"], str(reads))
+    check("and it has nothing to show yet", not model.present)
+
+    model.stateReceived({
+        "selector": "uid:aa",
+        "info": {"firmware": "0.0.3.9", "device_type": 0,
+                 "sleep_when_charging": True, "led_sync": False,
+                 "close_with_system": True,
+                 "show_animation_when_charging": False},
+        "uid": "aa" * 13, "nickname": "Shelf",
+        "lighting": {"mode": 5, "brightness": 40, "period": 3, "direction": 0,
+                     "colours": [[0, 116, 255]]},
+        "status": {"docked": True, "battery": 3}})
+    check("the dock is present", model.present)
+    check("its name is shown", model.nickname == "Shelf")
+    check("its switches are read, not assumed",
+          (model.sleepWhenCharging, model.ledSync, model.closeWithSystem,
+           model.showAnimationWhenCharging) == (True, False, True, False),
+          str([model.sleepWhenCharging, model.ledSync, model.closeWithSystem,
+               model.showAnimationWhenCharging]))
+    check("and what is sitting in it", "docked" in model.dockedState,
+          model.dockedState)
+
+    model.ledSync = True
+    check("the switch moves at once", model.ledSync)
+    check("and the worker is asked, for this dock",
+          asked == [("uid:aa", "led_sync", True)], str(asked))
+
+
+def test_a_reply_for_a_dock_nobody_is_looking_at_is_dropped():
+    """Two docks and a picker: a read started before the switch must not land."""
+    model = models.DockModel()
+    model.setSelector("uid:aa")
+    model.stateReceived({"selector": "uid:aa", "info": {"firmware": "0.0.3.9"},
+                         "nickname": "Shelf", "lighting": {}, "status": None})
+    model.setSelector("uid:bb")
+    model.stateReceived({"selector": "uid:aa", "info": {"firmware": "9.9.9.9"},
+                         "nickname": "Shelf", "lighting": {}, "status": None})
+    check("the stale reply is ignored", model.firmware != "9.9.9.9",
+          model.firmware)
+    check("and the page is still waiting for the dock it is on",
+          not model.present)
+
+
+def test_a_dock_effect_takes_its_own_defaults():
+    """Space Station gives each mode a period, colours and a direction.
+
+    Jumping between them without taking those leaves a rainbow running at a
+    breath's frame interval.
+    """
+    model = models.DockModel()
+    model.setSelector("uid:aa")
+    model.modeIndex = models.MODE_NAMES.index("Rainbow")
+    check("rainbow reads a direction", model.usesDirection)
+    check("and no colours", model.coloursUsed == 0, str(model.coloursUsed))
+    check("its interval range is its own",
+          (model.periodMin, model.periodMax) == (1, 5),
+          f"{model.periodMin}..{model.periodMax}")
+
+    model.modeIndex = models.MODE_NAMES.index("Breath")
+    check("breath reads one colour", model.coloursUsed == 1,
+          str(model.coloursUsed))
+    check("and no direction", not model.usesDirection)
+
+    wanted = []
+    model.lightingRequested.connect(lambda sel, cfg: wanted.append((sel, cfg)))
+    model.apply()
+    check("applying is busy until the upload finishes", model.busy)
+    check("and asks for this dock", wanted[0][0] == "uid:aa", str(wanted))
+    check("with the mode chosen", wanted[0][1]["mode"] == 5, str(wanted))
+    model.writeFinished(True)
+    check("and stops being busy when it is done", not model.busy)
+
+
 def test_models_pull_in_no_view_code():
     """The check that the extraction is real, not just relocated."""
     leaked = sorted(name for name in sys.modules
@@ -1857,6 +2078,14 @@ def main():
                  test_a_switch_asks_the_worker_and_moves_at_once,
                  test_auto_calibration_is_unavailable_without_debounce,
                  test_an_unsupported_feature_is_reported_as_such_not_as_off,
+                 test_the_device_list_shows_what_each_device_is,
+                 test_choosing_a_pad_tells_the_daemon_and_choosing_a_dock_does_not,
+                 test_the_selection_survives_a_pad_moving_to_another_node,
+                 test_a_pad_that_goes_away_is_not_forgotten,
+                 test_an_empty_bus_still_shows_the_pad_pages,
+                 test_a_dock_switch_moves_at_once_and_asks_the_worker,
+                 test_a_reply_for_a_dock_nobody_is_looking_at_is_dropped,
+                 test_a_dock_effect_takes_its_own_defaults,
                  test_models_pull_in_no_view_code):
         test()
     total = len(PASSED) + len(FAILED)

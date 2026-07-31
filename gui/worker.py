@@ -18,8 +18,9 @@ from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 import time
 
-from flydigi import (blobs, device, effects, identity, lighting, macros,
-                     mapping, motion, screen, screen_ota, settings)
+from flydigi import (blobs, charger, device, effects, identity, lighting,
+                     macros, mapping, motion, registry, screen, screen_ota,
+                     settings)
 
 # The one piece of user-facing text this file needs. It lives with the model
 # because a label that only existed in a QML page would leave the status line
@@ -44,12 +45,21 @@ class DeviceWorker(QObject):
     lighting_written = Signal(int, bool)
     macro_recorded = Signal(list)        # steps; empty means nothing was played
     active_changed = Signal(int)
+    devices_changed = Signal(list)       # every device attached, probed
+    pad_selected = Signal(str)           # a different pad is now the open one
+    dock_state = Signal(dict)            # one dock's whole state
+    dock_progress = Signal(float)        # 0..1 through a lighting upload
+    dock_finished = Signal(bool)
     status = Signal(str)
     failed = Signal(str)
 
     def __init__(self):
         super().__init__()
         self._ctrl = None
+        # Which pad to open, as a selector -- see `flydigi/registry.py`. None
+        # is "whichever the bus offers first", which is what one pad means and
+        # what this did before there could be two.
+        self._selector = None
         self._stopping = False
         self._stop_recording = False
 
@@ -90,7 +100,7 @@ class DeviceWorker(QObject):
         two pads.
         """
         if self._ctrl is None:
-            ctrl = device.Controller()
+            ctrl = registry.open_pad(self._selector)
             try:
                 identity.require(ctrl)
             except identity.WrongDevice:
@@ -135,6 +145,150 @@ class DeviceWorker(QObject):
                 self.failed.emit(f"{what}: {exc!r}")
                 return None
         return None
+
+    # -- which devices are here, and which one we are driving ---------------
+
+    @Slot()
+    def refresh_devices(self):
+        """Probe the whole bus and hand the result to the picker.
+
+        On this thread because it is one exchange per device -- three, since it
+        asks for uids and nicknames as well -- and the picker needs those: a
+        selector may be a nickname, and two identical pads are told apart by
+        nothing else.
+
+        Never routed through `_attempt`. There is no handle to go stale, and a
+        retry would double the traffic on a bus that is being polled anyway. A
+        device that will not answer comes back as an entry saying so, which is
+        what the list should show.
+        """
+        try:
+            entries = registry.list_devices(deep=True)
+        except OSError as exc:
+            self.failed.emit(f"looking for devices: {exc}")
+            return
+        self.devices_changed.emit(entries)
+
+    @Slot(str)
+    def select_pad(self, selector):
+        """Drive a different pad from now on, then say so.
+
+        The handle is dropped rather than reused: it is open on the old pad,
+        and every read after this belongs to the new one.
+
+        **The re-read is driven by the reply, not by the picker.** Whoever
+        chose the pad cannot ask for the reads itself: its request would be
+        queued to this thread *before* this slot ran, so every read in it would
+        go to the pad that was just switched away from -- the header would fill
+        in with the old pad's battery and the new one would not be read until
+        the next poll. Emitting from here means the requests are queued behind a
+        switch that has already happened.
+        """
+        selector = str(selector or "") or None
+        if selector == self._selector:
+            return
+        self._selector = selector
+        self._drop()
+        self.pad_selected.emit(selector or "")
+
+    # -- the charging dock --------------------------------------------------
+    #
+    # A device of its own, opened per request rather than held. The pad is held
+    # because the app polls it every thirty seconds and edits stream whole
+    # profiles into it; a dock is read when its page is open and written when a
+    # switch moves, and holding one would be holding a node another process
+    # might want for no benefit.
+
+    def _with_dock(self, selector, work, what):
+        try:
+            with registry.open_dock(selector) as dock:
+                charger.require(dock)
+                return work(dock)
+        except (OSError, device.DeviceNotFound, device.DeviceBusy,
+                charger.ProtocolError, charger.WrongDock) as exc:
+            self.failed.emit(f"{what}: {exc}")
+            return None
+        except Exception as exc:              # a bug here, not a sulking dock
+            self.failed.emit(f"{what}: {exc!r}")
+            return None
+
+    @Slot(str)
+    def load_dock(self, selector):
+        """Everything one dock will say: heartbeat, uid, name, lighting, status."""
+        def work(dock):
+            state = {
+                "selector": selector,
+                "info": charger.read_info(dock),
+                "uid": charger.read_uid(dock),
+                "nickname": charger.read_nickname(dock),
+            }
+            config = charger.read_led_config(dock)
+            state["lighting"] = {
+                "mode": config.mode, "brightness": config.brightness,
+                "period": config.period, "direction": config.direction,
+                "colours": [list(c) for c in config.colours],
+            }
+            # Unsolicited and about once a second, so this is a wait rather
+            # than a question. None when none arrived, which the page says.
+            state["status"] = charger.read_status(dock)
+            return state
+
+        state = self._with_dock(selector, work, "reading the charging dock")
+        if state is not None:
+            self.dock_state.emit(state)
+
+    @Slot(str, str, bool)
+    def set_dock_switch(self, selector, name, value):
+        """One of the four switches, then a read of the whole heartbeat back.
+
+        Read back for the same reason every device-settings write is: the reply
+        carries the command id and nothing about what it changed.
+        """
+        setter = {
+            "sleep_when_charging": charger.set_sleep_when_charging,
+            "led_sync": charger.set_led_sync,
+            "close_with_system": charger.set_close_with_system,
+            "show_animation_when_charging": charger.set_show_animation_when_charging,
+        }.get(name)
+        if setter is None:
+            self.failed.emit(f"no such dock setting: {name}")
+            return
+        if self._with_dock(selector, lambda dock: setter(dock, value),
+                           f"changing {name.replace('_', ' ')}") is None:
+            return
+        self.status.emit(f"Dock: {name.replace('_', ' ')} "
+                         f"{'on' if value else 'off'}")
+        self.load_dock(selector)
+
+    @Slot(str, dict)
+    def write_dock_lighting(self, selector, wanted):
+        """Generate an effect's frames and upload the lot. Seconds, not milliseconds.
+
+        Deliberately not through `_attempt`: this is 487 packets and a few
+        seconds, and a silent second attempt would double that and leave the
+        dock's frame memory holding half of one animation and half of another.
+        A failure says so and stops, which is what `write_led_config`'s own
+        message is written for.
+        """
+        config = charger.LedConfig(
+            mode=int(wanted.get("mode", charger.MODE_PULSE)),
+            brightness=int(wanted.get("brightness", 50)),
+            period=int(wanted.get("period", 1)),
+            direction=int(wanted.get("direction", charger.DIR_NONE)),
+            colours=[tuple(c) for c in wanted.get("colours") or ()])
+        self.status.emit("Computing the dock's frames…")
+
+        def work(dock):
+            charger.generate(config)
+            self.status.emit(f"Uploading {len(config.frames)} frame(s) to the dock…")
+            return charger.write_led_config(
+                dock, config, progress=self.dock_progress.emit)
+
+        packs = self._with_dock(selector, work, "writing the dock's lighting")
+        self.dock_finished.emit(packs is not None)
+        if packs is not None:
+            self.status.emit(f"Dock lighting: {len(config.frames)} frame(s) in "
+                             f"{packs} packet(s)")
 
     @Slot()
     def refresh_info(self):

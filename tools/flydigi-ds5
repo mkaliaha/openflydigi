@@ -32,7 +32,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flydigi import ds5, ds5_usb, effects, motion, relay, uhid  # noqa: E402
+from flydigi import ds5, ds5_usb, effects, motion, registry, relay, uhid  # noqa: E402
 
 
 def log(msg):
@@ -49,6 +49,8 @@ def main():
                     help="do not enable the vendor motion stream (no gyro)")
     ap.add_argument("--gyro-scale", type=float, default=1.0,
                     help="scale factor applied to gyro values; tune by feel")
+    registry.add_device_argument(
+        ap, help="which pad to relay, on a desk with more than one. It pins both\n                 halves -- the input node and the vendor node -- to one physical\n                 device, since two Apex 5s are identical to every other filter")
     ap.add_argument("--accel-scale", type=float, default=motion.ACCEL_SCALE,
                     help=f"scale factor applied to accelerometer values "
                          f"(default {motion.ACCEL_SCALE:.3f}, derived from the "
@@ -68,7 +70,7 @@ def main():
     # and the virtual DualSense must not leave with it. See
     # `flydigi.relay.PadLink`.
     pad = relay.PadLink(want_ctrl=not args.dump, want_motion=not args.no_motion,
-                        log=log)
+                        log=log, pad=args.device)
     connected, problem = pad.open()
     if not connected:
         sys.exit(problem)

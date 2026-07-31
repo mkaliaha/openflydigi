@@ -54,7 +54,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flydigi import ds5, dsmode, effects, evdev  # noqa: E402
 from flydigi import haptics as haptics_dsp  # noqa: E402
-from flydigi import motion, relay, usbip  # noqa: E402
+from flydigi import motion, registry, relay, usbip  # noqa: E402
 from flydigi.ds5_usbip import EP_HID_IN, DualSense  # noqa: E402
 
 # The DualSense's interrupt IN endpoint declares bInterval 6, i.e. 32 microframes
@@ -146,6 +146,8 @@ def main():
     ap.add_argument("--no-motion", action="store_true",
                     help="do not enable the vendor motion stream (no gyro)")
     ap.add_argument("--gyro-scale", type=float, default=1.0)
+    registry.add_device_argument(
+        ap, help="which pad to relay, on a desk with more than one. It pins both\n                 halves -- the input node and the vendor node -- to one physical\n                 device, since two Apex 5s are identical to every other filter")
     ap.add_argument("--accel-scale", type=float, default=motion.ACCEL_SCALE)
     ap.add_argument("--haptics", action="store_true",
                     help="analyse the haptic stream and report peaks per channel")
@@ -251,7 +253,7 @@ def main():
     # asked to present a DualSense with no Apex 5 in the machine is a mistake
     # worth reporting, not a disconnection worth waiting out.
     pad = relay.PadLink(want_ctrl=not args.dump, want_motion=not args.no_motion,
-                        log=log)
+                        log=log, pad=args.device)
     connected, problem = pad.open()
     if not connected:
         server.detach()

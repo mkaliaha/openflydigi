@@ -1,7 +1,7 @@
 # Other Flydigi hardware
 
-What is gated on a device this project does not drive — a second pad, the charging dock — and what
-command 31 may and may not be aimed at.
+How a device is told from another one of the same kind, what is gated on a device this project does
+not drive, the charging dock, and what command 31 may and may not be aimed at.
 
 Index: [PROGRESS.md](../PROGRESS.md).
 
@@ -181,31 +181,113 @@ another pad's settings block printed under this one's field names would mislead.
 `tools/flydigi-screen`, `tools/flydigi-haptics`, `tools/flydigid` and `tools/flydigi_cmd.py` do
 not call `identity.require` at all.
 
-The guard can only refuse, never choose. With two Flydigi pads attached, `find_device()` returns the
-first match in sorted-by-name `/dev/hidraw*` order, where `hidraw10` comes before `hidraw2`.
-`Controller(path=...)` accepts a node and nothing passes one: `flydigi-mapping`,
-`flydigi-settings`, `flydigi-screen` and `gui/worker.py` all construct `Controller()` bare, and
-the one `--device` flag over the vendor interface (`tools/flydigi_cmd.py`) opens the node itself
-rather than through `Controller`. The dock is the case this *does* now solve — a different
-family, not a different model — and `flydigi/charger.py` gives docks the selection layer pads
-still lack: `list_docks`, and `open_dock(path=..., uid=...)` behind `flydigi-charger --uid`.
+The guard refuses; `flydigi/registry.py` chooses. That split is deliberate — "which device" and
+"may this be written to" are different questions, and a tool may quite legitimately point itself
+at a Vader.
 
-The rest of the work is almost entirely in `flydigi/`: per-model key tables, offsets and capability
-flags. `gui/models/` only knows `mapping.APEX5_KEYS`.
+### Choosing between devices
 
-The udev rules would have to become per-model too. They serve three things and none is universal:
-the pad's own vendor hidraw node (`37d7:2501`, already model-specific), DualSense emulation
-(`/dev/uhid` plus the DualSense input nodes), which applies to the Apex 4 and 5, and the screen
-chip's bootloader tty (`ffaa:5555`) for the Apex 5 alone — the Apex 4 declares the same
-`ChipScreen`/`ChipType.Freq`, but Space Station sends it down the HID picture route instead, so
-only a `k5` ever produces the tty. A Vader or a Direwolf needs none of it, yet `setup.checks()`
-fails an absent rules file unconditionally.
+**What identifies a Flydigi device**, cheapest first, and every one of these is a valid selector:
 
-**Mode switch (27)** — `[4]=3, [5]=mode, [6]=Crc(3, 3+3)`, with
-`BluetoothMode {Switch=1, Xbox=2, Flashplay=3, DInput=4}`; the enum starts at `None = 0`, which is
-why Switch is 1. NewXInput only — there is no XInput or DInput builder. `IsSupportNs` is true, but
-the switch changes the report descriptor and probably the hidraw node. Treat as a one-way trip
-until proven otherwise.
+| Name | How | Cost | Stable | Measured |
+|---|---|---|---|---|
+| node | `/dev/hidrawN` | free | **no** — moves on every reconnect | — |
+| mac | command 1, raw 8..11, reversed | free, inside the heartbeat | yes | **reads all zeroes on this pad** |
+| uid | command 4, 13 bytes at raw 6 | one exchange | yes | **yes, on the pad and the dock** |
+| nickname | command 2 to read, 24 to write | one exchange | until renamed | read yes, **write never acked** |
+
+The address was going to be the cheap answer, since it rides the same command-1 reply as the
+battery that anything holding a pad already polls. It is not one. Measured on this pad, on its
+dongle, firmware 7.0.4.5:
+
+```
+04 5a a5 01 01 00 80 02 | 00 00 00 00 | 05 45 01 00 70 45 21 31 45 25 ...
+                          ^^^^^^^^^^^ DeviceMac
+```
+
+Every surrounding field decodes correctly there — device type 128, connect type 2, battery 5,
+firmware 7.0.4.5 — so this is the field being empty rather than the offset being wrong. Whether a
+cable fills it in is untested; the pad was on its dongle. `motion.parse_mac` returns None for
+all-zero, following the same convention Flydigi already use for an all-zero firmware version, so
+that nothing can key a config file on a value every pad shares.
+
+Command 4 works and is the one to use:
+
+```
+04 5a a5 04 01 00 | 14 20 6e 7a 1c 00 00 00 00 dc ba 3e 00 | 00 00 ...
+```
+
+**The two SDKs disagree about where a nickname starts, and the pad settles it.**
+`ReadNickNameControllerCommandNewXInput` slices `data.Slice(4, data.Length - 6)` — raw 5 with the
+report-id byte kept — while `Flydigi.ChargerSdk`'s slices from its own data[6]. An unnamed pad
+answered `04 5a a5 02 01 00 01 01 09 09 09 64 04 5e 00 ...`, and only the earlier slice reads that
+as unset: raw 5 is 0x00, which is Flydigi's own test for an erased name, where raw 6 is 0x01 and
+would have decoded as the first byte of a name that is not there. Each SDK is right about its own
+device.
+
+**Flydigi's nickname *write* is broken in both SDKs**, byte for byte the same code in
+`Flydigi.ControllerSdk` and `Flydigi.ChargerSdk`:
+
+```csharp
+array[4] = (byte)(2 + bytes.Length);
+Array.Copy(bytes, 0, array, 5, bytes.Length);
+array[6] = array.Crc(3, 3 + array[4]);     // <- fixed index
+```
+
+The checksum belongs at `3 + array[4]`, which is 6 only for a one-byte name. For anything longer
+their packet writes the checksum *into the name*, over its second byte, and leaves the real
+checksum slot at zero — and a config-family packet with a bad checksum draws no reply from this
+pad at all. So either command 24 is not checksummed, or Space Station's rename has never worked
+past one character. `identity.nickname_packet` sends the packet the framing says is right and
+takes `reference=True` for theirs; `tools/flydigi-devices name --reference` is the one run that
+settles it.
+
+**The dock's nickname read is one byte long, and this project shortens it.** Flydigi slice
+`data[6 : 6 + data[3] - 3]`, and the measured framing says that runs onto the checksum: the unset
+reply is `5a a5 02 04 01 00 07`, so a length byte of 4 covers a two-byte payload with the checksum
+at `[2 + length]`. An *n*-byte name makes the length `4 + n` and puts the checksum at `[6 + n]`,
+immediately after it — so their slice takes the name and then the checksum, which shows up as one
+replacement character on the end of every name. Differing from the reference only where it is
+demonstrably wrong is the call `motion.version_at_least` already makes.
+
+### What the selection layer is
+
+`flydigi/registry.py` enumerates both families into one list, probes each device with one exchange
+(three with `deep`, which adds the uid and the nickname), and resolves a selector — node, uid or a
+prefix of one, mac, or nickname — to exactly one device, **refusing an ambiguous one rather than
+guessing**. A bare selector still takes the first device of its kind, because that is what every
+caller that has only ever seen one device passes.
+
+`registry.key()` writes the best available name in `uid:`/`mac:`/`path:` form, which is what goes
+in a config file: `prefs.primary_pad` is the daemon's, written by the app's picker.
+
+Every tool takes `--device` with the same meaning, from `registry.add_device_argument`, and
+`tools/flydigi-devices list` prints all four names. `flydigi-charger --uid` still exists and now
+accepts anything `--device` does. `list_docks` and `open_dock` are thin wrappers over the shared
+layer, so pads and docks are chosen the same way.
+
+**The daemon splits by tier, and the split is a property of the routes rather than a preference.**
+The tier-1 vibration bind is command 82 and nothing else — a pad-side setting driven by the pad's
+own rumble, with no host process in the loop once written — so `flydigid` writes it to *every*
+attached pad that supports it, and two pads in a local co-op game both get adaptive triggers.
+Every other route holds one pad for the length of a session: a driver rewriting trigger effects at
+20 Hz, or a relay presenting one DualSense. Those act on the primary pad alone.
+
+**A relay has to pin both of its halves to one device.** Two Apex 5s share a vendor id, a product
+id and all three input-node names, so every filter `evdev.find_device` has matches both — a relay
+that chose its vendor node by uid and its input node by name would read one pad's sticks while
+writing the other pad's triggers. What links them is the USB device the two nodes hang off:
+`evdev.usb_device_of_hidraw` walks up from the hidraw node to the last ancestor with no colon in
+its name, and `find_device(usb_root=...)` accepts only input nodes under it.
+
+### Mock devices
+
+There is one pad and one dock on this desk, so every path above is exercised against
+`flydigi/mock/`, behind `FLYDIGI_MOCK_BUS`. It hooks `device.find_nodes`, which is the one place
+the tools, the daemon and the app all ask what is attached, and `Controller.__new__` hands back an
+in-process fake for a `mock:` path. Nothing appears unless the variable is set, and everything
+that does is marked `mock` everywhere a person can see it. The JSON form is re-read on every
+enumeration, so flipping `present` is a device being unplugged.
 
 ### An older pad is one dialect away, and still not worth it
 
@@ -462,6 +544,46 @@ listener rather than treating it as an ack. `data[7]` is whether a controller is
 `data[8]` its battery. Measured with nothing in the dock: `data[7]` reads 0, which fits. The
 battery byte has not been seen with a pad actually seated.
 
+### The dock's switches interact
+
+**"Intelligent start" turns the lighting off on both devices.** Observed on the hardware here:
+with `sleep_when_charging` on, docking a pad takes the lighting down on the pad *and* on the dock
+for as long as it sits there. That makes it exclusive in practice with the other two lighting
+switches — `led_sync` has nothing to keep in step and `show_animation_when_charging` has nothing
+to play, during exactly the window either of them is for.
+
+Space Station forces `sleep_when_charging` and `show_animation_when_charging` apart in its own UI,
+forcing one off whenever the other goes on. That was written up here as a house style, on the
+grounds that nothing in the SDK enforces it. It is not: their UI is enforcing something the
+firmware does. Nothing in `flydigi/charger.py` enforces it either — a library that quietly turned
+off a switch its caller did not mention would be worse than one that sets both and says what
+happens — so the app shows which one wins and the CLI says so in its help. The app also calls it
+"Sleep while docked", since Flydigi's own label describes none of this.
+
+**The dock's battery byte is a controller's charge on the controller's scale.** `charger.
+describe_battery` reads it as 0..5 with 6 meaning charging, which is how command 1's battery
+nibble is read for the pad itself. It has never been seen with a pad actually seated, so the scale
+is inferred — but a bare number would repeat the bug that reported a full pad as five-eighths, and
+worse: a docked pad is charging, so the value it is most likely to carry is the one that renders
+as "battery 6".
+
+The rest of the work is almost entirely in `flydigi/`: per-model key tables, offsets and capability
+flags. `gui/models/` only knows `mapping.APEX5_KEYS`.
+
+The udev rules would have to become per-model too. They serve three things and none is universal:
+the pad's own vendor hidraw node (`37d7:2501`, already model-specific), DualSense emulation
+(`/dev/uhid` plus the DualSense input nodes), which applies to the Apex 4 and 5, and the screen
+chip's bootloader tty (`ffaa:5555`) for the Apex 5 alone — the Apex 4 declares the same
+`ChipScreen`/`ChipType.Freq`, but Space Station sends it down the HID picture route instead, so
+only a `k5` ever produces the tty. A Vader or a Direwolf needs none of it, yet `setup.checks()`
+fails an absent rules file unconditionally.
+
+**Mode switch (27)** — `[4]=3, [5]=mode, [6]=Crc(3, 3+3)`, with
+`BluetoothMode {Switch=1, Xbox=2, Flashplay=3, DInput=4}`; the enum starts at `None = 0`, which is
+why Switch is 1. NewXInput only — there is no XInput or DInput builder. `IsSupportNs` is true, but
+the switch changes the report descriptor and probably the hidraw node. Treat as a one-way trip
+until proven otherwise.
+
 ### Telling a CD2 from something else
 
 `FlydigiChargerUtil.GetDeviceCodeById` returns the literal string `"cd2"` for any argument
@@ -482,9 +604,9 @@ string is unmeasured, and refusing a real CD2 over its artwork would be worse th
 guarded against. It goes in the refusal message instead.
 
 `cfgId` is host bookkeeping and never reaches the wire: no charger command carries an index, and
-the dock stores exactly one LED config. Two docks are told apart by uid, `flydigi-charger --uid`.
-Only one has ever been on this bus, so every multi-dock path is covered by `tests/fake_dock.py`
-and by nothing else.
+the dock stores exactly one LED config. Two docks are told apart by uid — `flydigi-charger
+--device`, the app's picker, or `registry.find` — and only one has ever been on this bus, so every
+multi-dock path is covered by `flydigi/mock/dock.py` and by nothing else.
 
 ### The pad's own dock setting, and the cooler
 

@@ -70,7 +70,39 @@ class AbsInfo:
         return lo + frac * (hi - lo)
 
 
-def find_device(name=None, vendor=None, product=None, axes=False):
+def usb_device(sys_path):
+    """The USB device directory a sysfs node hangs off, or None.
+
+    A USB device's own directory is the last ancestor whose name has no colon
+    in it -- `3-4` is the device, `3-4:1.1` is one of its interfaces -- so
+    walking up until that shape appears identifies the physical thing two
+    different subsystems are looking at. Which is the question: an hidraw node
+    and an evdev node say nothing about each other, and on a desk with two
+    identical pads they must not be paired by luck.
+    """
+    path = os.path.realpath(sys_path)
+    while path and path != "/":
+        base = os.path.basename(path)
+        if ":" not in base and os.path.exists(os.path.join(path, "idVendor")):
+            return path
+        path = os.path.dirname(path)
+    return None
+
+
+def usb_device_of_hidraw(hidraw_path):
+    """The USB device behind /dev/hidrawN, or None for anything else.
+
+    None for a mock path as much as for a missing one, and deliberately: a
+    device that is not on the bus has no bus topology, so a relay pointed at a
+    mock pad finds no input node and says so, rather than quietly relaying a
+    different pad's sticks.
+    """
+    node = os.path.basename(str(hidraw_path))
+    return usb_device(f"/sys/class/hidraw/{node}/device")
+
+
+def find_device(name=None, vendor=None, product=None, axes=False,
+                usb_root=None):
     """Return the /dev/input/eventN path of a matching device.
 
     Numbering shifts as devices come and go, so always resolve by name or
@@ -81,6 +113,12 @@ def find_device(name=None, vendor=None, product=None, axes=False):
     and "Flydigi Apex 5" -- all under the same vendor and product id, and the
     keyboard sorts first. Matching on ids alone therefore relays a device that
     never sends a single gamepad event, which looks exactly like a dead pad.
+
+    Pass `usb_root` -- a USB device directory from `usb_device_of_hidraw` -- to
+    accept only nodes belonging to that one physical device. Two Apex 5s share
+    a vendor id, a product id and all three node names, so with two attached
+    every other filter here matches both, and a relay would read one pad's
+    sticks while writing the other pad's triggers.
     """
     for path in sorted(glob.glob("/dev/input/event*"),
                        key=lambda p: int(p.rsplit("event", 1)[1])):
@@ -90,6 +128,8 @@ def find_device(name=None, vendor=None, product=None, axes=False):
             with open(f"{base}/name") as fh:
                 dev_name = fh.read().strip()
         except OSError:
+            continue
+        if usb_root and usb_device(base) != usb_root:
             continue
         if name and name.lower() not in dev_name.lower():
             continue

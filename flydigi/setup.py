@@ -511,6 +511,20 @@ def _vendor_node():
         return None
 
 
+def _dock_node():
+    """A charging dock's command node, or None when none is attached.
+
+    The first one, not all of them: this is a permissions check, and a
+    permission that applies to one dock's node applies to every dock's -- the
+    rule matches on the product id, not on the device.
+    """
+    from . import device
+    try:
+        return device.find_device(device.FAMILY_DOCK)
+    except device.DeviceNotFound:
+        return None
+
+
 def _dualsense_event_nodes():
     """Event nodes belonging to a DualSense, real or ours.
 
@@ -551,6 +565,22 @@ def checks():
     else:
         out.append(Check("hidraw", "Controller access", FAIL,
                          f"{node} is not writable", "install-rules"))
+
+    # The dock's own node. The rules file has covered it since the dock was
+    # first driven, and nothing checked it -- so on a distribution where hidraw
+    # nodes are not world-accessible, a dock would fail to open with a
+    # checklist reporting everything green. The dock needs nothing else from
+    # this page: udev rules, the daemon's unit and the menu entry all belong to
+    # the installation rather than to a device, and the daemon drives pads.
+    dock = _dock_node()
+    if dock is None:
+        out.append(Check("dock", "Charging dock access", SKIP,
+                         "no dock on the bus", None))
+    elif _writable(dock):
+        out.append(Check("dock", "Charging dock access", OK, dock, None))
+    else:
+        out.append(Check("dock", "Charging dock access", FAIL,
+                         f"{dock} is not writable", "install-rules"))
 
     if not os.path.exists("/dev/uhid"):
         out.append(Check("uhid", "Virtual DualSense (/dev/uhid)", FAIL,
