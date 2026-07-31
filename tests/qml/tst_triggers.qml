@@ -162,4 +162,28 @@ TestCase {
         verify(Pad.packetsReceived > 0, "nothing reached the pad");
         compare(Pad.badChecksums, 0, "the pad rejected a packet");
     }
+
+    function test_applying_engages_the_effect_and_does_not_merely_store_it() {
+        // The bug this guards: Apply wrote the effect into the profile blob and
+        // sent nothing live, so picking Trigger lock stored a lock and left the
+        // triggers loose. Asserted against what the pad is *running*, since the
+        // blob looked correct throughout.
+        pick("left", 4);                         // trigger lock
+        tryCompare(App.profile.triggers.left, "effect", 4, 2000);
+
+        Pad.resetCounters();
+        mouseClick(findChild(page, "applyButton"));
+        tryCompare(App.profile, "dirty", false, 5000, "the write never completed");
+
+        // Side ids, not indices: 1 is left and 2 is right. Both are asserted
+        // because Flydigi issue one command per trigger -- a single command
+        // addressed to `Both` acks and does nothing. Waiting on the right one,
+        // which goes out second: waiting on the left passes the moment the
+        // first of the pair lands and says nothing about the second.
+        tryVerify(() => Pad.liveEffects["2"] !== undefined, 3000,
+                  "the right trigger was never sent an effect");
+        verify(Pad.liveEffects["1"] !== undefined,
+               "nothing was engaged on the left trigger");
+        compare(Pad.liveEffects["1"][0], 4, "the left trigger is not locked");
+    }
 }

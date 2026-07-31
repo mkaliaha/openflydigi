@@ -56,23 +56,13 @@ Roughly in order of value. Each is a fresh-context-sized piece of work.
     plus a bindings-storage nuisance. Optional workaround, which neither app does: re-assert the flag
     on connect, off then on once SDL has enumerated. The real fixes are upstream.
     → [docs/findings-steam.md](docs/findings-steam.md)
- 1. **A stored trigger effect is never engaged, and the Triggers page is inert because of it.**
-    Found by trying to lock the triggers from the blob and feeling nothing. `write_profile` in
-    `gui/worker.py` writes 164/165, applies only when the macro page moved, and never sends command
-    **81** — so picking Trigger lock and hitting Apply stores the effect and engages nothing.
-    Space Station is store-and-*replay*, the same shape as the vibration bind: 500 ms after every
-    applied-config read it calls `UpdateAdapterTriggerConfig`, which builds a `ForceTriggerConfig*`
-    from the stored block and sends 81 **per side** (`ControllerBusinessService.cs:1595`). The fix
-    is to do the same after a profile write, one command per trigger — side 3 does nothing. Open
-    question worth one run: whether the pad engages the stored block by itself after a sleep or a
-    profile switch, or whether a host has to replay it every time.
- 2. **Gyro mapped to a stick (J2).** Offset 137, 8 bytes, smoothing curve at 830. Works in any game
+ 1. **Gyro mapped to a stick (J2).** Offset 137, 8 bytes, smoothing curve at 830. Works in any game
     with nothing running, which on Linux is otherwise Steam Input only.
- 3. **The charging dock.** The gen-2 dock is on the desk; blocked only on decompiling
+ 2. **The charging dock.** The gen-2 dock is on the desk; blocked only on decompiling
     `Flydigi.ChargerSdk.dll` / `Flydigi.CoolerSdk.dll`. It is a *lighting* problem, not a screen
     one — 162 addressable LEDs over the ordinary config path, and `cd2_led_sync` keeps it in step
     with the pad. → [docs/findings-other-devices.md](docs/findings-other-devices.md)
- 4. **Multiple pads.** A Vader 4 Pro is on the desk. **The device-type guard is built** —
+ 3. **Multiple pads.** A Vader 4 Pro is on the desk. **The device-type guard is built** —
     `flydigi/identity.py` reads command 1 and refuses anything that is not a k5, and the app, the
     mapping CLI and the settings CLI all go through it, so an Apex 5 config can no longer reach a
     Vader. What remains is driving the Vader deliberately, which `identity.require(ctrl, "f4")`
@@ -82,7 +72,7 @@ Roughly in order of value. Each is a fresh-context-sized piece of work.
     `IsSupportTriggerVibration` is a Vader flag and this pad has no such motors. The Vader is
     likewise the machine for the ADC calibration command, which `GenerateControllerVader4` is the
     only factory to set. → [docs/findings-profile-blob.md](docs/findings-profile-blob.md) J5
- 5. **An interactive crop for the Screen page.** Everything else there is done.
+ 4. **An interactive crop for the Screen page.** Everything else there is done.
 
 **Small, testable, an afternoon each.** These came out of diffing Space Station's own English locale
 file — its complete user-facing string set — and the 22 factories in `command.setting/` against what
@@ -237,7 +227,7 @@ python3 -m gui
 | Vibration | master switch, per-grip enable, min/max window, strength |
 | Controller → Selected profile / Other software | rename the open profile, back up / restore it to file; let Steam and similar take the pad over, and who currently holds it |
 | Sticks | dead zone, outer dead zone, sensitivity curve presets, circular range |
-| Triggers | stored effect — all six of Flydigi's, each with its own controls — plus the travel window, Flydigi's "Stroke Setting", as a start/end pair. **The stored effect is not engaged by Apply** — see What's next |
+| Triggers | stored effect — all six of Flydigi's, each with its own controls, engaged on the pad as well as stored — plus the travel window, Flydigi's "Stroke Setting", as a start/end pair |
 | Games | all 94 games, searchable, filtered by route; vibration presets load onto the pad from here; per-game **Auto** toggle, a route picker where a game really has a choice, and a DualSense marker on the 23 games Flydigi lists as DS5-aware |
 | DualSense | the tier-4b switch: vhci-hcd's state, haptic audio to the motors, what the relay is doing, and the launch option to copy |
 | Setup | the daemon's unit, "running now" and "start at login" as separate switches, the application-menu entry, and the udev rules behind one authentication prompt |
@@ -278,6 +268,18 @@ in `gui/` is [gui/README.md](gui/README.md).
     adaptive pad (`triggerStrokeUsable = !supportAdaptTrigger`), so their k5 write path is the dead
     one. "Just copy Space Station" was not available here.
     → [docs/findings-profile-blob.md](docs/findings-profile-blob.md) J3
+  * **A stored trigger effect does nothing until a live command 81 starts it, and the order of the
+    two matters.** Writing the force-trigger block and applying the config stores the effect and
+    leaves the triggers loose — found by putting Lock into the blob, applying, and feeling nothing.
+    Space Station is store-and-*replay*, the same shape as the vibration bind: 500 ms after every
+    applied-config read it rebuilds a `ForceTriggerConfig*` from the stored bytes and sends 81 per
+    side (`ControllerBusinessService.cs:1595`). `effects.engage_stored` is that, and the app now
+    calls it after a profile write and after opening one. **Write the blob first and send the live
+    commands after** — the reverse order silently loses the write. Two probe runs ended with their
+    own Lock still on the pad after printing "restored", because the restore cleared the live
+    effects and *then* wrote the profile; the same write with nothing in front of it restores
+    correctly. Consistent with replies going to every reader of the node: the 81 ACKs are still in
+    flight when the write handshake starts.
   * **The Lock effect makes the trigger digital.** With it on the axis reports 0 or 255 and nothing
     between — 2 distinct values and 35 evdev events across a 15-second run of pulls, against ~240
     values and ~1100 events with no effect. So it is a hair trigger in the button sense, right for a

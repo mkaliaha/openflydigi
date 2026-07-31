@@ -80,18 +80,12 @@ class TestPad(FakePad):
 
     def send(self, buf, wait=0.3, until=None):
         buf = bytes(buf)
-        # Answered before the checksum test, like CMD_GET_INFO: `bind_grip`
-        # builds a command-82 packet without a trailing checksum -- Flydigi's
-        # own NewXInput builder does not set one -- so FakePad's unconditional
-        # check would reject a perfectly correct packet.
+        # Only the history is kept here; answering command 82 is `FakePad`'s
+        # job now that it knows the trigger-effect family carries no checksum.
+        # This used to build its own ack to dodge that check, which meant two
+        # implementations of one reply and only one of them exercised.
         if buf[3] == flydigi_device.CMD_SET_FORCE_TRIGGER_GRIP:
             self.binds.append(list(buf[5:13]))
-            body = bytearray(32)
-            body[0] = 0x04
-            body[1], body[2] = flydigi_device.MAGIC1, flydigi_device.MAGIC2
-            body[3] = flydigi_device.CMD_SET_FORCE_TRIGGER_GRIP
-            body[6] = 1                          # ack_ok reads body[5] after the report id
-            return [bytes(body)]
         if buf[3] == motion.CMD_GET_INFO:
             body = bytearray(32)
             body[0] = motion.INPUT_REPORT_ID
@@ -139,13 +133,6 @@ class TestPad(FakePad):
         if buf[3] == mapping.CMD_APPLY:
             self.switches.append(buf[5])
         return super().send(buf, wait)
-
-    # `bind_grip` calls this on the controller to read an ack. It is a static
-    # method on the real Controller, and FakePad never grew one -- so applying
-    # a game preset raised AttributeError, which is not in DeviceWorker's
-    # except tuple. It escaped the slot silently: no binding, no `failed`, no
-    # status, nothing on screen.
-    ack_ok = staticmethod(flydigi_device.Controller.ack_ok)
 
     def close(self):
         pass
@@ -202,6 +189,18 @@ class PadProbe(QObject):
     def binds(self):
         """Each rumble-to-trigger binding the pad was sent, as raw payloads."""
         return [list(b) for b in self._pad.binds]
+
+    @Property("QVariantMap", notify=changed)
+    def liveEffects(self):
+        """The effect actually running on each trigger, by side id.
+
+        Read off the pad and not out of the profile, because that is the whole
+        distinction: storing an effect in the blob leaves the triggers loose,
+        and only a live command 81 starts it. A test asserting against the
+        model would pass with nothing engaged at all.
+        """
+        return {str(side): [mode] + list(params)
+                for side, (mode, params) in self._pad.live_effects.items()}
 
     # -- device settings ---------------------------------------------------
     #
@@ -263,6 +262,12 @@ class PadProbe(QObject):
         self._pad.switches.clear()
         self._pad.binds.clear()
         self._pad.bad_checksums = 0
+        # Live effect state survives a config apply on real hardware, so it has
+        # to be cleared deliberately here too -- otherwise a case asserting
+        # "applying engaged the effect" would pass on what an earlier case left
+        # running.
+        self._pad.live_effects.clear()
+        self._pad.live_binds.clear()
         self.changed.emit()
 
     @Slot(int, str, result=str)

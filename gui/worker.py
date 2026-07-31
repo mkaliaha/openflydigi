@@ -158,8 +158,18 @@ class DeviceWorker(QObject):
         opened, never all four to fill a list.
         """
         self.status.emit(f"Reading profile {cfg_id + 1}…")
-        config = self._attempt(lambda ctrl: mapping.read_config(ctrl, cfg_id),
-                               f"reading profile {cfg_id + 1}")
+
+        def work(ctrl):
+            config = mapping.read_config(ctrl, cfg_id)
+            # The read is what switches the pad, so this is Space Station's
+            # "after every applied-config read" case literally: the profile now
+            # running has trigger effects stored in it, and they do not start on
+            # their own. Opening a profile therefore engages its effects, which
+            # is what makes the Triggers page describe something real.
+            effects.engage_stored(ctrl, config)
+            return config
+
+        config = self._attempt(work, f"reading profile {cfg_id + 1}")
         if config is None:
             return
         self.profile_loaded.emit(cfg_id, bytes(config.blob), config.title)
@@ -230,6 +240,15 @@ class DeviceWorker(QObject):
                 # Pass the config's own id so committing does not overwrite the
                 # slot's version tag with zero.
                 saved = mapping.save_config(ctrl, new.data_version) if save else False
+                # A stored trigger effect is inert until a live command starts
+                # it -- writing the block and applying the config engages
+                # nothing, which is measured, not assumed. Space Station
+                # replays it as command 81 per side after every applied-config
+                # read, so we do the same after a write. Unconditional, like
+                # theirs: live effect state survives a config apply, so "the
+                # trigger bytes did not change" does not mean the pad is
+                # running them.
+                effects.engage_stored(ctrl, new)
             return sent, saved
 
         result = self._attempt(work, f"writing profile {cfg_id + 1}")

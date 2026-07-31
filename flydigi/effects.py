@@ -19,6 +19,7 @@ allowed to be, and which byte each one lands in -- so the profile editor and
 the live command cannot drift apart.
 """
 import collections
+import time
 
 from . import device
 from .device import (
@@ -381,6 +382,65 @@ def rumble(ctrl, low, high, wait=0.1):
     buf[5] = low & 0xFF
     buf[6] = high & 0xFF
     return ctrl.send(buf, wait=wait)
+
+
+def engage_stored(ctrl, config, wait=0.5):
+    """Send a profile's stored trigger effects to the pad as live commands.
+
+    **A stored effect does nothing until this runs.** Writing the block into the
+    profile and applying the config stores it and engages nothing: measured by
+    putting Lock into the blob, applying, and finding the triggers loose. Space
+    Station is store-and-*replay*, the same shape as the vibration bind -- 500 ms
+    after every applied-config read it calls `UpdateAdapterTriggerConfig`, which
+    rebuilds a `ForceTriggerConfig*` from the stored bytes and sends command 81
+    per side (`ControllerBusinessService.cs:1595`). So the profile is where the
+    effect *lives*, and a live command is how it *starts*.
+
+    `wait` is that delay, kept because the reference keeps it: the read that
+    precedes this leaves the firmware paging the profile in, and re-seating the
+    trigger motors is audibly not instant.
+
+    `config` is anything with `trigger_effect` and `trigger_bind` -- a
+    `MappingConfig` in practice. Nothing is imported from `mapping` here, so the
+    two modules stay independent.
+
+    One command per trigger, never side 3: a command addressed to `Both` ACKs
+    and does nothing at all.
+
+    Returns [(side_name, ok), ...].
+    """
+    if wait:
+        time.sleep(wait)
+    results = []
+    for name, side_id in (("left", SIDE_LEFT), ("right", SIDE_RIGHT)):
+        mode, params = config.trigger_effect(name)
+        mode = effect(mode).mode
+        params = list(params) + [0] * max(0, 10 - len(params))
+        match = params[4] == 1
+        if mode == MODE_RACE:
+            ok = race(ctrl, side_id, params[0], params[1], match)
+        elif mode == MODE_SNIPER:
+            ok = sniper(ctrl, side_id, params[0], params[1], params[2],
+                        params[3], match)
+        elif mode == MODE_RECOIL:
+            # Their Recoil takes Param[0..2] and skips Param[3], which is not a
+            # knob this effect has -- see `recoil`.
+            ok = recoil(ctrl, side_id, params[0], params[1], params[2], match)
+        elif mode == MODE_LOCK:
+            # Lock's strength is 255 in every call Flydigi makes, and its
+            # matchStroke is a literal true rather than Param[4].
+            ok = lock(ctrl, side_id, params[0])
+        elif mode == MODE_VIBRATION:
+            # Stored type 5 becomes SyncWithGrip, not a mode-5 command, and it
+            # reads the *bind* half of the block rather than the parameters.
+            # bindType is the literal 2 Flydigi always passes.
+            filt, scale, bind_params = config.trigger_bind(name)
+            bind_params = list(bind_params) + [0] * max(0, 4 - len(bind_params))
+            ok = bind_grip(ctrl, side_id, 2, filt, scale, bind_params[:4])
+        else:
+            ok = normal(ctrl, side_id)
+        results.append((name, ok))
+    return results
 
 
 def apply_game(ctrl, game):

@@ -24,6 +24,14 @@ PACKAGE_COUNT = 84
 BLOB_LEN = PACKAGE_COUNT * 10          # 840 bytes, matching a real v3.1 config
 
 
+# Commands that carry no checksum. The trigger-effect family is the whole of
+# it: `device.build` writes no checksum byte, and the pad acts on them anyway,
+# while a mapping or lighting packet with a bad one gets no reply at all.
+UNCHECKSUMMED = frozenset((device.CMD_SET_FORCE_TRIGGER,
+                           device.CMD_SET_FORCE_TRIGGER_GRIP,
+                           device.CMD_RUMBLE))
+
+
 def blank_blob(title="Profile"):
     """A config with every key at its default, laid out like the real thing."""
     blob = bytearray(b"\xff" * BLOB_LEN)
@@ -92,6 +100,15 @@ class FakePad:
         # caller gets an exception, and nothing says the two happened together.
         self.fail_reads = False
         self._pending_write = None     # (cfg_id, start_index, count)
+
+        # -- live trigger effects -------------------------------------------
+        # Kept per side, because a stored effect does nothing until one of
+        # these arrives: writing the block and applying the config engages
+        # nothing on real hardware. A fake that only modelled the blob would
+        # let that bug pass, since the bytes would look right the whole time.
+        # Never keyed by side 3 -- a command addressed to `Both` is inert.
+        self.live_effects = {}         # side -> (mode, [params])
+        self.live_binds = {}           # side -> (bind_type, filter, scale, [params])
 
         # -- screen ---------------------------------------------------------
         self.screen_frames = []        # every frame this pad has been sent
@@ -164,10 +181,23 @@ class FakePad:
             return []
         cmd = buf[3]
         length = buf[4]
-        if buf[3 + length] != device.checksum(buf, 3, 3 + length):
-            self.bad_checksums += 1
-            return []                  # the real pad simply does not answer
-        payload = buf[5 : 3 + length]
+        # The config family is checksummed and the trigger-effect family is
+        # not: `device.build` leaves the slot at zero for 81/82 and the pad
+        # takes them anyway. Checking every command here counted those as
+        # corrupt and answered nothing, which reads exactly like a pad that
+        # refused the effect.
+        if cmd not in UNCHECKSUMMED:
+            if buf[3 + length] != device.checksum(buf, 3, 3 + length):
+                self.bad_checksums += 1
+                return []              # the real pad simply does not answer
+        # Two length conventions in one protocol. `blobs.build` counts the
+        # command and length bytes themselves, so the payload ends at
+        # 3 + length; `device.build`, which the trigger family uses, stores the
+        # payload length plainly. Slicing everything the first way truncated
+        # every trigger command by two bytes -- enough that a three-byte
+        # "clear the effect" arrived as one byte and was dropped as malformed.
+        payload = (buf[5 : 5 + length] if cmd in UNCHECKSUMMED
+                   else buf[5 : 3 + length])
         handler = {
             lighting.CMD_READ: self._read_led,
             lighting.CMD_WRITE_START: self._write_start_led,
@@ -190,8 +220,18 @@ class FakePad:
             settings.CMD_SENSITIVITY: self._sensitivity,
             settings.CMD_SLEEP: self._sleep,
             settings.CMD_RESTART: self._restart,
+            device.CMD_SET_FORCE_TRIGGER: self._force_trigger,
+            device.CMD_SET_FORCE_TRIGGER_GRIP: self._force_trigger_grip,
         }.get(cmd)
         return handler(payload) if handler else []
+
+    def command(self, cmd_id, payload=b"", wait=0.3):
+        """As `Controller.command` -- build the envelope and send it."""
+        return self.send(device.build(cmd_id, payload), wait=wait)
+
+    # Borrowed rather than reimplemented: a fake that decided for itself what
+    # counts as an ACK would let a caller pass here and fail on the pad.
+    ack_ok = staticmethod(device.Controller.ack_ok)
 
     @staticmethod
     def _ack(cmd, echo=b""):
@@ -228,6 +268,40 @@ class FakePad:
         if self.fail_reads:
             return []                  # switched anyway, then went quiet
         return self._stream(mapping.CMD_READ, blob, cfg_id, pkg_size)
+
+    def _force_trigger(self, payload):
+        """SetForceTrigger (81): [applyFlag, side, mode, params...].
+
+        The real pad echoes the mode and the parameters back rather than a bare
+        success flag, which is how we know it parses the payload and does not
+        merely acknowledge the command id. Modelled, because a caller reading
+        the echo would otherwise be testing nothing.
+        """
+        if len(payload) < 3:
+            return []
+        _apply_flag, side, mode = payload[0], payload[1], payload[2]
+        if side == device.SIDE_BOTH:
+            # ACKs on hardware and does nothing at all. Recording it would let a
+            # writer that addresses `Both` look like it worked.
+            return [self._ack(device.CMD_SET_FORCE_TRIGGER)]
+        self.live_effects[side] = (mode, list(payload[3:]))
+        # `[success=1][mode][params...]`, side dropped -- the shape a real Apex 5
+        # sends back. The success flag keeps its usual slot, so this is the echo
+        # form that puts data after it rather than the sub-id form that replaces
+        # it; getting that backwards makes every effect look refused.
+        return [self._ack(device.CMD_SET_FORCE_TRIGGER,
+                          bytes([1, mode]) + bytes(payload[3:]))]
+
+    def _force_trigger_grip(self, payload):
+        """SyncWithGrip (82): [side, bindType, filter, scale, params...]."""
+        if len(payload) < 4:
+            return []
+        side = payload[0]
+        if side == device.SIDE_BOTH:
+            return [self._ack(device.CMD_SET_FORCE_TRIGGER_GRIP)]
+        self.live_binds[side] = (payload[1], payload[2], payload[3],
+                                 list(payload[4:8]))
+        return [self._ack(device.CMD_SET_FORCE_TRIGGER_GRIP)]
 
     def _status(self, _payload):
         body = bytearray(32)

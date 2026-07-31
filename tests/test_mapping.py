@@ -468,6 +468,69 @@ def test_live_effect_payloads_match_the_command_builders():
           pad.sent[-1] == (81, [1, 1, 2, 0, 1, 1, 1, 1]), str(pad.sent[-1]))
 
 
+class _Recorder:
+    """A pad that only remembers what was sent to it."""
+
+    def __init__(self):
+        self.sent = []
+
+    def command(self, cmd_id, payload=b"", wait=0.3):
+        self.sent.append((cmd_id, list(payload)))
+        return []
+
+    def send(self, buf, wait=0.3, until=None):
+        self.sent.append((buf[3], list(buf[5 : 5 + buf[4]])))
+        return []
+
+    @staticmethod
+    def ack_ok(_reply, _cmd_id):
+        return True
+
+
+def test_a_stored_effect_is_replayed_as_the_live_command_flydigi_builds():
+    """`engage_stored`, against ControllerRepository.CreateForceAdapterConfig.
+
+    A stored effect does nothing until a live 81 starts it -- measured with Lock
+    written into the blob and applied, which left the triggers loose. So the
+    replay is the feature, and what it puts on the wire is the whole of it.
+    """
+    cases = [
+        (effects.MODE_NORMAL, [0] * 10, (81, [1, 1, 0])),
+        (effects.MODE_RACE, [40, 200, 0, 0, 1], (81, [1, 1, 1, 40, 200, 1])),
+        (effects.MODE_SNIPER, [40, 30, 20, 10, 1],
+         (81, [1, 1, 2, 40, 30, 20, 10, 1])),
+        # Param[3] is not a knob this effect has, and Param[4] is the flag.
+        (effects.MODE_RECOIL, [40, 30, 20, 0, 0],
+         (81, [1, 1, 3, 40, 30, 20, 0, 0])),
+        # Lock's strength is a literal 255 and its match flag a literal 1, not
+        # Param[1] and Param[4] -- Flydigi hardcodes both.
+        (effects.MODE_LOCK, [90, 255, 1, 0, 0], (81, [1, 1, 4, 90, 255, 1])),
+    ]
+    for mode, params, expected in cases:
+        config = mapping.MappingConfig(blank_blob())
+        config.set_trigger_effect("left", mode, params)
+        pad = _Recorder()
+        effects.engage_stored(pad, config, wait=0)
+        name = effects.effect(mode).key
+        check(f"{name} replays as its live command",
+              pad.sent[0] == expected, str(pad.sent[0]))
+        check(f"{name} goes out once per trigger, never side 3",
+              len(pad.sent) == 2 and pad.sent[1][1][1] == device.SIDE_RIGHT,
+              str(pad.sent))
+
+    # Stored type 5 is the odd one: it becomes SyncWithGrip (82) built from the
+    # *bind* half of the block, with the bind type Flydigi always passes.
+    config = mapping.MappingConfig(blank_blob())
+    config.set_trigger_effect("left", effects.MODE_VIBRATION, [50, 20, 1, 90, 0],
+                              bind=(10, 60, [50, 1, 1, 20, 0]))
+    pad = _Recorder()
+    effects.engage_stored(pad, config, wait=0)
+    check("stored Vibration replays as command 82, not a mode-5 81",
+          pad.sent[0][0] == 82, str(pad.sent[0]))
+    check("and it carries the bind half, with bindType 2",
+          pad.sent[0][1][:8] == [1, 2, 10, 60, 50, 1, 1, 20], str(pad.sent[0]))
+
+
 def test_the_factory_curves_are_the_identity_line():
     """Both blocks ship as no-curve-at-all, on two different scales."""
     config = mapping.MappingConfig(blank_blob())
@@ -1094,6 +1157,7 @@ def main():
                  test_switching_to_general_keeps_the_numbers,
                  test_an_effect_reads_its_own_defaults_out_of_a_foreign_slot,
                  test_live_effect_payloads_match_the_command_builders,
+                 test_a_stored_effect_is_replayed_as_the_live_command_flydigi_builds,
                  test_the_trigger_motor_fields_land_where_flydigi_puts_them,
                  test_the_motor_strength_is_a_percentage_not_a_byte,
                  test_the_amplitude_window_cannot_be_inverted,

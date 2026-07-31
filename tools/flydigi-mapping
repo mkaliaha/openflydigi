@@ -28,7 +28,8 @@ import sys
 
 sys.path.insert(0, __file__.rsplit("/", 2)[0])
 
-from flydigi import device, identity, macros as macro_recorder, mapping
+from flydigi import (device, effects, identity, macros as macro_recorder,
+                     mapping)
 
 MACRO_TYPES = {"once": mapping.MACRO_ONCE,
                "held": mapping.MACRO_WHILE_HELD,
@@ -137,6 +138,11 @@ def commit(ctrl, cfg_id, new, old, save):
               else "warning: no reply to save -- change may be lost on power cycle")
     else:
         print("not saved -- pass --save to keep it across a power cycle")
+    # Storing a trigger effect does not start it. Space Station replays the
+    # stored block as a live command 81 per side after every applied-config
+    # read; without that the triggers stay loose whatever the profile says.
+    engaged = ", ".join(name for name, ok in effects.engage_stored(ctrl, new) if ok)
+    print(f"engaged the stored trigger effect on: {engaged or 'neither trigger'}")
 
 
 def main():
@@ -224,8 +230,19 @@ def main():
         return
 
     if args.cmd == "apply":
-        print("switched" if mapping.apply_config(ctrl, args.cfg)
-              else "no reply -- the pad may be asleep")
+        if not mapping.apply_config(ctrl, args.cfg):
+            print("no reply -- the pad may be asleep")
+            return
+        print("switched")
+        # Switching to a profile is not enough to start the trigger effects it
+        # stores -- they need a live command 81 each. Reading the slot back is
+        # what supplies the bytes to build those from; it is already the active
+        # one, so the read costs a round trip and switches nothing.
+        engaged = ", ".join(
+            name for name, ok
+            in effects.engage_stored(ctrl, mapping.read_config(ctrl, args.cfg))
+            if ok)
+        print(f"engaged the stored trigger effect on: {engaged or 'neither trigger'}")
         return
 
     config = read(ctrl, args.cfg)

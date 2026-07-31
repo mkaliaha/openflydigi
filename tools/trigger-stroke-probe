@@ -49,10 +49,13 @@ a Race left over from an earlier session cannot be mistaken for a travel window.
     tools/trigger-stroke-probe --baseline     # the pad as it is, both triggers
     tools/trigger-stroke-probe --curve        # the block at 123
     tools/trigger-stroke-probe --param        # Param[0..1] at 195/215
+    tools/trigger-stroke-probe --curve --under-race   # the same, under an effect
+    tools/trigger-stroke-probe --lock         # what Lock does to the reading
 
 Nothing is ever saved. The profile is written and applied, never committed with
 command 166, and is restored before exit -- and an applied-but-unsaved config
-dies on the pad's next sleep anyway.
+dies on the pad's next sleep anyway. The restore is read back and verified
+rather than announced; see `restore` for why that is not paranoia.
 """
 import argparse
 import os
@@ -204,6 +207,49 @@ def verdict(probed, control, side):
               "degenerate window should produce. Most likely one trigger was "
               "worked harder than the other; run it again, sweeping both the "
               "same way.")
+
+
+def restore(ctrl, cfg_id, original, edited):
+    """Put the profile back, and check that it went back.
+
+    **Order matters, and getting it wrong cost two profiles.** The obvious
+    shape -- clear the live effects, then write the blob -- leaves the pad
+    unrestored while printing that it was restored: two runs ended with the
+    probe's own Lock and its 0..128 window still on the pad, and the next run
+    read them as the profile's "original" state and put them back again. A
+    config write with no live command in front of it restores the same profile
+    correctly, which is the difference. hidraw replies go to every reader of the
+    node, so the ACKs from those command-81s are still in flight when the write
+    handshake starts, and the write reads one of them as its own answer.
+
+    So: blob first, live commands after. And read it back, because a write that
+    reports packets sent is not a write the pad kept -- the whole reason this
+    probe exists is that an ACK is not evidence.
+    """
+    sent = mapping.write_config(ctrl, cfg_id, original, old=edited)
+    mapping.apply_config(ctrl, cfg_id)
+    effects.clear_all(ctrl)
+    try:
+        back = mapping.read_config(ctrl, cfg_id)
+    except mapping.ProtocolError as exc:
+        print(f"\nrestored profile {cfg_id + 1} ({sent} packets) but could not "
+              f"read it back to check: {exc}")
+        return
+    intact = all(
+        back.trigger_effect(side) == original.trigger_effect(side)
+        and back.trigger_curve(side) == original.trigger_curve(side)
+        for side in mapping.SIDES)
+    if intact:
+        print(f"\nrestored profile {cfg_id + 1}, triggers released "
+              f"(read back and verified)")
+    else:
+        print(f"\nWARNING: profile {cfg_id + 1} did NOT go back. It still holds "
+              + "; ".join(
+                  f"{side} effect {back.trigger_effect(side)[0]}, window "
+                  f"{back.trigger_curve(side)['zero']}..{back.trigger_curve(side)['end']}"
+                  for side in mapping.SIDES)
+              + ". Nothing was saved, so a sleep clears it -- but do not treat "
+                "this profile as untouched in the next run.")
 
 
 def lock_verdict(probed, control, side, stop):
@@ -366,12 +412,7 @@ def main():
             print(f"\n{presses} button events during the window")
             lock_verdict(probed, control, args.side, stop)
         finally:
-            # Live effect state survives a config apply, so putting the blob
-            # back is not enough -- the lock has to be cleared explicitly.
-            effects.clear_all(ctrl)
-            mapping.write_config(ctrl, cfg_id, original, old=edited)
-            mapping.apply_config(ctrl, cfg_id)
-            print(f"\nrestored profile {cfg_id + 1}, triggers released")
+            restore(ctrl, cfg_id, original, edited)
             ctrl.close()
         return 0
 
@@ -439,10 +480,7 @@ def main():
         print(f"\n{presses} button events during the window")
         verdict(probed, control, args.side)
     finally:
-        effects.clear_all(ctrl)
-        mapping.write_config(ctrl, cfg_id, original, old=edited)
-        mapping.apply_config(ctrl, cfg_id)
-        print(f"\nrestored profile {cfg_id + 1}, triggers released")
+        restore(ctrl, cfg_id, original, edited)
         ctrl.close()
     return 0
 
