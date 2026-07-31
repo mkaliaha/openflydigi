@@ -29,6 +29,12 @@ Kirigami.ScrollablePage {
     // apply and save the other profile pages have.
     footer: ProfileFooter {}
 
+    // The conflict warning below reads DS mode's state, which is only current
+    // once something has asked for it -- the model polls rather than being
+    // pushed to. Cheap: a process-table read every two seconds while a page
+    // that cares is up.
+    Component.onCompleted: App.dsmode.refresh()
+
     ColumnLayout {
         spacing: 0
 
@@ -186,6 +192,21 @@ Kirigami.ScrollablePage {
         FormCard.FormHeader {
             visible: App.device.thirdPartyAvailable
             title: "Other software"
+        }
+
+        // The other half of the warning on the DualSense page. Turning this on
+        // while the relay runs takes away the evdev input it reads, and the
+        // symptom -- motion alive, sticks and buttons dead -- does not point
+        // back here on its own.
+        Kirigami.InlineMessage {
+            objectName: "thirdPartyDsConflict"
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.largeSpacing
+            visible: App.device.thirdPartyAvailable && App.dsmode.running
+            type: Kirigami.MessageType.Warning
+            text: "DualSense mode is on. Handing the pad to other software "
+                  + "stops the controller input it relays, leaving games a "
+                  + "DualSense with working motion and dead sticks and buttons."
         }
 
         FormCard.FormCard {

@@ -55,6 +55,17 @@ TestCase {
                 "the warning and the module state disagree");
     }
 
+    function test_the_page_warns_when_other_software_holds_the_pad() {
+        // The relay reads sticks and buttons from evdev, which the third-party
+        // handover switches off -- while motion keeps arriving, so the symptom
+        // is a pad that tilts and does nothing else. Compare against the model
+        // rather than the binding: a binding read once never updates.
+        let warning = findChild(page, "dsThirdPartyConflict");
+        verify(warning, "no message for the third-party conflict");
+        compare(warning.visible, App.device.thirdParty,
+                "the warning and the third-party flag disagree");
+    }
+
     function test_the_module_row_says_which_of_three_states_it_is_in() {
         // Loaded, present but not loaded, or absent: they call for different
         // sentences, and "not loaded" is not a problem to fix in advance.

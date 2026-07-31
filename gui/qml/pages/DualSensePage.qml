@@ -44,6 +44,25 @@ Kirigami.ScrollablePage {
                   + "a custom or minimal kernel may not."
         }
 
+        // The two switches are mutually exclusive and the failure is not
+        // obvious: the relay takes sticks and buttons from evdev, and letting
+        // another driver take the pad over switches off the report that node is
+        // built from. Motion keeps arriving on the vendor stream, so the game
+        // gets a DualSense that tilts and does nothing else -- which reads as a
+        // broken mapping rather than a source that was taken away. Say so here
+        // rather than letting it be diagnosed.
+        Kirigami.InlineMessage {
+            objectName: "dsThirdPartyConflict"
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.largeSpacing
+            visible: App.device.thirdParty
+            type: Kirigami.MessageType.Warning
+            text: "Other software is allowed to take the pad over, and that "
+                  + "stops the ordinary controller input this relay reads. "
+                  + "Games will see a DualSense with working motion and dead "
+                  + "sticks and buttons. Turn it off on the Controller page."
+        }
+
         FormCard.FormHeader {
             title: "DualSense mode"
         }
