@@ -180,6 +180,15 @@ def main():
     results.append(check("unknown keys are left alone",
                          "worst_iter" not in dsmode.parse_status("worst_iter=1.2ms")))
 
+    # The physical pad is now reported apart from the virtual one, because they
+    # come and go independently: `pad=0` is a sleeping Apex 5 on a relay that is
+    # very much still running and still holding the game's DualSense.
+    parsed = dsmode.parse_status(
+        "reports=1200 evdev=340 motion=9000 out=17 iso_urbs=4400 pad=0 drops=2")
+    results.append(check("a sleeping pad is readable off the status line",
+                         parsed.get("pad") == 0 and parsed.get("drops") == 2,
+                         str(parsed)))
+
     # -- the whole reading --------------------------------------------------
     state = dsmode.state()
     results.append(check("state answers every question a page asks",

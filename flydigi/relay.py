@@ -6,8 +6,17 @@
 
 Kept in the library rather than the CLI so it can be unit tested and reused by
 a GUI later.
+
+`PadLink` at the bottom is the other half of the same job: holding the physical
+pad in a way that survives it leaving the USB bus, which it does every time it
+falls asleep.
 """
-from . import ds5, evdev
+import os
+import threading
+import time
+
+from . import ds5, effects, evdev, motion
+from .device import Controller, DeviceNotFound
 
 FLYDIGI_VID, FLYDIGI_PID = 0x37D7, 0x2501
 
@@ -201,3 +210,322 @@ def build_state(reader, state, select_is_touchpad=True):
     state.set(ds5.TOUCHPAD, 2,
               bool(select_held and not chord) if select_is_touchpad else False)
     return state
+
+
+def release(state):
+    """Let go of every input, leaving everything that is not input alone.
+
+    What the game is fed while the pad is away. Not cosmetic: a pad that
+    leaves the bus mid-press -- a yanked cable, a dongle knocked out of a dock
+    -- would otherwise hold that button and that stick for as long as it stays
+    away, and the game would spend the whole time walking into a wall.
+
+    Battery and sequence number are untouched. They are not input, and the
+    last reading is still the best answer to what the battery was.
+    """
+    state.lx = state.ly = state.rx = state.ry = ds5.AXIS_NEUTRAL
+    state.l2 = state.r2 = 0
+    state.hat = ds5.HAT_NEUTRAL
+    state.buttons0 = state.buttons1 = state.buttons2 = 0
+    state.gyro = [0, 0, 0]
+    state.accel = [0, 0, 0]
+    return state
+
+
+class PadLink:
+    """The physical Apex 5, held loosely enough to survive it going away.
+
+    A sleeping Apex 5 does not go quiet on HID: it leaves the USB bus, taking
+    its evdev and hidraw nodes with it, and comes back under different node
+    numbers when a button wakes it (see `device.find_device`). A relay that
+    opens both once and reads them for the length of a play session therefore
+    dies the first time the pad is put down -- and it takes the virtual
+    DualSense with it, because the process serving that pad is the one that
+    just hit ENODEV. Losing the pad for a nap is a nuisance; losing the
+    controller the game is holding is a lost session.
+
+    So the physical pad is modelled as something that may be absent. Every
+    read that touches it can fail, a failure means "gone" rather than "fatal",
+    and the way back is to look for the nodes again. Nothing here is
+    privileged -- reopening a hidraw node needs no more than opening it did --
+    which is why it keeps working long after the relay has dropped back to the
+    invoking user.
+
+    The virtual side is deliberately not this class's business. It stays
+    attached throughout, and `release` above is what the caller feeds the game
+    in the meantime.
+
+    Threads. The caller's main loop selects on these descriptors, so it is the
+    only thing allowed to close one: a worker closing an fd out from under a
+    `select` is a use-after-free with an fd number for a pointer. A worker that
+    fails a write therefore sets `broken` and leaves it at that; `poll` does
+    the closing. `lock` guards use of the vendor node, which the caller shares
+    with its rumble thread.
+    """
+
+    # How long to wait before looking for the nodes again. The pad is woken by
+    # a button press, so this is a human-scale wait, not a race: a second of
+    # scanning /dev/input every time is cheap and reconnects fast enough that
+    # the wake feels immediate.
+    RETRY_INTERVAL = 1.0
+
+    # A dead node normally announces itself by failing a read. This is the
+    # backstop for the case where nothing reads it -- an idle pad with motion
+    # off produces no traffic at all, so without this a disconnect would go
+    # unnoticed until the next button press, which will never come.
+    CHECK_INTERVAL = 2.0
+
+    def __init__(self, want_ctrl=True, want_motion=True, log=None,
+                 clock=time.monotonic):
+        self.want_ctrl = want_ctrl
+        self.want_motion = want_motion
+        self.reader = None
+        self.ctrl = None
+        self.name = None
+        self.motion_on = False
+        # Bumped every time a node is newly opened, so a caller can tell "the
+        # same pad I had last iteration" from "a pad that has just arrived and
+        # remembers nothing" -- the pad drops live trigger effects when it
+        # sleeps, so they have to be sent again.
+        self.generation = 0
+        self.drops = 0
+        self.broken = False
+        self.lock = threading.RLock()
+        self._log = log or (lambda _msg: None)
+        self._now = clock
+        self._next_try = 0.0
+        self._next_check = 0.0
+
+    @property
+    def connected(self):
+        """Whether input is reaching us. The vendor node is a bonus, not this."""
+        return self.reader is not None
+
+    def fds(self):
+        """What to select on. Empty while the pad is away, which is legal."""
+        out = []
+        if self.reader is not None:
+            out.append(self.reader.fileno())
+        if self.motion_on and self.ctrl is not None:
+            out.append(self.ctrl.fd)
+        return out
+
+    # -- opening ------------------------------------------------------------
+
+    def open(self):
+        """Open whatever is present. Returns (connected, problem or None).
+
+        Partial success is success: the gamepad node and the vendor node come
+        back separately after a reconnect, and input reaching the game matters
+        more than effects reaching the pad. Whatever is missing is retried by
+        `poll`, so a vendor node that shows up a second late is picked up
+        rather than written off for the session.
+        """
+        with self.lock:
+            problem = None
+            if self.reader is None:
+                reader, name, problem = self._open_reader()
+                if reader is None:
+                    return False, problem
+                self.reader, self.name = reader, name
+                self.generation += 1
+                self._next_check = self._now() + self.CHECK_INTERVAL
+            if self.want_ctrl and self.ctrl is None:
+                ctrl, problem = self._open_ctrl()
+                if ctrl is not None:
+                    self.ctrl = ctrl
+                    self.generation += 1
+                    if self.want_motion:
+                        # Half a second of blocking, on a reconnect, on the
+                        # loop that owes the host a report every 4 ms. Left
+                        # inline anyway: it happens once per reconnect, the
+                        # host tolerates a gap in input reports where it would
+                        # not tolerate a gap in the socket, and moving it to a
+                        # thread would mean two threads racing to be the first
+                        # to talk to a pad that has just woken.
+                        self.motion_on = motion.enable(self.ctrl)
+            return True, problem
+
+    def _open_reader(self):
+        """(reader, name, problem). Resolved by id every time, never cached."""
+        path, name = evdev.find_device(vendor=FLYDIGI_VID, product=FLYDIGI_PID,
+                                       axes=True)
+        if not path:
+            path, name = evdev.find_device(name="Apex", axes=True)
+        if not path:
+            return None, None, (
+                "Apex 5 gamepad not found in /dev/input -- is it connected? "
+                "It leaves the USB bus entirely when it sleeps, so a button "
+                "press may be all it needs.")
+        # Checked rather than left to fail on open: this runs after the relay
+        # has given root back, so an unreadable node means the session's own
+        # permissions are not enough -- which is exactly what the udev rules
+        # are for. As root it would open regardless and the rules would look
+        # unnecessary right up until DS mode was started any other way.
+        if not os.access(path, os.R_OK):
+            return None, None, (
+                f"{path} is not readable as uid {os.getuid()}.\n"
+                f"Install the udev rules: tools/apex5-setup install-rules")
+        try:
+            return evdev.Reader(path), name, None
+        except OSError as exc:
+            # Lost between the scan and the open -- it sleeps when it likes.
+            return None, None, f"cannot open {path}: {exc}"
+
+    def _open_ctrl(self):
+        try:
+            return Controller(), None
+        except DeviceNotFound:
+            return None, "vendor interface not found; effects will not be applied"
+        except OSError as exc:
+            # Permission, most likely, and for the same reason as above. Not
+            # fatal: input still reaches the game, only the Apex 5's own motors
+            # and triggers go unwritten.
+            return None, (f"vendor interface not usable ({exc}); effects will "
+                          f"not be applied -- tools/apex5-setup install-rules")
+
+    # -- reading ------------------------------------------------------------
+
+    def read_input(self):
+        """True when a full evdev frame arrived. A read error means gone."""
+        reader = self.reader
+        if reader is None:
+            return False
+        try:
+            return reader.read()
+        except OSError:
+            self.broken = True
+            return False
+
+    def read_motion(self):
+        """One pending vendor report -- ("motion", gyro, accel), ("info", d).
+
+        Not `motion.read_report`, which cannot tell "nothing pending" from
+        "the pad left the bus", and here that difference is the whole point: a
+        removed hidraw node polls readable forever, so swallowing its ENODEV
+        spins this loop on a full core instead of noticing the disconnect.
+        """
+        with self.lock:
+            ctrl = self.ctrl
+            if ctrl is None:
+                return None
+            try:
+                data = os.read(ctrl.fd, 64)
+            except BlockingIOError:
+                return None
+            except OSError:
+                self.broken = True
+                return None
+        parsed = motion.parse(data)
+        if parsed:
+            return ("motion",) + parsed
+        info = motion.parse_info(data)
+        if info:
+            return ("info", info)
+        return None
+
+    def request_info(self):
+        """Ask for battery and connection type, if there is anything to ask."""
+        with self.lock:
+            if self.ctrl is None or not self.motion_on:
+                return
+            try:
+                motion.request_info(self.ctrl)
+            except OSError:
+                self.broken = True
+
+    # -- losing and finding it again ----------------------------------------
+
+    def poll(self, now=None):
+        """Keep the link honest. True when it changed hands either way.
+
+        Meant to be called every iteration of the caller's loop: it does real
+        work at most once a second, and the rest of the time it is two
+        comparisons. A True means the descriptor set has changed and the caller
+        must rebuild what it selects on -- and, if `connected` is now true,
+        that this pad remembers nothing it was told before.
+        """
+        now = self._now() if now is None else now
+        changed = False
+        if self.broken:
+            changed = self.drop("read failed", now)
+        elif self.reader is not None and now >= self._next_check:
+            self._next_check = now + self.CHECK_INTERVAL
+            if not self._node_present():
+                changed = self.drop("its node vanished", now)
+
+        wanted = self.reader is None or (self.want_ctrl and self.ctrl is None)
+        if wanted and now >= self._next_try:
+            self._next_try = now + self.RETRY_INTERVAL
+            before = (self.reader, self.ctrl)
+            self.open()
+            if (self.reader, self.ctrl) != before:
+                changed = True
+                self._log(f"pad back: {self.name} ({self.reader.path})"
+                          f"{'' if self.ctrl is None else ', ' + self.ctrl.path}"
+                          f"{', motion on' if self.motion_on else ''}")
+        return changed
+
+    def _node_present(self):
+        """Whether our gamepad node is still the device we opened.
+
+        The name is compared, not merely the node's existence: numbering is
+        reused, so `event23` coming back as somebody's webcam would otherwise
+        read as the pad still being here.
+        """
+        node = os.path.basename(self.reader.path)
+        try:
+            with open(f"/sys/class/input/{node}/device/name") as handle:
+                return handle.read().strip() == self.name
+        except OSError:
+            return False
+
+    def drop(self, reason, now=None):
+        """Let go of the nodes. False if there was nothing to let go of."""
+        now = self._now() if now is None else now
+        with self.lock:
+            self.broken = False
+            if self.reader is None and self.ctrl is None:
+                return False
+            self.drops += 1
+            self._log(f"pad gone ({reason}) -- the virtual DualSense stays "
+                      f"attached; waiting for it to come back")
+            self._close_nodes()
+            # It is provably not there, so there is nothing to gain by
+            # scanning for it in the same millisecond.
+            self._next_try = now + self.RETRY_INTERVAL
+            return True
+
+    def _close_nodes(self):
+        for handle in (self.reader, self.ctrl):
+            if handle is not None:
+                try:
+                    handle.close()
+                except OSError:
+                    pass
+        self.reader = self.ctrl = self.name = None
+        self.motion_on = False
+
+    def close(self, restore=True):
+        """Give the pad back the way we found it, if it is still here at all.
+
+        Every restoring write is allowed to fail: `close` runs on the way out
+        of a relay that may be shutting down *because* the pad left, and a pad
+        that is not on the bus cannot be handed anything.
+        """
+        with self.lock:
+            if restore and self.ctrl is not None:
+                if self.motion_on:
+                    try:
+                        motion.disable(self.ctrl)
+                    except OSError:
+                        pass
+                try:
+                    effects.rumble(self.ctrl, 0, 0, wait=0.0)
+                except OSError:
+                    pass
+                try:
+                    effects.clear_all(self.ctrl)
+                except OSError:
+                    pass
+            self._close_nodes()

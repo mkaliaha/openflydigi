@@ -142,6 +142,29 @@ Kirigami.ScrollablePage {
             FormCard.FormDelegateSeparator {}
 
             FormCard.FormTextDelegate {
+                objectName: "dsPadRow"
+                // Said out loud because the two pads are now genuinely
+                // independent: the Apex 5 leaves the USB bus every time it
+                // sleeps, and the virtual DualSense above stays attached
+                // through it. Without this row, a pad asleep on the sofa looks
+                // from here exactly like one that is working.
+                text: App.dsmode.padConnected
+                      ? "The Apex 5 is feeding it"
+                      : "The Apex 5 is asleep or unplugged"
+                description: App.dsmode.padConnected
+                             ? (App.dsmode.padDrops > 0
+                                ? "Back after " + App.dsmode.padDrops
+                                  + (App.dsmode.padDrops === 1
+                                     ? " disconnection." : " disconnections.")
+                                : "")
+                             : "Press a button on it. The virtual DualSense "
+                               + "stays attached meanwhile, so the game keeps "
+                               + "its controller — and its haptics."
+            }
+
+            FormCard.FormDelegateSeparator {}
+
+            FormCard.FormTextDelegate {
                 objectName: "dsGameRow"
                 // The one number that answers "has the game actually taken
                 // it": output reports only arrive from something driving the

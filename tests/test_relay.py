@@ -34,11 +34,185 @@ class FakeReader:
         return bool(self.keys.get(code))
 
 
+class FakeBus:
+    """A pad that can leave the USB bus and come back, with a clock to match.
+
+    The whole point of `PadLink` is what happens over seconds of wall-clock --
+    a pad sleeps, a second passes, a retry finds it again -- so the tests drive
+    time by hand rather than sleeping through it.
+    """
+
+    def __init__(self):
+        self.present = True
+        self.ctrl_present = True
+        self.time = 100.0
+        self.opens = 0
+        self.closed = []
+
+    def now(self):
+        return self.time
+
+    def tick(self, seconds):
+        self.time += seconds
+
+
+class FakeNode:
+    """Either of the two descriptors, standing in for a Reader or Controller."""
+
+    def __init__(self, bus, path, fd):
+        self.bus = bus
+        self.path = path
+        self.fd = fd
+        self.frames = 0
+
+    def fileno(self):
+        return self.fd
+
+    def read(self):
+        if not self.bus.present:
+            raise OSError(19, "No such device")
+        self.frames += 1
+        return True
+
+    def send(self, _buf, wait=0.0, until=None):
+        if not self.bus.present:
+            raise OSError(19, "No such device")
+        # Enough of a reply for motion.enable to call itself successful.
+        return [bytes([0x04, 0x5A, 0xA5, 17, 0, 1, 0])]
+
+    def close(self):
+        self.bus.closed.append(self.path)
+
+
+class FakeLink(relay.PadLink):
+    """PadLink with the two device-opening seams pointed at a FakeBus."""
+
+    def __init__(self, bus, **kwargs):
+        self.bus = bus
+        kwargs.setdefault("clock", bus.now)
+        super().__init__(**kwargs)
+
+    def _open_reader(self):
+        if not self.bus.present:
+            return None, None, "not on the bus"
+        self.bus.opens += 1
+        return FakeNode(self.bus, "/dev/input/event9", 30), "Flydigi Apex 5", None
+
+    def _open_ctrl(self):
+        if not (self.bus.present and self.bus.ctrl_present):
+            return None, "no vendor node"
+        return FakeNode(self.bus, "/dev/hidraw7", 31), None
+
+    def _node_present(self):
+        return self.bus.present
+
+
 def check(name, condition, detail=""):
     print(f"  {'PASS' if condition else 'FAIL'}  {name}")
     if not condition and detail:
         print(f"        {detail}")
     return condition
+
+
+def link_tests(results):
+    """Everything about surviving the pad leaving the bus."""
+
+    # `release` is what the game is fed while the pad is away.
+    state = relay.build_state(
+        FakeReader([evdev.BTN_SOUTH], analog={evdev.ABS_Z: 1.0}), ds5.InputState())
+    state.battery_charge = 4
+    state.battery_status = ds5.BATTERY_DISCHARGING
+    relay.release(state)
+    results.append(check("release clears held buttons",
+                         state.buttons0 == state.buttons1 == state.buttons2 == 0))
+    results.append(check("release centres the sticks and drops the triggers",
+                         (state.lx, state.ly, state.rx, state.ry,
+                          state.l2, state.r2)
+                         == (ds5.AXIS_NEUTRAL,) * 4 + (0, 0)))
+    results.append(check("release leaves the battery reading alone",
+                         (state.battery_charge, state.battery_status)
+                         == (4, ds5.BATTERY_DISCHARGING)))
+
+    # A read error is a disconnection, not a fatal error.
+    bus = FakeBus()
+    link = FakeLink(bus, want_motion=False)
+    connected, _problem = link.open()
+    results.append(check("opens what is there", connected and link.connected))
+    first_generation = link.generation
+
+    bus.present = False
+    results.append(check("a read on a pad that left the bus does not raise",
+                         link.read_input() is False))
+    results.append(check("...and marks it broken rather than dying", link.broken))
+    results.append(check("poll turns broken into gone", link.poll() is True))
+    results.append(check("gone means disconnected", not link.connected))
+    results.append(check("gone means nothing to select on", link.fds() == []))
+    results.append(check("the disconnection is counted", link.drops == 1))
+    results.append(check("both descriptors were closed",
+                         bus.closed == ["/dev/input/event9", "/dev/hidraw7"],
+                         str(bus.closed)))
+
+    # It does not thrash the filesystem while the pad is away.
+    scans = bus.opens
+    results.append(check("no retry before the interval is up", link.poll() is False))
+    bus.tick(relay.PadLink.RETRY_INTERVAL + 0.01)
+    results.append(check("still nothing to find while it is off the bus",
+                         link.poll() is False))
+    results.append(check("...though it did look", bus.opens == scans))
+
+    # And it comes back on its own.
+    bus.present = True
+    bus.tick(relay.PadLink.RETRY_INTERVAL + 0.01)
+    results.append(check("poll picks the pad back up", link.poll() is True))
+    results.append(check("connected again", link.connected and link.ctrl is not None))
+    results.append(check("a returning pad is a new generation, so a caller "
+                         "knows to send its effects again",
+                         link.generation > first_generation))
+    results.append(check("reading works again", link.read_input() is True))
+
+    # The backstop: a pad nobody is reading from still has to be noticed, or an
+    # idle pad would look connected until a button press that never comes.
+    bus.present = False
+    bus.tick(relay.PadLink.CHECK_INTERVAL + 0.01)
+    results.append(check("a vanished node is noticed with no read at all",
+                         link.poll() is True and not link.connected))
+    results.append(check("closing an absent pad does not raise",
+                         link.close() is None))
+
+    # Partial arrival: the gamepad node and the vendor node come back
+    # separately, and input must not wait for effects.
+    bus = FakeBus()
+    bus.ctrl_present = False
+    link = FakeLink(bus, want_motion=False)
+    connected, problem = link.open()
+    results.append(check("input alone counts as connected",
+                         connected and link.ctrl is None))
+    results.append(check("...and says what is missing", bool(problem), repr(problem)))
+    generation = link.generation
+    bus.ctrl_present = True
+    bus.tick(relay.PadLink.RETRY_INTERVAL + 0.01)
+    results.append(check("a late vendor node is picked up rather than written "
+                         "off for the session",
+                         link.poll() is True and link.ctrl is not None))
+    results.append(check("...and counts as a new generation",
+                         link.generation > generation))
+
+    # Motion is re-enabled by the reopen, not left to the caller to remember.
+    bus = FakeBus()
+    link = FakeLink(bus, want_motion=True)
+    link.open()
+    results.append(check("motion enabled on open", link.motion_on))
+    results.append(check("motion fd is watched", len(link.fds()) == 2))
+    bus.present = False
+    bus.tick(relay.PadLink.CHECK_INTERVAL + 0.01)
+    link.poll()
+    results.append(check("motion is off while the pad is away",
+                         not link.motion_on and not link.connected))
+    bus.present = True
+    bus.tick(relay.PadLink.RETRY_INTERVAL + 0.01)
+    link.poll()
+    results.append(check("motion is enabled again on reconnect",
+                         link.motion_on and link.connected))
 
 
 def main():
@@ -179,6 +353,8 @@ def main():
     # Short parameter blocks must not raise.
     results.append(check("short parameter block tolerated",
                          relay.translate(ds5.TriggerEffect("right", 1, b"\x05")) is not None))
+
+    link_tests(results)
 
     print(f"\n{sum(results)}/{len(results)} passed")
     return 0 if all(results) else 1

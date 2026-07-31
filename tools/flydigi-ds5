@@ -32,10 +32,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flydigi import ds5, ds5_usb, effects, evdev, motion, relay, uhid  # noqa: E402
-from flydigi.device import Controller, DeviceNotFound  # noqa: E402
-
-FLYDIGI_VID, FLYDIGI_PID = relay.FLYDIGI_VID, relay.FLYDIGI_PID
+from flydigi import ds5, ds5_usb, effects, motion, relay, uhid  # noqa: E402
 
 
 def log(msg):
@@ -67,21 +64,21 @@ def main():
     signal.signal(signal.SIGTERM, _terminate)
     signal.signal(signal.SIGHUP, _terminate)
 
-    path, name = evdev.find_device(vendor=FLYDIGI_VID, product=FLYDIGI_PID,
-                                   axes=True)
-    if not path:
-        path, name = evdev.find_device(name="Apex", axes=True)
-    if not path:
-        sys.exit("Apex 5 gamepad not found in /dev/input -- is it connected?")
-    log(f"input: {name} ({path})")
-
-    ctrl = None
-    if not args.dump:
-        try:
-            ctrl = Controller()
-            log(f"controller: {ctrl.path}")
-        except DeviceNotFound:
-            log("vendor interface not found; effects will not be applied")
+    # The pad, held loosely: it leaves the USB bus every time it falls asleep,
+    # and the virtual DualSense must not leave with it. See
+    # `flydigi.relay.PadLink`.
+    pad = relay.PadLink(want_ctrl=not args.dump, want_motion=not args.no_motion,
+                        log=log)
+    connected, problem = pad.open()
+    if not connected:
+        sys.exit(problem)
+    log(f"input: {pad.name} ({pad.reader.path})")
+    if pad.ctrl is not None:
+        log(f"controller: {pad.ctrl.path}")
+    elif problem:
+        log(problem)
+    if pad.ctrl is not None and not args.no_motion:
+        log(f"motion stream: {'enabled' if pad.motion_on else 'FAILED to enable'}")
 
     # Descriptor and feature reports come from ds5_usb.py, captured off real
     # hardware, rather than from inputtino. inputtino's descriptor is 273 bytes
@@ -101,13 +98,12 @@ def main():
     log("virtual DualSense created")
     log("games: set SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501")
 
-    motion_on = False
-    if ctrl and not args.no_motion:
-        motion_on = motion.enable(ctrl)
-        log(f"motion stream: {'enabled' if motion_on else 'FAILED to enable'}")
-
     state = ds5.InputState()
     applied = {}
+    # The last payload actually sent per trigger. The pad discards live trigger
+    # effects when it sleeps, and a game that set one has no reason to set it
+    # again, so this is what gets sent when the pad comes back.
+    last_effect = {}
     last_rumble = None
     left_motor = 0      # Flydigi stashes this and reuses it for one left case
     frames = 0
@@ -115,104 +111,132 @@ def main():
     last_info = None
     next_info_poll = 0.0
 
+    def watched():
+        return pad.fds() + [virtual.fd]
+
+    def send_effects():
+        """Push the remembered trigger effects at the pad, if there is one."""
+        ctrl = pad.ctrl
+        if ctrl is None:
+            return
+        for payload in last_effect.values():
+            try:
+                ctrl.send(payload, wait=0.0)
+            except OSError:
+                pad.broken = True
+
     try:
-        with evdev.Reader(path) as reader:
-            relay.build_state(reader, state)
-            virtual.send_input(state.pack())
-            watch = [reader.fileno(), virtual.fd]
-            if motion_on:
-                watch.append(ctrl.fd)
-            while True:
-                ready, _, _ = select.select(watch, [], [], 1.0)
-                if motion_on and ctrl.fd in ready:
-                    # Motion arrives at ~300 Hz, far faster than evdev events.
-                    # Fold it into the state and emit, so aiming stays smooth
-                    # rather than only updating when a stick moves.
-                    report = motion.read_report(ctrl)
-                    if report and report[0] == "motion":
-                        _kind, gyro, accel = report
-                        state.gyro = [v * args.gyro_scale for v in gyro]
-                        state.accel = [v * args.accel_scale for v in accel]
-                        state.sensor_timestamp += 188  # ~0.33us units at 300 Hz
-                        virtual.send_input(state.pack())
-                        motion_frames += 1
-                    elif report and report[0] == "info":
-                        info = report[1]
-                        level = info["battery_level"]
-                        if info["charging"]:
-                            state.battery_status = ds5.BATTERY_CHARGING
-                            state.battery_charge = 10
-                        else:
-                            # Flydigi reports 0..5; DualSense wants 0..10.
-                            state.battery_charge = min(10, level * 2)
-                            state.battery_status = (
-                                ds5.BATTERY_FULL if level >= motion.MAX_LEVEL
-                                else ds5.BATTERY_DISCHARGING)
-                        if info != last_info:
-                            last_info = info
-                            log(f"battery {level}/5"
-                                f"{' (charging)' if info['charging'] else ''}"
-                                f", {info['connect_type']}")
-                if motion_on and time.time() >= next_info_poll:
-                    # Battery only changes slowly; poll rarely.
-                    next_info_poll = time.time() + 30.0
-                    motion.request_info(ctrl)
-                if reader.fileno() in ready:
-                    if reader.read():
-                        relay.build_state(reader, state)
-                        virtual.send_input(state.pack())
-                        frames += 1
-                if virtual.fd in ready:
-                    for _rtype, data in virtual.poll(0.0):
-                        parsed = ds5.parse_output(data)
-                        rumble = parsed["rumble"]
-                        if rumble:
-                            left_motor = rumble[0]
-                        if rumble and rumble != last_rumble:
-                            last_rumble = rumble
-                            if not args.quiet:
-                                log(f"rumble {rumble}")
-                            if ctrl:
-                                # wait=0 is mandatory here: the default 0.1
-                                # spends 100 ms per update waiting for an ACK
-                                # that carries nothing, on the loop that feeds
-                                # the virtual pad.
+        relay.build_state(pad.reader, state)
+        virtual.send_input(state.pack())
+        watch = watched()
+        while True:
+            # Notice the pad leaving or returning before selecting on its
+            # descriptors. The virtual pad stays either way -- a game that
+            # loses it does not simply re-bind.
+            if pad.poll():
+                watch = watched()
+                if pad.connected:
+                    relay.build_state(pad.reader, state)
+                    send_effects()
+                else:
+                    # Let go of everything: a pad that vanished mid-press
+                    # would otherwise leave the game holding that button.
+                    relay.release(state)
+                    last_rumble = None
+                virtual.send_input(state.pack())
+
+            ready, _, _ = select.select(watch, [], [], 1.0)
+            ctrl = pad.ctrl
+            if pad.motion_on and ctrl is not None and ctrl.fd in ready:
+                # Motion arrives at ~300 Hz, far faster than evdev events.
+                # Fold it into the state and emit, so aiming stays smooth
+                # rather than only updating when a stick moves.
+                report = pad.read_motion()
+                if report and report[0] == "motion":
+                    _kind, gyro, accel = report
+                    state.gyro = [v * args.gyro_scale for v in gyro]
+                    state.accel = [v * args.accel_scale for v in accel]
+                    state.sensor_timestamp += 188  # ~0.33us units at 300 Hz
+                    virtual.send_input(state.pack())
+                    motion_frames += 1
+                elif report and report[0] == "info":
+                    info = report[1]
+                    level = info["battery_level"]
+                    if info["charging"]:
+                        state.battery_status = ds5.BATTERY_CHARGING
+                        state.battery_charge = 10
+                    else:
+                        # Flydigi reports 0..5; DualSense wants 0..10.
+                        state.battery_charge = min(10, level * 2)
+                        state.battery_status = (
+                            ds5.BATTERY_FULL if level >= motion.MAX_LEVEL
+                            else ds5.BATTERY_DISCHARGING)
+                    if info != last_info:
+                        last_info = info
+                        log(f"battery {level}/5"
+                            f"{' (charging)' if info['charging'] else ''}"
+                            f", {info['connect_type']}")
+            if pad.motion_on and time.time() >= next_info_poll:
+                # Battery only changes slowly; poll rarely.
+                next_info_poll = time.time() + 30.0
+                pad.request_info()
+            reader = pad.reader
+            if reader is not None and reader.fileno() in ready:
+                if pad.read_input():
+                    relay.build_state(reader, state)
+                    virtual.send_input(state.pack())
+                    frames += 1
+            if virtual.fd in ready:
+                for _rtype, data in virtual.poll(0.0):
+                    parsed = ds5.parse_output(data)
+                    rumble = parsed["rumble"]
+                    if rumble:
+                        left_motor = rumble[0]
+                    if rumble and rumble != last_rumble:
+                        last_rumble = rumble
+                        if not args.quiet:
+                            log(f"rumble {rumble}")
+                        if ctrl is not None:
+                            # wait=0 is mandatory here: the default 0.1
+                            # spends 100 ms per update waiting for an ACK
+                            # that carries nothing, on the loop that feeds
+                            # the virtual pad.
+                            try:
                                 effects.rumble(ctrl, rumble[0], rumble[1],
                                                wait=0.0)
-                        for effect in parsed["effects"]:
-                            if applied.get(effect.side) == effect.key():
-                                continue
-                            applied[effect.side] = effect.key()
-                            mapped = relay.translate(effect, left_motor)
-                            if mapped is None:
-                                # Unrecognised effect: leave the trigger alone,
-                                # as Flydigi does. Logged so unmapped patterns
-                                # from new games are visible.
-                                if not args.quiet:
-                                    log(f"{effect} -> unmapped, trigger unchanged")
-                                continue
-                            side, mode, params = mapped
+                            except OSError:
+                                pad.broken = True
+                    for effect in parsed["effects"]:
+                        if applied.get(effect.side) == effect.key():
+                            continue
+                        applied[effect.side] = effect.key()
+                        mapped = relay.translate(effect, left_motor)
+                        if mapped is None:
+                            # Unrecognised effect: leave the trigger alone,
+                            # as Flydigi does. Logged so unmapped patterns
+                            # from new games are visible.
                             if not args.quiet:
-                                log(f"{effect} -> mode={mode} params={params}")
-                            if ctrl:
-                                ctrl.send(
-                                    effects.common_effect_payload(side, mode, params),
-                                    wait=0.0)
+                                log(f"{effect} -> unmapped, trigger unchanged")
+                            continue
+                        side, mode, params = mapped
+                        if not args.quiet:
+                            log(f"{effect} -> mode={mode} params={params}")
+                        # Remembered whether or not it can be sent now: an
+                        # effect set while the pad is asleep is exactly the
+                        # one that has to be waiting for it when it wakes.
+                        last_effect[effect.side] = effects.common_effect_payload(
+                            side, mode, params)
+                        if ctrl is not None:
+                            try:
+                                ctrl.send(last_effect[effect.side], wait=0.0)
+                            except OSError:
+                                pad.broken = True
     except KeyboardInterrupt:
-        log(f"stopping after {frames} input frames, {motion_frames} motion frames")
+        log(f"stopping after {frames} input frames, {motion_frames} motion "
+            f"frames, {pad.drops} pad disconnections ridden out")
     finally:
         virtual.destroy()
-        if ctrl:
-            if motion_on:
-                try:
-                    motion.disable(ctrl)
-                except OSError:
-                    pass
-            try:
-                effects.clear_all(ctrl)
-            except OSError:
-                pass
-            ctrl.close()
+        pad.close()
 
 
 if __name__ == "__main__":

@@ -31,6 +31,12 @@ no more privilege than the game does. `--stay-root` opts out, for debugging.
 Stop it with SIGTERM (or Ctrl-C): the triggers and motors are put back, and the
 vhci port frees itself when the socket closes.
 
+The physical pad is allowed to come and go. It leaves the USB bus whenever it
+falls asleep, and the virtual DualSense is not allowed to leave with it: the
+game keeps its controller, sees every input released, and gets the pad back --
+with its trigger effects sent again, since the pad forgets those when it sleeps
+-- as soon as a button press brings it round. See `flydigi.relay.PadLink`.
+
 Tell games to ignore the physical pad so they bind to the virtual one:
     SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501 %command%
 """
@@ -49,15 +55,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from flydigi import ds5, dsmode, effects, evdev  # noqa: E402
 from flydigi import haptics as haptics_dsp  # noqa: E402
 from flydigi import motion, relay, usbip  # noqa: E402
-from flydigi.device import Controller, DeviceNotFound  # noqa: E402
 from flydigi.ds5_usbip import EP_HID_IN, DualSense  # noqa: E402
-
-FLYDIGI_VID, FLYDIGI_PID = relay.FLYDIGI_VID, relay.FLYDIGI_PID
 
 # The DualSense's interrupt IN endpoint declares bInterval 6, i.e. 32 microframes
 # = 4 ms. Offering a report more often than the host polls just wastes work; a
 # parked URB is the only thing that can carry one.
 POLL_INTERVAL = 0.004
+
+# How many iterations in a row may fail before the relay gives up and takes the
+# pad away. Consecutive, so an intermittent fault is ridden out indefinitely
+# while a fault that repeats every 4 ms ends the session in under a tenth of a
+# second -- with twenty lines in the log saying what it was.
+CRASH_LIMIT = 20
 
 
 def log(msg):
@@ -237,37 +246,23 @@ def main():
     server.start()
     log(f"games: set {dsmode.IGNORE_DEVICES}")
 
-    path, name = evdev.find_device(vendor=FLYDIGI_VID, product=FLYDIGI_PID,
-                                   axes=True)
-    if not path:
-        path, name = evdev.find_device(name="Apex", axes=True)
-    if not path:
+    # The pad, held loosely: it may leave the bus at any point after this and
+    # the relay carries on without it. Refused at startup all the same -- being
+    # asked to present a DualSense with no Apex 5 in the machine is a mistake
+    # worth reporting, not a disconnection worth waiting out.
+    pad = relay.PadLink(want_ctrl=not args.dump, want_motion=not args.no_motion,
+                        log=log)
+    connected, problem = pad.open()
+    if not connected:
         server.detach()
-        sys.exit("Apex 5 gamepad not found in /dev/input -- is it connected?")
-    # Checked rather than left to fail on open: this is the first thing done
-    # after giving root back, so an unreadable node here means the session's own
-    # permissions are not enough -- which is exactly what the udev rules are
-    # for. As root it would have opened regardless and the rules would look
-    # unnecessary right up until DS mode was started any other way.
-    if not os.access(path, os.R_OK):
-        server.detach()
-        sys.exit(f"{path} is not readable as uid {os.getuid()}.\n"
-                 f"Install the udev rules: tools/apex5-setup install-rules")
-    log(f"input: {name} ({path})")
-
-    ctrl = None
-    if not args.dump:
-        try:
-            ctrl = Controller()
-            log(f"controller: {ctrl.path}")
-        except DeviceNotFound:
-            log("vendor interface not found; effects will not be applied")
-        except OSError as exc:
-            # Permission, most likely, and for the same reason as above. Not
-            # fatal: input still reaches the game, only the Apex 5's own motors
-            # and triggers go unwritten.
-            log(f"vendor interface not usable ({exc}); effects will not be "
-                f"applied -- tools/apex5-setup install-rules")
+        sys.exit(problem)
+    log(f"input: {pad.name} ({pad.reader.path})")
+    if pad.ctrl is not None:
+        log(f"controller: {pad.ctrl.path}")
+    elif problem:
+        log(problem)
+    if pad.ctrl is not None and not args.no_motion:
+        log(f"motion stream: {'enabled' if pad.motion_on else 'FAILED to enable'}")
 
     # The DSP runs on decimated audio, so the filter must know the real rate.
     # The Apex 5's motors are ERMs with a mechanical spin-up; they cannot
@@ -286,7 +281,9 @@ def main():
     # haptic audio stream. A game can use either, and nothing stops it using
     # both. Keep them apart and combine, rather than letting whichever wrote
     # last win -- that silently drops one source's effects.
-    ctrl_lock = threading.Lock()
+    #
+    # The vendor node is shared with the main loop, so the lock is the pad's
+    # own rather than one of this loop's making.
     rumble_src = {"hid": (0, 0), "haptic": (0, 0)}
     # Trigger-effect payloads queue here for the same reason rumble does: each
     # is a claim() + _drain() + write on the vendor node, and a game dumps a
@@ -298,19 +295,29 @@ def main():
 
     def rumble_worker():
         last = None
+        generation = -1
         while not rumble_stop.is_set():
             rumble_wake.wait(0.1)
             rumble_wake.clear()
-            if ctrl is None:
-                continue
-            hid, haptic = rumble_src["hid"], rumble_src["haptic"]
-            value = (max(hid[0], haptic[0]), max(hid[1], haptic[1]))
-            try:
-                with ctrl_lock:
-                    # Trigger effects are one-shot state changes and must never
-                    # be gated on rumble: an earlier version drained this queue
-                    # only when the motor value also changed, so effects were
-                    # applied at whatever moment rumble happened to move.
+            with pad.lock:
+                ctrl = pad.ctrl
+                if ctrl is None:
+                    # Nothing to write to, and nothing we wrote survives -- a
+                    # pad that has left the bus comes back at rest.
+                    last = None
+                    continue
+                if pad.generation != generation:
+                    # A pad we have not written to before, whatever its
+                    # history. Forget the level we think it is holding.
+                    generation = pad.generation
+                    last = None
+                # Trigger effects are one-shot state changes and must never
+                # be gated on rumble: an earlier version drained this queue
+                # only when the motor value also changed, so effects were
+                # applied at whatever moment rumble happened to move.
+                hid, haptic = rumble_src["hid"], rumble_src["haptic"]
+                value = (max(hid[0], haptic[0]), max(hid[1], haptic[1]))
+                try:
                     while True:
                         try:
                             payload = effect_q.get_nowait()
@@ -322,8 +329,11 @@ def main():
                     if value != last:
                         last = value
                         effects.rumble(ctrl, value[0], value[1], wait=0.0)
-            except OSError:
-                pass
+                except OSError:
+                    # Say so and leave it: the main loop owns these
+                    # descriptors and is the only thing allowed to close one
+                    # while it is selecting on it.
+                    pad.broken = True
             rumble_stop.wait(1.0 / RUMBLE_HZ)
 
     rumble_thread = threading.Thread(target=rumble_worker, daemon=True)
@@ -334,13 +344,13 @@ def main():
     last_motors = None
     dropped = [0]
 
-    motion_on = False
-    if ctrl and not args.no_motion:
-        motion_on = motion.enable(ctrl)
-        log(f"motion stream: {'enabled' if motion_on else 'FAILED to enable'}")
-
     state = ds5.InputState()
     applied = {}
+    # The last payload actually sent per trigger, kept so it can be sent again.
+    # The pad discards live trigger effects when it sleeps, and a game that set
+    # one during a cutscene has no reason to ever set it again -- so without
+    # this, a nap silently costs the effects for the rest of the session.
+    last_effect = {}
     last_rumble = None
     left_motor = 0
     frames = 0
@@ -375,28 +385,58 @@ def main():
                 "hid-playstation did not create one")
     loopback_events = 0
 
-    try:
-        with evdev.Reader(path) as reader:
-            relay.build_state(reader, state)
-            watch = [reader.fileno()]
-            if motion_on:
-                watch.append(ctrl.fd)
-            if loopback:
-                watch.append(loopback.fileno())
+    def watched():
+        """Everything to select on. Rebuilt whenever the pad comes or goes."""
+        return pad.fds() + ([loopback.fileno()] if loopback else [])
 
-            while True:
+    crashes = 0
+    try:
+        relay.build_state(pad.reader, state)
+        watch = watched()
+
+        while True:
+            # Nothing below is allowed to take the virtual pad away. A game
+            # that loses a USB DualSense mid-session does not merely re-bind:
+            # the audio device goes with it, and PS5 haptics are gone for the
+            # rest of the run even if the pad comes back. So an unforeseen
+            # error is one bad iteration, not the end of the session --
+            # bounded, because a fault that repeats every 4 ms is a bug that
+            # should be seen rather than a hiccup that should be absorbed.
+            try:
                 if server.failed:
                     log(f"serve thread died: {server.failed!r}")
                     break
 
                 iter_start = time.monotonic()
+
+                # Has the pad left, or come back? Cheap every iteration, real
+                # work once a second. Deliberately before the select, which is
+                # what has to stop watching a descriptor that no longer exists.
+                if pad.poll(iter_start):
+                    watch = watched()
+                    if pad.connected:
+                        relay.build_state(pad.reader, state)
+                        # Send the triggers again: this pad remembers nothing.
+                        # Rumble needs no help -- the worker notices the new
+                        # generation and rewrites the level it is holding.
+                        for payload in last_effect.values():
+                            effect_q.put(payload)
+                        rumble_wake.set()
+                    else:
+                        # Let go of everything, or a pad that vanished
+                        # mid-press leaves the game holding that button down.
+                        relay.release(state)
+                        rumble_src["hid"] = rumble_src["haptic"] = (0, 0)
+                        last_motors = None
+                        last_rumble = None
+
                 ready, _, _ = select.select(watch, [], [], POLL_INTERVAL)
                 after_select = time.monotonic()
 
-                if motion_on and ctrl.fd in ready:
+                ctrl = pad.ctrl
+                if pad.motion_on and ctrl is not None and ctrl.fd in ready:
                     _t0 = time.monotonic()
-                    with ctrl_lock:
-                        report = motion.read_report(ctrl)
+                    report = pad.read_motion()
                     spent["motion"] += time.monotonic() - _t0
                     if report and report[0] == "motion":
                         _kind, gyro, accel = report
@@ -416,13 +456,15 @@ def main():
                                 ds5.BATTERY_FULL if level >= motion.MAX_LEVEL
                                 else ds5.BATTERY_DISCHARGING)
 
-                if motion_on and time.time() >= next_info_poll:
+                if pad.motion_on and time.time() >= next_info_poll:
                     next_info_poll = time.time() + 30.0
-                    motion.request_info(ctrl)
+                    pad.request_info()
 
-                if reader.fileno() in ready and reader.read():
-                    relay.build_state(reader, state)
-                    frames += 1
+                reader = pad.reader
+                if reader is not None and reader.fileno() in ready:
+                    if pad.read_input():
+                        relay.build_state(reader, state)
+                        frames += 1
 
                 if loopback and loopback.fileno() in ready:
                     if loopback.read():
@@ -505,9 +547,13 @@ def main():
                         side, mode, params = mapped
                         if not args.quiet:
                             log(f"{effect} -> mode={mode} params={params}")
-                        if ctrl:
-                            effect_q.put(
-                                effects.common_effect_payload(side, mode, params))
+                        payload = effects.common_effect_payload(side, mode, params)
+                        # Remembered whether or not it can be sent now: an
+                        # effect set while the pad is asleep is exactly the one
+                        # that has to be waiting for it when it wakes.
+                        last_effect[effect.side] = payload
+                        if pad.ctrl is not None:
+                            effect_q.put(payload)
                             rumble_wake.set()
 
                 _elapsed = time.monotonic() - after_select
@@ -519,7 +565,9 @@ def main():
                 if now >= next_status:
                     next_status = now + 10.0
                     line = (f"reports={sent} evdev={frames} motion={motion_frames}"
-                            f" out={out_reports[0]} iso_urbs={device.haptic_urbs}")
+                            f" out={out_reports[0]} iso_urbs={device.haptic_urbs}"
+                            f" pad={1 if pad.connected else 0}"
+                            f" drops={pad.drops}")
                     if args.verify:
                         line += f" loopback={loopback_events}"
                     if haptics:
@@ -536,11 +584,21 @@ def main():
                     if device.stalls:
                         line += f"\n       STALLS {device.stalls}"
                     log(line)
+                crashes = 0
+            except Exception as exc:            # noqa: BLE001
+                crashes += 1
+                log(f"iteration failed ({crashes}/{CRASH_LIMIT}): {exc!r}")
+                if crashes >= CRASH_LIMIT:
+                    raise
+                # Whatever went wrong, do not go on selecting on a set of
+                # descriptors that may be what went wrong.
+                watch = watched()
     except KeyboardInterrupt:
         log("stopping")
     finally:
         log(f"{sent} reports served, {frames} evdev frames, "
-            f"{motion_frames} motion frames, {out_reports[0]} output reports")
+            f"{motion_frames} motion frames, {out_reports[0]} output reports, "
+            f"{pad.drops} pad disconnections ridden out")
         if haptics:
             log(f"haptics: {haptics.urbs} URBs, {haptics.frames} frames")
             log(f"peaks: {haptics.summary()}")
@@ -564,24 +622,12 @@ def main():
             loopback.close()
         rumble_stop.set()
         rumble_wake.set()
-        if args.motors and ctrl:
-            try:
-                with ctrl_lock:
-                    effects.rumble(ctrl, 0, 0)
-            except OSError:
-                pass
+        rumble_thread.join(timeout=1.0)
         server.detach()
-        if ctrl:
-            if motion_on:
-                try:
-                    motion.disable(ctrl)
-                except OSError:
-                    pass
-            try:
-                effects.clear_all(ctrl)
-            except OSError:
-                pass
-            ctrl.close()
+        # Motors off, triggers back to normal, motion stream off -- and none of
+        # it required, because the pad may well be asleep on the other side of
+        # this. `close` writes what it can and swallows what it cannot.
+        pad.close()
 
 
 if __name__ == "__main__":

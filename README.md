@@ -114,6 +114,8 @@ sudo tools/flydigi-ds5-usbip --haptics --motors
 #   root is given back as soon as the USB attach is done
 #   set per-game: SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501 %command%
 #   start the game *after* this
+#   the Apex 5 may sleep and wake as it likes: it leaves the USB bus when it
+#   sleeps, but the virtual DualSense stays attached and the game keeps it
 tools/flydigi-ds5                       # the same without haptics, no root,
 #                                         for a machine with no vhci-hcd
 

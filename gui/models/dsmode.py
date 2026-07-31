@@ -134,6 +134,26 @@ class DsModeModel(QObject):
         """Reports served to the host -- proof the virtual pad is alive."""
         return self._stats.get("reports", 0)
 
+    @Property(bool, notify=statsChanged)
+    def padConnected(self):
+        """Whether the Apex 5 itself is on the bus. Not whether DS mode is on.
+
+        The two used to be the same thing and are not any more: the pad leaves
+        the bus whenever it sleeps, and the relay now stays up without it. So
+        the page can say "asleep" where it would once have said nothing,
+        because the whole thing had died.
+
+        True when the key is missing, which is how a relay from before this
+        existed reads -- there is no way to tell from its output that the pad
+        went away, and claiming it did would be worse than assuming it did not.
+        """
+        return bool(self._stats.get("pad", 1))
+
+    @Property(int, notify=statsChanged)
+    def padDrops(self):
+        """How many times the pad has left the bus this session."""
+        return self._stats.get("drops", 0)
+
     @Property(str, constant=True)
     def ignoreDevices(self):
         """The launch option, from the backend rather than restated here.

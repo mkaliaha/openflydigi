@@ -124,6 +124,30 @@ TestCase {
         compare(motors.checked, App.dsmode.motors);
     }
 
+    function test_the_pad_row_speaks_for_the_apex_5_and_not_for_ds_mode() {
+        // Two independent things since the relay learned to outlive a sleeping
+        // pad: the virtual DualSense stays attached while the Apex 5 leaves
+        // the USB bus. This row is the only place that difference is visible,
+        // so it must follow the pad and never the relay. Compared against the
+        // model rather than the binding -- a binding read once never updates.
+        let row = findChild(page, "dsPadRow");
+        verify(row, "no row for the physical pad");
+        if (App.dsmode.padConnected)
+            verify(row.text.indexOf("feeding") >= 0, row.text);
+        else
+            verify(row.text.indexOf("asleep") >= 0, row.text);
+    }
+
+    function test_a_relay_that_never_reported_a_pad_is_not_called_asleep() {
+        // Nothing is running in this test, so the counters are empty -- which
+        // is exactly the shape a relay from before `pad=` in the status line
+        // produces. Guessing "asleep" from a missing number would be a lie on
+        // every one of those.
+        compare(App.dsmode.padConnected, true,
+                "an empty status must not read as a sleeping pad");
+        compare(App.dsmode.padDrops, 0);
+    }
+
     function test_the_running_section_is_hidden_when_nothing_runs() {
         let row = findChild(page, "dsStatusRow");
         // The delegate exists either way; what matters is that its card is not

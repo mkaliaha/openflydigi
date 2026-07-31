@@ -148,6 +148,21 @@ module behind the app's switch and there is no DS-mode CLI. The haptics-to-motor
 is read once at start, so it has to be set *before* DS mode is turned on.
 → [docs/findings-games.md](docs/findings-games.md)
 
+**A sleeping Apex 5 no longer ends the session.** The pad leaves the USB bus when it sleeps, and
+both relays used to go with it — the first `ENODEV` off the evdev node fell through to the cleanup
+that detaches the virtual pad, so putting the pad down during a cutscene cost the game its
+controller. It cost more than that: a game binds its audio stream to the DualSense once, so a
+DualSense that goes away and comes back is a DualSense with no haptics for the rest of the run,
+even though the input works again. `flydigi/relay.py`'s `PadLink` holds the physical pad as
+something that may be absent — a failed read means "gone", not "fatal", and the nodes are looked
+for again once a second under whatever numbers they come back as. Meanwhile the virtual pad stays
+attached, fed a released state so a pad that vanished mid-press does not leave a button held, and
+the trigger effects are sent again when the pad returns, since it forgets them when it sleeps.
+`pad=` and `drops=` in the status line are the physical pad, never the virtual one; the app's
+DualSense page shows them as their own row. Not yet observed in a real game — the loop is covered
+in `tests/test_relay.py` against a fake bus, and what wants confirming on hardware is that the
+game's haptics really do survive the nap.
+
 **DS mode requires third-party mode off**, and the two switches are in the same app. Both relays take
 sticks and buttons from evdev, and the third-party toggle switches `controller_data` off — the report
 the evdev node is built from. Motion keeps arriving on the vendor stream, so the symptom is a
@@ -236,7 +251,8 @@ argument, the hardware proof of 166, and the QML testing traps are in
     in `lsusb`, no hidraw node. So "the pad is asleep" and "the cable is dead" are the same symptom
     at this level, and `find_device` raises `DeviceNotFound` rather than any read timing out.
     Pressing a button re-enumerates it, which is why node numbers change on reconnect — resolve by
-    name/descriptor, never by path.
+    name/descriptor, never by path. Anything that holds the pad for a whole session has to expect
+    this: `flydigi/relay.py`'s `PadLink` is that expectation for both DualSense relays.
   * **The pad discards unsaved config when it sleeps**, not merely on a power cycle — observed with
     lighting. Applying is working memory in the literal sense; command 166 is what makes it last.
   * **Effects persist in controller state** until changed; there is no timeout.
@@ -446,7 +462,7 @@ a bad checksum by staying silent exactly as the pad does.
 | Path | What |
 |---|---|
 | `PROTOCOL.md` | Full wire protocol + hardware verification results |
-| `flydigi/` | Library — `device.py` (transport), `identity.py` (the command-1 device-type guard), `blobs.py` (packetised config transfer), `effects.py` (live trigger commands), `mapping.py` (profiles, remapping, macros, vibration, stored triggers), `macros.py` (recording one off the pad's evdev node), `lighting.py` (RGB), `screen.py` (160x80 screen: LVGL image format, settings, and the HID upload that puts no picture on this pad), `screen_ota.py` (the serial upload that works), `settings.py` (the pad's own settings: command 3 and the small writes behind it), `games.py`, `forza.py`, `evdev.py` (the xpad evdev reader every relay's input comes from), `ds5.py` (DualSense report codec), `dsx.py` (DSX UDP protocol), `monitor.py` (process-memory engine), `motion.py` (battery, gyro/accel and the third-party toggle), `relay.py` (Apex 5 → DualSense translation) |
+| `flydigi/` | Library — `device.py` (transport), `identity.py` (the command-1 device-type guard), `blobs.py` (packetised config transfer), `effects.py` (live trigger commands), `mapping.py` (profiles, remapping, macros, vibration, stored triggers), `macros.py` (recording one off the pad's evdev node), `lighting.py` (RGB), `screen.py` (160x80 screen: LVGL image format, settings, and the HID upload that puts no picture on this pad), `screen_ota.py` (the serial upload that works), `settings.py` (the pad's own settings: command 3 and the small writes behind it), `games.py`, `forza.py`, `evdev.py` (the xpad evdev reader every relay's input comes from), `ds5.py` (DualSense report codec), `dsx.py` (DSX UDP protocol), `monitor.py` (process-memory engine), `motion.py` (battery, gyro/accel and the third-party toggle), `relay.py` (Apex 5 → DualSense translation, and `PadLink`: holding a pad that leaves the bus every time it sleeps) |
 | `gui/` | PySide6/QML desktop app (GPL-3.0-or-later) — `app.py` (the object graph), `main.py` (entry point), `worker.py` (all device I/O, on its own thread), `i18n.py` (the `i18n*()` shim the engine needs; without it every Kirigami form delegate throws `ReferenceError: i18ndc is not defined`, so `main.py` installs it unconditionally), `models/` (view-agnostic state; `screen.py` is the one that touches QtGui, for image decoding), `qml/` (`Main.qml`, `pages/`, `components/`) |
 | `tools/flydigi-mapping` | CLI for profiles — list/show/set/clear/rename/apply/backup/restore, plus `macros`, `macro-record`, `macro-set`, `macro-clear` |
 | `tools/flydigi-forza` | Forza driver — UDP 5300 → rules → triggers (`--port`, `--config` for a rule file other than `configs/forza.json`, `--dump` for telemetry only, `--quiet`; `--accept LEN:OFFSET`, e.g. `--accept 331:12`, for a newer Forza shipping an unknown packet size) |

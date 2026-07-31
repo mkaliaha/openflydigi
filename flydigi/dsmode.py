@@ -55,7 +55,13 @@ IGNORE_DEVICES = "SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501"
 # raw so a view can pick out the two numbers that answer "is this working":
 # `out` is output reports from the game (it has bound to our pad) and `iso_urbs`
 # is haptic audio arriving (it is using the audio path).
-STATUS_KEYS = ("reports", "evdev", "motion", "out", "iso_urbs", "loopback")
+#
+# `pad` is 1 while the physical Apex 5 is on the bus and 0 while it is asleep or
+# unplugged, and `drops` counts the times it has left and come back. Neither
+# says anything about the virtual pad, which stays attached throughout -- that
+# separation is the whole point of them being two numbers.
+STATUS_KEYS = ("reports", "evdev", "motion", "out", "iso_urbs", "loopback",
+               "pad", "drops")
 
 STOP_GRACE = 5.0
 
