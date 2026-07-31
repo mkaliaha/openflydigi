@@ -333,13 +333,131 @@ stop. This pad honours the block regardless.
 
 ## Gyro mapped to a stick, at offset 137 (J2)
 
-8 bytes, `m_fdg_macro_motion_mapping_struct_t`:
-`type, keyid, method, zero, sensity_x, sensity_y, mode, keyid_ext`, where `type` is
-`MotionMapType {Off=0, LeftJoystick=1, RightJoystick=2, Mouse=3}` and `mode` is
-`MotionUseMode {FPS=0, Racer=1}`. Smoothing curve at **offset 830**, 6 bytes. The mapping runs on
-the pad, so it works in any game with nothing running on the host. The pad's own UI warns that
-enabling this lowers the polling rate. `MotionMapType.Mouse` is not a pad feature — see *Ruled out*
-in [PROGRESS.md](../PROGRESS.md).
+8 bytes, `m_fdg_macro_motion_mapping_struct_t`, with a 6-byte response curve away at **830**:
+
+```
+137  type  keyid  method  zero  sensity_x  sensity_y  mode  keyid_ext
+     0     12     0       4     25         20         0     0          ← factory
+830  zero  p1.x   p1.y    p2.x  p2.y       end
+     0     63     63      127   127        127                         ← factory
+```
+
+The struct's field names are the firmware's; what they carry is
+`MappingConfigParser.ParseToMotionConfig` and `ParseMotionConfigToArray`:
+
+| byte | field | is |
+|---|---|---|
+| 0 | `type` | `MotionMapType {Off=0, LeftJoystick=1, RightJoystick=2, Mouse=3}` |
+| 1 | `keyid` | `MappingTypeJoystick.EnableKey[0]`, a `ControllerKey`; 255 is None |
+| 2 | `method` | `MotionEnableType {Click=0, Press=1}` — toggle, or on while held |
+| 3 | `zero` | `DeadZone`, 0..100 |
+| 4, 5 | `sensity_x/y` | `Sensitivity`, 0..100, written to both from one number |
+| 6 | `mode` | `MotionUseMode {FPS=0, Racer=1}` |
+| 7 | `keyid_ext` | `EnableKey[1]`, the second enable key |
+
+The mapping runs on the pad, so it works in any game with nothing running on the host — which on
+Linux is otherwise Steam Input only. The pad's own UI warns that enabling it lowers the polling
+rate. `MotionMapType.Mouse` is not a pad feature — see *Ruled out* in [PROGRESS.md](../PROGRESS.md)
+— but it is written here like any other value: refusing it in a byte layout would leave a profile
+brought over from Windows uneditable, so it is the *app* that does not offer it.
+
+### Measured on the pad
+
+`tools/gyro-map-probe` writes the block, then reads both sticks and the enable key off evdev while
+the pad's own motion stream counts how far it was actually tilted. The mapped stick is the reading
+and the other one is the control; a hand on the shell shows up as the control moving and the window
+is scored spoilt. Five windows, on a wired Apex 5, firmware 7.0.3.0:
+
+| Window | What was written | Reading |
+|---|---|---|
+| 1 | nothing | 962 tilt samples, both sticks flat. Tilting alone drives nothing. |
+| 2 | right stick, Hold, key LB | **peak 0.97 of full travel, driven** while LB held; nothing while released |
+| 3 | right stick, Hold, first key None, **second key** RB | **peak 0.91, driven** while RB held. Byte 7 works on its own. |
+| 4 | right stick, **Click**, key LB | 2.9 s driven · 2.7 s quiet · 4.6 s driven · 3.8 s quiet · 1.9 s driven |
+| 5 | window 2 again, **curve at 830 flattened to zero output** | peak 1.10, driven — unchanged from window 2 |
+
+So: **the pad plays the block, the enable key gates it, byte 7 is honoured by itself, Click toggles,
+and the response curve at 830 is inert.** Window 4 is the weakest of these as a finding — Click is
+the antithesis of Hold and was never really in doubt — and it is here because the harness made it
+nearly free once the other four existed.
+
+Three things came out of the runs that matter more than the table does:
+
+  * **Releasing the enable key does not re-centre the stick.** It parks wherever the gyro last put
+    it — 0.27 of full travel in window 2, 0.26 in window 3 — and stays exactly there: both post-
+    release samples were identical and the axis sent nothing more. A game goes on reading a stick
+    held a quarter over until the gyro is switched back on and tilted back.
+  * **The block at 830 is a feature Flydigi never finished** — see its own section below. Not
+    merely unmeasured, and not waiting for an interface to be written for it.
+  * **An off-stretch is invisible to anything that counts events.** evdev only reports a changing
+    axis, so a gyro that has been switched off produces *no samples at all* — a 3.8 s silence
+    arrives as one event. Two verdicts in the probe were wrong before this was accounted for: a
+    parked stick read as "still driven" because it sat far from centre, and Click read as "not a
+    toggle" because its off-stretches were discarded as too short. Stretches are measured in
+    seconds and liveness as mean step between samples, never as a count.
+
+**The two sensitivity bytes ship different.** 25 and 20 at the factory, which their own software
+cannot produce: `ParseMotionConfigToArray` assigns `Sensitivity` to both, and their reader collapses
+the pair with `Math.Max`. So the block leaves the factory in a state no round trip through Space
+Station preserves, and one number is the honest thing to show.
+
+**The mode is derived, not chosen.** Nothing in Space Station's gyro panel sets `UseMode`; its save
+path picks it from the target — `RightJoystick` or `Mouse` → FPS, `LeftJoystick` → Racer — and
+leaves it alone when the target is Off. What the firmware does differently between the two is
+unmeasured. `set_motion` derives it the same way and takes an override.
+
+**The factory's enable keys are live buttons, not blanks.** Byte 1 is 12 (`Lt`) and byte 7 is 0
+(`Up`) on an untouched pad — not the 255 that means None. Their writer only ever assigns byte 7 when
+the enable type is Press, re-emitting whatever it read otherwise, so turning gyro mapping on in
+Space Station on a fresh pad hands D-pad Up a share of it. Which of the two the firmware honours,
+and whether it reads the second at all under Click, is unmeasured. `set_motion` writes both bytes
+whenever either is given, and the app's key pickers show what is really stored rather than "none".
+
+## The response curve at 830 is a feature Flydigi never finished
+
+The block is the joystick core block with its type byte removed — `zero, p1.x, p1.y, p2.x, p2.y,
+end` on the same 0..127 scale — and it ships as the same identity line, `0 63 63 127 127 127`. Two
+independent lines of evidence say nothing plays it.
+
+**The firmware does not read it.** Measured with `tools/gyro-map-probe --window 5`: the curve
+written flat to zero output, with the mapping otherwise byte-identical to a window that drove the
+stick to 0.97 of full travel, and the stick still reached **1.10**. Three things rule out the
+obvious ways to be wrong about a null result:
+
+  * **The bytes arrive.** Written, applied and read straight back off the pad: `830..836` returns
+    `0 0 0 127 0 0`, exactly what was sent.
+  * **The tail block is live on apply**, so this is not a "needs command 166 first" result — the
+    nine-point bank at 790 is in the same tail, and flattening *it* silences the stick outright
+    (`tools/joystick-curve-probe`, table above).
+  * **The pad evaluates no polyline at all.** The same probe found the stick's core polyline at 109
+    equally inert: flattened to zero output it changes nothing, because the host compiles the curve
+    to the bank and the pad plays the bank. 830 is that same source form — and there is no compiled
+    companion for it anywhere in the blob. The unclaimed ranges are 227..230, 768..770, 814..820 and
+    825..830, none of them nine points.
+
+**And Space Station never authors it.** `Smoothness` occurs **five times in the whole application**,
+which is the entire evidence and worth listing: the child component reads `i.smoothness` and emits
+`callback("smoothness", …)`; the parent's read handler stores `O.mappingTypeJoystick.smoothness`;
+its callback updates that state; and its render passes the value back down as `Smoothness`. The
+round trip is fully wired — and then:
+
+  * the panel is drawn inside the **literal** `className: "trigger-mode-right none"`. Not a
+    conditional: the same file hides things two other ways when it means to, `U("x", {none: cond})`
+    and `+(i.vibrationUsable ? "" : " none")`. This one is unconditional by construction.
+  * the parent passes `Smoothness` and the child reads `smoothness`, so the slider's value is
+    `undefined`. `connect(i => i.global)` cannot rescue it: those five occurrences are exhaustive,
+    so no reducer or store key supplies the lowercase name either.
+  * the save path never assigns the field, writing `sensitivity`, `deadZone`, `enableType` and the
+    enable keys and nothing else.
+
+Their slider is also a 0..255 scalar over a field that is a four-node curve —
+`MotionSmoothnessConfig {Zero, Point1, Point2, End}`, not an int. So this is not three bugs in a
+working feature; it is a feature abandoned partway through wiring, left in the struct and
+round-tripped by `MappingConfigParserV31` ever since, which re-emits all six bytes on every write
+from whatever its reader put there.
+
+`set_motion_curve` stays because the block is real and its layout is confirmed against that writer.
+Nothing should offer a control for it.
 
 ## Grip vibration, at offset 145
 

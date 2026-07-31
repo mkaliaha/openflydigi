@@ -97,7 +97,7 @@ so. The QML layer exists for what only a running view can answer, and it has to 
 **PySide6 cannot see an item created by a delegate** — a Repeater and a ListView both really build
 theirs, QML counts them, and `findChild` finds none.
 
-The QML cases are the ten `tests/qml/tst_*.qml`, one per page; Macros and Setup have none, and
+The QML cases are the eleven `tests/qml/tst_*.qml`, one per page; Macros and Setup have none, and
 `tests/test_shell.py` only asserts that they open. `tests/qml_harness.py` drives them, putting `Pad`,
 `Fixture` and `QmlDir` into the engine's root context; the fixtures are described in
 [gui/README.md](../gui/README.md). Importing `gui.app` there is load-bearing — the decorators

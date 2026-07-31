@@ -12,12 +12,12 @@ wire protocol is [PROTOCOL.md](PROTOCOL.md); the long write-up behind each findi
 ## Status
 
 Adaptive triggers are done and validated in real games. The desktop app covers profiles, button
-remapping, macros, sticks, vibration, per-profile trigger effects, the pad's own device settings,
-lighting, the screen, the game list and its own setup. The daemon detects a running game and applies
-its route unattended.
+remapping, macros, sticks, the gyro mapped to a stick, vibration, per-profile trigger effects, the
+pad's own device settings, lighting, the screen, the game list and its own setup. The daemon detects
+a running game and applies its route unattended.
 
-**Left to build:** gyro mapped to a stick, the charging dock, driving a second pad deliberately, an
-interactive crop for the Screen page, and the smaller pieces under What's next.
+**Left to build:** the charging dock, driving a second pad deliberately, an interactive crop for the
+Screen page, and the smaller pieces under What's next.
 
 | Tier | Mechanism | Games | State |
 |---|---|---|---|
@@ -46,13 +46,11 @@ true — `gui/` may import `flydigi/` and never the reverse, and nothing Flydigi
 
 Roughly in order of value.
 
- 1. **Gyro mapped to a stick (J2).** Offset 137, 8 bytes, smoothing curve at 830. Works in any game
-    with nothing running, which on Linux is otherwise Steam Input only.
- 2. **The charging dock (`cd2`).** Blocked only on decompiling `Flydigi.ChargerSdk.dll` /
+ 1. **The charging dock (`cd2`).** Blocked only on decompiling `Flydigi.ChargerSdk.dll` /
     `Flydigi.CoolerSdk.dll`. It is a *lighting* problem, not a screen one — 162 addressable LEDs
     over the ordinary config path, and `cd2_led_sync` keeps it in step with the pad.
     → [docs/findings-other-devices.md](docs/findings-other-devices.md)
- 3. **Multiple pads.** The device-type guard in `flydigi/identity.py` refuses to write anything that
+ 2. **Multiple pads.** The device-type guard in `flydigi/identity.py` refuses to write anything that
     is not a k5, and the app, the mapping CLI and the settings CLI all go through it, so an Apex 5
     config cannot reach a Vader. Refusing is not selecting:
     `find_device` returns the first `/dev/hidraw*` in sorted-by-name order carrying the vendor
@@ -65,8 +63,8 @@ Roughly in order of value.
     flag and this pad has no such motors. The Vader is likewise the machine for the ADC calibration
     command, which `GenerateControllerVader4` is the only factory to set.
     → [docs/findings-profile-blob.md](docs/findings-profile-blob.md) J5
- 4. **An interactive crop for the Screen page.** Everything else there is done.
- 5. **Third-party mode: optional polish.** Command 17 here is byte-identical to Space Station's.
+ 3. **An interactive crop for the Screen page.** Everything else there is done.
+ 4. **Third-party mode: optional polish.** Command 17 here is byte-identical to Space Station's.
     After a reconnect with the flag already on, Steam stops *labelling* the pad Apex 5 while
     everything keeps working — cosmetic, plus a bindings-storage nuisance. The optional workaround,
     which neither app does, is to re-assert the flag off then on once SDL has enumerated; the real
@@ -104,6 +102,13 @@ running. What the **Xbox home button** toggle does (19 sub 2): the command is bu
 `--i-know`, so `tools/flydigi-settings xbox-home off --i-know` and one evdev capture settle it.
 → [docs/device-settings.md](docs/device-settings.md)
 
+**Whether a trigger still reads as an analogue axis while it is the gyro's enable key.** The pad
+ships with `Lt` in that byte, and the enable key is *not* swallowed — the probe correlated stick
+movement against `BTN_TL` arriving on evdev throughout, so a digital button goes on working while it
+gates the gyro. A trigger is an axis rather than a button, and one that went digital whenever gyro
+mapping was on would be the pad's own factory setting doing it. One window of
+`tools/gyro-map-probe` with `Lt` as the key, watching `ABS_Z` through a slow pull, settles it.
+
 ## What's done
 
 All command factories are decompiled under `decompiled/Flydigi.ControllerSdk/`.
@@ -113,6 +118,7 @@ All command factories are decompiled under `decompiled/Flydigi.ControllerSdk/`.
 | Mapping profiles | status 161, apply 162, read 163, write 164/165, save 166 | `flydigi/mapping.py`, `tools/flydigi-mapping`, GUI |
 | Device-type guard | identify read 1 | `flydigi/identity.py` — `require()` refuses anything but a k5, and `flydigi/` calls it nowhere itself; `flydigi-mapping`, `flydigi-settings` and the app take it once per connection, so their reads are refused too |
 | Buttons, sticks, vibration, stored triggers | inside the 840-byte profile blob | same module — [detail](docs/findings-profile-blob.md) |
+| Gyro mapped to a stick | the profile's motion block at 137 | `flydigi/mapping.py` (`motion`/`set_motion`), `tools/flydigi-mapping gyro`, GUI — **measured on the pad** with `tools/gyro-map-probe`: it plays the block, both enable keys gate it, Click toggles, and the response curve at 830 is inert — [detail](docs/findings-profile-blob.md) J2 |
 | Macros, played by the pad | the profile's macro page at 230, plus 162 to make one live | `flydigi/mapping.py`, `flydigi/macros.py` (the recorder), GUI — [detail](docs/findings-profile-blob.md) |
 | Live trigger effects, all six | 81, 82 | `flydigi/effects.py` — [PROTOCOL.md](PROTOCOL.md) §3a |
 | Device settings | read 3, write 19 by sub-id, 20/21/22/23, restart 29 | `flydigi/settings.py`, `tools/flydigi-settings`, GUI — [detail](docs/device-settings.md) |
@@ -208,6 +214,7 @@ distrobox exists. Setup, the package list and the symbol detail are in
 | Buttons | remap, turbo + hold/toggle, reset all to default |
 | Macros | record a sequence off the pad and bind it to any key, pick once / while held / toggle, set the repeat gap, see every step, delete |
 | Sticks | dead zone, outer dead zone, sensitivity curve presets, circular range |
+| Gyro | map the gyro onto either stick, the button that turns it on and how, sensitivity and the dead-zone offset — plus the motion mode, shown and not offered, because Flydigi derives it from the stick |
 | Vibration | master switch, per-grip enable, min/max window, strength |
 | Triggers | stored effect — all six of Flydigi's, each with its own controls, engaged on the pad as well as stored — plus the travel window, Flydigi's "Stroke Setting", as a start/end pair |
 | Lighting | effect, up to 5 colours, brightness, cycle time, react-to-rumble |
@@ -464,7 +471,8 @@ a bad checksum by staying silent exactly as the pad does.
 | `PROTOCOL.md` | Full wire protocol + hardware verification results |
 | `flydigi/` | Library — `device.py` (transport), `identity.py` (the command-1 device-type guard), `blobs.py` (packetised config transfer), `effects.py` (live trigger commands), `mapping.py` (profiles, remapping, macros, vibration, stored triggers), `macros.py` (recording one off the pad's evdev node), `lighting.py` (RGB), `screen.py` (160x80 screen: LVGL image format, settings, and the HID upload that puts no picture on this pad), `screen_ota.py` (the serial upload that works), `settings.py` (the pad's own settings: command 3 and the small writes behind it), `games.py`, `forza.py`, `evdev.py` (the xpad evdev reader every relay's input comes from), `ds5.py` (DualSense report codec), `dsx.py` (DSX UDP protocol), `monitor.py` (process-memory engine), `motion.py` (battery, gyro/accel and the third-party toggle), `relay.py` (Apex 5 → DualSense translation, and `PadLink`: holding a pad that leaves the bus every time it sleeps) |
 | `gui/` | PySide6/QML desktop app (GPL-3.0-or-later) — `app.py` (the object graph), `main.py` (entry point), `worker.py` (all device I/O, on its own thread), `i18n.py` (the `i18n*()` shim the engine needs; without it every Kirigami form delegate throws `ReferenceError: i18ndc is not defined`, so `main.py` installs it unconditionally), `models/` (view-agnostic state; `screen.py` is the one that touches QtGui, for image decoding), `qml/` (`Main.qml`, `pages/`, `components/`) |
-| `tools/flydigi-mapping` | CLI for profiles — list/show/set/clear/rename/apply/backup/restore, plus `macros`, `macro-record`, `macro-set`, `macro-clear` |
+| `tools/flydigi-mapping` | CLI for profiles — list/show/set/clear/rename/apply/backup/restore, plus `macros`, `macro-record`, `macro-set`, `macro-clear`, `gyro` |
+| `tools/gyro-map-probe` | What the pad does with the motion block at 137: five windows answering whether it plays it, whether each enable key gates it, whether Click toggles, and whether the curve at 830 is read. Transitions counted out on the motors, in `stick-feel`'s grammar |
 | `tools/flydigi-forza` | Forza driver — UDP 5300 → rules → triggers (`--port`, `--config` for a rule file other than `configs/forza.json`, `--dump` for telemetry only, `--quiet`; `--accept LEN:OFFSET`, e.g. `--accept 331:12`, for a newer Forza shipping an unknown packet size) |
 | `tools/flydigi-dsx` | DSX protocol listener on UDP 7878 — drives triggers from any DSX-compatible mod (`--dump` to decode only, `--forward PORT` to relay datagrams onward; Flydigi uses 8787) |
 | `tools/flydigi-monitor` | Memory-reading driver using Flydigi's XGameMonitor configs (`--probe` to debug offsets) |

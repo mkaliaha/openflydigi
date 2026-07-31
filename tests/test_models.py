@@ -589,6 +589,129 @@ def test_a_stick_bound_to_a_key_is_not_offered_a_curve():
     check("the right stick is unaffected", profile.sticks.right.isStick)
 
 
+def test_the_gyro_starts_off_and_shows_the_keys_the_factory_left():
+    profile, _ = make_profile()
+    motion = profile.motion
+    check("a factory profile has the gyro off", motion.target == 0)
+    check("so the page's controls are not offered", not motion.enabled)
+    check("and it is not a mouse mapping", not motion.isMouse)
+
+    # The two bytes a fresh pad ships with. Reporting them as "(none)" would
+    # hide a binding that is live the moment a target is picked.
+    names = list(motion.keyNames)
+    check("the first enable key is the factory's Lt",
+          names[motion.key] == "Left trigger", names[motion.key])
+    check("and the second is the factory's Up",
+          names[motion.secondKey] == "Up", names[motion.secondKey])
+    check("so something would turn it on", motion.hasKey)
+    check("(none) leads the key list", names[0] == models.MOTION_NO_KEY)
+
+
+def test_picking_a_stick_picks_the_motion_mode_with_it():
+    """Nothing on the page sets the mode, and every profile needs one."""
+    profile, _ = make_profile()
+    motion = profile.motion
+
+    motion.target = 1
+    check("the left stick is Racing", motion.useMode == "Racing", motion.useMode)
+    check("and the block agrees",
+          profile.config.motion()["use_mode"] == mapping.MOTION_RACER)
+
+    motion.target = 2
+    check("the right stick is FPS", motion.useMode == "FPS", motion.useMode)
+    check("mapping the gyro is a change", profile.dirty)
+
+
+def test_the_second_enable_key_is_offered_only_where_it_would_write():
+    """Under Click the format carries no change to byte 7, so nothing pretends.
+
+    The factory ships D-pad Up in that byte and the pad acts on it, so the page
+    has to account for it either way -- as an editable control under Hold, and
+    as a named fact under Click.
+    """
+    profile, _ = make_profile()
+    motion = profile.motion
+    motion.target = 2
+    motion.enableType = 0                       # press to toggle
+    check("no second-key control in toggle mode", not motion.holdMode)
+    check("but the live leftover is named",
+          motion.strandedKey == "Up", motion.strandedKey)
+
+    names = list(motion.keyNames)
+    motion.key = names.index("M1")
+    check("the chosen key is stored", profile.config.motion()["keys"][0] == "m1")
+    check("and byte 7 is untouched, as Flydigi leaves it",
+          profile.config.motion()["keys"][1] == "up",
+          str(profile.config.motion()["keys"]))
+
+    motion.enableType = 1                       # while held
+    check("the control appears", motion.holdMode)
+    check("and nothing is stranded once it can be edited",
+          motion.strandedKey == "", motion.strandedKey)
+    motion.secondKey = 0
+    check("clearing the second key clears it",
+          profile.config.motion()["keys"] == ("m1", None),
+          str(profile.config.motion()["keys"]))
+    check("and the page says something still turns it on", motion.hasKey)
+
+    motion.key = 0
+    check("with neither key set, nothing does", not motion.hasKey)
+
+
+def test_the_gyro_sliders_are_the_ones_space_station_shows():
+    profile, _ = make_profile()
+    motion = profile.motion
+    check("both run to 100", motion.maximum == mapping.MOTION_SENSITIVITY_MAX)
+
+    motion.sensitivity = 70
+    motion.deadZone = 5
+    check("sensitivity round-trips", motion.sensitivity == 70)
+    check("and reaches both axis bytes",
+          profile.config.motion()["sensitivity_xy"] == (70, 70),
+          str(profile.config.motion()["sensitivity_xy"]))
+    check("the dead-zone offset round-trips", motion.deadZone == 5)
+
+
+def test_a_mouse_mapping_is_named_rather_than_shown_as_off():
+    """A profile brought over from Windows can hold one; this cannot honour it."""
+    profile, _ = make_profile()
+    profile.config.blob[mapping.OFF_MOTION] = mapping.MOTION_MOUSE
+    profile.motion.refresh()
+    check("the page can say so", profile.motion.isMouse)
+    check("the combo falls back to Off, having nothing else to show",
+          profile.motion.target == 0)
+
+    # And picking a stick replaces it, rather than being refused underneath.
+    profile.motion.target = 2
+    check("choosing a stick takes", not profile.motion.isMouse)
+    check("and it really is the right stick",
+          profile.config.motion()["target"] == mapping.MOTION_RIGHT_STICK)
+
+
+def test_the_gyro_editor_leaves_the_response_curve_alone():
+    """The block is inert, so there is nothing here to offer a control for.
+
+    Measured with `tools/gyro-map-probe --window 5`: flattened to zero output,
+    with the mapping otherwise identical to a run that reached 0.97 of full
+    travel, the stick still reached 1.10. Space Station cannot edit it either --
+    a hardcoded `none` class on the div, a prop passed as `Smoothness` and read
+    as `smoothness`, and a save path that never assigns the field -- but that is
+    no longer the reason the app leaves it alone.
+    """
+    profile, _ = make_profile()
+    for name in ("curve", "smoothness", "responseCurve"):
+        check(f"no {name} on the gyro model", not hasattr(profile.motion, name))
+
+    before = bytes(profile.config.blob)
+    profile.motion.target = 2
+    profile.motion.sensitivity = 80
+    block = slice(mapping.OFF_MOTION_CURVE,
+                  mapping.OFF_MOTION_CURVE + mapping.MOTION_CURVE_ENTRY)
+    check("editing the gyro leaves the curve block alone",
+          bytes(profile.config.blob)[block] == before[block],
+          str(list(profile.config.blob[block])))
+
+
 def test_circularity_is_not_part_of_the_curve():
     """It is the one field in these blocks the firmware applies itself.
 
@@ -1664,6 +1787,12 @@ def main():
                  test_a_stick_edit_moves_the_curve_to_custom,
                  test_a_stick_bound_to_a_key_is_not_offered_a_curve,
                  test_circularity_is_not_part_of_the_curve,
+                 test_the_gyro_starts_off_and_shows_the_keys_the_factory_left,
+                 test_picking_a_stick_picks_the_motion_mode_with_it,
+                 test_the_second_enable_key_is_offered_only_where_it_would_write,
+                 test_the_gyro_sliders_are_the_ones_space_station_shows,
+                 test_a_mouse_mapping_is_named_rather_than_shown_as_off,
+                 test_the_gyro_editor_leaves_the_response_curve_alone,
                  test_restore_refuses_a_wrong_sized_file,
                  test_backup_then_restore_round_trips,
                  test_slot_list_tracks_active_and_current,

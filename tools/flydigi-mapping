@@ -18,6 +18,7 @@
     tools/flydigi-mapping macro-record 0 m1 --seconds 8 --save
     tools/flydigi-mapping macro-set 0 m2 press:a wait:80 release:a --save
     tools/flydigi-mapping macro-clear 0 m1 --save
+    tools/flydigi-mapping gyro 0 right --key m1 --sensitivity 60 --save
 
 Edits land in the pad's working memory immediately; --save commits them to
 flash so they survive a power cycle. Always back up before writing -- these
@@ -34,6 +35,12 @@ from flydigi import (device, effects, identity, macros as macro_recorder,
 MACRO_TYPES = {"once": mapping.MACRO_ONCE,
                "held": mapping.MACRO_WHILE_HELD,
                "toggle": mapping.MACRO_TOGGLE}
+
+# Short names for MOTION_TARGETS, whose own are two words. Mouse is absent
+# because the pad cannot do it -- see mapping.MOTION_TARGETS.
+GYRO_TARGETS = {"off": mapping.MOTION_OFF,
+                "left": mapping.MOTION_LEFT_STICK,
+                "right": mapping.MOTION_RIGHT_STICK}
 
 
 def open_pad():
@@ -74,6 +81,20 @@ def describe(config):
             label += "(hold)" if mode == mapping.TURBO_WHILE_HELD else "(toggle)"
         parts.append(label)
     return ", ".join(parts)
+
+
+def describe_motion(config):
+    """The gyro mapping as one line."""
+    motion = config.motion()
+    target = mapping.MOTION_TARGETS.get(motion["target"], motion["target"])
+    if motion["target"] == mapping.MOTION_OFF:
+        return "off"
+    keys = [str(key) for key in motion["keys"] if key is not None]
+    enable = mapping.MOTION_ENABLE_TYPES.get(motion["enable_type"],
+                                             motion["enable_type"])
+    return (f"{target}, {enable} {' or '.join(keys) or 'nothing'}, "
+            f"sensitivity {motion['sensitivity']}, "
+            f"dead-zone offset {motion['dead_zone']}")
 
 
 def parse_steps(tokens):
@@ -216,6 +237,21 @@ def main():
     p.add_argument("key")
     p.add_argument("--save", action="store_true")
 
+    p = sub.add_parser("gyro", help="map the gyro onto a stick")
+    p.add_argument("cfg", type=int)
+    p.add_argument("target", choices=sorted(GYRO_TARGETS),
+                   help="which stick the gyro drives, or off")
+    p.add_argument("--key", help="the button that turns the gyro on")
+    p.add_argument("--key2", help="a second button that also turns it on")
+    p.add_argument("--enable", choices=("click", "hold"),
+                   help="the key toggles the gyro, or holds it on")
+    p.add_argument("--sensitivity", type=int,
+                   help=f"0..{mapping.MOTION_SENSITIVITY_MAX}")
+    p.add_argument("--dead-zone", type=int,
+                   help=f"0..{mapping.MOTION_DEAD_ZONE_MAX}, an offset that "
+                        "cancels a game's own dead zone rather than adding one")
+    p.add_argument("--save", action="store_true")
+
     args = parser.parse_args()
     ctrl = open_pad()
 
@@ -257,6 +293,7 @@ def main():
             note = "" if target == key and not frequency else "   <-- remapped"
             turbo = f" turbo {frequency}" if frequency else ""
             print(f"  {key:<7} -> {target}{turbo}{note}")
+        print(f"  gyro    -> {describe_motion(config)}")
         if config.macros():
             print()
             show_macros(config)
@@ -317,6 +354,44 @@ def main():
         if config.macro(args.key) is None:
             sys.exit(f"error: {args.key} has no macro on it")
         new.clear_macro(args.key)
+    elif args.cmd == "gyro":
+        target = GYRO_TARGETS[args.target]
+        for name in (args.key, args.key2):
+            if name is not None and name not in mapping.KEY_IDS:
+                sys.exit(f"error: unknown key {name!r}")
+        keys = None
+        if target != mapping.MOTION_OFF:
+            # Not optional, and not a default we could pick: the factory blob
+            # holds Lt and D-pad Up in the two enable-key bytes, so turning the
+            # gyro on without saying which button does it hands the mapping to
+            # whichever of those the firmware reads.
+            if args.key is None:
+                sys.exit("error: --key says which button turns the gyro on. "
+                         "There is no always-on setting, and the bytes already "
+                         "in the profile are the factory's, not a choice.")
+            keys = (args.key, args.key2)
+        elif args.key is not None or args.key2 is not None:
+            keys = (args.key, args.key2)
+        try:
+            new.set_motion(target=target, enable_type=args.enable, keys=keys,
+                           sensitivity=args.sensitivity,
+                           dead_zone=args.dead_zone)
+        except ValueError as exc:
+            sys.exit(f"error: {exc}")
+        print(f"gyro: {describe_motion(new)}")
+        landed = new.motion()
+        if args.key2 is not None and landed["keys"][1] != args.key2:
+            # Flydigi's format only carries a change to byte 7 under Hold, and
+            # this mirrors it -- so say so rather than let --key2 look applied.
+            print("note: --key2 was not written. The profile's enable type is "
+                  "toggle, and the blob only carries a change to the second "
+                  "key while it is hold -- pass --enable hold to set it.")
+        if target != mapping.MOTION_OFF and landed["keys"][1] is not None:
+            print(f"note: {landed['keys'][1]} also switches the gyro on. The "
+                  "pad ships with one set in that byte and honours it, so it "
+                  "is a real binding whether or not you chose it.")
+        if target != mapping.MOTION_OFF:
+            print("note: the pad lowers its polling rate while this is on")
     elif args.cmd == "restore":
         with open(args.path, "rb") as fh:
             blob = fh.read()

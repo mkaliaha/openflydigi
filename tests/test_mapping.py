@@ -531,6 +531,198 @@ def test_a_stored_effect_is_replayed_as_the_live_command_flydigi_builds():
           pad.sent[0][1][:8] == [1, 2, 10, 60, 50, 1, 1, 20], str(pad.sent[0]))
 
 
+def flydigi_motion_bytes(target, key1, enable_type, dead_zone, sensitivity,
+                         use_mode, key2):
+    """`MappingConfigParser.ParseMotionConfigToArray`, joystick branch.
+
+    Their writer fills the 8 bytes with 0xFF and then assigns every one of
+    them, so a fully specified `set_motion` has to land on the same array.
+    """
+    data = [0xFF] * 8
+    data[0] = target
+    data[2] = enable_type
+    data[4] = sensitivity
+    data[5] = sensitivity
+    data[6] = use_mode
+    data[1] = key1
+    data[3] = dead_zone
+    data[7] = key2
+    return data
+
+
+def test_the_factory_motion_block_is_off_but_not_blank():
+    config = mapping.MappingConfig(blank_blob())
+    motion = config.motion()
+    check("the gyro ships off", motion["target"] == mapping.MOTION_OFF, str(motion))
+    check("with a dead-zone offset of 4", motion["dead_zone"] == 4, str(motion))
+    check("and Lt sitting in the first enable-key byte",
+          motion["keys"][0] == "lt", str(motion))
+    # The trap set_motion exists to avoid: 0 there is a key, not an absence.
+    check("and D-pad Up in the second, which is not the same as no key",
+          motion["keys"][1] == "up", str(motion))
+    check("the two sensitivity axes ship different",
+          motion["sensitivity_xy"] == (25, 20), str(motion))
+    check("and collapse the way Flydigi's reader collapses them",
+          motion["sensitivity"] == 25, str(motion))
+
+
+def test_the_motion_block_matches_flydigis_writer():
+    config = mapping.MappingConfig(blank_blob())
+    config.set_motion(target="right stick", enable_type="hold", keys=("m1", "m2"),
+                      sensitivity=70, dead_zone=15)
+    written = list(config.blob[mapping.OFF_MOTION : mapping.OFF_MOTION + 8])
+    expected = flydigi_motion_bytes(
+        mapping.MOTION_RIGHT_STICK, mapping.KEY_IDS["m1"], mapping.MOTION_PRESS,
+        15, 70, mapping.MOTION_FPS, mapping.KEY_IDS["m2"])
+    check("every byte lands where Flydigi puts it", written == expected,
+          f"{written} != {expected}")
+
+    motion = config.motion()
+    check("and reads back as it was set",
+          (motion["target"], motion["enable_type"], motion["keys"],
+           motion["sensitivity"], motion["dead_zone"])
+          == (mapping.MOTION_RIGHT_STICK, mapping.MOTION_PRESS, ("m1", "m2"),
+              70, 15), str(motion))
+    check("one number reaches both axes", motion["sensitivity_xy"] == (70, 70),
+          str(motion))
+
+    # Both sliders stop at 100 in Space Station, and the fields are bytes.
+    config.set_motion(sensitivity=400, dead_zone=400)
+    motion = config.motion()
+    check("sensitivity is clamped to the slider's range",
+          motion["sensitivity"] == mapping.MOTION_SENSITIVITY_MAX, str(motion))
+    check("and so is the dead-zone offset",
+          motion["dead_zone"] == mapping.MOTION_DEAD_ZONE_MAX, str(motion))
+
+
+def test_the_use_mode_follows_the_target():
+    """Space Station derives it rather than offering it, and so do we."""
+    config = mapping.MappingConfig(blank_blob())
+    config.set_motion(target="left stick")
+    check("the left stick means Racer",
+          config.motion()["use_mode"] == mapping.MOTION_RACER)
+    config.set_motion(target="right stick")
+    check("the right stick means FPS",
+          config.motion()["use_mode"] == mapping.MOTION_FPS)
+
+    # Turning it off assigns neither branch in their writer, so the mode stays.
+    config.set_motion(target="off")
+    check("turning the gyro off leaves the mode where it was",
+          config.motion()["use_mode"] == mapping.MOTION_FPS)
+
+    config.set_motion(target="left stick", use_mode="fps")
+    check("an explicit mode wins", config.motion()["use_mode"] == mapping.MOTION_FPS)
+
+
+def test_the_second_enable_key_is_written_only_under_hold():
+    """Flydigi's rule, reproduced rather than corrected.
+
+    Their writer assigns `EnableKey[1]` inside the `Press` branch and re-emits
+    whatever it read otherwise. The factory leaves 0 -- D-pad Up -- in that
+    byte, and the pad honours it on its own, so under Click a mapping keeps an
+    enable key nobody chose. That is a thing for a UI to show, not for a byte
+    layout to quietly fix.
+    """
+    config = mapping.MappingConfig(blank_blob())
+    config.set_motion(target="right stick", enable_type="click",
+                      keys=("m1", None))
+    check("the first key is written under Click",
+          config.motion()["keys"][0] == "m1")
+    check("and the factory's Up survives, as it does in theirs",
+          config.motion()["keys"][1] == "up", str(config.motion()["keys"]))
+
+    config.set_motion(enable_type="hold", keys=("m1", None))
+    check("under Hold the second key is written",
+          config.motion()["keys"] == ("m1", None), str(config.motion()["keys"]))
+    check("stored as ControllerKey.None",
+          config.blob[mapping.OFF_MOTION + 7] == mapping.MOTION_KEY_NONE)
+
+    config.set_motion(keys=("lb", "rb"))
+    check("a pair sets both", config.motion()["keys"] == ("lb", "rb"))
+
+    # Leaving `keys` out has to leave the bytes alone, or every other setter
+    # would quietly unbind the gyro.
+    config.set_motion(sensitivity=30)
+    check("setting something else does not touch the keys",
+          config.motion()["keys"] == ("lb", "rb"))
+
+
+def test_a_mouse_mapping_is_written_the_way_flydigi_writes_one():
+    """Not a pad feature, and still not this module's business to refuse.
+
+    Their Mouse branch blanks both enable keys and the dead zone, because the
+    host process that moves the pointer owns all three. Refusing it here would
+    leave a profile brought over from Windows uneditable; the app just does not
+    offer it.
+    """
+    config = mapping.MappingConfig(blank_blob())
+    config.set_motion(target="mouse", enable_type="hold", keys=("m1", "m2"),
+                      sensitivity=40, dead_zone=30)
+    written = list(config.blob[mapping.OFF_MOTION : mapping.OFF_MOTION + 8])
+    expected = [mapping.MOTION_MOUSE, 0xFF, mapping.MOTION_PRESS, 0,
+                40, 40, mapping.MOTION_FPS, 0xFF]
+    check("every byte matches their Mouse branch", written == expected,
+          f"{written} != {expected}")
+    check("and it reads back as mouse",
+          mapping.MOTION_TARGETS[config.motion()["target"]] == "mouse")
+    check("with no enable keys", config.motion()["keys"] == (None, None))
+
+    for what in (dict(target="wheel"), dict(target=9),
+                 dict(enable_type="sometimes"), dict(use_mode=4)):
+        raised = False
+        try:
+            config.set_motion(**what)
+        except ValueError:
+            raised = True
+        check(f"{what} is refused", raised)
+
+
+def test_the_motion_curve_is_the_joystick_curve_without_its_type():
+    config = mapping.MappingConfig(blank_blob())
+    curve = config.motion_curve()
+    check("the factory curve is the identity line",
+          (curve["zero"], curve["point1"], curve["point2"], curve["end"])
+          == (0, (63, 63), (127, 127), 127), str(curve))
+
+    config.set_motion_curve(zero=10, point1=(20, 40), point2=(90, 110), end=120)
+    curve = config.motion_curve()
+    check("it round-trips",
+          (curve["zero"], curve["point1"], curve["point2"], curve["end"])
+          == (10, (20, 40), (90, 110), 120), str(curve))
+
+    config.set_motion_curve(end=250)
+    check("and stays on the stick's 0..127 scale",
+          config.motion_curve()["end"] == mapping.MOTION_CURVE_MAX)
+
+    # The block lives in the v3.1 tail, like the joystick extras.
+    short = mapping.MappingConfig(bytearray(blank_blob()[:790]))
+    check("an older profile has no curve at all", short.motion_curve() is None)
+    raised = False
+    try:
+        short.set_motion_curve(zero=1)
+    except mapping.ProtocolError:
+        raised = True
+    check("and writing one is refused rather than appended", raised)
+
+
+def test_editing_the_gyro_does_not_disturb_its_neighbours():
+    config = mapping.MappingConfig(blank_blob())
+    before = bytearray(config.blob)
+    config.set_motion(target="left stick", enable_type="click", keys=("m3", None),
+                      sensitivity=55, dead_zone=0)
+    config.set_motion_curve(point1=(10, 10))
+    changed = {i for i, (a, b) in enumerate(zip(before, config.blob)) if a != b}
+    allowed = set(range(mapping.OFF_MOTION, mapping.OFF_MOTION + 8)) | set(
+        range(mapping.OFF_MOTION_CURVE,
+              mapping.OFF_MOTION_CURVE + mapping.MOTION_CURVE_ENTRY))
+    check("only the two motion blocks moved", changed <= allowed,
+          str(sorted(changed - allowed)))
+    check("the trigger travel beside it is intact",
+          config.trigger_curve("right")["end"] == 255)
+    grip = slice(mapping.OFF_GRIP_VIBRATION, mapping.OFF_GRIP_VIBRATION + 9)
+    check("and the grip vibration behind it", config.blob[grip] == before[grip])
+
+
 def test_the_factory_curves_are_the_identity_line():
     """Both blocks ship as no-curve-at-all, on two different scales."""
     config = mapping.MappingConfig(blank_blob())
@@ -1195,6 +1387,13 @@ def main():
                  test_the_trigger_motor_fields_land_where_flydigi_puts_them,
                  test_the_motor_strength_is_a_percentage_not_a_byte,
                  test_the_amplitude_window_cannot_be_inverted,
+                 test_the_factory_motion_block_is_off_but_not_blank,
+                 test_the_motion_block_matches_flydigis_writer,
+                 test_the_use_mode_follows_the_target,
+                 test_the_second_enable_key_is_written_only_under_hold,
+                 test_a_mouse_mapping_is_written_the_way_flydigi_writes_one,
+                 test_the_motion_curve_is_the_joystick_curve_without_its_type,
+                 test_editing_the_gyro_does_not_disturb_its_neighbours,
                  test_the_factory_curves_are_the_identity_line,
                  test_moving_the_trigger_window_moves_its_points,
                  test_the_joystick_type_is_written_into_both_blocks,

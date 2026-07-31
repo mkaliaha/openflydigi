@@ -39,6 +39,7 @@ files = [
     "gui/qml/pages/ButtonsPage.qml",
     "gui/qml/pages/ControllerPage.qml",
     "gui/qml/pages/GamesPage.qml",
+    "gui/qml/pages/GyroPage.qml",
     "gui/qml/pages/LightingPage.qml",
     "gui/qml/pages/ScreenPage.qml",
     "gui/qml/pages/SetupPage.qml",

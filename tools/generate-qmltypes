@@ -168,6 +168,7 @@ def collect():
         (models.TriggerSideModel, False),
         (models.StickModel, False),
         (models.StickSideModel, False),
+        (models.MotionModel, False),
         (models.LightingModel, False),
         (models.ColourListModel, False),
         (models.GameListModel, False),

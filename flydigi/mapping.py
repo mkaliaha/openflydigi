@@ -60,6 +60,7 @@ OFF_PACKAGE_COUNT = 2
 OFF_KEY_TABLE = 13
 OFF_JOYSTICK_CURVE = 109   # 2 x 7: sensitivity curve per stick
 OFF_TRIGGER_CURVE = 123    # 2 x 7: travel curve per trigger
+OFF_MOTION = 137           # 8: the gyro mapped to a stick
 OFF_GRIP_VIBRATION = 145   # 1 + 2 x 4: the grip motors
 OFF_TRIGGER_MOTOR = 154    # 1 + 2 x 14: the trigger motors
 OFF_FORCE_TRIGGER = 185    # 2 x 20: the adaptive-trigger effect
@@ -73,6 +74,7 @@ OFF_MACROS = 230           # 538 bytes: the macro page, header and bodies
 OFF_TITLE = 770
 OFF_JOYSTICK_EXTRA = 790   # 2 x 12: the 9-point bank, circularity and edge
 OFF_MACRO_CYCLE = 820      # v3.1+: one repeat interval per macro slot
+OFF_MOTION_CURVE = 830     # v3.1+: 6, the gyro's response curve
 TITLE_BYTES = 20
 
 # -- macros -------------------------------------------------------------------
@@ -294,6 +296,60 @@ APEX5_KEYS = [
 # see, which reads as "A stopped working".
 EXTRA_KEYS = ["m1", "m2", "m3", "m4", "m5", "m6"]
 XINPUT_TARGETS = [key for key in APEX5_KEYS if key not in EXTRA_KEYS]
+
+# -- the gyro mapped to a stick, at 137 ---------------------------------------
+#
+# MotionMapType: what the gyro drives. The pad does the mapping itself, which
+# is the whole point of it -- gyro aim in any game, with nothing running on the
+# host, where Linux otherwise has only Steam Input.
+#
+# `mouse` is a real value of theirs and is written like any other. It is not a
+# pad feature: Space Station moves the host's pointer from the raw motion stream
+# in its own KeyboardMouseInjectRunner, and the pad's copy is a note to that
+# process, so a Linux host has nothing to act on it. That makes it something not
+# to *offer* -- which the app does not -- rather than something to refuse here.
+MOTION_OFF, MOTION_LEFT_STICK, MOTION_RIGHT_STICK, MOTION_MOUSE = 0, 1, 2, 3
+MOTION_TARGETS = {
+    MOTION_OFF: "off",
+    MOTION_LEFT_STICK: "left stick",    # Space Station labels it "racing games"
+    MOTION_RIGHT_STICK: "right stick",  # ... and this one "shooting games"
+    MOTION_MOUSE: "mouse",
+}
+MOTION_TARGET_IDS = {name: value for value, name in MOTION_TARGETS.items()}
+
+# MotionEnableType: what the enable key does. There is no "always on" -- the
+# gyro is bound to a key either way, and a mapping with no key set is a mapping
+# nothing can turn on.
+MOTION_CLICK, MOTION_PRESS = 0, 1
+MOTION_ENABLE_TYPES = {
+    MOTION_CLICK: "click",   # a press turns it on, another turns it off
+    MOTION_PRESS: "hold",    # on for as long as the key is held
+}
+MOTION_ENABLE_TYPE_IDS = {name: value for value, name in MOTION_ENABLE_TYPES.items()}
+
+# MotionUseMode. Not a control of its own in Space Station: their save path
+# derives it from the target -- left stick means Racer, right stick means FPS --
+# so the two travel together and `set_motion` derives it the same way unless a
+# caller says otherwise. What the firmware does differently between them is
+# unmeasured.
+MOTION_FPS, MOTION_RACER = 0, 1
+MOTION_USE_MODES = {MOTION_FPS: "fps", MOTION_RACER: "racer"}
+MOTION_USE_MODE_IDS = {name: value for value, name in MOTION_USE_MODES.items()}
+
+# ControllerKey.None -- what an unset enable key holds. Numerically the same as
+# TARGET_IDENTITY, and unrelated: this is the absence of a key, that one is a
+# key left doing its own job.
+MOTION_KEY_NONE = 255
+
+# Both sliders in Space Station's gyro panel run 0..100, and the two fields are
+# bytes, so the ceiling is the interface's rather than the wire's.
+MOTION_SENSITIVITY_MAX = 100
+MOTION_DEAD_ZONE_MAX = 100
+
+# The response curve at 830 is the joystick core block minus its type byte, on
+# the same 0..127 scale, and the factory holds the identity line there.
+MOTION_CURVE_ENTRY = 6
+MOTION_CURVE_MAX = 127
 
 
 def stick_nodes(center=0, edge=0, point1=(63, 63), point2=(127, 127)):
@@ -829,6 +885,201 @@ class MappingConfig:
                 f"a macro step cannot send {key!r}: only {', '.join(XINPUT_TARGETS)} "
                 "reach a host, the rest are remap sources with no XInput id")
         return KEY_IDS[name]
+
+    # -- the gyro mapped to a stick ---------------------------------------
+    #
+    # 8 bytes, `m_fdg_macro_motion_mapping_struct_t`:
+    #
+    #   [0] target, MotionMapType        [4] sensitivity, x axis
+    #   [1] enable key, ControllerKey    [5] sensitivity, y axis
+    #   [2] enable type                  [6] use mode, MotionUseMode
+    #   [3] dead-zone offset             [7] second enable key
+    #
+    # The pad plays this itself, so a gyro-to-stick mapping works in any game
+    # with nothing running on the host. Its own UI warns that turning it on
+    # lowers the polling rate.
+    #
+    # The response curve belongs to this block and does not live in it -- six
+    # more bytes at 830, in the v3.1 tail. See `motion_curve`.
+
+    def motion(self):
+        """Where the gyro is mapped, and what turns it on.
+
+        `sensitivity` is the pair collapsed the way Flydigi's reader collapses
+        it, to the larger of the two axes, because their writer only ever emits
+        one number into both. `sensitivity_xy` is what the bytes really hold,
+        and on a factory pad the two differ -- 25 and 20 -- so the block ships
+        in a state their own software cannot produce.
+
+        Enable keys read as key names, or None for ControllerKey.None. Both are
+        reported: which of them the firmware honours is unmeasured, and see
+        `set_motion` for why the second one is a trap.
+        """
+        base = OFF_MOTION
+        x, y = self.blob[base + 4], self.blob[base + 5]
+        return {
+            "target": self.blob[base],
+            "enable_type": self.blob[base + 2],
+            "keys": (self._motion_key_name(self.blob[base + 1]),
+                     self._motion_key_name(self.blob[base + 7])),
+            "sensitivity": max(x, y),
+            "sensitivity_xy": (x, y),
+            "dead_zone": self.blob[base + 3],
+            "use_mode": self.blob[base + 6],
+        }
+
+    def set_motion(self, target=None, enable_type=None, keys=None,
+                   sensitivity=None, dead_zone=None, use_mode=None):
+        """Map the gyro onto a stick.
+
+        **This mirrors `ParseMotionConfigToArray` and takes no view of its
+        own.** Every rule below is Flydigi's, including the two that are traps,
+        because a byte layout is the wrong place to hold an opinion -- the same
+        reason the force-trigger block here only moves bytes. What to *offer* is
+        the caller's business, and `gui/models/profile.py` is where this
+        project's answers to that live.
+
+        `target` and `enable_type` take either the id or the name from
+        MOTION_TARGETS / MOTION_ENABLE_TYPES. `use_mode` is derived from the
+        target, as their save path derives it -- left stick means Racer, right
+        stick means FPS -- and turning the mapping off leaves it alone, as
+        theirs does. `sensitivity` goes into both axis bytes from one number.
+
+        Two rules are theirs and are worth knowing before calling this:
+
+        **The second enable key is only written under Hold.** Their writer
+        assigns `EnableKey[1]` inside `s == MotionEnableType_Press` and re-emits
+        whatever it read otherwise. It matters because the factory blob holds 0
+        in byte 7 -- D-pad Up, not "no key" -- and byte 7 is honoured on its own,
+        measured with `tools/gyro-map-probe --window 3`. So turning the mapping
+        on under Click leaves Up as a live second way to switch the gyro on,
+        and this reproduces that rather than quietly fixing it. Pass an explicit
+        pair under Hold to set it; the app shows the byte instead of hiding it.
+
+        **Mouse is writable here.** The pad stores the byte and does nothing
+        with it -- Space Station moves the host pointer from the raw motion
+        stream, and the pad's copy is a note to that process. Refusing it in
+        this module would mean a profile brought over from Windows could not be
+        edited at all; the app simply does not offer it.
+        """
+        base = OFF_MOTION
+        if target is not None:
+            target = self._motion_value("target", target, MOTION_TARGET_IDS,
+                                        MOTION_TARGETS)
+            self.blob[base] = target
+            if use_mode is None and target in (MOTION_LEFT_STICK,
+                                               MOTION_RIGHT_STICK):
+                use_mode = (MOTION_RACER if target == MOTION_LEFT_STICK
+                            else MOTION_FPS)
+        if enable_type is not None:
+            self.blob[base + 2] = self._motion_value(
+                "enable type", enable_type, MOTION_ENABLE_TYPE_IDS,
+                MOTION_ENABLE_TYPES)
+        if use_mode is not None:
+            self.blob[base + 6] = self._motion_value(
+                "use mode", use_mode, MOTION_USE_MODE_IDS, MOTION_USE_MODES)
+        if self.blob[base] == MOTION_MOUSE:
+            # Their Mouse branch, whole: no enable keys in the blob and no dead
+            # zone, because both belong to the host process that does the work.
+            self.blob[base + 1] = MOTION_KEY_NONE
+            self.blob[base + 3] = 0
+            self.blob[base + 7] = MOTION_KEY_NONE
+        elif keys is not None:
+            if isinstance(keys, (str, int)):
+                keys = (keys, None)
+            first, second = keys
+            self.blob[base + 1] = self._motion_key(first)
+            if self.blob[base + 2] == MOTION_PRESS:
+                self.blob[base + 7] = self._motion_key(second)
+        if sensitivity is not None:
+            value = max(0, min(MOTION_SENSITIVITY_MAX, int(sensitivity)))
+            self.blob[base + 4] = self.blob[base + 5] = value
+        if dead_zone is not None and self.blob[base] != MOTION_MOUSE:
+            self.blob[base + 3] = max(0, min(MOTION_DEAD_ZONE_MAX,
+                                             int(dead_zone)))
+
+    def motion_curve(self):
+        """The gyro's response curve, or None on a protocol older than 3.1.
+
+        Six bytes -- `zero, point1, point2, end` -- which is the joystick core
+        block with its type byte removed, on the same 0..127 scale, and the
+        factory holds the same identity line: `0 63 63 127 127 127`.
+
+        **The pad does not read this block.** Written flat to zero output, with
+        the mapping otherwise byte-identical to a run that drove the stick to
+        0.97 of full travel, the stick still reached 1.10 -- measured with
+        `tools/gyro-map-probe --window 5`. So it is inert, and nothing should
+        offer a control for it.
+
+        Space Station cannot edit it either, by three independent faults in one
+        panel: the div holding the slider carries a hardcoded `none` class, the
+        parent passes the value down as `Smoothness` while the child reads
+        `smoothness`, and the save path never assigns the field at all. Their
+        slider is also a 0..255 number over a field that is a four-node curve.
+        Kept because the block is real and the layout is confirmed against
+        their v3.1 writer, which re-emits all six bytes on every write.
+        """
+        base = OFF_MOTION_CURVE
+        if len(self.blob) < base + MOTION_CURVE_ENTRY:
+            return None
+        return {
+            "zero": self.blob[base],
+            "point1": (self.blob[base + 1], self.blob[base + 2]),
+            "point2": (self.blob[base + 3], self.blob[base + 4]),
+            "end": self.blob[base + 5],
+        }
+
+    def set_motion_curve(self, zero=None, point1=None, point2=None, end=None):
+        """Shape the gyro's response.
+
+        `end` is settable here, unlike the joystick core block's, because
+        Flydigi's v3.1 writer emits all six of these bytes from the bean on
+        every write rather than leaving one of them to a reader that corrupts
+        it.
+        """
+        base = OFF_MOTION_CURVE
+        if len(self.blob) < base + MOTION_CURVE_ENTRY:
+            raise ProtocolError(
+                "this profile has no motion curve block -- protocol 3.1 only")
+        if zero is not None:
+            self.blob[base] = self._motion_curve_byte(zero)
+        for offset, point in ((base + 1, point1), (base + 3, point2)):
+            if point is not None:
+                x, y = point
+                self.blob[offset] = self._motion_curve_byte(x)
+                self.blob[offset + 1] = self._motion_curve_byte(y)
+        if end is not None:
+            self.blob[base + 5] = self._motion_curve_byte(end)
+
+    @staticmethod
+    def _motion_curve_byte(value):
+        return max(0, min(MOTION_CURVE_MAX, int(value)))
+
+    @staticmethod
+    def _motion_value(what, value, ids, names):
+        """One of the block's small enums, by id or by name."""
+        if isinstance(value, str):
+            if ids is None or value not in ids:
+                raise ValueError(f"no {what} called {value!r}")
+            return ids[value]
+        value = int(value)
+        if value not in names:
+            raise ValueError(f"no {what} {value}")
+        return value
+
+    @staticmethod
+    def _motion_key(key):
+        """An enable key as the block stores it. None means no key."""
+        if key is None:
+            return MOTION_KEY_NONE
+        key_id = KEY_IDS[key] if isinstance(key, str) else int(key)
+        if not 0 <= key_id <= 255:
+            raise ValueError(f"no key id {key!r}")
+        return key_id
+
+    @staticmethod
+    def _motion_key_name(byte):
+        return None if byte == MOTION_KEY_NONE else KEY_NAMES.get(byte, byte)
 
     # -- grip vibration ---------------------------------------------------
     #

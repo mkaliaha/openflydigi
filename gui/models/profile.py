@@ -367,6 +367,23 @@ CURVE_PRESETS = [("Default", mapping.CURVE_DEFAULT),
 # mapping.BIPOLAR_MAX for why only one half has an encoding we trust.
 STICK_MAX = mapping.BIPOLAR_MAX
 
+# Where the gyro can be pointed. Space Station names the two sticks after the
+# genre each suits, which says more than "left" does; the parenthesis keeps the
+# name of the thing that actually moves. Mouse is not offered -- the pad cannot
+# do it, see mapping.MOTION_TARGETS.
+MOTION_TARGETS = [("Off", mapping.MOTION_OFF),
+                  ("Left stick (racing)", mapping.MOTION_LEFT_STICK),
+                  ("Right stick (aiming)", mapping.MOTION_RIGHT_STICK)]
+
+MOTION_ENABLE_TYPES = [("Press to toggle", mapping.MOTION_CLICK),
+                       ("While held", mapping.MOTION_PRESS)]
+
+# What may turn the gyro on. Every button the shell has, unlike a remap target:
+# an enable key is read by the pad itself and never sent anywhere, so the
+# paddles -- which XInput cannot carry -- are the best keys for it.
+MOTION_NO_KEY = "(none)"
+MOTION_KEYS = [MOTION_NO_KEY] + mapping.APEX5_KEYS
+
 
 @QmlElement
 class StickSideModel(QObject):
@@ -494,6 +511,177 @@ class StickModel(QObject):
     def refresh(self):
         for side in self._sides.values():
             side.refresh()
+
+
+@QmlElement
+class MotionModel(QObject):
+    """The gyro mapped onto a stick, stored in the open profile.
+
+    One `changed` signal for the lot, as the sticks have: picking a target also
+    moves the use mode, so no field here is independent of the others.
+    """
+
+    changed = Signal()
+
+    def __init__(self, profile):
+        super().__init__(profile)
+        self._profile = profile
+
+    def _motion(self):
+        config = self._profile.config
+        if config is None:
+            # Space Station's own starting numbers, so a page with no profile
+            # open shows the same sliders it will show a moment later.
+            return {"target": mapping.MOTION_OFF,
+                    "enable_type": mapping.MOTION_CLICK,
+                    "keys": (None, None), "sensitivity": 50, "dead_zone": 15,
+                    "use_mode": mapping.MOTION_FPS}
+        return config.motion()
+
+    def _set(self, **kwargs):
+        config = self._profile.config
+        if config is None:
+            return
+        config.set_motion(**kwargs)
+        self.changed.emit()
+        self._profile.markChanged()
+
+    @Property("QStringList", constant=True)
+    def targetNames(self):
+        return [label for label, _value in MOTION_TARGETS]
+
+    @Property("QStringList", constant=True)
+    def enableTypeNames(self):
+        return [label for label, _value in MOTION_ENABLE_TYPES]
+
+    @Property("QStringList", constant=True)
+    def keyNames(self):
+        return [MOTION_NO_KEY] + [key_label(key) for key in mapping.APEX5_KEYS]
+
+    @Property(int, constant=True)
+    def maximum(self):
+        return mapping.MOTION_SENSITIVITY_MAX
+
+    @Property(int, notify=changed)
+    def target(self):
+        """Index into MOTION_TARGETS, not the stored id."""
+        stored = self._motion()["target"]
+        return next((i for i, (_l, v) in enumerate(MOTION_TARGETS) if v == stored),
+                    0)
+
+    @target.setter
+    def target(self, value):
+        index = max(0, min(len(MOTION_TARGETS) - 1, int(value)))
+        self._set(target=MOTION_TARGETS[index][1])
+
+    @Property(bool, notify=changed)
+    def enabled(self):
+        """Whether the gyro drives anything -- what the page's controls hang on."""
+        return self._motion()["target"] != mapping.MOTION_OFF
+
+    @Property(bool, notify=changed)
+    def isMouse(self):
+        """Set up on Windows to move the host's pointer, which this cannot do.
+
+        Not a state this app can produce, and one a profile brought over from
+        Space Station can be in. The page says so rather than showing Off,
+        which is what the target combo has to fall back to.
+        """
+        return self._motion()["target"] == mapping.MOTION_MOUSE
+
+    @Property(int, notify=changed)
+    def enableType(self):
+        stored = self._motion()["enable_type"]
+        return next((i for i, (_l, v) in enumerate(MOTION_ENABLE_TYPES)
+                     if v == stored), 0)
+
+    @enableType.setter
+    def enableType(self, value):
+        index = max(0, min(len(MOTION_ENABLE_TYPES) - 1, int(value)))
+        self._set(enable_type=MOTION_ENABLE_TYPES[index][1])
+
+    def _key_index(self, which):
+        key = self._motion()["keys"][which]
+        return MOTION_KEYS.index(key) if key in MOTION_KEYS else 0
+
+    def _set_key(self, which, value):
+        index = max(0, min(len(MOTION_KEYS) - 1, int(value)))
+        chosen = None if index == 0 else MOTION_KEYS[index]
+        keys = list(self._motion()["keys"])
+        keys[which] = chosen
+        self._set(keys=tuple(keys))
+
+    @Property(int, notify=changed)
+    def key(self):
+        return self._key_index(0)
+
+    @key.setter
+    def key(self, value):
+        self._set_key(0, value)
+
+    @Property(int, notify=changed)
+    def secondKey(self):
+        return self._key_index(1)
+
+    @secondKey.setter
+    def secondKey(self, value):
+        self._set_key(1, value)
+
+    @Property(bool, notify=changed)
+    def hasKey(self):
+        """A mapping with no enable key is one nothing can switch on."""
+        return any(key is not None for key in self._motion()["keys"])
+
+    @Property(bool, notify=changed)
+    def holdMode(self):
+        """Whether the second enable key can be edited at all.
+
+        The blob's format only carries a change to it under Hold -- Flydigi's
+        writer assigns byte 7 inside that branch and re-emits what it read
+        otherwise -- so offering the control under Click would be offering one
+        that silently does nothing. Space Station reveals its second-key row on
+        the same condition.
+        """
+        return self._motion()["enable_type"] == mapping.MOTION_PRESS
+
+    @Property(str, notify=changed)
+    def strandedKey(self):
+        """A second enable key that is live and cannot be reached from here.
+
+        Empty unless the profile is on Click *and* byte 7 holds a key. That is
+        the factory's own state -- it ships with D-pad Up there -- and the pad
+        honours the byte on its own, measured with `tools/gyro-map-probe`. So
+        the page names it rather than showing a control that would not write.
+        """
+        if self.holdMode:
+            return ""
+        second = self._motion()["keys"][1]
+        return "" if second is None else key_label(second)
+
+    @Property(int, notify=changed)
+    def sensitivity(self):
+        return self._motion()["sensitivity"]
+
+    @sensitivity.setter
+    def sensitivity(self, value):
+        self._set(sensitivity=int(value))
+
+    @Property(int, notify=changed)
+    def deadZone(self):
+        return self._motion()["dead_zone"]
+
+    @deadZone.setter
+    def deadZone(self, value):
+        self._set(dead_zone=int(value))
+
+    @Property(str, notify=changed)
+    def useMode(self):
+        """Shown and not offered: it follows the target, as it does in theirs."""
+        return {mapping.MOTION_FPS: "FPS",
+                mapping.MOTION_RACER: "Racing"}.get(self._motion()["use_mode"], "")
+
+    def refresh(self):
+        self.changed.emit()
 
 
 @QmlElement
@@ -1055,6 +1243,7 @@ class ProfileModel(QObject):
         self._vibration = VibrationModel(self)
         self._triggers = TriggerModel(self)
         self._sticks = StickModel(self)
+        self._motion = MotionModel(self)
 
     # `config` is a plain attribute, not a Q_PROPERTY: MappingConfig is not a
     # QObject and has no business crossing into QML. The sub-models reach it
@@ -1086,6 +1275,10 @@ class ProfileModel(QObject):
     @Property(StickModel, constant=True)
     def sticks(self):
         return self._sticks
+
+    @Property(MotionModel, constant=True)
+    def motion(self):
+        return self._motion
 
     @Property(int, notify=cfgIdChanged)
     def cfgId(self):
@@ -1219,6 +1412,7 @@ class ProfileModel(QObject):
         self._vibration.refresh()
         self._triggers.refresh()
         self._sticks.refresh()
+        self._motion.refresh()
         self.markChanged()
 
     @Slot()
@@ -1332,4 +1526,5 @@ class ProfileModel(QObject):
         self._vibration.refresh()
         self._triggers.refresh()
         self._sticks.refresh()
+        self._motion.refresh()
         self.markChanged()

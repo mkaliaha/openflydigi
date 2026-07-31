@@ -54,6 +54,15 @@ def blank_blob(title="Profile"):
         extra = mapping.OFF_JOYSTICK_EXTRA + side * mapping.JOYSTICK_EXTRA_ENTRY
         blob[extra : extra + 12] = bytes(
             [0, 50, 62, 75, 87, 100, 112, 125, 137, 150, 0, 0])
+    # The motion block and its response curve, likewise off the hardware. The
+    # 0xFF fill would have parsed as a gyro mapped to nothing with both enable
+    # keys unset, which is tidier than the truth: the pad ships with Lt in the
+    # first enable-key byte and 0 -- D-pad Up -- in the second, and with the two
+    # sensitivity axes at different values. See docs/findings-profile-blob.md.
+    blob[mapping.OFF_MOTION : mapping.OFF_MOTION + 8] = bytes(
+        [0, 12, 0, 4, 25, 20, 0, 0])
+    blob[mapping.OFF_MOTION_CURVE : mapping.OFF_MOTION_CURVE
+         + mapping.MOTION_CURVE_ENTRY] = bytes([0, 63, 63, 127, 127, 127])
     # The macro page and its repeat intervals, as a real pad holds them: a
     # six-byte header of zeroes and 0xFF behind it, and 3 -- 30 ms -- in all
     # five interval slots. Read off the hardware, like the curves above; the

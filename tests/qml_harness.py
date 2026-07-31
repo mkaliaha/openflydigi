@@ -305,6 +305,21 @@ class PadProbe(QObject):
         config = mapping.MappingConfig(self._pad.blobs[cfg_id])
         return bool(config.joystick_shape(side)["circular"])
 
+    @Slot(int, result="QVariantMap")
+    def motionOf(self, cfg_id):
+        """The gyro block as the pad now holds it.
+
+        Handed over whole rather than one field at a time: the target, the mode
+        and the two enable keys are written together, and a case that checked
+        only the one it moved would miss the others going with it.
+        """
+        motion = mapping.MappingConfig(self._pad.blobs[cfg_id]).motion()
+        return {"target": motion["target"], "useMode": motion["use_mode"],
+                "enableType": motion["enable_type"],
+                "key": motion["keys"][0] or "", "key2": motion["keys"][1] or "",
+                "sensitivity": motion["sensitivity"],
+                "deadZone": motion["dead_zone"]}
+
     @Slot(int, result=int)
     def remapCount(self, cfg_id):
         return len(mapping.MappingConfig(self._pad.blobs[cfg_id]).remapped())

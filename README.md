@@ -75,6 +75,9 @@ tools/flydigi-mapping backup 0 profile0.bin      # back up before writing; this 
 tools/flydigi-mapping set 0 m1 a --save          # --save commits to flash
 #   --turbo N repeats the target while the key is held, --turbo-toggle latches it instead
 tools/flydigi-mapping macro-record 0 m1 --seconds 8 --save
+tools/flydigi-mapping gyro 0 right --key m1 --sensitivity 60
+#   the pad drives the stick itself, so it works in any game; --key is required because
+#   the factory leaves two buttons in the enable-key bytes and neither was chosen
 
 # the pad's own device settings
 tools/flydigi-settings show             # the whole block, one read
@@ -144,22 +147,22 @@ tools/apex5-setup install-rules         # the one subcommand that needs root
 | `tools/flydigi-dsx` | DSX listener, UDP 127.0.0.1:7878 |
 | `tools/flydigi-forza` | Forza Data Out telemetry through the rule engine |
 | `tools/flydigi-haptics` | Apex 5 rumble driven from a DualSense's haptic-audio sink |
-| `tools/flydigi-mapping` | profiles: `list`/`show`/`set`/`clear`/`rename`/`apply`, `backup`/`restore`, macro record and bind |
+| `tools/flydigi-mapping` | profiles: `list`/`show`/`set`/`clear`/`rename`/`apply`, `backup`/`restore`, macro record and bind, `gyro` |
 | `tools/flydigi-monitor` | trigger effects from game memory, per Flydigi's XGameMonitor configs |
 | `tools/flydigi-run` | Steam launch wrapper for one named game |
 | `tools/flydigi-screen` | the 160x80 screen: pictures, animations, always-on, status bar |
 | `tools/flydigi-settings` | the pad's device settings block: sleep timer, quick-switch, stick debounce/rebound/auto-calibration, precision, sensitivity, status bar, always-on, restart. Every write but `restart` is followed by a read of the whole block |
 | `tools/hid_probe.py` | what the pad exposes on the HID bus |
 
-The other eleven files in `tools/` are not day-to-day: seven hardware probes, the offline
+The other twelve files in `tools/` are not day-to-day: eight hardware probes, the offline
 simulators `forza-simulate` and `haptics-simulate`, `gen_ds5_usb.py` (regenerates
 `flydigi/ds5_usb.py` from descriptors captured off a real DualSense) and `generate-qmltypes`
 (GUI build tooling). They are listed individually in [PROGRESS.md](PROGRESS.md#repo-contents).
 
 ## Desktop app
 
-Profiles, remapping, macros, sticks, vibration, triggers, lighting, device settings, the screen
-and per-game routes — plus a **DualSense** switch that turns the virtual-DualSense relay on for
+Profiles, remapping, macros, sticks, the gyro, vibration, triggers, lighting, device settings, the
+screen and per-game routes — plus a **DualSense** switch that turns the virtual-DualSense relay on for
 the whole system, and a **Setup** page for the daemon's unit, autostart, menu entry and udev
 rules. QML on Kirigami:
 

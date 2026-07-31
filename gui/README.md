@@ -90,7 +90,7 @@ icon.
     worker.py         device access, on its own thread
     i18n.py           the i18n*() shim the engine needs -- PySide6 has no KLocalizedContext
     models/           view-agnostic state -- no QtWidgets, no QtQuick
-    qml/              Main.qml, pages/ (twelve), components/ (six)
+    qml/              Main.qml, pages/ (thirteen), components/ (six)
     requirements.txt  what the runtime must provide -- documentation, not a pip file
 
 QML constructs `App`, so opening the device is a separate `start()`. Polling is
