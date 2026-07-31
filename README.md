@@ -44,16 +44,31 @@ and the per-route tier table, [docs/](docs/) the long-form findings behind each 
   `flatpak-spawn --host`, and inside a distrobox through `host-spawn` or `distrobox-host-exec`,
   since pkexec cannot reach polkit from in there.
 
-**Every Flydigi pad opens the same way.** `find_device` matches on the vendor id and the vendor
-collection's report-descriptor prefix, which every model in the range shares, so a Vader 4 Pro
-opens exactly like an Apex 5. Profile and settings writes are therefore gated on a command-1
-`DeviceType` read that refuses anything but an Apex 5 (`k5`). `flydigi-mapping`,
-`flydigi-settings` and the app call that gate once per connection, so their reads are refused
-too; the trigger-effect and screen tools are ungated, and `flydigi/` itself gates nothing —
-the caller decides. With two Flydigi pads attached, nothing chooses between them by itself:
-`find_device` returns the first match in sorted-by-name `/dev/hidraw*` order (`hidraw10` before
-`hidraw2`). `Controller(path=...)` takes a node, but of the day-to-day tools only
-`tools/flydigi_cmd.py` takes a `--device` path.
+**Every current Flydigi pad opens the same way.** `find_device` matches on the vendor id, the
+product id's top nibble and the vendor collection's report-descriptor prefix, which every pad of
+the `5a a5` generation shares — a Vader 5 or an Apex 6 would open exactly like an Apex 5.
+Nothing older can reach it at all: `IsOldProtocol()` is `VendorId != 0x37D7`, so an Apex 3/4, a
+Vader 3/4 or a Direwolf is an XInput device with no HID vendor collection, cabled or on its
+dongle alike, and only Windows sees HID there because `xusb22` synthesises it. Profile and
+settings writes are therefore gated on a command-1 `DeviceType` read that refuses anything but an
+Apex 5 (`k5`).
+`flydigi-mapping`, `flydigi-settings` and the app call that gate once per connection, so their
+reads are refused too; the trigger-effect and screen tools are ungated, and `flydigi/` itself
+gates nothing — the caller decides. With two Flydigi pads attached, nothing chooses between
+them by itself: `find_device` returns the first match in sorted-by-name `/dev/hidraw*` order
+(`hidraw10` before `hidraw2`). `Controller(path=...)` takes a node, but of the day-to-day tools
+only `tools/flydigi_cmd.py` takes a `--device` path.
+
+**The nibble is what keeps the charging dock out.** Flydigi number their device families in the
+top nibble of the product id — controllers `2`, chargers `6`, coolers `1` — and their three
+`HidManager`s key on exactly that. It matters here because the CD2 dock is vendor `37d7` too
+*and* its report descriptor also begins `06 a0 ff`: for as long as those two were the whole
+test, `find_device` returned the dock whenever the dock's node sorted first, which happens
+every time the pad sleeps and leaves the USB bus. Measured on this desk, with the pad asleep,
+it returned the dock. Pad-framed packets carry report id `0x03` where the dock expects `0x00`,
+so the dock ignores them rather than acting on them — the damage was confusion, not corruption,
+but the tools sat there getting silence from a device that was wide awake.
+`tools/flydigi-charger` drives the dock deliberately, and picks between docks with `--uid`.
 
 ## Quick start
 
@@ -118,7 +133,9 @@ sudo tools/flydigi-ds5-usbip --haptics --motors
 #   set per-game: SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501 %command%
 #   start the game *after* this
 #   the Apex 5 may sleep and wake as it likes: it leaves the USB bus when it
-#   sleeps, but the virtual DualSense stays attached and the game keeps it
+#   sleeps, but the virtual DualSense stays attached, so the game should keep
+#   it. Covered by tests/test_relay.py against a fake bus; not yet confirmed
+#   in a real game -- see PROGRESS.md
 tools/flydigi-ds5                       # the same without haptics, no root,
 #                                         for a machine with no vhci-hcd
 
@@ -127,6 +144,18 @@ tools/flydigi-screen status
 tools/flydigi-screen show photo.jpg     # ~25s; the pad reboots itself after
 tools/flydigi-screen animate spin.gif   # ~25s per frame, so keep it short
 tools/flydigi-screen off                # blank the panel -- Space Station cannot
+
+# the CD2 charging dock -- a separate device, not part of the pad
+tools/flydigi-charger show              # firmware, uid, the four switches, the lighting header
+tools/flydigi-charger light pulse       # 162 LEDs, 50 frames, ~5s to upload
+tools/flydigi-charger light breath --colour ff0055 --brightness 80
+tools/flydigi-charger light rainbow --direction left
+tools/flydigi-charger lighting-sync on  # keep the dock in step with the pad
+#   the dock has no effect generator: a mode is 24 kB of frames computed here and uploaded,
+#   which is why `light` takes seconds rather than being one write
+#   `default` (the Flydigi logo) is not offered -- Space Station does not compute that one
+#   either, it uploads a file its installer ships and this repository does not have it
+tools/flydigi-charger list              # every dock on the bus; --uid picks one
 
 # system setup: udev rules, the daemon's unit, autostart, the menu entry
 tools/apex5-setup                       # the checklist
@@ -141,6 +170,7 @@ tools/apex5-setup install-rules         # the one subcommand that needs root
 | `tools/fetch-configs` | Flydigi's game list, the Forza rule config, the monitor configs, the mod archives |
 | `tools/flydigi_cmd.py` | one-off vendor commands: device info, trigger effects, rumble |
 | `tools/flydigi-auto` | which games the daemon may act on by itself, and which route it takes |
+| `tools/flydigi-charger` | the CD2 charging dock: `show`, `list`, its four switches, and `light <mode>` over the eight computable effects |
 | `tools/flydigid` | daemon: detect a running game, apply its route, reset on exit |
 | `tools/flydigi-ds5` | virtual DualSense over uhid |
 | `tools/flydigi-ds5-usbip` | virtual DualSense over usbip + vhci, with haptic audio |

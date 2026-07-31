@@ -16,8 +16,13 @@ remapping, macros, sticks, the gyro mapped to a stick, vibration, per-profile tr
 pad's own device settings, lighting, the screen, the game list and its own setup. The daemon detects
 a running game and applies its route unattended.
 
-**Left to build:** the charging dock, an interactive crop for the Screen page, and the smaller
-pieces under What's next. Supporting an older pad is [ruled out](#ruled-out).
+The **CD2 charging dock** is driven too, as a device of its own: its four switches and all eight
+of its computable lighting effects, from `tools/flydigi-charger`. There is no GUI page for it
+yet, and no custom images or animations.
+
+**Left to build:** a dock page in the app and the dock's image/animation path, an interactive
+crop for the Screen page, and the smaller pieces under What's next. Supporting an older pad is
+[ruled out](#ruled-out).
 
 | Tier | Mechanism | Games | State |
 |---|---|---|---|
@@ -46,9 +51,13 @@ true — `gui/` may import `flydigi/` and never the reverse, and nothing Flydigi
 
 Roughly in order of value.
 
- 1. **The charging dock (`cd2`).** Blocked only on decompiling `Flydigi.ChargerSdk.dll` /
-    `Flydigi.CoolerSdk.dll`. It is a *lighting* problem, not a screen one — 162 addressable LEDs
-    over the ordinary config path, and `cd2_led_sync` keeps it in step with the pad.
+ 1. **A dock page in the app, and the dock's custom images.** The backend is done and measured;
+    what is left is a Kirigami page over `flydigi/charger.py`, and the image/GIF path — one
+    pixel sampled per LED onto the 162-LED wedge, one frame per GIF frame. That decoding cannot
+    live in the zero-dependency backend, so it belongs in `gui/`, where Qt already reads both
+    formats, with `flydigi/` taking colour arrays. The dock's `default` mode stays out of reach
+    until someone copies `Configs/Charger/cd2/default/default_mapping_0.dat` off a Windows
+    install: Space Station does not compute that one either, it uploads that file.
     → [docs/findings-other-devices.md](docs/findings-other-devices.md)
  2. **An interactive crop for the Screen page.** Everything else there is done.
  3. **Third-party mode: optional polish.** Command 17 here is byte-identical to Space Station's.
@@ -94,7 +103,10 @@ ships with `Lt` in that byte, and the enable key is *not* swallowed — the prob
 movement against `BTN_TL` arriving on evdev throughout, so a digital button goes on working while it
 gates the gyro. A trigger is an axis rather than a button, and one that went digital whenever gyro
 mapping was on would be the pad's own factory setting doing it. One window of
-`tools/gyro-map-probe` with `Lt` as the key, watching `ABS_Z` through a slow pull, settles it.
+`tools/gyro-map-probe` cannot be pointed at `Lt` as it stands: the gate keys are hardcoded to LB
+and RB, and every entry in `WINDOWS` is written `gate="lb"`, precisely because evdev reports those
+as buttons. Settling it needs a **new window** that writes `Lt` as the enable key and watches
+`ABS_Z` through a slow pull, not a run of an existing one.
 
 ## What's done
 
@@ -118,6 +130,7 @@ All command factories are decompiled under `decompiled/Flydigi.ControllerSdk/`.
 | Virtual DualSense (tier 4) | — | `flydigi/uhid.py`, `tools/flydigi-ds5` — [detail](docs/findings-haptics.md) |
 | Virtual DualSense over USB (tier 4b) | — | `flydigi/usbip.py`, `tools/flydigi-ds5-usbip` — adds haptic audio |
 | DualSense mode as one switch for the whole system, not a per-game route | — | `flydigi/dsmode.py`, the app's DualSense page |
+| The CD2 charging dock | heartbeat 1, nickname 2/24, uid 4, switches 17/18/19/25, LED read 20, LED write 97/98, RGB write 22/23 | `flydigi/charger.py`, `tools/flydigi-charger` — **measured on the dock**: firmware 0.0.3.9, the reply checksum position predicted correctly on all five reads (the command-97 ack is the one exception, a slot later), and its eight computable effects reproduced closely enough that Space Station's own Breath and this port's were indistinguishable side by side — [detail](docs/findings-other-devices.md) |
 
 **The vibration bind is live state, and is re-applied when the pad comes back.** It is command 82
 with no blob write, so `tools/flydigid` watches for the pad leaving the bus mid-game and re-applies
@@ -144,9 +157,10 @@ is read once at start, so it has to be set *before* DS mode is turned on.
 **A sleeping Apex 5 no longer ends the session.** The pad leaves the USB bus when it sleeps, and
 both relays used to go with it — the first `ENODEV` off the evdev node fell through to the cleanup
 that detaches the virtual pad, so putting the pad down during a cutscene cost the game its
-controller. It cost more than that: a game binds its audio stream to the DualSense once, so a
-DualSense that goes away and comes back is a DualSense with no haptics for the rest of the run,
-even though the input works again. `flydigi/relay.py`'s `PadLink` holds the physical pad as
+controller. Haptics are the reason to expect it cost more than the input: a game opens its audio
+stream to the DualSense at launch, so a DualSense that goes away and comes back would plausibly
+come back mute even once the input works again. That consequence is reasoning from how the stream
+is opened, not something measured here. `flydigi/relay.py`'s `PadLink` holds the physical pad as
 something that may be absent — a failed read means "gone", not "fatal", and the nodes are looked
 for again once a second under whatever numbers they come back as. Meanwhile the virtual pad stays
 attached, fed a released state so a pad that vanished mid-press does not leave a button held, and
@@ -180,13 +194,15 @@ one would fail exactly where the app runs — in the `apex-dev` distrobox.
   * **Steam lists the pad twice** with the third-party flag on, and after a reconnect stops labelling
     it "Apex 5" while it keeps working on the native driver. Neither is fixable from here.
     → [docs/findings-steam.md](docs/findings-steam.md)
-  * **The guard refuses the wrong pad; it cannot pick the right one.** `find_device` returns the
-    first `/dev/hidraw*` in sorted-by-name order carrying the vendor prefix — `hidraw10` before
+  * **The guard refuses the wrong pad; it cannot pick the right one.** Within a device family,
+    `find_device` returns the first `/dev/hidraw*` in sorted-by-name order — `hidraw10` before
     `hidraw2` — and only `tools/flydigi_cmd.py` surfaces the `Controller(path=...)` override, as
-    `--device`. Two pads with that prefix get whichever the sort reaches first, and
-    `identity.require` turns that into a refusal rather than a wrong write. A Vader 4 Pro on its
-    dongle never gets that far, having no HID interface at all — but an Apex 4 or a cabled Vader
-    might, so the guard is not decoration.
+    `--device`. Two pads get whichever the sort reaches first, and `identity.require` turns that
+    into a refusal rather than a wrong write. The pads that can collide are the other `5a a5`
+    ones — a Vader 5 or an Apex 6 — since `IsOldProtocol()` is `VendorId != 0x37D7` and nothing
+    older carries a HID vendor collection on Linux at all, cabled or on a dongle. The dock is a
+    solved case rather than an instance of this one: families are told apart by the product id's
+    top nibble, and `tools/flydigi-charger --uid` picks between docks.
     → [docs/findings-other-devices.md](docs/findings-other-devices.md)
 
 ## The desktop app
@@ -395,9 +411,11 @@ argument, the hardware proof of 166, and the QML testing traps are in
 
   * **Older pads are ruled out by the pad, not by the protocol.** `IsOldProtocol()` is
     `VendorId != 0x37D7`: everything before this generation speaks an older dialect of the same
-    protocol — same 840-byte blob and parsers, but a 15-byte `a5 <cmd> <sub>` frame, renumbered
-    commands, replies at offset 14 of the gamepad report, and 10-byte blob packets. Measured on a
-    Vader 4 Pro, and transcribable rather than unknown. It stays unbuilt because that pad has
+    protocol — same blob and parsers, but a 15-byte `a5 <cmd> <sub>` frame, renumbered commands,
+    replies at offset 14 of the gamepad report, and 10-byte blob packets. Measured on a Vader 4
+    Pro, and transcribable rather than unknown. (Which blob *length* that pad carries was not
+    pinned down: the first packet reports either 79 or 84 packets, so 790 or 840 bytes, and both
+    are versions of the same layout.) It stays unbuilt because that pad has
     neither adaptive triggers nor a screen, and because reaching it takes interface 0 from `xpad`
     for every operation. Only an Apex 5 and a Vader 4 Pro are available to test with.
     → [docs/findings-other-devices.md](docs/findings-other-devices.md)

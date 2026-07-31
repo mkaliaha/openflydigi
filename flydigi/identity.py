@@ -4,11 +4,31 @@
 
 """Which Flydigi device is on the other end, and what it is allowed to be sent.
 
-**`find_device` cannot tell two Flydigi pads apart.** It matches on the vendor id
-and the vendor collection's report-descriptor prefix, and every model in the
-range shares both -- so a Vader 4 Pro plugged in beside an Apex 5, or instead of
-it, opens exactly the same way. Nothing above that layer noticed, which meant an
-Apex 5 profile could be written into a Vader's flash with no error anywhere.
+**`find_device` cannot tell two Flydigi pads apart.** It narrows to the
+controller family -- vendor id, the product id's top nibble, and the vendor
+collection's report-descriptor prefix -- and any pad that publishes a vendor
+node matches all three, so a second one plugged in beside an Apex 5, or instead
+of it, opens exactly the same way. Nothing above that layer notices, which would
+mean an Apex 5 profile written into another pad's flash with no error anywhere.
+
+**Which pads those are is a shorter list than it looks.** `IsOldProtocol()` is
+`VendorId != 0x37D7`, so only the `5a a5` generation carries this vendor id at
+all -- Apex 5, Apex 6, Vader 5. Everything older is an XInput device, `045e:028e`
+with no HID vendor collection, cabled or on its dongle alike; Windows reaches
+those through the HID front end `xusb22` synthesises, and nothing on Linux can
+see them. Measured on a Vader 4 Pro.
+
+So the device that would open exactly like an Apex 5 and take an Apex 5 profile
+into its flash is a **Vader 5 or an Apex 6**, not a Vader 4. That is why this
+gate is not decoration, and why `SUPPORTED` names a code rather than trusting
+the transport.
+-> docs/findings-other-devices.md
+
+The nibble separates *kinds* of device, never models: it is what keeps the CD2
+charging dock -- same vendor, same descriptor prefix -- out of a pad handle, and
+it does nothing at all about two pads. That is this module's job and it always
+was. See `flydigi/device.py` for the split and `flydigi/charger.py:require` for
+the dock's own version of the gate below.
 
 The only thing that distinguishes them is a **command-1 read**: `DeviceType` is a
 number per SKU, and Flydigi's own `FlydigiControllerFactory` dispatches on it.

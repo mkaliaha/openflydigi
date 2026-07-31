@@ -37,6 +37,42 @@ REPORT_ID_OUT = 0x03
 # Vendor collection: usage page 0xffa0. Identical on wired and dongle.
 VENDOR_DESC_PREFIX = b"\x06\xa0\xff"
 
+# **The vendor id and the descriptor prefix do not identify a pad.** The CD2
+# charging dock is 37d7 too, and its report descriptor also begins 06 a0 ff, so
+# for as long as this matched on those two alone it would hand a caller the
+# dock. Measured here: with the pad asleep -- which takes it off the USB bus
+# entirely, leaving no pad node at all -- `find_device()` returned the dock's
+# /dev/hidraw7, and every ungated tool would have written pad packets at it.
+#
+# The sort order is a second, narrower way in rather than the main one. hidraw
+# hands out the lowest free minor, so a pad that sleeps and returns reclaims
+# the minors it freed and lands *below* a dock plugged in after it -- observed
+# twice this session. What it takes to lose the race is the dock being attached
+# first, or the string sort putting "hidraw10" before "hidraw7".
+#
+# What tells them apart is the product id's top nibble, which is what Flydigi
+# key on as well: `ControllerHidManager` takes `pid >> 12 == 2`,
+# `ChargerHidManager` takes `pid >> 12 == 6` and `CoolerHidManager` takes
+# `pid & 0xff00 == 0x1000`. The three sets are disjoint, which is why Space
+# Station never had this problem. Their controller test carries a third clause,
+# `pid >> 8 != 8`, that cannot fire once the nibble is 2; it is not reproduced.
+#
+# The nibble, not the whole id, on purpose. `0x2501` is this pad and it is the
+# only Flydigi product id that appears anywhere in the decompiled source, so
+# hard-coding it would narrow this to one SKU on no evidence that the others
+# differ. Matching the nibble keeps the old behaviour -- open any pad, and let
+# `identity.require` refuse the wrong one on its device type -- while no longer
+# opening something that is not a pad at all.
+FAMILY_PAD = 2
+FAMILY_DOCK = 6
+# `CoolerHidManager` tests `pid & 0xff00 == 0x1000`, which is this nibble with
+# an 8-bit model space under it. Named so a message can say what was looked
+# for; nothing here drives one.
+FAMILY_COOLER = 1
+
+FAMILY_NAMES = {FAMILY_PAD: "controller", FAMILY_DOCK: "charging dock",
+                FAMILY_COOLER: "cooler"}
+
 CMD_GET_INFO = 0x01
 CMD_RUMBLE = 0x12
 CMD_SET_FORCE_TRIGGER = 81
@@ -82,7 +118,66 @@ def checksum(buf, start, end):
     return sum(buf[start:end]) & 0xFF
 
 
-def find_device():
+def hid_ids(node):
+    """(vendor, product) for a hidraw node, or None if it declares neither.
+
+    From `HID_ID=<bus>:<vendor>:<product>` in the node's uevent, all three
+    zero-padded to eight hex digits.
+    """
+    try:
+        with open(f"/sys/class/hidraw/{node}/device/uevent") as fh:
+            for line in fh:
+                if line.startswith("HID_ID="):
+                    parts = line.strip().split("=", 1)[1].split(":")
+                    if len(parts) == 3:
+                        return int(parts[1], 16), int(parts[2], 16)
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def hid_name(node):
+    """`HID_NAME` for a hidraw node, or "". The product string, as the kernel
+    saw it -- "Flydigi APEX5 Wireless", "flydigi Flydigi CD2"."""
+    try:
+        with open(f"/sys/class/hidraw/{node}/device/uevent") as fh:
+            for line in fh:
+                if line.startswith("HID_NAME="):
+                    return line.strip().split("=", 1)[1]
+    except OSError:
+        pass
+    return ""
+
+
+def find_nodes(family=FAMILY_PAD):
+    """Every Flydigi command interface of one device family, in node order.
+
+    The family nibble picks the kind of device. The descriptor prefix then
+    picks the vendor collection, and is applied **to pads only** -- which is
+    where the reference applies it and where it is needed: a pad publishes a
+    keyboard/mouse node under the same ids, and only its second interface
+    carries `06 a0 ff`. `ChargerHidManager.FindSpecialHidDevice` tests the
+    vendor id and the nibble and nothing else, so requiring a usage page of a
+    dock would be this project inventing a condition Flydigi do not have, and
+    would silently hide any dock that ordered its collections differently.
+    """
+    for path in sorted(glob.glob("/dev/hidraw*")):
+        node = os.path.basename(path)
+        ids = hid_ids(node)
+        if ids is None or ids[0] != VID or (ids[1] >> 12) != family:
+            continue
+        if family != FAMILY_PAD:
+            yield path
+            continue
+        try:
+            with open(f"/sys/class/hidraw/{node}/device/report_descriptor", "rb") as fh:
+                if fh.read(3) == VENDOR_DESC_PREFIX:
+                    yield path
+        except OSError:
+            continue
+
+
+def find_device(family=FAMILY_PAD):
     """Return the hidraw path of the Flydigi vendor command interface.
 
     Works in both wired and dongle mode -- the node number changes but the
@@ -92,21 +187,25 @@ def find_device():
     it leaves the USB bus. `usb 3-4: USB disconnect` with no matching connect,
     and nothing under /dev/hidraw* carrying the vendor id -- indistinguishable
     from an unplugged cable at this level, which is why the message names both.
+
+    With two devices of the same family attached this still returns whichever
+    node sorts first, and `identity.require` is still what refuses the wrong
+    one. What it no longer does is return a *different kind* of device.
     """
-    for path in sorted(glob.glob("/dev/hidraw*")):
-        node = os.path.basename(path)
-        try:
-            with open(f"/sys/class/hidraw/{node}/device/uevent") as fh:
-                if f"{VID:04X}" not in fh.read().upper():
-                    continue
-            with open(f"/sys/class/hidraw/{node}/device/report_descriptor", "rb") as fh:
-                if fh.read(3) == VENDOR_DESC_PREFIX:
-                    return path
-        except OSError:
-            continue
+    for path in find_nodes(family):
+        return path
+    if family == FAMILY_PAD:
+        raise DeviceNotFound(
+            "no Flydigi controller found -- press a button to wake the pad, "
+            "since it leaves the USB bus entirely when it sleeps, or check "
+            "the cable")
+    if family == FAMILY_DOCK:
+        raise DeviceNotFound(
+            "no Flydigi charging dock found -- check that it is plugged into "
+            "the host and not just into power")
     raise DeviceNotFound(
-        "no Flydigi controller found -- press a button to wake the pad, since "
-        "it leaves the USB bus entirely when it sleeps, or check the cable")
+        f"no Flydigi {FAMILY_NAMES.get(family, f'device of family {family}')} "
+        f"found")
 
 
 def build(cmd_id, payload=b""):

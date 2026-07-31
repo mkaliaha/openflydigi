@@ -26,6 +26,14 @@
 # Apex 5 vendor command interface (trigger effects, rumble, config).
 KERNEL=="hidraw*", ATTRS{idVendor}=="37d7", ATTRS{idProduct}=="2501", TAG+="uaccess"
 
+# CD2 charging dock: its switches and its lighting. A separate product id
+# rather than a second interface on the pad, and a separate rule for the same
+# reason -- the two are unrelated devices that happen to share a vendor.
+# Not needed on Aurora/Fedora, where the node already comes up 0666; the pad's
+# rule above is not needed there either, and both are here for distributions
+# that are stricter.
+KERNEL=="hidraw*", ATTRS{idVendor}=="37d7", ATTRS{idProduct}=="6001", TAG+="uaccess"
+
 # The screen chip's bootloader. After command 31 the pad leaves the HID bus and
 # comes back as a USB CDC serial device under these ids -- not Flydigi's, and
 # not anyone's: ffaa:5555 is a placeholder the chip vendor shipped. The node

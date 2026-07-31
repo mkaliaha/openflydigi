@@ -18,6 +18,7 @@ and the serial screen upload behind `31` (§8d). §7 has the detail, §5 what is
 | 7 | Apex 5 behaviour on the wire |
 | 8 | The screen — image format (8a), the HID picture family (8b), settings (8c), the serial upload (8d), recovery from command 31 (8e) |
 | 9 | Stored configs — the packetised blob transfer |
+| 10 | The CD2 charging dock — framing (10a), commands (10b), the LED transfer (10c), why it plays frames (10d) |
 
 ---
 
@@ -861,3 +862,103 @@ its own structs at load time, while the key table beside it is read as it stands
 hardware — four macros sat silent while an ordinary remap beside them worked, played after a 162,
 and a fifth written and applied with no 166 at all played as well. So 166 decides whether macros
 survive a sleep, not whether they run.
+
+---
+
+## 10. The CD2 charging dock
+
+A different device on the same desk, not part of the pad: **`37d7:6001`**, one HID interface, two
+64-byte interrupt endpoints, a 34-byte report descriptor with one 64-byte input report, one 64-byte
+output report, usage page `0xffa0` and **no report ids**. Source: `Flydigi.ChargerSdk.dll`,
+decompiled the same way as the rest. Measured on firmware **0.0.3.9**, charger type 0.
+
+### 10a. Framing
+
+The `5a a5` envelope of §2, with report id `0x00` instead of `0x03` and the reply checksum one
+slot earlier than the request's:
+
+```
+request   [0] 0x00   [1] 0x5A  [2] 0xA5  [3] cmd  [4] len  [5..] payload
+          checksum at [3 + len],  8-bit sum over [3, 3 + len)
+reply     [0] 0x5A   [1] 0xA5   [2] cmd  [3] len  [4..] payload
+          checksum at [2 + len],  8-bit sum over [2, 2 + len)
+```
+
+`len` counts `[3]` and `[4]` themselves: `len = 2 + len(payload)`. A command buffer is 32 bytes;
+the two data-pack commands use 64.
+
+The reply position was checked against the five reads below and predicted the byte the dock sent in
+each. The command-97 ack is the one exception seen, placing it at `[3 + len]`. Flydigi validate no
+reply checksum anywhere — `.Crc(` appears only on outgoing buffers, and nothing in `Flydigi.Basic`
+or `Flydigi.Hid` sums received bytes. What matches a reply to its command is `IsAck`, overridden
+fourteen times as `data[2] == CommandId()` and called from `HidCommunicationProtocol:71`;
+`ParseAckData` does no matching, it only parses fields. So a caller should match on the command
+byte and confirm writes by reading back.
+
+Measured: a **short output report is accepted**. 32-, 64- and 65-byte writes of the same heartbeat
+drew identical replies.
+
+Measured: **a pad-framed packet is ignored.** Report id `0x03` shifts the magic by one byte, and the
+dock answered nothing — twice, at two widths, against a correctly-framed control that answered every
+time. This is the only thing that made the old `find_device` picking the dock survivable.
+
+### 10b. Commands
+
+| id | Direction | Payload | Notes |
+|---|---|---|---|
+| 1 | read | — | heartbeat: type `[6]`, chip `[15]&0xF`, firmware `[16]`,`[17]` as packed nibbles, then the four switches at `[18]`..`[21]` |
+| 2 | read | — | nickname, present only when `[3] > 4`; the slice `[6 : 6+[3]-3]` runs one byte long |
+| 4 | read | — | uid, 13 bytes at `[6]`..`[18]` |
+| 17 | write | enable | sleep when charging ("Intelligent start") |
+| 18 | write | enable | lighting sync |
+| 19 | write | enable | close with system |
+| 20 | read | — | LED header: mode `[4]`, brightness `[5]`, period `[6]`, direction `[7]`, colour count `[8]`, colours from `[9]`. **Never returns frames** |
+| 22 / 23 | write | start / pack | single-frame RGB write. The host path is wired end to end — `ChargerRepository.UpdateFrame:551` → `WriteRgbConfig`, reached from IPC 24577 — but no renderer control sends it, so it is unreachable from Space Station's UI |
+| 24 | write | name | nickname — and Flydigi's builder puts its checksum at a fixed `[6]`, corrupting anything longer than one character |
+| 25 | write | enable | power display |
+| 97 / 98 | write | start / pack | the LED config, below |
+| 175 | write | — | reset mapping config; Space Station's own "restore defaults" does not send it |
+| 224 | write | — | firmware upgrade mode |
+| 254 | write | type | rewrite the device type |
+| **239** | **unsolicited** | — | pushed roughly once a second: `[7]` a controller is docked, `[8]` its battery |
+
+Note the read at 20 and the write at 97/98 **transpose their fields**:
+
+```
+write   frameCount, period, brightness, mode, direction, colourCount, palette…, frames…
+read    mode, brightness, period, direction, colourCount, palette…
+```
+
+### 10c. The LED config transfer
+
+`97` starts it — payload `0x0A, startIdx>>8, startIdx, nPkts>>8, nPkts`, `len` 7 — and `98` carries
+the data in 50-byte packs: `len = packLen + 7`, then `nPkts>>8, nPkts, idx>>8, idx, packLen`, data
+from `[10]`, checksum at `[packLen + 10]`. The final pack is sent short, not padded. Every pack
+waits for its own ack; there is no inter-packet delay anywhere in Flydigi's stack.
+
+Flydigi advertise `len // 50 + 1` packs while sending `ceil(len / 50)`. The two differ exactly when
+the blob divides by 50, and there they promise the dock a pack that never arrives — a 4-frame custom
+animation is 1950 bytes, 39 packs against an advertised 40. `flydigi/charger.py` sends the true
+count.
+
+### 10d. The dock plays frames; it has no effect generator
+
+The same architecture as the pad's lighting in §9, and measured the same way. A header naming
+`Breath` with the right colour, brightness and interval — all of which read back correctly — and
+`frameCount: 0` did **not** breathe: the dock went on playing its previous animation's leftovers,
+then a travelling band of wrong colours, then flat white. Frame memory is not cleared by a config
+write, so with no valid count the dock walks those bytes at offsets that are not multiples of three
+and every RGB triple rotates into its neighbour's channels. **The frame count in the header must
+match the frames actually sent.**
+
+The same mode with its computed frames played correctly, and a `Pulse` uploaded with 50 frames was
+indistinguishable from what the dock had been showing before anything here touched it.
+
+**162 LEDs**, 16 rows of 14, 15, 16, 15, 14, 13 … 3. A blob is 6 header bytes, 3 per palette
+colour and 486 per frame, so a fifty-frame effect is 24,306 bytes with an empty palette (gradient,
+rainbow), 24,309 with one colour (pulse) and 24,312 with two (wave-gradient, diagonal-flow) — 487
+packets in every case, about five seconds.
+
+The eight computable effects, their frame counts and the lattice the two geometric ones use are in
+[docs/findings-other-devices.md](docs/findings-other-devices.md). `Default` is not computable by
+anyone: Space Station uploads a file its installer ships.

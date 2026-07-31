@@ -49,28 +49,47 @@ def checksum(buf, start, end):
 
 
 def find_vendor_interface():
-    """Return hidraw path whose report descriptor has a 31-byte output report."""
-    candidates = []
+    """Return the pad's hidraw path: vendor id, family nibble, usage page.
+
+    **The family nibble is not optional and this tool learned that the hard
+    way.** The CD2 charging dock is 37d7 as well and its descriptor also begins
+    `06 a0 ff`, so matching those two alone hands this tool the dock whenever
+    the dock's node sorts first -- which happens every time the pad sleeps, as
+    it leaves the USB bus. Pad-framed packets carry report id 0x03 where the
+    dock expects 0x00, so the dock ignores them and the probe reports a pad
+    that answers nothing.
+
+    Flydigi's own three device managers separate their families this way:
+    controllers are `pid >> 12 == 2`, chargers 6, coolers `pid & 0xff00`
+    == 0x1000. This stays standalone rather than importing flydigi.device,
+    because a bench probe that still runs when the package is broken is the
+    point of it -- but the rule is the same one, and flydigi/device.py carries
+    the long version of this note.
+    """
     for path in sorted(glob.glob("/dev/hidraw*")):
-        uevent = f"/sys/class/hidraw/{os.path.basename(path)}/device/uevent"
+        node = os.path.basename(path)
         try:
-            with open(uevent) as fh:
-                text = fh.read()
-        except OSError:
+            with open(f"/sys/class/hidraw/{node}/device/uevent") as fh:
+                ids = None
+                for line in fh:
+                    if line.startswith("HID_ID="):
+                        parts = line.strip().split("=", 1)[1].split(":")
+                        if len(parts) == 3:
+                            ids = (int(parts[1], 16), int(parts[2], 16))
+                        break
+        except (OSError, ValueError):
             continue
-        if f"{VID:08X}" not in text.upper().replace("0000", "0000"):
-            if f"{VID:04X}" not in text.upper():
-                continue
+        if ids is None or ids[0] != VID or (ids[1] >> 12) != (PID >> 12):
+            continue
         # vendor-defined usage page 0xffa0 shows up as 06 a0 ff at descriptor start
-        desc_path = f"/sys/class/hidraw/{os.path.basename(path)}/device/report_descriptor"
         try:
-            with open(desc_path, "rb") as fh:
-                desc = fh.read()
+            with open(f"/sys/class/hidraw/{node}/device/report_descriptor", "rb") as fh:
+                desc = fh.read(3)
         except OSError:
             continue
-        if desc[:3] == b"\x06\xa0\xff":
-            candidates.append(path)
-    return candidates[0] if candidates else None
+        if desc == b"\x06\xa0\xff":
+            return path
+    return None
 
 
 def build(cmd_id, payload, report_id=DEFAULT_REPORT_ID):

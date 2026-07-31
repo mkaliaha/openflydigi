@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
+"""The CD2 charging dock: its four switches and its lighting.
+
+    tools/flydigi-charger show                     # everything it will say
+    tools/flydigi-charger list                     # every dock on the bus
+    tools/flydigi-charger light pulse              # a mode at its own defaults
+    tools/flydigi-charger light breath --colour ff0055 --brightness 80
+    tools/flydigi-charger light rainbow --direction left --interval 4
+    tools/flydigi-charger light close              # lights off, dock still on
+    tools/flydigi-charger lighting-sync on
+    tools/flydigi-charger power-display off
+
+**A mode is 24 kB of frames, not a mode byte.** The dock has no effect
+generator: it plays what it is given, so `light` computes every frame here and
+uploads the lot, 487 packets for a fifty-frame effect and about five seconds.
+Writing the byte alone leaves it cycling whatever was in its frame memory --
+measured, and it looks like corruption rather than like nothing happening.
+
+`default` is deliberately missing. Space Station does not compute that one
+either: it uploads a file its installer ships, and this repository does not
+have it. See flydigi/charger.py.
+"""
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from flydigi import charger, device  # noqa: E402
+
+SWITCHES = {
+    "sleep-when-charging": (
+        charger.set_sleep_when_charging, "sleep_when_charging",
+        'Flydigi call this "Intelligent start"'),
+    "lighting-sync": (
+        charger.set_led_sync, "led_sync",
+        "keep the dock's lighting in step with the pad's"),
+    "close-with-system": (
+        charger.set_close_with_system, "close_with_system",
+        "go dark when the host shuts down"),
+    "power-display": (
+        charger.set_show_animation_when_charging,
+        "show_animation_when_charging",
+        'Flydigi call this "Power Display"'),
+}
+
+# Space Station's dropdown order, minus `default` -- which needs a file we do
+# not have -- and minus `custom`, which needs frames from somewhere. `solid` is
+# in the firmware's enum and absent from their dropdown; it works and is
+# offered here, since "one colour, not moving" is an obvious thing to want.
+MODES = {
+    "close": charger.MODE_CLOSE,
+    "solid": charger.MODE_SOLID,
+    "breath": charger.MODE_BREATH,
+    "diagonal-flow": charger.MODE_DIAGONAL_FLOW,
+    "gradient": charger.MODE_GRADIENT,
+    "wave-gradient": charger.MODE_WAVE_GRADIENT,
+    "rainbow": charger.MODE_RAINBOW,
+    "pulse": charger.MODE_PULSE,
+}
+
+DIRECTIONS = {"right": charger.DIR_RIGHT, "left": charger.DIR_LEFT,
+              "down": charger.DIR_DOWN, "up": charger.DIR_UP}
+
+# Which modes actually read the fields, so the tool can say when one is inert
+# rather than silently accepting it. Straight off the generators.
+USES_COLOUR = {"solid": 1, "breath": 1, "pulse": 1,
+               "diagonal-flow": 2, "wave-gradient": 2}
+USES_DIRECTION = ("rainbow", "wave-gradient")
+
+
+def parse_colour(text):
+    value = text.strip().lstrip("#")
+    if len(value) != 6:
+        raise ValueError(f"{text!r} is not a six-digit hex colour")
+    return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def show(dock):
+    info = charger.read_info(dock)
+    print(f"dock          {dock.path}")
+    print(f"  firmware    {info['firmware'] or 'not reported'}")
+    print(f"  device type {info['device_type']}  chip {info['chip_type']}")
+    print(f"  uid         {charger.read_uid(dock)}")
+    print(f"  nickname    {charger.read_nickname(dock) or '(none set)'}")
+    print("  switches")
+    for name, (_, key, note) in SWITCHES.items():
+        print(f"    {name:<22} {'on' if info[key] else 'off':<4} -- {note}")
+
+    config = charger.read_led_config(dock)
+    colours = " ".join(f"#{r:02x}{g:02x}{b:02x}" for r, g, b in config.colours)
+    print("  lighting")
+    print(f"    mode                 {charger.MODE_NAMES.get(config.mode, config.mode)}")
+    print(f"    brightness           {config.brightness}")
+    print(f"    frame interval       {config.period}")
+    print(f"    direction            {charger.DIR_NAMES.get(config.direction, config.direction)}")
+    print(f"    colours              {colours or '(none)'}")
+    # The header is all a read returns. The frames are write-only, so what the
+    # dock is actually playing cannot be read back off it.
+    print("    frames               not readable -- command 20 answers the header only")
+
+    status = charger.read_status(dock)
+    if status is None:
+        print("  no status report in the last second")
+    elif status["docked"]:
+        print(f"  a controller is docked, battery {status['battery']}")
+    else:
+        print("  nothing docked")
+    return 0
+
+
+def listing():
+    docks = charger.list_docks()
+    if not docks:
+        print("no charging dock found", file=sys.stderr)
+        return 1
+    for entry in docks:
+        if entry["info"] is None:
+            print(f"{entry['path']}  {entry['product'] or '(unnamed)'}  "
+                  f"-- did not answer")
+            continue
+        model = charger.name_for(entry["info"]["device_type"])
+        name = entry["nickname"] or model or entry["product"] or "unknown"
+        if model is None:
+            name += f"  -- charger type {entry['info']['device_type']}, not a CD2"
+        print(f"{entry['path']}  {entry['uid']}  "
+              f"fw {entry['info']['firmware']}  {name}")
+    return 0
+
+
+def light(dock, args):
+    mode = MODES[args.mode]
+    config = charger.LedConfig(mode=mode)
+
+    if args.colour:
+        wanted = USES_COLOUR.get(args.mode, 0)
+        if wanted == 0:
+            print(f"{args.mode} ignores colour -- its generator does not read "
+                  f"one", file=sys.stderr)
+            return 2
+        if len(args.colour) > wanted:
+            print(f"{args.mode} uses {wanted} colour(s); {len(args.colour)} given",
+                  file=sys.stderr)
+            return 2
+        config.colours = [parse_colour(c) for c in args.colour]
+    if args.direction:
+        if args.mode not in USES_DIRECTION:
+            print(f"{args.mode} ignores direction -- only "
+                  f"{' and '.join(USES_DIRECTION)} read it", file=sys.stderr)
+            return 2
+        config.direction = DIRECTIONS[args.direction]
+    if args.brightness is not None:
+        low, high = charger.BRIGHTNESS_MIN, charger.BRIGHTNESS_MAX
+        if not low <= args.brightness <= high:
+            print(f"brightness is {low}..{high}", file=sys.stderr)
+            return 2
+        config.brightness = args.brightness
+    if args.interval is not None:
+        low, high = charger.MODE_PERIOD_RANGE.get(
+            mode, charger.PERIOD_RANGE_FALLBACK)
+        if not low <= args.interval <= high:
+            print(f"{args.mode}'s frame interval is {low}..{high} in Space "
+                  f"Station", file=sys.stderr)
+            return 2
+        config.period = args.interval
+
+    charger.generate(config)
+    packs = charger.write_led_config(dock, config)
+    print(f"{args.mode}: {len(config.frames)} frames, {packs} packets")
+    after = charger.read_led_config(dock)
+    print(f"dock now reports mode "
+          f"{charger.MODE_NAMES.get(after.mode, after.mode)}, "
+          f"brightness {after.brightness}, interval {after.period}")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="\n".join(__doc__.splitlines()[1:]))
+    ap.add_argument("--device", metavar="PATH",
+                    help="hidraw node, when more than one dock is attached")
+    ap.add_argument("--uid", help="pick a dock by uid, or a prefix of one")
+    sub = ap.add_subparsers(dest="cmd")
+
+    sub.add_parser("show", help="everything the dock will report")
+    sub.add_parser("list", help="every dock on the bus")
+
+    lit = sub.add_parser("light", help="set a lighting mode")
+    lit.add_argument("mode", choices=sorted(MODES))
+    lit.add_argument("--colour", "--color", action="append", metavar="RRGGBB",
+                     help="repeat for a mode that takes two")
+    lit.add_argument("--brightness", type=int, metavar="1-100")
+    lit.add_argument("--interval", type=int, metavar="N",
+                     help="frame interval; bigger is slower")
+    lit.add_argument("--direction", choices=sorted(DIRECTIONS))
+
+    for name, (_, _, note) in SWITCHES.items():
+        switch = sub.add_parser(name, help=note)
+        switch.add_argument("value", choices=("on", "off"))
+
+    args = ap.parse_args()
+    if not args.cmd:
+        ap.print_help()
+        return 2
+
+    try:
+        if args.cmd == "list":
+            return listing()
+        with charger.open_dock(args.device, args.uid) as dock:
+            # Once per connection, before anything writes -- and before `show`
+            # too, for the reason tools/flydigi-settings gates its own: another
+            # dock's fields printed under a CD2's names would mislead worse
+            # than a refusal. `list` stays ungated; an inventory should report
+            # what is there, including what it cannot drive.
+            charger.require(dock)
+            if args.cmd == "show":
+                return show(dock)
+            if args.cmd == "light":
+                return light(dock, args)
+            setter = SWITCHES[args.cmd][0]
+            setter(dock, args.value == "on")
+            # Read the whole block back rather than trusting the ack: a reply
+            # echoes the command id and nothing about what it changed, which
+            # is the same reason tools/flydigi-settings re-reads.
+            info = charger.read_info(dock)
+            state = "on" if info[SWITCHES[args.cmd][1]] else "off"
+            print(f"{args.cmd} is {state}")
+            return 0
+    except (device.DeviceNotFound, device.DeviceBusy,
+            charger.ProtocolError, charger.WrongDock) as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"bad value: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

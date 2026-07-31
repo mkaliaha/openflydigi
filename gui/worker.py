@@ -80,10 +80,14 @@ class DeviceWorker(QObject):
         place a handle is opened, and the device on the far end of an open
         handle does not change. One command-1 exchange per connection.
 
-        It is not paranoia: `find_device` matches on the vendor id and the
-        vendor collection's report descriptor, and every Flydigi pad shares
-        both -- so a Vader 4 Pro opens exactly like an Apex 5 and would take an
-        840-byte Apex 5 profile into its flash without a word.
+        It is not paranoia: `find_device` narrows to the controller family and
+        its vendor collection, and every pad of the `5a a5` generation matches
+        both -- a Vader 5 or an Apex 6 would open exactly like an Apex 5 and
+        take an 840-byte Apex 5 profile into its flash without a word. (Nothing
+        older can: those carry no Flydigi vendor id and no HID vendor
+        collection at all.) The family nibble tells kinds of device apart,
+        never models, so this check is still the only thing standing between
+        two pads.
         """
         if self._ctrl is None:
             ctrl = device.Controller()

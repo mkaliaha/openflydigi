@@ -86,25 +86,30 @@ only** — writing settings to the pad; driving impulse triggers during a game i
 wanted, since on Linux there is no XInput to carry it and almost nothing but Forza uses it.
 
 The device-type guard is `flydigi/identity.py`. It exists because `flydigi/device.py` matches on
-vendor id plus the `06 a0 ff` report-descriptor prefix, neither of which tells the models apart, so
-an Apex 5 config would otherwise go into a Vader 4. The module is `DEVICE_TYPES` (the table above,
+vendor id, the product id's top nibble and the `06 a0 ff` report-descriptor prefix — which
+together pick out *a Flydigi pad of the `5a a5` generation* and say nothing about which one, so
+an Apex 5 config would otherwise go into a **Vader 5 or an Apex 6**. Not into anything older:
+those carry no Flydigi vendor id in either transport and never reach this code at all. The
+module is `DEVICE_TYPES` (the table above,
 asserted by `tests/test_identity.py:50-60`), `PRODUCT_NAMES`, `code_for`, `name_for`,
 `identify(ctrl)` (one command-1 read, raising `WrongDevice` when the pad does not answer at all),
 `require(ctrl, *codes)` raising `WrongDevice`, and `SUPPORTED = ("k5",)`. Writes are gated; reads
 deliberately are not, since asking an unknown pad what it is cannot damage it. Driving another
 model deliberately means naming its code: `identity.require(ctrl, "f4")`. Three call sites gate —
 `tools/flydigi-mapping:51`, `tools/flydigi-settings:136` and `gui/worker.py:91` — one check per
-connection rather than per write; `flydigi-settings` gates its read-only `show` too, because a
-Vader's settings block printed under this pad's field names would mislead. `tools/flydigi-screen`,
-`tools/flydigi-haptics`, `tools/flydigid` and `tools/flydigi_cmd.py` do not call
-`identity.require` at all.
+connection rather than per write; `flydigi-settings` gates its read-only `show` too, because
+another pad's settings block printed under this one's field names would mislead.
+`tools/flydigi-screen`, `tools/flydigi-haptics`, `tools/flydigid` and `tools/flydigi_cmd.py` do
+not call `identity.require` at all.
 
 The guard can only refuse, never choose. With two Flydigi pads attached, `find_device()` returns the
-first match in sorted-by-name `/dev/hidraw*` order, where `hidraw10` comes before `hidraw2`
-(`flydigi/device.py:96-106`). `Controller(path=...)` accepts a node (`flydigi/device.py:131-132`)
-and nothing passes one: `flydigi-mapping:47`, `flydigi-settings:130`, `flydigi-screen:55` and
-`gui/worker.py:89` all construct `Controller()` bare, and the one `--device` flag over the vendor
-interface (`tools/flydigi_cmd.py:342`) opens the node itself rather than through `Controller`.
+first match in sorted-by-name `/dev/hidraw*` order, where `hidraw10` comes before `hidraw2`.
+`Controller(path=...)` accepts a node and nothing passes one: `flydigi-mapping`,
+`flydigi-settings`, `flydigi-screen` and `gui/worker.py` all construct `Controller()` bare, and
+the one `--device` flag over the vendor interface (`tools/flydigi_cmd.py`) opens the node itself
+rather than through `Controller`. The dock is the case this *does* now solve — a different
+family, not a different model — and `flydigi/charger.py` gives docks the selection layer pads
+still lack: `list_docks`, and `open_dock(path=..., uid=...)` behind `flydigi-charger --uid`.
 
 The rest of the work is almost entirely in `flydigi/`: per-model key tables, offsets and capability
 flags. `gui/models/` only knows `mapping.APEX5_KEYS`.
@@ -138,10 +143,25 @@ Measured on a Vader 4 Pro, `DeviceType 85`, firmware 6.9.3.3, on its 2.4 GHz don
     `Read(64)`, `Write`). Windows reaches the pad anyway because `xusb22` synthesises the HID front
     end that makes Xbox pads visible to DirectInput, and Space Station talks to that — which is why
     configuring it there costs no XInput. `xpad` synthesises nothing. String descriptor `0xEE`
-    STALLs, so this is not a pad hiding a second personality from Linux. Other models may differ:
-    `FindSpecialHidDevice` also matches a `0xFFA0` collection at interface 1 or 2, so a cabled Vader
-    or an Apex 4 could present a node `find_device` would open, and the guard in `identity.py` still
-    earns its keep.
+    STALLs, so this is not a pad hiding a second personality from Linux. **Nor is a cable the
+    difference.** Every pad of this generation is an XInput device wired or wireless — measured
+    both ways on this desk, `045e:028e` each time — which follows from `IsOldProtocol()` being
+    `VendorId != 0x37D7`: an old pad does not carry the Flydigi vendor id in either mode, so
+    `find_device` cannot match one however it is attached.
+
+    **The kernel log looks like it says otherwise, and it does not.** The 2.4 GHz dongle
+    enumerates on its own before the pad attaches through it: `04b4:2412` — Cypress, product
+    string `Flydigi VADER4`, `SerialNumber=0` — carrying four HID interfaces that Linux binds to
+    hidraw nodes, one of them a non-input collection. It then disconnects and the composite comes
+    back as `045e:028e` with a serial. So those hidraw nodes belong to a dongle with no pad
+    behind it yet, and they last seconds: nine once, under one twice. Anyone grepping a boot log
+    for "VADER" will find them and conclude an old pad is reachable over hidraw. It is not — the
+    window closes before anything can use it, and what replaces it has no vendor collection at
+    all.
+    `FindSpecialHidDevice`'s `0xFFA0` collection at interface 1 or 2 is Space Station matching the
+    front end `xusb22` synthesises on Windows, not a node Linux ever sees. What `identity.py`
+    guards against is therefore a **Vader 5 or an Apex 6** — the other `5a a5` pads, which do
+    carry `37d7` and would open exactly like an Apex 5 — and not anything older.
   * **The commands answer on the xpad endpoints.** usbfs, `USBDEVFS_DISCONNECT` to take the
     interface from `xpad`, then a claim on interface 0 — no root, since the uaccess ACL on
     `/dev/bus/usb/*` is enough. A frame is 15 bytes, `[0]=0xA5`, `[1]=cmdId`, `[2]=sub`, no
@@ -160,8 +180,9 @@ Measured on a Vader 4 Pro, `DeviceType 85`, firmware 6.9.3.3, on its 2.4 GHz don
     were not tried and are unverified.
 
 **What rules it out is the pad, not the work.** The dialect is transcription rather than discovery:
-62 of the SDK's 80 command files carry an XInput variant beside their NewXInput twin, against 49 for
-the new protocol. But a Vader 4 has neither adaptive triggers nor a screen, so the two features that
+of the SDK's 81 command files, 61 carry a legacy class — 58 an XInput one, 58 a DInput one — against
+49 carrying a NewXInput one, and 36 carry both a NewXInput and an XInput. So most of the old dialect
+is already written out beside the new one, and 24 legacy files have no new twin at all. But a Vader 4 has neither adaptive triggers nor a screen, so the two features that
 earn this pad an app do not exist on that one, and what is left is configured once and forgotten.
 Reaching it also means taking interface 0 from `xpad` for every read and write, so it stops being a
 gamepad for as long as the app holds it. Serving its input from a virtual pad in the meantime is
@@ -187,58 +208,220 @@ is measured and everything said here about any other model is read out of the SD
   * **The wheel block (183..185)** — `m_fdg_macro_lunpan_struct_t {type, rev}`. `IsSupportWheel` is
     never set for the Apex 5. Keep carrying the bytes; build UI only for a pad that declares it.
 
-## Charging dock, and syncing it with the pad
+## The CD2 charging dock
 
-The gen-2 dock is `cd2`. Driving it is blocked only on decompiling `Flydigi.ChargerSdk.dll` and
-`Flydigi.CoolerSdk.dll` in `bundle/`: `~/.dotnet/tools/ilspycmd -o decompiled/Flydigi.ChargerSdk
-bundle/Flydigi.ChargerSdk.dll` in the `wine-arch` distrobox. The Vader 4's older dock is a different
-device; nothing here describes it, and it must not be assumed to speak the `cd2` protocol.
+**Driven, and measured.** `flydigi/charger.py` and `tools/flydigi-charger`. The SDK came from
+`~/.dotnet/tools/ilspycmd -o decompiled/Flydigi.ChargerSdk bundle/Flydigi.ChargerSdk.dll` in the
+`wine-arch` distrobox; everything below marked *measured* came off the dock on this desk,
+firmware **0.0.3.9**, charger type 0, uid `1960f0f1f2cdab52efe7bc0658`.
 
-**The dock takes images and animations, and it is a lighting problem rather than a screen one.**
-The DIY page accepts png/jpeg/gif, crops on a 334x304 canvas, decodes GIF frames one at a time
-behind a "Saving your settings, please wait..." modal (`loading_message_config_saving`), and shares
-the pad's `screen_*` locale strings — but the `cd2` has **162 addressable LEDs** in a wedge: 16
-rows of 14, 15, 16, 15, 14, 13 … down to 3, at fixed coordinates the page carries as a literal
-array. Conversion samples **one pixel per LED** into `Color {red, green, blue}`, builds a
-`FramedLedColor {brightness, colors[162]}` per GIF frame, and sends the lot as an ordinary
-`IpcCommandEnum_UpdateConfig` carrying `ChargerLedConfig {mode: ChargerLedType_Custom, period,
-direction, brightness, frames[]}` → `ChargerRepository.UpdateConfig` → `ChargerSdk.WriteLedConfig`.
-(`ChargerSdk.WriteRgbConfig` is the single-frame call, reached from `UpdateFrame(FramedLedColor)`.)
+The Vader 4's older dock is a different device. It has never been on this bus, nothing here
+describes it, and it must not be assumed to speak the `cd2` protocol —
+see [Telling a CD2 from something else](#telling-a-cd2-from-something-else).
 
-Protobuf field numbers: `ChargerLedConfig {mode 1, period 2, brightness 3, color[] 4,
-useColorCount 5, direction 6, frames[] 7}` and `FramedLedColor {brightness 1, colors[] 2}`.
-`UpdateConfig` accepts a cfgId of 0..8. The DIY page sends `brightness: 100`, `useColorCount: 0`,
-`color: []`, `direction: ChargerLedDirection_NONE`, and `period: 1` for a still image or
-`Math.round(frameInterval / 10)` for a GIF — so `period` is the frame interval in centiseconds,
-not a frame count.
+### On the bus
 
-The image path uses **no `SwitchUsb`, no firmware console and no command 31** — the ordinary config
-path, and the same host-computes-frames/device-plays-them architecture as `flydigi/lighting.py`.
-`ChargerRepository` has no screen or picture method, and `Configs/Charger/cd2/default/` holds
-`default_mapping_0.dat` … `default_mapping_4.dat` and no image at all, against the pad's own
-`Configs/Controller/k5/default/default_screen_image_*.bin`. The dock's whole API is mapping
-configs, `UpdateFrame(FramedLedColor)`, `EnableLedSync`, `EnableCloseWithSystem`,
-`EnableSleepWhenCharging`, `EnableShowAnimationWhenCharging`, plus a `SwitchUsb` that is firmware
-update and nothing to do with images.
+`37d7:6001`, one interface, HID, two 64-byte interrupt endpoints, a 34-byte report descriptor
+declaring one 64-byte input and one 64-byte output report under usage page `0xffa0` and **no
+report ids at all**. So the leading byte of a write is `0x00` where the pad's is `0x03`, and a
+reply carries no report-id byte.
 
-`ChargerLedType` has ten members — Close 0, Solid 1, Default 2, Custom 3, DiagonalFlow 4, Breath 5,
-Gradient 6, WaveGradient 7, Rainbow 8, Pulse 9 — of which the locales expose eight,
-`cd2_charger_led_type_{breath,custom,default,diagonal_flow,gradient,pulse,rainbow,wave_gradient}`,
-omitting Close and Solid. `cd2_led_sync` is "Lighting Sync", tooltip "Keep the lighting mode of the
-controller and dock in sync" — the integration wanted here.
+**It is not the pad, and matching on the vendor id alone said it was.** Vendor `37d7` and a
+descriptor beginning `06 a0 ff` describe both devices, so `find_device` returned the dock
+whenever the dock's node sorted first — reproduced here with the pad asleep, which is not an
+exotic state since the pad leaves the USB bus when it sleeps. The fix is Flydigi's own rule:
+the product id's top nibble is the device family — `2` controller, `6` charger, `1` cooler — and
+each of Flydigi's three `HidManager`s tests it, though only the charger's tests it alone:
+`ChargerHidManager` is vendor plus `pid >> 12 == 6` and nothing else, `ControllerHidManager` adds
+a usage-page test and a `pid >> 8 != 8` clause that the nibble already makes unreachable, and
+`CoolerHidManager` masks the top *byte*, `pid & 0xff00 == 0x1000`. `flydigi/device.py:FAMILY_*`.
 
-The pad carries one dock-related setting of its own: `EnableDockSmartStop`, command **80** with
-sub-id `[2]=16` and `[3]=enable`, in the legacy envelope rather than `5a a5`. There is no NewXInput
-builder: the XInput and DInput classes are byte-identical, and a NewXInput controller is handed the
-DInput one, so a request for this setting reaches any pad as a legacy packet. Space Station never
-makes that request for a `k5` — `ReadHardwareFunctionStatus` sets `DockSmartStopUsable` for `fp4`
-alone, and its NewXInput branch never sets the flag. Nothing here sends 80 sub 16, and what an
-Apex 5 does with one is unverified.
+Measured, and the reason this was confusion rather than corruption: **the dock ignores
+pad-framed packets.** A heartbeat sent with report id `0x03` instead of `0x00` shifts the magic
+by one byte and drew no reply, twice, at two packet widths, with a correctly-framed control
+either side that answered every time.
+
+### Framing
+
+Same `5a a5` envelope as the pad, with one asymmetry that is easy to get backwards:
+
+```
+request   [0] 0x00  [1] 0x5A  [2] 0xA5  [3] cmd  [4] len  [5..] payload
+          checksum at [3 + len], the 8-bit sum over [3, 3 + len)
+reply     [0] 0x5A  [1] 0xA5  [2] cmd  [3] len  [4..] payload
+          checksum at [2 + len], over [2, 2 + len)
+```
+
+`len` counts bytes `[3]` and `[4]` themselves, so it is `2 + len(payload)`. The reply checksum
+position was verified against every read this project makes — heartbeat, uid, nickname, LED
+config and the unsolicited status report — and predicted the byte the dock actually sent in all
+five cases. The one exception seen is the command-97 ack, which puts it at `[3 + len]`. Flydigi
+never check a reply checksum anywhere (`ParseAckData` matches on the command byte alone), so
+neither does this; a write is confirmed by reading it back.
+
+Measured: **a short output report is accepted.** 32-, 64- and 65-byte writes of the same
+heartbeat drew identical replies, so Linux hidraw not zero-padding the way hidapi-on-Windows
+does costs nothing.
+
+Commands: heartbeat **1**, read nickname **2**, read uid **4**, sleep-when-charging **17**,
+lighting sync **18**, close-with-system **19**, read LED config **20**, RGB write start/pack
+**22**/**23**, write nickname **24**, power display **25**, LED write start/pack **97**/**98**,
+reset mapping **175**, firmware upgrade mode **224**, write device type **254**. The last three
+are transcribed and deliberately unwrapped: Space Station's own "restore defaults" does not send
+175 (it re-uploads the shipped default file), and 224 and 254 are one-way trips on a device with
+no documented recovery.
+
+Flydigi's own `UpdateNicknameCommand` writes its checksum at a fixed index `[6]` rather than
+`[3 + len]`, so it corrupts any nickname longer than one character. Nothing here writes a
+nickname; worth remembering if anything ever does.
+
+### The dock plays frames; it does not generate effects
+
+This is the whole shape of the device, and it is the same architecture as
+[the pad's lighting](../flydigi/lighting.py): the host computes every frame and uploads them,
+and the mode byte only records which effect produced the data.
+
+Measured, in two halves:
+
+  * A config with the header for `Breath` — correct mode, colour, brightness and interval, all
+    of which read back correctly — and **`frameCount: 0`** did not breathe. The dock kept
+    playing its previous animation's leftovers: fragments of the old effect, then a travelling
+    band of wrong colours, then flat white. The band is the giveaway. Frame memory is not
+    cleared by a config write, so with no valid frame count the dock walks those bytes at
+    offsets that are not multiples of three, rotating every RGB triple into its neighbour's
+    channels. **The frame count in the header must match the frames actually sent.**
+  * The same mode with its 40 computed frames played correctly, and a `Pulse` written with its
+    50 frames was indistinguishable from the animation the dock had before anything here touched
+    it. Side by side against Space Station's own `Breath`, at identical parameters, there was no
+    visible difference; changing only the colour changed only the colour, which is what rules out
+    the upload having silently done nothing.
+
+**162 LEDs** in a wedge — 16 rows of 14, 15, 16, 15, 14, 13 … down to 3.
+
+The write is `ConfigParser.ParseFrameLedConfigToArray` and its field order is **not** the read's:
+
+```
+write (97/98)   frameCount, period, brightness, mode, direction, useColorCount,
+                then palette RGB triples, then every frame's 162 RGB triples
+read  (20)      mode, brightness, period, direction, useColorCount, then palette
+```
+
+A read never returns frames, so what the dock is playing cannot be recovered from it — only the
+header. `useColorCount` is a field of its own rather than the palette's length, and Flydigi's own
+preset table has the two disagreeing in both directions, which is itself evidence the dock does
+not use the byte to locate the frame data.
+
+One deliberate divergence. Flydigi advertise `len // 50 + 1` packs while sending
+`ceil(len / 50)`; the two agree unless the blob divides by 50 exactly, and there they promise the
+dock a pack they never send. This sends the true count. Their arithmetic is reachable — a custom
+animation of four frames is 1950 bytes, 39 packs against an advertised 40.
+
+Every pack waits for its own ack. There is no inter-packet delay anywhere in Flydigi's stack and
+no blind streaming either. A fifty-frame effect is 24,306 bytes, 487 packets, about five seconds.
+
+### The effects, and where their geometry comes from
+
+Ported from Space Station's own generators in `useLedEffectRenderer`, faithfully enough that two
+of Flydigi's oddities are reproduced rather than corrected: the HSL conversion uses
+`q = l + s - l*s` unconditionally where the usual formula branches below mid-lightness (every
+call site passes lightness 0.5, where they agree), and the breath stepper takes the frame
+interval and ignores it, so a breath's step size does not depend on its speed.
+
+`ChargerLedType` has ten members — Close 0, Solid 1, Default 2, Custom 3, DiagonalFlow 4,
+Breath 5, Gradient 6, WaveGradient 7, Rainbow 8, Pulse 9. Space Station's dropdown offers nine,
+omitting Solid. Eight are computable here; `Default` is not, and `Custom` takes frames from the
+caller. Frame counts: 50 for gradient, rainbow, wave-gradient, diagonal-flow and pulse; 1 for
+close and solid; **2N for breath**, where N depends on the colour, because each step scales what
+is left by `1 - step/50` and a darker colour reaches black sooner.
+
+Direction is read by **rainbow and wave-gradient only**, and they do not even divide the same
+way: rainbow uses row ÷ row-count and column ÷ row-length, wave-gradient uses the same two minus
+one.
+
+**Pulse and diagonal-flow do not use the LED positions the image sampler uses.** They build their
+own lattice around whichever preview circle sits nearest the middle of a 450x420 box — that is
+`point_115`, index 114, at 47.56% / 50.48%, i.e. (214.02, 212.016) — with a horizontal pitch of
+width/20 and a vertical pitch of that times √3/2. Transcribed rather than reasoned about.
+
+**`Default` cannot be computed and is refused rather than approximated.** Space Station does not
+compute it either: `read_default_config` reads
+`Configs/Charger/cd2/default/default_mapping_<deviceType>.dat`, a serialised
+`ChargerMappingConfigBean` its installer ships, and uploads those frames. Confirmed from the
+other side — applying `Default` in Space Station puts the Flydigi logo animation on the dock. The
+file is not in this repository and `tools/fetch-configs` does not fetch it. Copying one off a
+Windows install is all it would take: the field numbers are `ChargerMappingConfigBean
+{cfgId 1, title 2, currentLedConfig 7, ledConfigOptions 8, advancedLedConfig 9}`,
+`ChargerLedConfig {mode 1, period 2, brightness 3, color[] 4, useColorCount 5, direction 6,
+frames[] 7}`, `FramedLedColor {brightness 1, colors[] 2}`, `Color {red 1, green 2, blue 3}`.
+
+### The images path, which is not built here
+
+The DIY page accepts png/jpeg/gif, crops on a 334x304 canvas and samples **one pixel per LED**
+— nearest pixel, no averaging, no gamma, alpha discarded — into a `FramedLedColor` per GIF
+frame, capped at 200 frames, then sends an ordinary `UpdateConfig`. `period` there is the frame
+interval in centiseconds (`Math.round(frameInterval / 10)`); the preview animator disagrees with
+itself and plays at `20 * period` ms.
+
+It uses **no `SwitchUsb`, no firmware console and no command 31** — the ordinary config path.
+That decoding cannot live in a zero-dependency backend, which is why it is scoped to `gui/` where
+Qt already reads both formats. → [PROGRESS.md](../PROGRESS.md#whats-next)
+
+### The four switches, and what the dock says on its own
+
+`cd2_sleep_when_charging` "Intelligent start" (17), `cd2_led_sync` "Lighting Sync" (18),
+`cd2_close_with_system` "Close When Shutdown" (19), `cd2_show_animation_when_charging`
+"Power Display" (25). Space Station's UI makes the first and last mutually exclusive, forcing one
+off when the other goes on; nothing in the SDK enforces it, so nothing here does either.
+
+Lighting sync is one enable byte and no host-side traffic moves lighting between the two devices,
+so the pad and dock arrange it between themselves. Measured with sync on: the dock's stored
+colour and brightness did not match the pad's, so whatever it syncs is not the stored config.
+
+**The dock pushes an unsolicited report `239` about once a second** — the only thing it sends
+without being asked. `ChargerProtocol.ParseData` singles it out and hands it to a raw-data
+listener rather than treating it as an ack. `data[7]` is whether a controller is docked and
+`data[8]` its battery. Measured with nothing in the dock: `data[7]` reads 0, which fits. The
+battery byte has not been seen with a pad actually seated.
+
+### Telling a CD2 from something else
+
+`FlydigiChargerUtil.GetDeviceCodeById` returns the literal string `"cd2"` for any argument
+whatsoever, and the `Charger` constructor hardcodes the same — so Flydigi's SDK drives anything
+in the `0x6xxx` family as a CD2 without ever asking. `charger.require` asks. Two layers:
+
+  * **It must answer `5a a5` at all.** All sixteen charger commands are built
+    `isNewProtocol: true` and, unlike the controller SDK — which carries a legacy twin for 62 of
+    its 80 commands — the charger SDK has no legacy dialect anywhere. A dock old enough to
+    predate `5a a5` has nothing to answer with.
+  * **Its charger type must be a known CD2.** `ChargerDeviceType` is CD2 0, CD2_EVA 1, CD2_SRS 2,
+    CD2_GS 3, CD2_MHY_HK 4 — five editions of one model, differing in artwork rather than
+    protocol. An unknown type is refused by name.
+
+The product string is deliberately **not** a gate. `HID_NAME` does name the generation — this
+dock reports `flydigi Flydigi CD2` — but whether the four collaboration editions carry the same
+string is unmeasured, and refusing a real CD2 over its artwork would be worse than the case being
+guarded against. It goes in the refusal message instead.
+
+`cfgId` is host bookkeeping and never reaches the wire: no charger command carries an index, and
+the dock stores exactly one LED config. Two docks are told apart by uid, `flydigi-charger --uid`.
+Only one has ever been on this bus, so every multi-dock path is covered by `tests/fake_dock.py`
+and by nothing else.
+
+### The pad's own dock setting, and the cooler
+
+The pad carries one dock-related setting: `EnableDockSmartStop`, command **80** with sub-id
+`[2]=16` and `[3]=enable`, in the legacy envelope rather than `5a a5`. There is no NewXInput
+builder: the XInput and DInput classes are byte-identical, and a NewXInput controller is handed
+the DInput one, so a request for this setting reaches any pad as a legacy packet. Space Station
+never makes that request for a `k5` — `ReadHardwareFunctionStatus` sets `DockSmartStopUsable` for
+`fp4` alone, and its NewXInput branch never sets the flag. Nothing here sends 80 sub 16, and what
+an Apex 5 does with one is unverified.
 
 `Category` is Unknown, Controller, Cooler, Keyboard, Mouse, Headset, Charger, and `bundle/` ships
 `Flydigi.CoolerSdk.dll` and `Flydigi.KeyboardSdk.dll` alongside the charger's. There is no keyboard
 repository; `CoolerRepository` exposes fan mode and speed, an accelerate level, smart mode, gear and
-RGB lighting, a speed curve, auto-start and intelligent start/stop.
+RGB lighting, a speed curve, auto-start and intelligent start/stop. No cooler is available to test
+with, so none is driven.
 
 ## Firmware update: not implemented, and command 31 only for the screen chip
 
