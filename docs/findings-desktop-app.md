@@ -133,7 +133,7 @@ Traps:
   * **A model test that leaves `dsmode.stop` real reaches out of the test and stops the relay
     somebody is playing through.** `stop()` takes no pids on purpose — the relay outlives the app,
     so the switch has to go by the process table rather than by what this process started — and one
-    `setRunning(False)` in `make_dsmode` therefore SIGTERMed a live virtual DualSense. It cost a
+    `setRunning(False)` in the model tests therefore SIGTERMed a live virtual DualSense. It cost a
     session in a running game, and the only trace was a graceful `[ds5] stopping` in
     `~/.local/state/flydigi/ds5-relay.log`. The helper now stands `stop` in along with `state`,
     `latest_status` and `tail`. `tests/test_dsmode.py` stays on the real one and is safe for the

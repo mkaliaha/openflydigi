@@ -367,10 +367,11 @@ CURVE_PRESETS = [("Default", mapping.CURVE_DEFAULT),
 # mapping.BIPOLAR_MAX for why only one half has an encoding we trust.
 STICK_MAX = mapping.BIPOLAR_MAX
 
-# Where the gyro can be pointed. Space Station names the two sticks after the
-# genre each suits, which says more than "left" does; the parenthesis keeps the
-# name of the thing that actually moves. Mouse is not offered -- the pad cannot
-# do it, see mapping.MOTION_TARGETS.
+# Where the gyro can be pointed. Named the way Space Station names them --
+# the stick first, the genre it suits in parentheses ("Left joystick (racing
+# games)", "Right joystick (shooting games)") -- since the thing that actually
+# moves belongs in the label and the genre is the hint. Mouse is not offered --
+# the pad cannot do it, see mapping.MOTION_TARGETS.
 MOTION_TARGETS = [("Off", mapping.MOTION_OFF),
                   ("Left stick (racing)", mapping.MOTION_LEFT_STICK),
                   ("Right stick (aiming)", mapping.MOTION_RIGHT_STICK)]
@@ -649,9 +650,11 @@ class MotionModel(QObject):
         """A second enable key that is live and cannot be reached from here.
 
         Empty unless the profile is on Click *and* byte 7 holds a key. That is
-        the factory's own state -- it ships with D-pad Up there -- and the pad
-        honours the byte on its own, measured with `tools/gyro-map-probe`. So
-        the page names it rather than showing a control that would not write.
+        the factory's own state -- it ships with D-pad Up there. Byte 7 is
+        known to work on its own, measured with `tools/gyro-map-probe`, but
+        that window was a *Hold* one; whether the firmware reads the second key
+        under Click is not settled either way. So the page names the key rather
+        than showing a control that might not write.
         """
         if self.holdMode:
             return ""

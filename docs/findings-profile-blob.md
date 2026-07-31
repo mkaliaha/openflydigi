@@ -410,8 +410,10 @@ unmeasured. `set_motion` derives it the same way and takes an override.
 (`Up`) on an untouched pad — not the 255 that means None. Their writer only ever assigns byte 7 when
 the enable type is Press, re-emitting whatever it read otherwise, so turning gyro mapping on in
 Space Station on a fresh pad hands D-pad Up a share of it. Which of the two the firmware honours,
-and whether it reads the second at all under Click, is unmeasured. `set_motion` writes both bytes
-whenever either is given, and the app's key pickers show what is really stored rather than "none".
+and whether it reads the second at all under Click, is unmeasured. `set_motion` reproduces their
+rule rather than overriding it: byte 1 is written unconditionally, byte 7 only under Press. What
+the app does differently is show what is really stored — a key stranded in byte 7 is named on the
+page instead of reading as "none".
 
 ## The response curve at 830 is a feature Flydigi never finished
 

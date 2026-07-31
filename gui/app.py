@@ -214,9 +214,16 @@ class App(QObject):
         """(Re)start the info poll at whichever interval the state calls for.
 
         Never while a screen upload is running: the pad spends minutes bridging
-        to its screen chip with no vendor node to answer on, so polling it would
-        bury the upload's own progress under a failure every two seconds. The
-        upload's end calls this again.
+        to its screen chip, and a poll landing in the middle of that would at
+        best contend with the upload for the node and at worst bury its own
+        progress under a failure every two seconds. The upload's end calls this
+        again.
+
+        Note the vendor node does *not* go away: command 31 adds a CDC
+        interface beside the gamepad rather than replacing the pad with a
+        bootloader, and the `37d7:2501` hidraw nodes stay enumerated
+        throughout (PROTOCOL.md). What is unmeasured is whether the firmware
+        still answers on them mid-bridge, which is reason enough not to ask.
         """
         if self._screen.busy:
             return
