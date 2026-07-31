@@ -54,7 +54,10 @@ TestCase {
     function test_each_trigger_has_its_own_controls() {
         for (const side of ["left", "right"]) {
             verify(findChild(page, "effect_" + side), "no effect picker for " + side);
-            verify(findChild(page, "deadZone_" + side), "no dead zone for " + side);
+            verify(findChild(page, "strokeStart_" + side),
+                   "no travel start for " + side);
+            verify(findChild(page, "strokeEnd_" + side),
+                   "no travel end for " + side);
             pick(side, 1);                       // racing
             tryVerify(() => findChild(page, "param_start_" + side), 2000,
                       "no start control for " + side);
@@ -119,10 +122,24 @@ TestCase {
         compare(values.match_input, before ? 0 : 1, "the switch did not write through");
     }
 
-    function test_dead_zone_writes_through() {
-        findChild(page, "deadZone_left").moved(15);
-        compare(App.profile.triggers.left.deadZone, 15);
+    function test_the_stroke_window_writes_through() {
+        findChild(page, "strokeStart_left").moved(15);
+        findChild(page, "strokeEnd_left").moved(200);
+        compare(App.profile.triggers.left.strokeStart, 15);
+        compare(App.profile.triggers.left.strokeEnd, 200);
         verify(App.profile.dirty, "editing a trigger is a change");
+    }
+
+    function test_the_stroke_window_cannot_be_dragged_inside_out() {
+        // The backend swaps an inverted pair rather than storing it, so the
+        // slider has to read back from the model. Dragging the start past the
+        // end is reachable -- Space Station's own range slider passes neither
+        // pushable nor allowCross -- so it has to mean something sane.
+        findChild(page, "strokeEnd_right").moved(40);
+        findChild(page, "strokeStart_right").moved(200);
+        const side = App.profile.triggers.right;
+        compare(side.strokeStart, 40, "start should have taken the lower value");
+        compare(side.strokeEnd, 200, "end should have taken the higher value");
     }
 
     function test_no_trigger_motor_controls_are_drawn() {
@@ -135,7 +152,7 @@ TestCase {
     }
 
     function test_an_edit_can_be_applied_to_the_pad() {
-        findChild(page, "deadZone_right").moved(20);
+        findChild(page, "strokeStart_right").moved(20);
         let apply = findChild(page, "applyButton");
         verify(apply.enabled, "an edit should enable apply");
 

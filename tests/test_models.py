@@ -436,15 +436,22 @@ def test_trigger_fields_are_independent():
     right.effect = 1                     # racing
     right.setEffectParam("start", 60)
     right.setEffectParam("resistance", 200)
-    right.deadZone = 15
+    right.strokeStart = 15
+    right.strokeEnd = 200
 
     mode, params = profile.config.trigger_effect("right")
     check("trigger effect reaches the config",
           mode == models.TRIGGER_MODES[1][1], str(mode))
     check("both knobs are kept", (params[0], params[1]) == (60, 200),
           str(params[:2]))
-    check("dead zone reaches the curve",
-          profile.config.trigger_curve("right")["zero"] == 15)
+    curve = profile.config.trigger_curve("right")
+    check("the stroke window reaches the curve block at 123",
+          (curve["zero"], curve["end"]) == (15, 200), str(curve))
+    # The window is the curve block, the effect's knobs are the force-trigger
+    # block, and the probe that settled which of the two the pad plays would be
+    # worthless if the app wrote the window into both. 195/196 is inert here.
+    check("the window stays out of the effect's parameter slots",
+          (params[0], params[1]) == (60, 200), str(params[:2]))
     check("the model reads back its own effect index", right.effect == 1)
     check("editing a trigger marks dirty", profile.dirty)
 
@@ -522,7 +529,7 @@ def test_no_trigger_motor_controls_are_offered():
     # what is asserted is that nothing in the app writes it.
     before = bytes(profile.config.blob)
     profile.triggers.side("right").effect = 1
-    profile.triggers.side("right").deadZone = 12
+    profile.triggers.side("right").strokeStart = 12
     block = slice(mapping.OFF_TRIGGER_MOTOR, mapping.OFF_TRIGGER_MOTOR + 29)
     check("editing a trigger leaves the motor block alone",
           bytes(profile.config.blob)[block] == before[block],

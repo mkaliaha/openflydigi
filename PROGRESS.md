@@ -56,11 +56,16 @@ Roughly in order of value. Each is a fresh-context-sized piece of work.
     plus a bindings-storage nuisance. Optional workaround, which neither app does: re-assert the flag
     on connect, off then on once SDL has enumerated. The real fixes are upstream.
     → [docs/findings-steam.md](docs/findings-steam.md)
- 1. **Stroke Setting on the Triggers page.** 195/215 are `Param[0]` of the force-trigger blocks and
-    the General effect's two parameters *are* the stroke window. The page's current "Dead zone"
-    writes the curve block at 123, which on an Apex 5 Space Station never shows — so it is very
-    likely writing where this pad does not read. One piece of work: add the start/end pair, then
-    verify the dead zone by feel or drop it. → [docs/findings-profile-blob.md](docs/findings-profile-blob.md)
+ 1. **A stored trigger effect is never engaged, and the Triggers page is inert because of it.**
+    Found by trying to lock the triggers from the blob and feeling nothing. `write_profile` in
+    `gui/worker.py` writes 164/165, applies only when the macro page moved, and never sends command
+    **81** — so picking Trigger lock and hitting Apply stores the effect and engages nothing.
+    Space Station is store-and-*replay*, the same shape as the vibration bind: 500 ms after every
+    applied-config read it calls `UpdateAdapterTriggerConfig`, which builds a `ForceTriggerConfig*`
+    from the stored block and sends 81 **per side** (`ControllerBusinessService.cs:1595`). The fix
+    is to do the same after a profile write, one command per trigger — side 3 does nothing. Open
+    question worth one run: whether the pad engages the stored block by itself after a sleep or a
+    profile switch, or whether a host has to replay it every time.
  2. **Gyro mapped to a stick (J2).** Offset 137, 8 bytes, smoothing curve at 830. Works in any game
     with nothing running, which on Linux is otherwise Steam Input only.
  3. **The charging dock.** The gen-2 dock is on the desk; blocked only on decompiling
@@ -86,8 +91,7 @@ we ship. Every one is verifiable on the hardware here, and several were already 
 
   * **Restore a profile slot to factory** — `ResetMappingConfigByCfgId`, command **175** (S1). The
     Buttons page's "reset all" only clears key mappings in the in-memory blob; Space Station's
-    resets the whole slot on the pad. It is also the only repair for a blob written into 123..137,
-    which this pad does not read — see J3.
+    resets the whole slot on the pad.
   * **Controller nickname** — read **2**, write **24** (S2). Self-verifying, and it makes a two-pad
     desk legible.
   * **The cooperative lock** — `AcquireController`, command **28** (S3). The read half is built as
@@ -233,7 +237,7 @@ python3 -m gui
 | Vibration | master switch, per-grip enable, min/max window, strength |
 | Controller → Selected profile / Other software | rename the open profile, back up / restore it to file; let Steam and similar take the pad over, and who currently holds it |
 | Sticks | dead zone, outer dead zone, sensitivity curve presets, circular range |
-| Triggers | stored effect — all six of Flydigi's, each with its own controls — plus a dead zone that writes the curve block at 123 and is not confirmed to reach this pad |
+| Triggers | stored effect — all six of Flydigi's, each with its own controls — plus the travel window, Flydigi's "Stroke Setting", as a start/end pair. **The stored effect is not engaged by Apply** — see What's next |
 | Games | all 94 games, searchable, filtered by route; vibration presets load onto the pad from here; per-game **Auto** toggle, a route picker where a game really has a choice, and a DualSense marker on the 23 games Flydigi lists as DS5-aware |
 | DualSense | the tier-4b switch: vhci-hcd's state, haptic audio to the motors, what the relay is doing, and the launch option to copy |
 | Setup | the daemon's unit, "running now" and "start at login" as separate switches, the application-menu entry, and the udev rules behind one authentication prompt |
@@ -263,6 +267,24 @@ in `gui/` is [gui/README.md](gui/README.md).
   * **Never match a game process by cmdline alone** — Steam/Proton wrappers (`reaper`, `bwrap`,
     `pv-adverb`, `steam.exe`) all carry the game's path. Require the PE to be mapped.
   * **Effects persist in controller state** until changed; there is no timeout.
+  * **The trigger travel window is the block at 123, and this pad plays it — the force-trigger
+    `Param[0..1]` at 195/215 is inert.** Exactly backwards from what three readings of the decompile
+    predicted. Measured with `tools/trigger-stroke-probe`, which gives one trigger a degenerate
+    0..16 window and leaves the other as an in-run control: 17 distinct evdev values against 240 for
+    the curve block, 238 against 239 for the parameter pair. Both triggers still span the full
+    0..255 output, so the window moves *physical* travel and not what the game reads — on this pad,
+    bringing the end in is a software hair trigger. The source misled because Space Station has one
+    slider with two destinations chosen by `supportAdaptTrigger`, *and* hides it entirely on an
+    adaptive pad (`triggerStrokeUsable = !supportAdaptTrigger`), so their k5 write path is the dead
+    one. "Just copy Space Station" was not available here.
+    → [docs/findings-profile-blob.md](docs/findings-profile-blob.md) J3
+  * **The Lock effect makes the trigger digital.** With it on the axis reports 0 or 255 and nothing
+    between — 2 distinct values and 35 evdev events across a 15-second run of pulls, against ~240
+    values and ~1100 events with no effect. So it is a hair trigger in the button sense, right for a
+    shooter and wrong for a throttle, which the effect's own description now says. It is also why
+    the travel window does nothing under Lock: there is no analogue reading to rescale. Under
+    *Racing* the same window works normally — same run, same hand, 2 distinct values against the
+    control's 29.
   * **A trigger command addressed to `Both` (side 3) does nothing.** It is in Flydigi's own
     `ForceTriggerSide` enum, it ACKs like everything else, and the triggers stay loose. Measured with
     rumble pulses marking the phases so they could not be confused: `side=3` at full resistance gave

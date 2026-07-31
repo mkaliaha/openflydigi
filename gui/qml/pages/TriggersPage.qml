@@ -76,6 +76,18 @@ Kirigami.ScrollablePage {
                              + "drives the triggers itself overrides it while "
                              + "it runs."
             }
+
+            FormCard.FormDelegateSeparator {}
+
+            FormCard.FormTextDelegate {
+                text: "About the travel window"
+                description: "It narrows the physical pull, not what the game "
+                             + "reads: the trigger still reports its full range "
+                             + "over whatever travel is left. Bringing the end "
+                             + "in is a hair trigger, which this pad has no "
+                             + "switch for. It applies under every effect, "
+                             + "including General."
+            }
         }
     }
 }

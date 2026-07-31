@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// One trigger's stored adaptive effect, dead zone and motor.
+// One trigger's stored adaptive effect and its travel window.
 
 pragma ComponentBehavior: Bound
 
@@ -72,11 +72,28 @@ FormCard.FormCard {
 
     FormCard.FormDelegateSeparator {}
 
+    // Flydigi's "Stroke Setting", and it applies whatever the effect above is:
+    // it is a separate block in the profile, not one of the effect's knobs. Two
+    // rows rather than the one range slider Space Station draws, because the
+    // form has no range control and a pair reads the same. The backend keeps
+    // start <= end by swapping, so each slider reads back from the model rather
+    // than trusting its own last position.
     SliderRow {
-        objectName: "deadZone_" + root.sideName
-        label: "Dead zone"
-        value: root.side.deadZone
-        onMoved: (newValue) => root.side.deadZone = newValue
+        objectName: "strokeStart_" + root.sideName
+        label: "Travel start"
+        description: "How far in before the trigger registers at all"
+        value: root.side.strokeStart
+        onMoved: (newValue) => root.side.strokeStart = newValue
+    }
+
+    FormCard.FormDelegateSeparator {}
+
+    SliderRow {
+        objectName: "strokeEnd_" + root.sideName
+        label: "Travel end"
+        description: "Where it reads fully pressed, short of the hard stop"
+        value: root.side.strokeEnd
+        onMoved: (newValue) => root.side.strokeEnd = newValue
     }
 
 }

@@ -191,7 +191,7 @@ class VibrationModel(QObject):
 
 @QmlElement
 class TriggerSideModel(QObject):
-    """One trigger's stored adaptive effect and dead zone."""
+    """One trigger's stored adaptive effect and travel window."""
 
     changed = Signal()
 
@@ -266,19 +266,53 @@ class TriggerSideModel(QObject):
         values[key] = int(value)
         self._store(mode, values)
 
-    @Property(int, notify=changed)
-    def deadZone(self):
-        config = self._profile.config
-        return config.trigger_curve(self._side)["zero"] if config is not None else 0
+    # -- the stroke window -------------------------------------------------
+    #
+    # Space Station's "Stroke Setting": where the trigger starts registering and
+    # where it reads full. It is the travel curve block at offset 123, and this
+    # pad plays it -- measured with `tools/trigger-stroke-probe`, which gave one
+    # trigger a 0..16 window and left the other alone: 17 distinct evdev values
+    # against the control's 240, in the same sweep. The reported range stays
+    # 0..255 either way, so what the window moves is the physical travel, not
+    # what the game reads, exactly as Flydigi's own tooltip says.
+    #
+    # The neighbouring candidate is dead. `Param[0..1]` of the force-trigger
+    # block at 195/196 carries the same pair on paper -- it is what Space
+    # Station writes for a pad *with* adaptive triggers -- and the same probe
+    # found it inert here, 238 against 239. Nor does their UI ever set it:
+    # `triggerStrokeUsable` is `!supportAdaptTrigger`, so on a k5 the slider is
+    # hidden, and `ForceTriggerConfigNormal` sends `[side, 0]` with no
+    # parameters at all. Do not move this pair to 195/215.
 
-    @deadZone.setter
-    def deadZone(self, value):
+    def _stroke(self, key):
+        config = self._profile.config
+        if config is None:
+            return 0 if key == "zero" else 255
+        return config.trigger_curve(self._side)[key]
+
+    def _set_stroke(self, **kwargs):
         config = self._profile.config
         if config is None:
             return
-        config.set_trigger_curve(self._side, zero=int(value))
+        config.set_trigger_curve(self._side, **kwargs)
         self.changed.emit()
         self._profile.markChanged()
+
+    @Property(int, notify=changed)
+    def strokeStart(self):
+        return self._stroke("zero")
+
+    @strokeStart.setter
+    def strokeStart(self, value):
+        self._set_stroke(zero=int(value))
+
+    @Property(int, notify=changed)
+    def strokeEnd(self):
+        return self._stroke("end")
+
+    @strokeEnd.setter
+    def strokeEnd(self, value):
+        self._set_stroke(end=int(value))
 
     def refresh(self):
         self.changed.emit()

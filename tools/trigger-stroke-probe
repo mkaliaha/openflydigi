@@ -1,0 +1,451 @@
+#!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
+"""Ask the pad which trigger travel window it actually reads.
+
+Space Station calls the control "Stroke Setting" -- a range slider over 0..255
+that sets where the trigger starts registering and where it reads full. The
+decompile shows it writing to **two different places depending on the pad**, and
+neither of them can be settled by reading more C#:
+
+    supportAdaptTrigger == false   ->  TriggerConfig.Start/End
+                                       -> configBean.Zero / .End
+                                       -> the travel curve block at offset 123
+    supportAdaptTrigger == true    ->  AdapterTriggerTypeNormal.Start/End
+                                       -> TriggerAdapterConfigBean.Param[0..1]
+                                       -> the force-trigger block, 195/196 and
+                                          215/216
+
+and on an Apex 5, which is the second case, **the control is hidden entirely**:
+the renderer sets `triggerStrokeUsable` to `!supportAdaptTrigger`, so the slider
+only ever appears on pads without adaptive triggers. Param[0]/Param[1] are
+round-tripped through the blob and never edited by any UI, and the live command
+for mode Normal -- `ForceTriggerConfigNormal` -- carries no parameters at all,
+just `[side, 0]`. So Flydigi's software neither writes nor sends this window on
+this pad, and nothing in their source says whether the *firmware* still honours
+one of the two blocks.
+
+That is a question only the hardware answers, so this asks it.
+
+**Degenerate values, not nudges.** "Does a window of 40..200 do anything" needs a
+reference input to answer. A window of 0..16 does not: if the pad plays it, the
+trigger reaches full scale within the first 6% of its travel and sits there for
+the rest, and no recalibration stage can turn that back into a smooth ramp. The
+reading is the count of distinct values a slow full sweep produces -- a few if
+the window is live, a couple of hundred if it is not.
+
+**The other trigger is the control, in the same run.** Only the chosen side is
+given a window; both are swept and both are reported. A difference between two
+triggers a hand worked in the same minute is a result. Both coming back
+identical means the block is inert, and it means it without needing a separate
+baseline run to compare against.
+
+Both arms also force the stored effect to General on *both* sides, so a Lock or
+a Race left over from an earlier session cannot be mistaken for a travel window.
+
+    tools/trigger-stroke-probe --baseline     # the pad as it is, both triggers
+    tools/trigger-stroke-probe --curve        # the block at 123
+    tools/trigger-stroke-probe --param        # Param[0..1] at 195/215
+
+Nothing is ever saved. The profile is written and applied, never committed with
+command 166, and is restored before exit -- and an applied-but-unsaved config
+dies on the pad's next sleep anyway.
+"""
+import argparse
+import os
+import select
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from flydigi import device, effects, evdev, mapping
+
+# Which evdev axis each trigger reports on.
+AXES = {"left": evdev.ABS_Z, "right": evdev.ABS_RZ}
+
+# A window this narrow cannot be mistaken for anything else: the trigger is
+# full-scale before the finger has really moved.
+DEFAULT_START = 0
+DEFAULT_END = 16
+
+
+def sweep(seconds, patience=90.0):
+    """Wait for a button, then record both triggers for `seconds`.
+
+    Buttons are the liveness signal, for the same reason as in
+    `joystick-curve-probe`: a trigger nobody pulled and a trigger the pad has
+    flattened to a single value look identical from here. Button events during
+    the window prove somebody was working the pad, so "two distinct values" is a
+    measurement rather than an empty room.
+    """
+    path, name = evdev.find_device(vendor=device.VID, axes=True)
+    if path is None:
+        sys.exit("no Flydigi gamepad on evdev -- press a button to wake the pad")
+
+    seen = {side: [] for side in AXES}
+    presses = 0
+    with evdev.Reader(path) as reader:
+        missing = [s for s, code in AXES.items() if code not in reader.abs]
+        if missing:
+            sys.exit(f"this node reports no axis for the {', '.join(missing)} "
+                     "trigger")
+        ranges = {side: (reader.abs[code].minimum, reader.abs[code].maximum)
+                  for side, code in AXES.items()}
+
+        while select.select([reader], [], [], 0)[0]:
+            reader.read()
+        pressed = {c for c, v in reader.keys.items() if v}
+
+        def poll(timeout):
+            nonlocal pressed, presses
+            if not select.select([reader], [], [], timeout)[0]:
+                return False
+            synced = reader.read()
+            now = {c for c, v in reader.keys.items() if v}
+            presses += len(now ^ pressed)
+            pressed = now
+            return synced
+
+        # Arming on a button alone was wrong here, and cost a run: the triggers
+        # are the measurement, so someone told to work the triggers does
+        # exactly that and the window never opens. Any movement starts it.
+        # Buttons are still counted, because they are what separates "the pad
+        # flattened this trigger" from "nobody touched it".
+        rest = {side: reader.axes.get(code, 0) for side, code in AXES.items()}
+
+        def stirred():
+            return presses > 0 or any(
+                abs(reader.axes.get(code, 0) - rest[side]) > 4
+                for side, code in AXES.items())
+
+        print(f"{name} ({path}): PULL A TRIGGER to start the {seconds:.0f}s "
+              "window, then squeeze BOTH triggers slowly all the way in and "
+              "out, a few times, tapping a button as you go")
+        giveup = time.time() + patience
+        while not stirred() and time.time() < giveup:
+            poll(0.2)
+        if not stirred():
+            sys.exit("nothing moved -- the pad may have slept")
+        print("started")
+
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            if not poll(0.2):
+                continue
+            for side, code in AXES.items():
+                seen[side].append(reader.axes.get(code, 0))
+    print("window closed -- you can stop")
+    return seen, presses, ranges
+
+
+def describe(side, samples, span, presses):
+    """One trigger's sweep, as the two numbers that separate the outcomes."""
+    lo, hi = span
+    distinct = sorted(set(samples))
+    print(f"\n{side} trigger  (evdev range {lo}..{hi})")
+    if len(distinct) <= 1:
+        if presses > 1:
+            print("  SILENT: never moved, while buttons were arriving. Either "
+                  "it was not pulled or the pad is suppressing it entirely.")
+        else:
+            print("  VOID: nothing from this trigger and no buttons either.")
+        return None
+    reach = max(samples)
+    floor = min(samples)
+    # The whole reading. A pad playing a 0..16 window turns a full sweep into a
+    # handful of steps; an untouched trigger resolves the travel in full.
+    print(f"  {len(samples)} samples, {len(distinct)} distinct values, "
+          f"{floor}..{reach}")
+    if hi > lo:
+        print(f"  furthest it reported: {reach} of {hi} "
+              f"({reach * 100 // (hi - lo)}% of full scale)")
+    if hi > lo:
+        pinned = sum(1 for s in samples if s >= lo + 0.95 * (hi - lo))
+        idle = sum(1 for s in samples if s <= lo + 0.02 * (hi - lo))
+        print(f"  {pinned * 100 // len(samples)}% of the sweep pinned at full "
+              f"scale, {idle * 100 // len(samples)}% at rest")
+    print("  where the sweep landed:")
+    for step in range(10):
+        band_lo = lo + (hi - lo) * step // 10
+        band_hi = lo + (hi - lo) * (step + 1) // 10
+        n = sum(1 for s in samples if band_lo <= s < band_hi or
+                (step == 9 and s == hi))
+        print(f"    {step * 10:3d}-{step * 10 + 10:3d}%  "
+              f"{'#' * min(60, n)}{'' if n else '  (empty)'}")
+    return {"distinct": len(distinct), "reach": reach}
+
+
+def verdict(probed, control, side):
+    """Compare the two triggers. Only their ratio means anything."""
+    print()
+    if probed is None or control is None:
+        print("INCONCLUSIVE: one of the two triggers produced nothing, so "
+              "there is nothing to compare. Run it again and work both.")
+        return
+    other = "right" if side == "left" else "left"
+    probed, control = probed["distinct"], control["distinct"]
+    print(f"{side} (window written): {probed} distinct values -- "
+          f"{other} (untouched control): {control} distinct values")
+    if probed * 4 <= control:
+        print(f"VERDICT: LIVE. The {side} trigger resolves a fraction of what "
+              f"the {other} one does, which is what a narrow travel window "
+              "looks like: full scale reached almost at once and held. The pad "
+              "reads this block.")
+    elif probed >= control * 0.6:
+        print("VERDICT: INERT. Both triggers resolved their travel the same "
+              "way, so the window changed nothing. The pad does not read this "
+              "block -- writing it moves a slider and nothing else.")
+    else:
+        print("VERDICT: unclear -- the two differ, but not by the margin a "
+              "degenerate window should produce. Most likely one trigger was "
+              "worked harder than the other; run it again, sweeping both the "
+              "same way.")
+
+
+def lock_verdict(probed, control, side, stop):
+    """Both triggers are locked at `stop`; only one has a window ending there.
+
+    Two readings, and they are independent. The control says what a locked
+    trigger reports at its stop with the travel window left alone; the probed
+    side says whether a window narrowed onto the lock point rescales that back
+    to full. A game reads the number, not the finger.
+    """
+    print()
+    if probed is None or control is None:
+        print("INCONCLUSIVE: one of the two triggers produced nothing. Run it "
+              "again and pull both right up to the stop.")
+        return
+    other = "right" if side == "left" else "left"
+    print(f"both triggers locked at {stop}. "
+          f"{side} (window 0..{stop}): reached {probed['reach']} -- "
+          f"{other} (window left alone): reached {control['reach']}")
+
+    # Checked before anything about reach, because it makes reach meaningless.
+    # This is what actually happened on an Apex 5 and it was in neither branch
+    # below: a locked trigger reports 0 or 255 and nothing in between, which an
+    # event-driven axis shows as a handful of events for a whole run.
+    if probed["distinct"] <= 3 and control["distinct"] <= 3:
+        print(f"VERDICT: Lock makes the trigger DIGITAL. Both sides produced "
+              f"{probed['distinct']} and {control['distinct']} distinct values "
+              "-- nothing between rest and full. There is no analogue reading "
+              "for a travel window to rescale, which is why the two sides match "
+              "despite one having a window ending at the lock point. Lock is a "
+              "hair trigger in the button sense, not a shortened analogue pull.")
+        return
+
+    if control["reach"] >= 250:
+        print("The locked trigger still reports full scale on its own, so the "
+              "stop is a wall the finger meets after the reading has already "
+              "topped out. Nothing to rescale.")
+    else:
+        print(f"On its own a locked trigger tops out at {control['reach']} of "
+              f"255 -- a game pulling it to the stop sees "
+              f"{control['reach'] * 100 // 255}% and never more.")
+
+    if probed["reach"] >= control["reach"] + 24:
+        print(f"VERDICT: the window APPLIES UNDER LOCK, and it is the fix: "
+              f"narrowing travel to the lock point took the reading from "
+              f"{control['reach']} back up to {probed['reach']}. Lock plus a "
+              "matching Travel end is a hair trigger that still reports full.")
+    elif abs(probed["reach"] - control["reach"]) <= 8:
+        print("VERDICT: the window did not change what the locked trigger "
+              "reports, and the reading stayed analogue. The effect block is "
+              "overriding the travel curve -- test an analogue effect with "
+              "--curve --under-race before believing that in general.")
+    else:
+        print("VERDICT: unclear -- they differ, but by less than a rescale "
+              "would give. Most likely the two were not pulled equally hard "
+              "into the stop. Run it again.")
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--curve", action="store_true",
+                    help="write the window into the travel curve block at 123, "
+                         "where Space Station puts it on a pad WITHOUT adaptive "
+                         "triggers -- zero, end and the two mirrored points")
+    ap.add_argument("--param", action="store_true",
+                    help="write the window into Param[0..1] of the force-trigger "
+                         "block, where Space Station puts it on a pad WITH "
+                         "adaptive triggers -- 195/196 and 215/216")
+    ap.add_argument("--under-race", action="store_true",
+                    help="with --curve: put BOTH triggers on the Racing effect "
+                         "first, so the window is tested under an effect that "
+                         "keeps the trigger analogue. Lock cannot answer this -- "
+                         "it turns the axis into two states, leaving nothing for "
+                         "a window to rescale")
+    ap.add_argument("--lock", action="store_true",
+                    help="put BOTH triggers on the Lock effect at --lock-at, and "
+                         "give only the probed one a travel window ending there. "
+                         "Answers two things at once: whether the window still "
+                         "applies under an effect rather than only under "
+                         "General, and whether a locked trigger can still report "
+                         "full scale at the stop")
+    ap.add_argument("--lock-at", type=int, default=128,
+                    help="where the Lock effect stops the trigger, 20..200 "
+                         "(default 128, mid-travel)")
+    ap.add_argument("--baseline", action="store_true",
+                    help="change nothing; just measure both triggers as they are")
+    ap.add_argument("--side", choices=("left", "right"), default="left",
+                    help="which trigger gets the window. The other is the control")
+    ap.add_argument("--start", type=int, default=DEFAULT_START,
+                    help=f"window start, 0..255 (default {DEFAULT_START})")
+    ap.add_argument("--end", type=int, default=DEFAULT_END,
+                    help=f"window end, 0..255 (default {DEFAULT_END}). The "
+                         "default is deliberately degenerate -- see the module "
+                         "docstring")
+    ap.add_argument("--seconds", type=float, default=15.0)
+    args = ap.parse_args()
+
+    arms = [args.curve, args.param, args.lock, args.baseline]
+    if sum(1 for a in arms if a) != 1:
+        ap.error("pass exactly one of --curve, --param, --lock or --baseline")
+
+    if args.baseline:
+        seen, presses, ranges = sweep(args.seconds)
+        left = describe("left", seen["left"], ranges["left"], presses)
+        right = describe("right", seen["right"], ranges["right"], presses)
+        print(f"\n{presses} button events during the window")
+        print("\nBaseline only -- no window was written. These two counts are "
+              "what a live block has to break.")
+        return 0
+
+    ctrl = device.Controller()
+    status = mapping.read_status(ctrl)
+    if status is None:
+        sys.exit("the pad did not answer -- press a button to wake it")
+    cfg_id = status["active"]
+
+    original = mapping.read_config(ctrl, cfg_id)
+    edited = original.copy()
+
+    was = {side: edited.trigger_effect(side)[0] for side in mapping.SIDES}
+    other_side = "right" if args.side == "left" else "left"
+
+    if args.lock:
+        stop = max(20, min(200, args.lock_at))
+        params, _bind = effects.stored(effects.MODE_LOCK, {"start": stop})
+        for side in mapping.SIDES:
+            edited.set_trigger_effect(side, effects.MODE_LOCK, params)
+        # The control gets the factory window explicitly rather than whatever
+        # was there, so the only difference between the two triggers is the one
+        # being tested.
+        edited.set_trigger_curve(other_side, zero=0, end=255)
+        edited.set_trigger_curve(args.side, zero=0, end=stop)
+        print(f"profile {cfg_id + 1}: both triggers -> Lock at {stop}; "
+              f"{args.side} travel window 0..{stop}, {other_side} left at 0..255")
+        print("pull BOTH triggers right up to the stop and hold there for part "
+              "of the run -- the number that matters is how far each reports")
+        print("do NOT force past the stop: the reading is what the pad reports "
+              "at the lock, and overpowering it measures your grip instead")
+        print("(applied only, never saved)")
+        try:
+            mapping.write_config(ctrl, cfg_id, edited, old=original)
+            mapping.apply_config(ctrl, cfg_id)
+            time.sleep(0.5)
+            # The blob write alone engages nothing: Space Station follows every
+            # applied-config read with a live command 81 per side, built from
+            # the stored block (ControllerBusinessService.cs:1595 ->
+            # UpdateAdapterTriggerConfig). One command per trigger -- a command
+            # addressed to side 3 does nothing at all.
+            for side_id in (device.SIDE_LEFT, device.SIDE_RIGHT):
+                if not effects.lock(ctrl, side_id, stop):
+                    sys.exit(f"the pad refused the lock on side {side_id}")
+            print(f"both triggers locked at {stop} by a live command 81")
+            seen, presses, ranges = sweep(args.seconds)
+            probed = describe(args.side, seen[args.side], ranges[args.side],
+                              presses)
+            control = describe(other_side, seen[other_side], ranges[other_side],
+                               presses)
+            print(f"\n{presses} button events during the window")
+            lock_verdict(probed, control, args.side, stop)
+        finally:
+            # Live effect state survives a config apply, so putting the blob
+            # back is not enough -- the lock has to be cleared explicitly.
+            effects.clear_all(ctrl)
+            mapping.write_config(ctrl, cfg_id, original, old=edited)
+            mapping.apply_config(ctrl, cfg_id)
+            print(f"\nrestored profile {cfg_id + 1}, triggers released")
+            ctrl.close()
+        return 0
+
+    if args.under_race and not args.curve:
+        ap.error("--under-race goes with --curve")
+
+    under = effects.MODE_RACE if args.under_race else effects.MODE_NORMAL
+    race_params, _ = effects.stored(effects.MODE_RACE, {})
+    for side in mapping.SIDES:
+        # Both sides to the same effect, so a stored Lock or Race left over from
+        # an earlier session cannot masquerade as a travel window. Under
+        # General, params=None leaves the parameter slots alone -- which is what
+        # the --param arm then writes into.
+        edited.set_trigger_effect(side, under,
+                                  race_params if args.under_race else None)
+
+    start, end = sorted((max(0, min(255, args.start)),
+                         max(0, min(255, args.end))))
+    if args.curve:
+        before = edited.trigger_curve(args.side)
+        edited.set_trigger_curve(args.side, zero=start, end=end)
+        where = (f"curve block at {mapping.OFF_TRIGGER_CURVE + mapping.SIDES.index(args.side) * mapping.CURVE_ENTRY}: "
+                 f"zero {before['zero']} -> {start}, end {before['end']} -> {end} "
+                 "(points mirrored onto the window)")
+    else:
+        base = mapping.OFF_FORCE_TRIGGER + mapping.SIDES.index(args.side) * 20
+        _mode, params = edited.trigger_effect(args.side)
+        before = list(params[:2])
+        params = list(params)
+        params[0], params[1] = start, end
+        edited.set_trigger_effect(args.side, effects.MODE_NORMAL, params)
+        where = (f"force-trigger Param[0..1] at {base + 10}/{base + 11}: "
+                 f"{before} -> [{start}, {end}]")
+
+    print(f"profile {cfg_id + 1}: effect {was['left']}/{was['right']} -> "
+          f"General on both; {args.side} {where}")
+    print(f"the {'right' if args.side == 'left' else 'left'} trigger is left "
+          "alone and is the control -- squeeze both the same way")
+    print("(applied only, never saved)")
+
+    try:
+        mapping.write_config(ctrl, cfg_id, edited, old=original)
+        # The key table lands as the packet arrives, but nothing here is a key.
+        # Apply the profile so the firmware re-parses the blocks that are, which
+        # is what Space Station's own write does a moment later.
+        mapping.apply_config(ctrl, cfg_id)
+        time.sleep(0.5)
+        # Live effect state survives a config apply, so an effect left running
+        # by an earlier session would still be on the triggers. Clearing both is
+        # also the faithful replay of General -- ForceTriggerConfigNormal is
+        # exactly `[side, 0]`, one command per side.
+        effects.clear_all(ctrl)
+        if args.under_race:
+            knobs = effects.defaults(effects.MODE_RACE)
+            for side_id in (device.SIDE_LEFT, device.SIDE_RIGHT):
+                if not effects.race(ctrl, side_id, knobs["start"],
+                                    knobs["resistance"]):
+                    sys.exit(f"the pad refused Racing on side {side_id}")
+            print(f"both triggers on Racing (start {knobs['start']}, "
+                  f"resistance {knobs['resistance']}) by a live command 81")
+        seen, presses, ranges = sweep(args.seconds)
+        probed = describe(args.side, seen[args.side], ranges[args.side], presses)
+        control = describe(other_side, seen[other_side], ranges[other_side],
+                           presses)
+        print(f"\n{presses} button events during the window")
+        verdict(probed, control, args.side)
+    finally:
+        effects.clear_all(ctrl)
+        mapping.write_config(ctrl, cfg_id, original, old=edited)
+        mapping.apply_config(ctrl, cfg_id)
+        print(f"\nrestored profile {cfg_id + 1}, triggers released")
+        ctrl.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -405,21 +405,54 @@ pair, and allows them to be equal, since Space Station's range slider passes nei
 a caller deliberately shaping the curve.
 
 `type` stays read-only: it is a bare `int32` the SDK round-trips and never decodes, it reaches no
-UI, and the pad ships with 0. **And a warning before building any UI for this**: on an Apex 5 Space
-Station never shows this block at all — `IsSupportForceTrigger` routes the same two UI numbers into
-the force-trigger block at 195/215 instead — so anything we write into 123..137 survives every
-subsequent edit in their app, and the only repair is a whole-profile "Restore default".
+UI, and the pad ships with 0.
 
-**Where those two numbers land, exactly**, found while filling in the effect vocabulary: 195 and 215
-are `Param[0]` of the left and right force-trigger blocks — each side's pair is `Param[0]`/`Param[1]`
-at 195/196 and 215/216 — and the protobuf record for them is
-`AdapterTriggerTypeNormal { Start, End }` — the *General* effect's two parameters are the stroke
-window. So the Triggers page's "Dead zone", which writes the curve block at 123, is very likely
-writing somewhere this pad does not read, and the control Space Station calls "Stroke Setting" is
-missing from ours. Not yet done, and worth doing as one piece: a start/end pair on General, and
-either verifying the dead zone by feel or dropping it. This is also why `effects.stored()` returns
-no parameters for General rather than zeroing them — clearing those slots would wipe the stroke
-window every time someone switched an effect off.
+**This block is Space Station's "Stroke Setting", and the pad plays it.** Measured with
+`tools/trigger-stroke-probe`, which writes a degenerate 0..16 window to one trigger and leaves the
+other as an in-run control: the written side produced **17 distinct evdev values** against the
+control's **240**, in the same sweep, with 84% of the pull pinned at full scale. 17 is exactly a
+0..16 window. Both triggers still spanned the full 0..255 output, so what the window moves is the
+*physical* travel and not the range the game reads — which is precisely what Flydigi's own tooltip
+claims (`effect_travel_range`: "sets the physical press interval over which the trigger takes
+effect; does not affect the upper and lower limits of the in-game trigger data"). On this pad,
+bringing `end` in is a software hair trigger.
+
+**And the neighbouring candidate is inert.** The same probe wrote the same window into `Param[0]`/
+`Param[1]` of the force-trigger block — 195/196 and 215/216, the `AdapterTriggerTypeNormal
+{ Start, End }` record — and got **238 against 239**: no difference at all. Three separate readings
+of the decompile had pointed at 195/215 as the real destination and at 123 as a byte this pad does
+not read. That was exactly backwards, and only the hardware said so.
+
+**Why the source misled, in detail**, since the same trap is set for anything else read out of the
+renderer. Space Station has *one* stroke slider with *two* destinations, chosen by
+`supportAdaptTrigger`:
+
+  * **off** — `TriggerConfig.Start`/`End` → `configBean.Zero`/`.End` → this block, at 123.
+  * **on** — `AdapterTriggerTypeNormal.Start`/`End` → `TriggerAdapterConfigBean.Param[0..1]` →
+    195/196 and 215/216.
+
+Both halves are in `ControllerRepository.SaveTriggerConfig` and in the renderer's read effect, which
+is what made 195/215 look like the answer for an Apex 5. But the renderer also sets
+`triggerStrokeUsable` to **`!supportAdaptTrigger`** (`index-DM6mSbRo.js`, alongside
+`Me(!S.supportAdaptTrigger)`), so on a pad *with* adaptive triggers the slider is hidden outright —
+and the panel holding it is itself gated on `triggerType === Normal`, so on a k5 the General effect
+draws an empty box. Space Station therefore never edits the stroke window on this pad **by either
+route**. Two more things point the same way: `Param[0..1]` under mode Normal are only ever
+round-tripped through the blob, and the live command for that mode,
+`ForceTriggerConfigNormal`, carries no parameters at all — just `[side, 0]`.
+
+So "do what Space Station does" was not available here: copying them exactly means shipping no
+stroke control, and copying their *k5* write path means writing the byte that measures inert. The
+Triggers page now offers the pair as **Travel start / Travel end**, writing 123 as it always did.
+
+There is no capability flag for a mechanical trigger stop — `IsSupportForceTrigger`, `Led`, `Ns`,
+`Screen` and `TriggerVibration` are the whole set — so `!supportAdaptTrigger` is likely standing in
+for the pads that have one, where the firmware needs telling how much travel the stop left. That is
+a guess about intent and nothing rests on it: this pad honours the block whatever it was for.
+
+None of this changes `effects.stored()`, which still returns no parameters for General rather than
+zeroing them: the slots hold whatever the last effect left, and clearing them would throw away
+numbers someone tuned before switching the effect off.
 
 ## J4 — the vibration bind, and the four effects that were missing
 

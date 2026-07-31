@@ -115,8 +115,18 @@ EFFECTS = (
                        "Pressure needed to push through it", 1, 255, 40),
                _MATCH,
            )),
+    # Measured, not inferred: with Lock on, the axis reports **0 or 255 and
+    # nothing between** -- a 15-second run of pulls produced 2 distinct values
+    # and 35 evdev events, against ~1100 events across ~240 values with no
+    # effect. So this is a hair trigger in the button sense rather than a
+    # shortened analogue pull, which is worth saying on the tin: it is the right
+    # effect for a shooter and the wrong one for a throttle. It also means the
+    # profile's travel window has nothing to act on here, though it does apply
+    # under the analogue effects -- `tools/trigger-stroke-probe --lock` and
+    # `--curve --under-race` are the two runs.
     Effect(MODE_LOCK, "lock", "Trigger lock",
-           "A hard stop -- the trigger will not travel past the point", (
+           "A hard stop, and the reading goes with it -- past the point the "
+           "trigger reads fully pressed at once, with nothing in between", (
                _number("start", "Lock position",
                        "Travel the trigger is allowed before it stops",
                        20, 200, 60),
