@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
+"""Device settings: everything the pad holds that is not part of a profile.
+
+    tools/flydigi-settings show                  # the whole block, one read
+    tools/flydigi-settings sleep 30              # minutes, or `never`
+    tools/flydigi-settings quick-switch on       # FN + A/B/X/Y picks a profile
+    tools/flydigi-settings stick-debounce off
+    tools/flydigi-settings precision 12bit
+    tools/flydigi-settings sensitivity middle
+    tools/flydigi-settings restart
+
+Every write is followed by a read of the whole block, and what it prints is what
+the pad answered afterwards -- not what was asked for. That is not caution for
+its own sake: a command-19 reply echoes the value and never the sub-id, so an
+ACK says "a setting was written" and nothing about which one.
+
+Two settings are on this pad's wire and out of the desktop app on purpose.
+`report-rate` writes a field that reads 0 here, which is not in Flydigi's map,
+and the pad already polls at the 1 ms ceiling its endpoints declare -- nothing
+to gain, a working rate to lose. `xbox-home` is a one-line experiment nobody has
+run: the pad reports it supported and on, Flydigi's own wrapper declines to send
+it, and what it does to the Home key is unknown until someone watches evdev
+while it is off. Both need `--i-know`.
+"""
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from flydigi import device, settings  # noqa: E402
+
+# The switches, as the command line spells them. Everything unsupported on a k5
+# is still here -- the pad says what it supports and `show` prints that, which
+# is more useful than a tool that pretends the sub-id does not exist.
+SWITCHES = {
+    "quick-switch": ("quick_switch", "FN + A/B/X/Y switches profile on the pad"),
+    "xbox-home": ("xbox_home", "the Home button (untested -- see --i-know)"),
+    "motion-debounce": ("motion_debounce", "unsupported on an Apex 5"),
+    "mapping-switch": ("mapping_switch", "undocumented in every locale Flydigi ships"),
+    "stick-debounce": ("stick_debounce", "off reads subtle movement, and jitters at rest"),
+    "auto-calibration": ("auto_calibration", "needs stick debounce on"),
+    "stick-rebound": ("stick_rebound", "filters the spike a stick makes on release"),
+    "status-bar": ("status_bar_always_on", "keep the screen's status bar up"),
+    "always-on": ("always_on", "keep the stored picture up while the pad idles"),
+    "audio": ("audio", "unsupported on an Apex 5"),
+}
+
+# Writes that need saying out loud first, and why.
+GUARDED = {
+    "report-rate": "this pad reports a rate of 0, which is not in Flydigi's map, "
+                   "and both its input endpoints already poll at 1 ms",
+    "xbox-home": "nothing has ever watched what this does to the Home button",
+}
+
+PRECISION_WORDS = {f"{bits}bit": index
+                   for index, bits in enumerate(settings.PRECISION_BITS) if bits}
+SENSITIVITY_WORDS = {name.lower().replace("-", ""): value
+                     for value, name in settings.SENSITIVITY_NAMES.items()}
+
+
+def on_off(text):
+    lowered = text.strip().lower()
+    if lowered in ("on", "yes", "true", "1", "enable", "enabled"):
+        return True
+    if lowered in ("off", "no", "false", "0", "disable", "disabled"):
+        return False
+    raise argparse.ArgumentTypeError(f"expected on or off, got {text!r}")
+
+
+def show(state):
+    words = settings.describe(state)
+    print("Switches")
+    for flag, (name, note) in SWITCHES.items():
+        if not state[f"{name}_usable"]:
+            print(f"  {flag:<17} unsupported on this pad")
+            continue
+        print(f"  {flag:<17} {'on ' if state[name] else 'off'}   {note}")
+    print("\nNumbers")
+    print(f"  sleep             {words['sleep']}")
+    print(f"  report-rate       {words['report_rate']}")
+    print(f"  precision         {words['precision']}")
+    print(f"  sensitivity       {words['sensitivity']}")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--i-know", action="store_true",
+                    help="send a write this pad has no measured answer for")
+    sub = ap.add_subparsers(dest="cmd")
+
+    sub.add_parser("show", help="read the whole settings block")
+
+    for flag, (_name, note) in SWITCHES.items():
+        p = sub.add_parser(flag, help=note)
+        p.add_argument("value", type=on_off, metavar="on|off")
+
+    p_sleep = sub.add_parser("sleep", help="idle minutes before the pad sleeps")
+    p_sleep.add_argument("minutes", help=f"0..{settings.SLEEP_MAX_MINUTES}, or `never`")
+
+    p_precision = sub.add_parser("precision", help="stick resolution")
+    p_precision.add_argument("value", choices=sorted(PRECISION_WORDS))
+
+    p_sensitivity = sub.add_parser("sensitivity", help="centre sensitivity")
+    p_sensitivity.add_argument("value", choices=sorted(SENSITIVITY_WORDS))
+
+    p_rate = sub.add_parser("report-rate", help="polling rate in Hz (needs --i-know)")
+    p_rate.add_argument("hz", type=int, choices=sorted(settings.REPORT_RATE_HZ.values()))
+
+    sub.add_parser("restart", help="reboot the pad (command 29)")
+
+    args = ap.parse_args()
+    if not args.cmd:
+        ap.print_help()
+        return 2
+
+    if args.cmd in GUARDED and not args.i_know:
+        print(f"{args.cmd}: {GUARDED[args.cmd]}.\n"
+              f"Pass --i-know to send it anyway.", file=sys.stderr)
+        return 2
+
+    try:
+        with device.Controller() as ctrl:
+            if args.cmd == "show":
+                return show(settings.read_status(ctrl))
+            if args.cmd == "restart":
+                # No read-back: the pad is on its way off the bus, and a read
+                # here would either time out or reopen a handle that is about
+                # to go stale anyway.
+                if not settings.restart(ctrl):
+                    print("no reply -- the pad may be asleep", file=sys.stderr)
+                    return 1
+                print("restarting -- the hidraw node goes away and comes back")
+                return 0
+
+            if args.cmd in SWITCHES:
+                name, value = SWITCHES[args.cmd][0], args.value
+            elif args.cmd == "sleep":
+                name = "sleep_minutes"
+                value = (0 if args.minutes.strip().lower() == "never"
+                         else int(args.minutes))
+            elif args.cmd == "precision":
+                name, value = "precision", PRECISION_WORDS[args.value]
+            elif args.cmd == "sensitivity":
+                name, value = "sensitivity", SENSITIVITY_WORDS[args.value]
+            else:
+                rate = {hz: wire for wire, hz in settings.REPORT_RATE_HZ.items()}
+                name, value = "report_rate", rate[args.hz]
+
+            return show(settings.apply(ctrl, name, value))
+    except (device.DeviceNotFound, device.DeviceBusy, settings.SettingsError) as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"bad value: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

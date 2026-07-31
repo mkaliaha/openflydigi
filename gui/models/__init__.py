@@ -25,13 +25,17 @@ from .profile import (CURVE_PRESETS, DEFAULT_TARGET, KEY_CLUSTERS, KEY_LABELS,
                       TriggerSideModel, VibrationModel, VibrationSideModel,
                       key_label)
 from .screen import FIT_MODES, MAX_FRAMES, ScreenModel
+from .settings import (PRECISION_NAMES, PRECISION_WIRE, SENSITIVITY_NAMES,
+                       SENSITIVITY_WIRE, SettingsModel)
 from .setup import SetupChecksModel, SetupModel
 
 __all__ = [
     "ALL_ROUTES", "APPLIABLE_ROUTE", "BATTERY_STEPS", "CURVE_PRESETS",
     "CYCLE_MAX", "CYCLE_MIN", "FIT_MODES", "MAX_FRAMES", "STICK_MAX",
     "DEFAULT_TARGET", "EFFECTS", "EFFECT_NAMES", "KEEP_CURRENT", "KEY_CLUSTERS",
-    "KEY_LABELS", "MACRO_TYPES", "RECORD_SECONDS", "ROUTE_NAMES", "TARGETS",
+    "KEY_LABELS", "MACRO_TYPES", "PRECISION_NAMES", "PRECISION_WIRE",
+    "RECORD_SECONDS", "ROUTE_NAMES", "SENSITIVITY_NAMES", "SENSITIVITY_WIRE",
+    "TARGETS",
     "TIER_LABELS", "TITLE_MAX_CHARS",
     "TRIGGER_MODES", "TURBO_MAX_HZ",
     "TURBO_MODES",
@@ -39,7 +43,7 @@ __all__ = [
     "GameListModel", "KeyMapModel", "LightingModel", "MacroModel",
     "ProfileListModel",
     "ProfileModel",
-    "ScreenModel", "SetupChecksModel", "SetupModel",
+    "ScreenModel", "SettingsModel", "SetupChecksModel", "SetupModel",
     "StickModel", "StickSideModel", "TriggerModel", "TriggerSideModel", "VibrationModel", "VibrationSideModel",
     "from_hex", "game_name", "invert_cycle", "key_label", "route_detail",
     "route_name", "to_hex",

@@ -1480,6 +1480,130 @@ def test_the_two_switches_are_different_sub_commands():
           asked[1] == (screen.SUB_STATUS_BAR, False), str(asked))
 
 
+def test_the_settings_block_fills_the_page():
+    """The thirteen bytes an Apex 5 answered, all the way to the properties.
+
+    Parsed rather than hand-written as a dict, so this covers the decode and
+    the model together -- a bit position moving would show up here as a switch
+    in the wrong place.
+    """
+    from flydigi import settings as backend
+
+    from gui.models import SettingsModel
+
+    model = SettingsModel()
+    check("nothing is claimed before a read", not model.loaded)
+    check("and nothing is offered either", not model.quickSwitchUsable)
+
+    model.stateReceived(backend.parse_status(
+        bytes([90, 165, 3, 1, 0, 251, 123, 1, 0, 15, 0, 2, 17])))
+    check("loaded", model.loaded)
+    check("quick switch was on", model.quickSwitch)
+    check("and it is offered", model.quickSwitchUsable)
+    check("sleep is 15 minutes", model.sleepMinutes == 15, str(model.sleepMinutes))
+    check("which reads as words", model.sleepText == "15 min", model.sleepText)
+    check("the report rate says what the pad answered",
+          model.reportRateText == "default (0)", model.reportRateText)
+
+
+def test_the_pickers_index_by_resolution_and_write_by_wire_value():
+    """The trap in `JoystickPrecision`, seen from the UI side.
+
+    The enum is in declaration order -- 8, 10, 12, 9, 11, 14, 16 -- so a picker
+    sorted the way a person expects disagrees with the wire from 9-bit on. What
+    goes out has to be the wire value.
+    """
+    from flydigi import settings as backend
+
+    from gui.models import SettingsModel
+
+    model = SettingsModel()
+    model.stateReceived(backend.parse_status(
+        bytes([90, 165, 3, 1, 0, 251, 123, 1, 0, 15, 0, 2, 17])))
+    check("the picker is sorted by resolution",
+          model.precisionNames == ["8-bit", "9-bit", "10-bit", "11-bit",
+                                   "12-bit", "14-bit", "16-bit"],
+          str(model.precisionNames))
+    check("wire 2 shows as 10-bit", model.precisionNames[model.precision] == "10-bit")
+
+    asked = []
+    model.writeRequested.connect(lambda name, value: asked.append((name, value)))
+    model.precision = 4                       # the row for 12-bit
+    check("12-bit goes out as wire value 3", asked[-1] == ("precision", 3), str(asked))
+
+    check("seven sensitivities, most first",
+          model.sensitivityNames[0] == "Highest"
+          and model.sensitivityNames[-1] == "Lowest"
+          and len(model.sensitivityNames) == 7,
+          str(model.sensitivityNames))
+    model.sensitivity = 0
+    check("the most sensitive is wire 14", asked[-1] == ("sensitivity", 14), str(asked))
+
+
+def test_a_switch_asks_the_worker_and_moves_at_once():
+    """Optimistic, then corrected. The pad takes about a second to answer, and a
+    switch that snapped back for that long would read as a failed click."""
+    from flydigi import settings as backend
+
+    from gui.models import SettingsModel
+
+    model = SettingsModel()
+    model.stateReceived(backend.parse_status(
+        bytes([90, 165, 3, 1, 0, 251, 123, 1, 0, 15, 0, 2, 17])))
+    asked = []
+    model.writeRequested.connect(lambda name, value: asked.append((name, value)))
+
+    model.quickSwitch = False
+    check("the worker was asked", asked == [("quick_switch", 0)], str(asked))
+    check("and the switch moved", not model.quickSwitch)
+
+    # And the read-back is what it settles on, even when the pad disagrees.
+    model.stateReceived(backend.parse_status(
+        bytes([90, 165, 3, 1, 0, 251, 123, 1, 0, 15, 0, 2, 17])))
+    check("the pad has the last word", model.quickSwitch)
+
+    model.sleepMinutes = 999
+    check("sleep is clamped to what the pad takes",
+          asked[-1] == ("sleep_minutes", backend.SLEEP_MAX_MINUTES), str(asked))
+
+
+def test_auto_calibration_is_unavailable_without_debounce():
+    """Flydigi's own string for the debounce toggle says so; not our rule."""
+    from flydigi import settings as backend
+
+    from gui.models import SettingsModel
+
+    model = SettingsModel()
+    model.stateReceived(backend.parse_status(
+        bytes([90, 165, 3, 1, 0, 251, 123, 1, 0, 15, 0, 2, 17])))
+    check("reachable while debounce is on", model.autoCalibrationUsable)
+    model.stickDebounce = False
+    check("and not once it is off", not model.autoCalibrationUsable)
+
+
+def test_an_unsupported_feature_is_reported_as_such_not_as_off():
+    """The pad acknowledges settings it does not have, so the sentence after a
+    write has to come from the read-back rather than from the request."""
+    from flydigi import settings as backend
+    from gui.models.settings import describe_setting
+
+    state = backend.parse_status(
+        bytes([90, 165, 3, 1, 0, 251, 123, 1, 0, 15, 0, 2, 17]))
+    check("an unsupported one says so",
+          describe_setting("motion_debounce", state)
+          == "Motion debounce: not supported on this pad",
+          describe_setting("motion_debounce", state))
+    check("a supported one says on or off",
+          describe_setting("quick_switch", state) == "Quick-switch config: on",
+          describe_setting("quick_switch", state))
+    check("a number says the number",
+          describe_setting("sleep_minutes", state) == "Sleep: 15 min",
+          describe_setting("sleep_minutes", state))
+    check("and precision says the depth, not the index",
+          describe_setting("precision", state) == "Stick precision: 10-bit",
+          describe_setting("precision", state))
+
+
 def main():
     QCoreApplication.instance() or QCoreApplication([])
     for test in (test_selecting_an_unread_profile_requests_it_once,
@@ -1556,6 +1680,11 @@ def main():
                  test_every_frame_gets_a_preview_so_the_page_can_play_it,
                  test_the_screen_state_is_read_rather_than_assumed,
                  test_the_two_switches_are_different_sub_commands,
+                 test_the_settings_block_fills_the_page,
+                 test_the_pickers_index_by_resolution_and_write_by_wire_value,
+                 test_a_switch_asks_the_worker_and_moves_at_once,
+                 test_auto_calibration_is_unavailable_without_debounce,
+                 test_an_unsupported_feature_is_reported_as_such_not_as_off,
                  test_models_pull_in_no_view_code):
         test()
     total = len(PASSED) + len(FAILED)

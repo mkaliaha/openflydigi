@@ -22,7 +22,8 @@ from PySide6.QtQml import QmlElement, QmlSingleton
 from flydigi import games
 
 from .models import (DeviceModel, DsModeModel, GameFilterModel, GameListModel,
-                     LightingModel, ProfileModel, ScreenModel, SetupModel)
+                     LightingModel, ProfileModel, ScreenModel, SettingsModel,
+                     SetupModel)
 from .worker import DeviceThread
 
 # See gui/models/device.py for what these two names do.
@@ -62,6 +63,7 @@ class App(QObject):
     requestLighting = Signal()
     requestTransport = Signal()
     requestScreen = Signal()
+    requestSettings = Signal()
     requestVibration = Signal(dict)
     fetchingChanged = Signal()
 
@@ -75,6 +77,7 @@ class App(QObject):
         self._games = GameListModel(self)
         self._games_view = GameFilterModel(self._games, self)
         self._screen = ScreenModel(self)
+        self._settings = SettingsModel(self)
         self._setup = SetupModel(self)
         self._dsmode = DsModeModel(self)
         # A failed setup action is the same kind of news as a failed device
@@ -125,6 +128,8 @@ class App(QObject):
         self._profile.macros.recordRequested.connect(worker.record_macro)
         self._lighting.writeRequested.connect(worker.write_lighting)
         self.requestScreen.connect(worker.refresh_screen)
+        self.requestSettings.connect(worker.refresh_settings)
+        self._settings.writeRequested.connect(worker.write_setting)
         self._screen.uploadRequested.connect(self._screen_upload_starting)
         self._screen.uploadRequested.connect(worker.upload_screen)
         self._screen.settingRequested.connect(worker.set_screen_setting)
@@ -142,6 +147,7 @@ class App(QObject):
         worker.lighting_loaded.connect(self._lighting.configLoaded)
         worker.lighting_written.connect(self._lighting_written)
         worker.vibration_applied.connect(self._vibration_applied)
+        worker.settings_changed.connect(self._settings.stateReceived)
         worker.screen_status.connect(self._screen.statusReceived)
         worker.screen_progress.connect(self._screen.progressReceived)
         worker.screen_finished.connect(self._screen_finished)
@@ -149,7 +155,7 @@ class App(QObject):
         self._polling = poll
         if poll:
             self._info_timer.start(INFO_INTERVAL_MS)
-            self.requestScreen.emit()
+            self.requestSettings.emit()
 
     @Slot()
     def shutdown(self):
@@ -195,6 +201,10 @@ class App(QObject):
     def screen(self):
         return self._screen
 
+    @Property(SettingsModel, constant=True)
+    def settings(self):
+        return self._settings
+
     @Property(SetupModel, constant=True)
     def setup(self):
         return self._setup
@@ -216,7 +226,10 @@ class App(QObject):
         self.requestStatus.emit()
         self.requestLighting.emit()
         self.requestTransport.emit()
-        self.requestScreen.emit()
+        # One read for both: the screen's two toggles are two bits of the
+        # device-settings block, so asking for the block fills the Screen page
+        # as well and the pad is not asked the same question twice.
+        self.requestSettings.emit()
         self._profile.forget()
 
     @Slot()

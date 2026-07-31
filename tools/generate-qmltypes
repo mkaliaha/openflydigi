@@ -173,6 +173,7 @@ def collect():
         (models.GameListModel, False),
         (models.GameFilterModel, False),
         (models.ScreenModel, False),
+        (models.SettingsModel, False),
         (models.SetupModel, False),
         (models.SetupChecksModel, False),
         (models.DsModeModel, False),

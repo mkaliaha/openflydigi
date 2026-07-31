@@ -6,6 +6,13 @@ does nothing.
 
 Index: [PROGRESS.md](../PROGRESS.md).
 
+**Built.** `flydigi/settings.py` is the read and every write; `tools/flydigi-settings`
+is the CLI; the app's **Device** page is the UI. Four of the write commands are
+verified on hardware — 19 sub 1 (quick-switch), 21 (precision), 22 (sensitivity) and
+23 (sleep time) — each written and read back through command 3. Command 29 (restart)
+is built and has never been sent. Report rate is read and shown and deliberately has
+no control; see below.
+
 ## Command 3: the whole settings block in one read
 
 One read covers most of a device-settings page by itself. `ReadHardwareFunctionStatus`,
@@ -89,8 +96,50 @@ So Space Station's debounce toggle is sub-id 5. Sub-id 3 needs no UI.
 multi-scale: 21 and 22 are standalone commands read back through command 3, while the control points
 live in the 840-byte blob, and all four factory profiles carry identical ones. The stick's 0..127
 and the trigger's 0..255 therefore read as two fixed normalisations of the stored format, with
-bitness changing only how finely the output is quantised. Assumed, not proven — falsifiable in a
-minute by writing a different precision and re-reading a profile.
+bitness changing only how finely the output is quantised.
+
+**Proven, not assumed any more.** Precision was written to 12-bit, profile 1 read back, precision
+put back to 10-bit and the profile read again. Both curve regions came back byte-identical:
+
+```
+curve  00003f3f7f7f7f 00003f3f7f7f7f      at 12-bit and at 10-bit
+extra  00323e4b5764707d8996 0000 …        likewise
+```
+
+So the stored control points are on their own fixed scale. A curve editor does not have to know the
+pad's bitness.
+
+### What precision actually changes — measured, and it is only one of the two streams
+
+The setting is real, it does exactly what its name says, and **it acts on the gamepad report, not on
+the vendor stream.** Both were sampled by sweeping the sticks in full circles for a fixed 20 seconds
+and counting how many *distinct* values each axis produced. Quantising to N bits inside a 16-bit
+field caps that count at 2^N, so the count running into a power of two is the tell.
+
+| Stream | at 10-bit | at 12-bit |
+|---|---|---|
+| evdev gamepad node (`Flydigi Apex 5`) | **1008, 1014, 1013, 1020** — all four axes against 1024 = 2¹⁰, none over | **~3050 per axis** — far past 1024, heading for 4096 |
+| vendor input report (hidraw, marker `0xEF`) | ~2100 per axis, no lattice | ~1800 per axis, no lattice |
+
+The evdev numbers are the finding: four axes independently landing within 1.6% of 1024 and never
+exceeding it is not sampling luck. At 12-bit the same sweep goes straight past that ceiling.
+
+The vendor stream shows no such ceiling at either setting, and the gcd of its distinct values is 1
+rather than 64 or 16 — so **the raw stream is not quantised by this setting at all**. It carries the
+pad's own resolution and the precision control sits downstream of it, on the XInput path. Anything
+reading sticks off the vendor stream — a relay, a probe — is therefore unaffected by what this
+control is set to, and anything reading evdev is.
+
+**Where the sticks are in the vendor report.** Found while measuring the above, and not documented
+anywhere else here: the four axes are **signed 16-bit little-endian at offsets 4, 6, 8 and 10** —
+left X, left Y, right X, right Y. `00 80` is −32768 and `ff 7f` is +32767. `flydigi/motion.py` only
+ever decoded gyro (18) and accel (24) out of this report; the sticks were sitting in front of them
+the whole time. That matters for the relays, which take sticks from evdev and motion from here, and
+so go blind the moment another driver switches `controller_data` off — the same report still carries
+the sticks on the `raw_data` side.
+
+**Measuring it needs third-party mode off.** With it on, `controller_data` is off and the evdev node
+sends nothing at all, so the 10-bit run above reads as a dead pad rather than a quiet one.
 
 ## Small commands worth having
 
@@ -172,8 +221,22 @@ does is a one-line experiment rather than a dead end. The legacy framing (comman
 9/10`) hints at whether Home reaches the host or is handled on the pad, but that is inference; only
 the pad settles it.
 
-**Do sub-ID 1 first** — quick-switch is the only one here that gives a Linux user something
-otherwise unobtainable: switching profiles from the pad with nothing running.
+**Sub-ID 1 was done first** — quick-switch is the only one here that gives a Linux user something
+otherwise unobtainable: switching profiles from the pad with nothing running. Verified on hardware:
+`19 / 1 / 0` turned it off and command 3 reported it off, `19 / 1 / 1` put it back.
+
+**What each write is verified to do**, all through `settings.apply`, which writes and then reads
+command 3 back:
+
+| Command | Written | Read back as |
+|---|---|---|
+| 19 sub 1 | 0, then 1 | quick-switch off, then on |
+| 21 | 3 | precision 12-bit (from 10-bit) |
+| 22 | 16 | sensitivity Middle-high (from Middle) |
+| 23 | 30, then 15 | sleep 30 min, then 15 |
+
+The read-back is not politeness. A command-19 reply echoes the value and never the sub-id, so an
+ACK cannot say which setting moved — and the pad acknowledges sub-ids it does not support at all.
 
 ## Battery — settled: there is no percentage in this SDK
 

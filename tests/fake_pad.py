@@ -17,7 +17,7 @@ on real hardware, which nothing in the decompiled source predicts. See
 """
 import contextlib
 
-from flydigi import device, lighting, mapping, screen
+from flydigi import device, lighting, mapping, screen, settings
 
 PROTO_V31 = 0x0301
 PACKAGE_COUNT = 84
@@ -94,10 +94,44 @@ class FakePad:
         self.screen_frames = []        # every frame this pad has been sent
         self.screen_period = None
         self.screen_uploads = 0        # how many finished uploads landed
-        self.always_on = False
-        self.status_bar_always_on = False
         self.screen_test = None        # (on, colour) from the last command 242
         self._frame = None             # (index, count, bytearray) mid-transfer
+
+        # -- device settings ------------------------------------------------
+        #
+        # What a real Apex 5 answered command 3 with, feature by feature:
+        # supported 251 (everything but motion debounce), enabled 123 (the
+        # status bar off, the rest on), sleep 15 min, report rate 0, precision
+        # 2 = 10-bit, sensitivity 17 = Middle.
+        self.settings = {
+            "quick_switch": True,
+            "xbox_home": True,
+            "motion_debounce": False,
+            "mapping_switch": True,
+            "stick_debounce": True,
+            "auto_calibration": True,
+            "stick_rebound": True,
+            "status_bar_always_on": False,
+            "always_on": False,
+            "audio": False,
+        }
+        self.sleep_minutes = 15
+        self.report_rate = 0
+        self.precision = 2
+        self.sensitivity = 17
+        self.restarts = 0
+
+    # The screen's two settings are two entries of the block above, and the
+    # screen tests reach for them by name. Properties rather than a second copy:
+    # a fake with two stores would let a decoder read the wrong bit and still
+    # pass.
+    @property
+    def always_on(self):
+        return self.settings["always_on"]
+
+    @property
+    def status_bar_always_on(self):
+        return self.settings["status_bar_always_on"]
 
     # -- transport ---------------------------------------------------------
 
@@ -146,8 +180,13 @@ class FakePad:
             screen.CMD_UPLOAD_END: self._upload_end,
             screen.CMD_UPLOAD_FINISH: self._upload_finish,
             screen.CMD_TEST_SCREEN: self._test_screen,
-            screen.CMD_SETTING: self._setting,
-            screen.CMD_HARDWARE_STATUS: self._hardware_status,
+            settings.CMD_SETTING: self._setting,
+            settings.CMD_STATUS: self._hardware_status,
+            settings.CMD_REPORT_RATE: self._report_rate,
+            settings.CMD_PRECISION: self._precision,
+            settings.CMD_SENSITIVITY: self._sensitivity,
+            settings.CMD_SLEEP: self._sleep,
+            settings.CMD_RESTART: self._restart,
         }.get(cmd)
         return handler(payload) if handler else []
 
@@ -315,38 +354,76 @@ class FakePad:
         self.screen_test = (payload[0] == 1, tuple(payload[1:4]))
         return [self._ack(screen.CMD_TEST_SCREEN)]
 
+    # -- device settings ---------------------------------------------------
+
+    # What this pad answers as *supported*, exactly as the hardware did: motion
+    # debounce and audio come back unsupported on a k5. Kept as the names rather
+    # than as the two bytes, so the bit packing below is the only place bits are
+    # built and a wrong shift shows up as a wrong feature.
+    UNSUPPORTED = ("motion_debounce", "audio")
+
     def _setting(self, payload):
+        """Command 19. Acks whatever it understands; changes only what it can.
+
+        An unsupported sub-setting is acknowledged and does nothing, which is
+        this pad's rule everywhere -- "a command answering is not a command
+        working". A fake that refused them instead would let a caller believe an
+        ACK proves a feature exists.
+        """
         sub_id, value = payload[0], payload[1]
-        if sub_id == screen.SUB_OFF_SCREEN:
-            self.always_on = value == 1
-        elif sub_id == screen.SUB_STATUS_BAR:
-            self.status_bar_always_on = value == 1
-        else:
+        name = next((n for n, s in settings.SUB_IDS.items() if s == sub_id), None)
+        if name is None:
             return []
+        if name not in self.UNSUPPORTED:
+            self.settings[name] = value == 1
         # The pad echoes the *value*, not the sub-id -- so nothing in a reply
         # says which setting it belonged to. Modelled, because the SDK's own
         # IsAck matches on the sub-id and would never fire against real
         # hardware; a fake that echoed the sub-id would hide that.
-        return [self._ack(screen.CMD_SETTING, echo=bytes([value & 1]))]
+        return [self._ack(settings.CMD_SETTING, echo=bytes([value & 1]))]
+
+    def _standalone(self, cmd, attribute, payload):
+        setattr(self, attribute, payload[0])
+        return [self._ack(cmd)]
+
+    def _report_rate(self, payload):
+        return self._standalone(settings.CMD_REPORT_RATE, "report_rate", payload)
+
+    def _precision(self, payload):
+        return self._standalone(settings.CMD_PRECISION, "precision", payload)
+
+    def _sensitivity(self, payload):
+        return self._standalone(settings.CMD_SENSITIVITY, "sensitivity", payload)
+
+    def _sleep(self, payload):
+        return self._standalone(settings.CMD_SLEEP, "sleep_minutes", payload)
+
+    def _restart(self, _payload):
+        self.restarts += 1
+        return [self._ack(settings.CMD_RESTART)]
 
     def _hardware_status(self, _payload):
-        """Command 3, with the screen bits filled from this pad's state.
-
-        The rest of the reply carries what a real Apex 5 answered -- supported
-        bits 251, sleep time 15, report rate 0, precision 2, sensitivity 17.
-        """
-        supported = 0x7B | 0x80              # 251: everything but motion debounce
-        enabled = 0x7B | (0x80 if self.status_bar_always_on else 0)
+        """Command 3: the whole settings block, built from this pad's state."""
+        supported = [0, 0]
+        enabled = [0, 0]
+        for name, sub_id in settings.SUB_IDS.items():
+            half = 0 if sub_id <= 8 else 1
+            mask = 1 << ((sub_id - 1) if half == 0 else (sub_id - 9))
+            if name not in self.UNSUPPORTED:
+                supported[half] |= mask
+            if self.settings[name]:
+                enabled[half] |= mask
         body = bytearray(32)
         body[0] = 0x04
         body[1], body[2] = device.MAGIC1, device.MAGIC2
-        body[3] = screen.CMD_HARDWARE_STATUS
+        body[3] = settings.CMD_STATUS
         body[4] = 1
-        body[6] = supported
-        body[7] = enabled
-        body[8] = 0x01                       # off-screen supported, audio not
-        body[9] = 0x01 if self.always_on else 0x00
-        body[10], body[11], body[12], body[13] = 15, 0, 2, 17
+        body[6], body[7] = supported[0], enabled[0]
+        body[8], body[9] = supported[1], enabled[1]
+        body[10] = self.sleep_minutes
+        body[11] = self.report_rate
+        body[12] = self.precision
+        body[13] = self.sensitivity
         return [bytes(body)]
 
 

@@ -26,6 +26,15 @@ INPUT_REPORT_ID = 0x04
 INPUT_REPORT_MARKER = 0xEF     # SDL calls this FLYDIGI_V2_INPUT_REPORT
 UNCHANGED = 0xFF
 
+# The sticks are in this report too, and were overlooked for a long time: four
+# signed 16-bit little-endian axes, left X/Y then right X/Y, with `00 80` for
+# -32768 and `ff 7f` for +32767. Found by sweeping one stick and watching which
+# offsets moved. Worth knowing because the relays take sticks from evdev and
+# motion from here, so they go blind the moment another driver switches
+# `controller_data` off -- while this report keeps carrying the sticks on the
+# `raw_data` side. Nothing reads them yet; `parse` is deliberately unchanged.
+STICK_OFFSETS = (4, 6, 8, 10)  # left X, left Y, right X, right Y
+
 GYRO_OFFSET = 18               # gyro X/Y/Z at 18, 20, 22
 ACCEL_OFFSET = 24              # accel X/Y/Z at 24, 26, 28
 MIN_REPORT_LEN = 30

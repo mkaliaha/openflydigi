@@ -50,18 +50,23 @@ and the SDK has no NewXInput branch for them at all. All three of its branches
 are the same packet with a different magic prefix, so `DIALECTS` carries all
 three and `probe` tries each.
 """
-from . import blobs, device
+from . import blobs, device, settings
 
 CMD_UPLOAD_START = 208
 CMD_UPLOAD_DATA = 209
 CMD_UPLOAD_END = 210
 CMD_UPLOAD_FINISH = 211
 CMD_TEST_SCREEN = 242
-CMD_SETTING = 19
-CMD_HARDWARE_STATUS = 3
 
-SUB_STATUS_BAR = 8
-SUB_OFF_SCREEN = 9
+# The screen's two settings are two bits of the device-settings block, and both
+# the write command and the read live in `flydigi/settings.py`. Named again here
+# because this is where a screen caller looks for them -- but bound to that
+# module rather than restated, so there is one place a sub-id can be wrong.
+CMD_SETTING = settings.CMD_SETTING
+CMD_HARDWARE_STATUS = settings.CMD_STATUS
+
+SUB_STATUS_BAR = settings.SUB_STATUS_BAR
+SUB_OFF_SCREEN = settings.SUB_OFF_SCREEN
 
 WIDTH = 160
 HEIGHT = 80
@@ -462,24 +467,13 @@ def period_from_interval(interval_ms):
 def _setting(ctrl, sub_id, value, wait=0.5):
     """Write one command-19 sub-setting. True if the pad acknowledged it.
 
-    **The reply does not carry the sub-id, whatever the SDK says.** Flydigi's
-    `IsAck` for this family matches `data[2] == 19 && data[5] == subId`, and on
-    an Apex 5 `data[5]` is the *value* echoed back -- so their own check could
-    never match, and ours copied it and reported a working command as failed.
-    Measured:
-
-        19 sub9 value=1  ->  5a a5 13 01 00 01 21
-        19 sub8 value=1  ->  5a a5 13 01 00 01 20
-        19 sub8 value=0  ->  5a a5 13 01 00 00 1f
-
-    Nothing distinguishes one sub-setting's reply from another's, so an ACK here
-    means "a setting was written", not "this setting was written". When it
-    matters, read command 3 back -- `read_screen_status` does.
+    `settings.set_feature` under the name screen callers already use. The
+    measurement behind it is worth keeping in sight from here: the reply carries
+    the *value*, never the sub-id, so an ACK means "a setting was written" and
+    not "this setting was written". Read command 3 back when it matters which,
+    as `read_screen_status` does.
     """
-    wanted = 1 if value else 0
-    payload = bytes([sub_id, wanted])
-    return any(body[2] == CMD_SETTING and body[5] == wanted
-               for body in _replies(ctrl, blobs.build(CMD_SETTING, payload), wait))
+    return settings.set_feature(ctrl, sub_id, value, wait)
 
 
 def set_always_on(ctrl, enabled, wait=0.5):
@@ -555,29 +549,34 @@ def test_screen(ctrl, on, colour=(255, 255, 255), faithful=False, wait=0.5):
                for body in _replies(ctrl, test_screen_packet(on, colour, faithful), wait))
 
 
-def parse_screen_status(body):
-    """The screen's bits out of a command 3 reply.
+def screen_bits(state):
+    """The screen's four keys out of a whole device-settings block.
 
-    Command 3 answers for the whole settings block -- sleep time, report rate,
-    the stick options -- and the rest of it belongs with the device-settings
-    work rather than here. These four bits are the screen's own state, and a
-    screen tool that could only write them would be guessing at what it changed.
+    Narrowing rather than a second decode: two readers of one reply is two
+    places for a bit position to be wrong. The status-bar key keeps its shorter
+    name, which is what the screen model and its tests were written against.
     """
-    if len(body) < 9 or body[2] != CMD_HARDWARE_STATUS:
-        raise ScreenError("not a command 3 reply")
     return {
-        "status_bar_usable": bool(body[5] & 0x80),
-        "status_bar_always_on": bool(body[6] & 0x80),
+        "status_bar_usable": state["status_bar_always_on_usable"],
+        "status_bar_always_on": state["status_bar_always_on"],
         # The SDK's `OffScreenUsable` / `OffScreen` bits, reported under what
         # they were measured to do rather than what they are called. See
         # `set_always_on`: the bit set means the picture stays up.
-        "always_on_usable": bool(body[7] & 0x01),
-        "always_on": bool(body[8] & 0x01),
+        "always_on_usable": state["always_on_usable"],
+        "always_on": state["always_on"],
     }
 
 
+def parse_screen_status(body):
+    """The screen's bits out of a command 3 reply."""
+    try:
+        return screen_bits(settings.parse_status(body))
+    except settings.SettingsError as exc:
+        raise ScreenError(str(exc)) from None
+
+
 def read_screen_status(ctrl, wait=0.5):
-    for body in _replies(ctrl, blobs.build(CMD_HARDWARE_STATUS), wait):
-        if body[2] == CMD_HARDWARE_STATUS:
-            return parse_screen_status(body)
-    raise ScreenError("no reply to command 3 -- the pad may be asleep")
+    try:
+        return screen_bits(settings.read_status(ctrl, wait))
+    except settings.SettingsError as exc:
+        raise ScreenError(str(exc)) from None

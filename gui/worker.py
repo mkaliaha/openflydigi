@@ -19,7 +19,12 @@ from PySide6.QtCore import QObject, QThread, Signal, Slot
 import time
 
 from flydigi import (blobs, device, effects, lighting, macros, mapping, motion,
-                     screen, screen_ota)
+                     screen, screen_ota, settings)
+
+# The one piece of user-facing text this file needs. It lives with the model
+# because a label that only existed in a QML page would leave the status line
+# naming a wire field.
+from .models.settings import SETTING_LABELS, describe_setting
 
 
 class DeviceWorker(QObject):
@@ -31,6 +36,7 @@ class DeviceWorker(QObject):
     vibration_applied = Signal(str, str)       # game name, sides applied
     transport_changed = Signal(dict)     # third-party flag + who holds the pad
     versions_changed = Signal(dict)      # the seven firmware components
+    settings_changed = Signal(dict)      # the whole command-3 block
     screen_status = Signal(dict)
     screen_progress = Signal(int, int)
     screen_finished = Signal(bool)
@@ -278,13 +284,51 @@ class DeviceWorker(QObject):
         self.status.emit(f"Recorded {len(steps)} step(s)" if steps
                          else "Nothing was recorded")
 
+    # -- device settings ----------------------------------------------------
+
+    def _settings_read(self, block):
+        """One command-3 reply, delivered to both pages that live off it.
+
+        The screen's two toggles are two bits of this same block, so a read here
+        keeps the Screen page current too rather than each page polling the pad
+        for the same thirteen bytes.
+        """
+        self.settings_changed.emit(block)
+        self.screen_status.emit(screen.screen_bits(block))
+
+    @Slot()
+    def refresh_settings(self):
+        block = self._attempt(settings.read_status, "reading the device settings")
+        if block:
+            self._settings_read(block)
+
+    @Slot(str, int)
+    def write_setting(self, name, value):
+        """Write one setting, then report the block as the pad reads it back.
+
+        Never what was asked for: a command-19 ack echoes the value and never
+        the sub-id, so nothing in a reply says which setting moved. Command 3
+        does, which is why `settings.apply` ends in a read.
+        """
+        block = self._attempt(lambda ctrl: settings.apply(ctrl, name, value),
+                              f"changing {SETTING_LABELS.get(name, name).lower()}")
+        if block:
+            self._settings_read(block)
+            self.status.emit(describe_setting(name, block))
+
     # -- screen ------------------------------------------------------------
 
     @Slot()
     def refresh_screen(self):
-        state = self._attempt(screen.read_screen_status, "reading the screen state")
-        if state:
-            self.screen_status.emit(state)
+        """The screen's state, read as part of the whole settings block.
+
+        Deliberately not `screen.read_screen_status`: that is the same command 3
+        with everything but four bits thrown away, and this page and the device
+        settings page would then take turns asking for it.
+        """
+        block = self._attempt(settings.read_status, "reading the screen state")
+        if block:
+            self._settings_read(block)
 
     @Slot(int, bool)
     def set_screen_setting(self, sub_id, value):
@@ -295,17 +339,18 @@ class DeviceWorker(QObject):
         which one. Command 3 says what actually happened.
         """
         def work(ctrl):
-            screen._setting(ctrl, sub_id, value)
-            return screen.read_screen_status(ctrl)
+            settings.set_feature(ctrl, sub_id, value)
+            return settings.read_status(ctrl)
 
-        state = self._attempt(work, "changing a screen setting")
-        if state:
-            self.screen_status.emit(state)
+        block = self._attempt(work, "changing a screen setting")
+        if block:
+            self._settings_read(block)
             if sub_id == screen.SUB_OFF_SCREEN:
-                self.status.emit("Screen keeps your picture up" if state["always_on"]
+                self.status.emit("Screen keeps your picture up" if block["always_on"]
                                  else "Screen dark when idle")
             else:
-                self.status.emit("Status bar always on" if state["status_bar_always_on"]
+                self.status.emit("Status bar always on"
+                                 if block["status_bar_always_on"]
                                  else "Status bar hides itself")
 
     @Slot(list, int, bool)

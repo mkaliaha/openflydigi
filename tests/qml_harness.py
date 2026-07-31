@@ -197,6 +197,28 @@ class PadProbe(QObject):
         """Each rumble-to-trigger binding the pad was sent, as raw payloads."""
         return [list(b) for b in self._pad.binds]
 
+    # -- device settings ---------------------------------------------------
+    #
+    # Read off the pad rather than off the model: the model shows a setting as
+    # on the moment it is clicked, so asserting against it would pass whether or
+    # not the write ever landed.
+
+    @Property("QVariantMap", notify=changed)
+    def settings(self):
+        return dict(self._pad.settings)
+
+    @Property(int, notify=changed)
+    def sleepMinutes(self):
+        return self._pad.sleep_minutes
+
+    @Property(int, notify=changed)
+    def precision(self):
+        return self._pad.precision
+
+    @Property(int, notify=changed)
+    def sensitivity(self):
+        return self._pad.sensitivity
+
     @Slot()
     def reset(self):
         """Put the pad back to factory state, blobs included.
@@ -207,8 +229,16 @@ class PadProbe(QObject):
         -- a case that applies an effect leaves those frames on the pad, so the
         next case choosing the same effect is genuinely not a change.
         """
+        fresh = FakePad()
         self._pad.blobs = {i: blank_blob(f"Profile {i + 1}") for i in range(4)}
-        self._pad.led_blob = FakePad().led_blob
+        self._pad.led_blob = fresh.led_blob
+        # And the device settings, for the same reason: a case that turns
+        # quick-switch off leaves it off, and the next case toggling it finds
+        # nothing to change.
+        self._pad.settings = dict(fresh.settings)
+        self._pad.sleep_minutes = fresh.sleep_minutes
+        self._pad.precision = fresh.precision
+        self._pad.sensitivity = fresh.sensitivity
         self._pad.active = 0
         self._pad.fail_reads = False
         self.resetCounters()
@@ -289,11 +319,13 @@ class Fixture(QObject):
         self._profile_reads = 0
         self._lighting_reads = 0
         self._screen_reads = 0
+        self._settings_reads = 0
         # Connected after each model's own handler, so by the time a counter
         # moves the model already holds the new config.
         app.thread.worker.profile_loaded.connect(self._count_profile_read)
         app.thread.worker.lighting_loaded.connect(self._count_lighting_read)
         app.thread.worker.screen_status.connect(self._count_screen_read)
+        app.thread.worker.settings_changed.connect(self._count_settings_read)
 
     def _count_profile_read(self, *_args):
         self._profile_reads += 1
@@ -306,6 +338,19 @@ class Fixture(QObject):
     def _count_screen_read(self, *_args):
         self._screen_reads += 1
         self.changed.emit()
+
+    def _count_settings_read(self, *_args):
+        self._settings_reads += 1
+        self.changed.emit()
+
+    @Property(int, notify=changed)
+    def settingsReads(self):
+        """How many command-3 blocks have landed. See `profileReads`.
+
+        Every write ends in one of these, so this is also how a case waits for
+        a write to have been answered rather than merely sent.
+        """
+        return self._settings_reads
 
     @Property(int, notify=changed)
     def lightingReads(self):
@@ -364,6 +409,7 @@ class Fixture(QObject):
         self._profile_reads = 0
         self._lighting_reads = 0
         self._screen_reads = 0
+        self._settings_reads = 0
         self.changed.emit()
 
     @Slot(result=QObject)

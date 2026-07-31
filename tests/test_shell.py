@@ -47,7 +47,7 @@ WARNINGS = []
 STARTED = []
 
 # The sections the global drawer offers, in order.
-SECTIONS = ["Controller", "Buttons", "Macros", "Sticks", "Vibration",
+SECTIONS = ["Controller", "Device", "Buttons", "Macros", "Sticks", "Vibration",
             "Triggers", "Lighting", "Screen", "Games", "DualSense", "Setup"]
 
 

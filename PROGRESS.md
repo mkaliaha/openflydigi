@@ -12,12 +12,13 @@ protocol is [PROTOCOL.md](PROTOCOL.md); the long write-up behind each finding is
 ## Where things stand
 
 Adaptive triggers are done and validated in real games. The desktop app covers profiles, button
-remapping, macros, sticks, vibration, per-profile trigger effects, lighting, the screen, the game
-list and its own setup. The daemon detects a running game and applies its route unattended.
+remapping, macros, sticks, vibration, per-profile trigger effects, the pad's own device settings,
+lighting, the screen, the game list and its own setup. The daemon detects a running game and applies
+its route unattended.
 
-**Left to build, in size order: the device-settings page and the charging dock** — plus the
-device-type guard, which is a safety item rather than polish, and a group of small pieces that are
-an afternoon each, all listed in What's next.
+**Left to build, in size order: the charging dock** — plus the device-type guard, which is a safety
+item rather than polish, and a group of small pieces that are an afternoon each, all listed in
+What's next.
 
 | Tier | Mechanism | Games | Validated in |
 |---|---|---|---|
@@ -56,43 +57,22 @@ Roughly in order of value. Each is a fresh-context-sized piece of work.
     plus a bindings-storage nuisance. Optional workaround, which neither app does: re-assert the flag
     on connect, off then on once SDL has enumerated. The real fixes are upstream.
     → [docs/findings-steam.md](docs/findings-steam.md)
- 1. **A device-settings page.** Nine controls, and narrower than that sounds: command 3 returns the
-    whole block in one read — supported *and* enabled bits, sleep time, report rate, stick precision
-    and sensitivity — and the generic write, command 19, covers five of them by sub-id. One read and
-    two write commands span the page:
-
-    | Control | Command | Note |
-    |---|---|---|
-    | Quick-switch config | 19 sub 1 | **do this first** — `FN + A/B/X/Y` picks a profile on the pad, with nothing running, which a Linux user cannot get any other way |
-    | Sleep time | 23 | **and this second** — the pad ships at 15 minutes, and dropping off the bus mid-session has interrupted nearly every test |
-    | Joystick debounce | 19 sub 5 | off reads subtle movement better and jitters at rest; also disables auto-calibration |
-    | Joystick auto-calibration | 19 sub 6 | |
-    | Rebound algorithm | 19 sub 7 | filters the reverse spike a stick's inertia makes on release |
-    | Mapping switch | 19 sub 4 | supported and on, and it has no UI string in any of the twelve locales — what it does is a bench question |
-    | Joystick precision | 21 | 8/9/10/11/12/14/16-bit in *declaration* order; ours reads 10-bit |
-    | Centre sensitivity | 22 | Fast / Medium / Slow over seven wire values; ours reads Middle |
-    | Report rate | 20 | reads 0, which is not in the documented map — do not write it blind |
-
-    The pad reports motion debounce (sub 3) and audio (sub 10) as **unsupported**, so those two need
-    no UI. The Xbox home button (sub 2) is a third case and not a dead one: supported, on, and
-    reachable on the wire — see the cheap experiments below before giving it a control.
-    → [docs/device-settings.md](docs/device-settings.md)
- 2. **Stroke Setting on the Triggers page.** 195/215 are `Param[0]` of the force-trigger blocks and
+ 1. **Stroke Setting on the Triggers page.** 195/215 are `Param[0]` of the force-trigger blocks and
     the General effect's two parameters *are* the stroke window. The page's current "Dead zone"
     writes the curve block at 123, which on an Apex 5 Space Station never shows — so it is very
     likely writing where this pad does not read. One piece of work: add the start/end pair, then
     verify the dead zone by feel or drop it. → [docs/findings-profile-blob.md](docs/findings-profile-blob.md)
- 3. **Persist the vibration bind.** The stored form is settled — same structure as live command 82
+ 2. **Persist the vibration bind.** The stored form is settled — same structure as live command 82
     with one spare byte — so a per-game preset can survive a sleep instead of being re-applied.
     Today the Games page applies it with live 82, which the pad forgets.
     → [docs/device-settings.md](docs/device-settings.md)
- 4. **Gyro mapped to a stick (J2).** Offset 137, 8 bytes, smoothing curve at 830. Works in any game
+ 3. **Gyro mapped to a stick (J2).** Offset 137, 8 bytes, smoothing curve at 830. Works in any game
     with nothing running, which on Linux is otherwise Steam Input only.
- 5. **The charging dock.** The gen-2 dock is on the desk; blocked only on decompiling
+ 4. **The charging dock.** The gen-2 dock is on the desk; blocked only on decompiling
     `Flydigi.ChargerSdk.dll` / `Flydigi.CoolerSdk.dll`. It is a *lighting* problem, not a screen
     one — 162 addressable LEDs over the ordinary config path, and `cd2_led_sync` keeps it in step
     with the pad. → [docs/findings-other-devices.md](docs/findings-other-devices.md)
- 6. **Multiple pads.** A Vader 4 Pro is on the desk. The prerequisite is the device-type guard:
+ 5. **Multiple pads.** A Vader 4 Pro is on the desk. The prerequisite is the device-type guard:
     `flydigi/device.py` matches on vendor id plus report-descriptor prefix today, neither of which
     tells the models apart, so it would happily write an Apex 5 config to a Vader. It also unlocks
     work that is already written: the **trigger-vibration editor** (J5, offset 154) is in
@@ -100,7 +80,7 @@ Roughly in order of value. Each is a fresh-context-sized piece of work.
     `IsSupportTriggerVibration` is a Vader flag and this pad has no such motors. The Vader is
     likewise the machine for the ADC calibration command, which `GenerateControllerVader4` is the
     only factory to set. → [docs/findings-profile-blob.md](docs/findings-profile-blob.md) J5
- 7. **An interactive crop for the Screen page.** Everything else there is done.
+ 6. **An interactive crop for the Screen page.** Everything else there is done.
 
 **Small, testable, an afternoon each.** These came out of diffing Space Station's own English locale
 file — its complete user-facing string set — and the 22 factories in `command.setting/` against what
@@ -129,11 +109,12 @@ we ship. Every one is verifiable on the hardware here, and several were already 
   * **Macro editing.** We record and delete. Space Station edits a recorded macro's steps — output
     key, duration, interval — and builds one without recording at all. `set_macro()` already takes
     arbitrary steps, so this is GUI-only too.
-  * **Restart the controller** — command **29**, no argument.
+  * **Restart the controller** — command **29**, no argument. Built as
+    `settings.restart` and `tools/flydigi-settings restart`; never sent to hardware, and not in the
+    app until it has been.
 
 **Cheap experiments, each one sitting.** The `center`/`edge` sign encoding — write 236 to byte 110
-with apply-and-no-save, sweep the stick, watch evdev; the three outcomes are unmistakable. Whether
-stick precision rescales the profile's curve bytes — write a different precision, re-read a profile.
+with apply-and-no-save, sweep the stick, watch evdev; the three outcomes are unmistakable.
 Whether the firmware accepts 164/165 aimed at a slot it is not running. What the **Xbox home button**
 toggle does (19 sub 2): the pad reports it supported *and* on, and the NewXInput command exists for
 our mode — it is Flydigi's own wrapper that declines to send it — so sending it and watching whether
@@ -214,6 +195,7 @@ All command factories are decompiled under `decompiled/Flydigi.ControllerSdk/`.
 | Buttons, sticks, vibration, stored triggers | inside the 840-byte profile blob | same module — [detail](docs/findings-profile-blob.md) |
 | Macros, played by the pad | the profile's macro page at 230, plus 162 to make one live | `flydigi/mapping.py`, `flydigi/macros.py` (the recorder), GUI — [detail](docs/findings-profile-blob.md) |
 | Live trigger effects, all six | 81, 82 | `flydigi/effects.py` — [PROTOCOL.md](PROTOCOL.md) §3a |
+| Device settings | read 3, write 19 by sub-id, 20/21/22/23, restart 29 | `flydigi/settings.py`, `tools/flydigi-settings`, GUI — [detail](docs/device-settings.md) |
 | RGB lighting | read 167, write 168/169 | `flydigi/lighting.py`, GUI |
 | The screen | 31 + UART OTA over CDC; `TestScreen` 242; 19/9 and 19/8 | `flydigi/screen_ota.py` — [detail](docs/findings-screen.md) |
 | Arbitration between our own writers | advisory `flock` on the node | `Controller.claim()` — [detail](docs/findings-steam.md) |
@@ -235,6 +217,7 @@ python3 -m gui
 
 | Tab | What works |
 |---|---|
+| Device | the pad's own settings, not a profile's: switching profile from the pad with `FN + A/B/X/Y`, sleep time, stick debounce, auto-calibration, the rebound filter, stick resolution and centre sensitivity — plus the polling rate, shown and not offered |
 | Buttons | remap, turbo + hold/toggle, reset all to default |
 | Macros | record a sequence off the pad and bind it to any key, pick once / while held / toggle, set the repeat gap, see every step, delete |
 | Vibration | master switch, per-grip enable, min/max window, strength |
@@ -352,6 +335,28 @@ in `gui/` is [gui/README.md](gui/README.md).
     writing a different mode number alone changes nothing visible.
   * **Frame geometry is not 16 x 10** despite what `LedConfigParser` walks — that is the older
     490-byte layout. An Apex 5 returns 380 bytes = 10 frames x 12 LEDs. Derive it from the blob.
+  * **`JoystickPrecision` is in declaration order, not by bit depth** — `None, 8, 10, 12, 9, 11, 14,
+    16`, because 9- and 11-bit were added after 8/10/12 and 14/16 later still. So this pad's `2` is
+    **10-bit**, not 12, and any picker sorted the way a person expects disagrees with the wire from
+    9-bit on. What goes out has to be the enum index.
+  * **A command-19 reply echoes the value and never the sub-id**, so an ACK means "a setting was
+    written" and not which — and the pad acknowledges sub-ids it reports as unsupported. Every write
+    in `flydigi/settings.py` therefore ends in a command-3 read, and the UI shows that rather than
+    what was asked for. Flydigi's own `IsAck` matches on the sub-id and so can never fire.
+  * **Stick precision does not rescale a profile's curve bytes.** Measured both ways: profile 1 read
+    at 12-bit and at 10-bit came back byte-identical. The stored control points are on their own
+    fixed scale.
+  * **Stick precision quantises the evdev report and leaves the vendor stream alone.** A 20-second
+    sweep at 10-bit produced 1008/1014/1013/1020 distinct values on the four evdev axes — four
+    independent runs at 1024 = 2¹⁰ and never over it — against ~3050 each at 12-bit. The vendor
+    input report shows no such ceiling at either setting. So the control sits on the XInput path,
+    downstream of the pad's own resolution: a relay reading sticks off the vendor stream is
+    unaffected by it, and a game reading evdev is. → [docs/device-settings.md](docs/device-settings.md)
+  * **The sticks are in the vendor input report, at offsets 4, 6, 8 and 10** — signed 16-bit
+    little-endian, left X/Y then right X/Y, `00 80` being −32768 and `ff 7f` +32767. `motion.parse`
+    only ever took gyro (18) and accel (24) out of this report. Worth knowing for the relays, which
+    take sticks from evdev and so go blind when another driver switches `controller_data` off, while
+    this report keeps carrying them on the `raw_data` side.
   * **M1–M4 and C/Z are remap sources, not targets.** They have no XInput equivalent, so mapping a
     face button onto one makes it send nothing. `APEX5_KEYS` is the source list, `XINPUT_TARGETS`
     is what a remap may point at.
@@ -420,7 +425,7 @@ Tests, cheapest first. Each skips with exit 0 when PySide6 is absent, so the bac
 dependency-free:
 
 ```bash
-for t in tests/test_{device,dsmode,dsx,forza,games,macros,mapping,monitor,prefs,relay,screen,screen_ota}.py; do python3 "$t"; done
+for t in tests/test_{device,dsmode,dsx,forza,games,macros,mapping,monitor,prefs,relay,screen,screen_ota,settings}.py; do python3 "$t"; done
 distrobox enter apex-dev -- bash -lc 'cd ~/Projects/ApexExperiments && \
   python3 tests/test_models.py && python3 tests/test_shell.py && python3 tests/test_qml.py'
 tools/generate-qmltypes
@@ -461,12 +466,13 @@ a bad checksum by staying silent exactly as the pad does.
 | Path | What |
 |---|---|
 | `PROTOCOL.md` | Full wire protocol + hardware verification results |
-| `flydigi/` | Library — `device.py` (transport), `blobs.py` (packetised config transfer), `effects.py` (live trigger commands), `mapping.py` (profiles, remapping, macros, vibration, stored triggers), `macros.py` (recording one off the pad's evdev node), `lighting.py` (RGB), `screen.py` (160×80 screen: LVGL image format, settings, and the HID upload that this pad ignores), `screen_ota.py` (the serial upload that works), `games.py`, `forza.py`, `evdev.py` (the xpad evdev reader every relay's input comes from), `ds5.py` (DualSense report codec), `dsx.py` (DSX UDP protocol), `monitor.py` (process-memory engine), `motion.py` (battery, gyro/accel and the third-party toggle), `relay.py` (Apex 5 → DualSense translation) |
+| `flydigi/` | Library — `device.py` (transport), `blobs.py` (packetised config transfer), `effects.py` (live trigger commands), `mapping.py` (profiles, remapping, macros, vibration, stored triggers), `macros.py` (recording one off the pad's evdev node), `lighting.py` (RGB), `screen.py` (160×80 screen: LVGL image format, settings, and the HID upload that this pad ignores), `screen_ota.py` (the serial upload that works), `settings.py` (the pad's own settings: command 3 and the small writes behind it), `games.py`, `forza.py`, `evdev.py` (the xpad evdev reader every relay's input comes from), `ds5.py` (DualSense report codec), `dsx.py` (DSX UDP protocol), `monitor.py` (process-memory engine), `motion.py` (battery, gyro/accel and the third-party toggle), `relay.py` (Apex 5 → DualSense translation) |
 | `gui/` | PySide6/QML desktop app (GPL-3.0-or-later) — `app.py` (the object graph), `main.py` (entry point), `worker.py` (all device I/O, on its own thread), `models/` (view-agnostic state; `screen.py` is the one that touches QtGui, for image decoding), `qml/` (`Main.qml`, `pages/`, `components/`) |
 | `tools/flydigi-mapping` | CLI for profiles — list/show/set/clear/rename/apply/backup/restore, plus `macros`, `macro-record`, `macro-set`, `macro-clear` |
 | `tools/flydigi-forza` | Forza driver — UDP 5300 → rules → triggers (`--dump` for telemetry only) |
 | `tools/flydigi-dsx` | DSX protocol listener on UDP 7878 — drives triggers from any DSX-compatible mod |
 | `tools/flydigi-monitor` | Memory-reading driver using Flydigi's XGameMonitor configs (`--probe` to debug offsets) |
+| `tools/flydigi-settings` | The pad's own settings — `show`, then one subcommand per setting. Every write ends in a read-back, because a command-19 ack cannot say which setting it belonged to |
 | `tools/flydigi-screen` | The screen — `check`/`preview`/`convert` need no pad; then `status`, `test`, `show`, `animate`, `send`, `on`/`off`, `statusbar`. Sending goes over the serial route by default (`--via hid` is for other models, and inert here) |
 | `flydigi/uhid.py` | Pure-Python `/dev/uhid` binding (no dependencies) — creates kernel-side HID devices |
 | `flydigi/usbip.py` | Pure-Python USB device served to this machine's own kernel via `vhci-hcd` — no dependencies, no `usbip` tool |
@@ -479,7 +485,7 @@ a bad checksum by staying silent exactly as the pad does.
 | `tools/gen_ds5_usb.py` | Regenerates the above from a connected DualSense. Scrubs the Bluetooth addresses in report `0x09` **and the hardware address in `0x0B`**, unconditionally. Report `0x05`, this unit's IMU calibration, is kept deliberately — per-unit but not an identifier |
 | `tools/flydigi-ds5-usbip` | Tier 4b — the relay, with `--haptics` and `--motors` |
 | `tools/ds5-dump-features` | Re-reads a real DualSense and diffs it against what we serve |
-| `tests/` | `test_device.py`, `test_dsmode.py`, `test_dsx.py`, `test_forza.py`, `test_games.py`, `test_macros.py`, `test_mapping.py`, `test_monitor.py`, `test_prefs.py`, `test_relay.py`, `test_screen.py`, `test_screen_ota.py` need no Qt; `test_models.py`, `test_shell.py`, `test_qml.py` need PySide6 — all pass without hardware, each printing its own count |
+| `tests/` | `test_device.py`, `test_dsmode.py`, `test_dsx.py`, `test_forza.py`, `test_games.py`, `test_macros.py`, `test_mapping.py`, `test_monitor.py`, `test_prefs.py`, `test_relay.py`, `test_screen.py`, `test_screen_ota.py`, `test_settings.py` need no Qt; `test_models.py`, `test_shell.py`, `test_qml.py` need PySide6 — all pass without hardware, each printing its own count |
 | `tests/fake_pad.py` | Stand-in controller: multi-packet reads, diffed writes, apply, save, checksum rejection |
 | `tools/forza-simulate` | Synthetic telemetry generator, for testing without the game |
 | `tests/test_forza.py` | Self-test for the parser and rule engine (no hardware needed) |
