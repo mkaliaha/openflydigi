@@ -288,10 +288,17 @@ What survives is everything this project drives over the vendor interface — wh
 and 5, all of them. The trigger effects were verified by feel, not by ACK: command 245 already
 taught us that this pad ACKs commands it then ignores.
 
-**What it costs is exactly Tier 4 and our own evdev tools.** `tools/flydigi-ds5` relays sticks and
-buttons from evdev into the virtual DualSense, and `joystick-curve-probe` and `stick-feel` read the
-same node — none of them work while the flag is on. Tier 4 needed Steam Input off anyway, so the two
-were already mutually exclusive in practice; this makes it explicit.
+**What it costs is DS mode — both tiers — and our own evdev tools.** `tools/flydigi-ds5` *and*
+`tools/flydigi-ds5-usbip` relay sticks and buttons from evdev into the virtual DualSense, and
+`joystick-curve-probe` and `stick-feel` read the same node. None of them work while the flag is on,
+because `controller_data = False` silences the report the evdev node is built from.
+
+**DS mode and third-party mode are mutually exclusive, and the failure is not obvious.** Motion
+survives — the vendor stream keeps running with `controller_data` off, measured below — so a game
+gets a DualSense that tilts and has dead sticks and buttons. That reads as a broken mapping rather
+than a missing input source. The tell is the relay's status line: `evdev=` stuck at 0 while
+`motion=` climbs. Nothing enforces it; neither relay reads command 16 before starting.
+DS mode needed Steam Input off anyway, so the two were already exclusive in practice.
 
 **Recorded because it was measured, not because anything should be built on it.** In the exact
 state above — third-party on, `controller_data` off — the vendor operator-data stream was still

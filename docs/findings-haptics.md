@@ -480,6 +480,20 @@ privilege-escalation primitive, since one of those devices is a keyboard.
     Launch with `SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501`, or set it globally in Steam.
   * **Steam Input must be off** for that game: it masks the pad as an Xbox controller, which breaks
     DualSense semantics and the four-channel audio the haptics arrive on.
+  * **Third-party mode must be off**, and this one fails in a way that looks like something else.
+    Both relays take sticks and buttons from **evdev** — `evdev.find_device` then `evdev.Reader`, in
+    `tools/flydigi-ds5` and `tools/flydigi-ds5-usbip` alike. The third-party toggle hands the pad to
+    another driver, which switches `controller_data` off, and the ordinary controller report is what
+    feeds the evdev node. So with it on, the node goes silent and the relay has nothing to relay.
+
+    What makes it confusing is that **motion keeps working**: gyro and accel come from the vendor
+    stream, which survives `controller_data = False` (measured at ~970 Hz in exactly that state). The
+    game therefore gets a DualSense that tilts but has dead sticks and dead buttons, which reads as a
+    broken mapping rather than a source that has been taken away. The tell is the relay's own status
+    line: `evdev=` stays at 0 while `motion=` climbs.
+
+    Nothing enforces this — neither relay reads command 16 before starting. `joystick-curve-probe`
+    and `stick-feel` read the same node and fail the same way.
   * **`--verify` is the first debugging step**, not the last. It reads our own `054c:0ce6` evdev node
     back and counts events, which separates "our reports never reach the OS" from "the game bound the
     wrong pad" — two failures that look identical from inside the game.

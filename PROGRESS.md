@@ -112,6 +112,13 @@ So `isPS5` is no longer a route in `flydigi/prefs.py`, the daemon never starts t
 app has a **DualSense** section: the mode switch, plus a haptics-to-motors switch that is read once at start and so has to be set *before* DS mode is turned on. `flydigi/dsmode.py` is what the switch and the CLI
 share.
 
+**DS mode requires third-party mode off**, and the two switches are in the same app. Both relays take
+sticks and buttons from evdev, and the third-party toggle hands the pad to another driver which
+switches `controller_data` off — the report the evdev node is built from. Motion keeps arriving on
+the vendor stream, so the symptom is a DualSense that tilts with dead sticks and buttons rather than
+an obvious dead source; the relay's `evdev=` counter sits at 0 while `motion=` climbs. Nothing
+enforces it today. → [docs/findings-steam.md](docs/findings-steam.md)
+
 **The privilege model, as built.** The attach is the only privileged step, so the relay is started
 through pkexec, does the module load and the attach as root, and then `setuid`s back to the invoking
 user before it opens a device or starts a thread. What runs for the length of a play session is an
