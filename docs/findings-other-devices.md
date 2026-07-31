@@ -194,7 +194,7 @@ at a Vader.
 | node | `/dev/hidrawN` | free | **no** — moves on every reconnect | — |
 | mac | command 1, raw 8..11, reversed | free, inside the heartbeat | yes | **reads all zeroes on this pad** |
 | uid | command 4, 13 bytes at raw 6 | one exchange | yes | **yes, on the pad and the dock** |
-| nickname | command 2 to read, 24 to write | one exchange | until renamed | read yes, **write never acked** |
+| nickname | command 2 to read, 24 to write | one exchange | until renamed | **yes, both** |
 
 The address was going to be the cheap answer, since it rides the same command-1 reply as the
 battery that anything holding a pad already polls. It is not one. Measured on this pad, on its
@@ -217,30 +217,42 @@ Command 4 works and is the one to use:
 04 5a a5 04 01 00 | 14 20 6e 7a 1c 00 00 00 00 dc ba 3e 00 | 00 00 ...
 ```
 
-**The two SDKs disagree about where a nickname starts, and the pad settles it.**
+**The nickname is at raw 6, like every other payload, and finding that out took writing one.**
 `ReadNickNameControllerCommandNewXInput` slices `data.Slice(4, data.Length - 6)` — raw 5 with the
-report-id byte kept — while `Flydigi.ChargerSdk`'s slices from its own data[6]. An unnamed pad
-answered `04 5a a5 02 01 00 01 01 09 09 09 64 04 5e 00 ...`, and only the earlier slice reads that
-as unset: raw 5 is 0x00, which is Flydigi's own test for an erased name, where raw 6 is 0x01 and
-would have decoded as the first byte of a name that is not there. Each SDK is right about its own
-device.
+report-id byte kept — where `Flydigi.ChargerSdk`'s slices from its own data[6], and an unnamed pad
+appeared to confirm the earlier offset by answering 0x00 there, which is Flydigi's own test for an
+erased name. It is the index byte, zero in every single-frame reply. The two SDKs do not disagree;
+the reference's indexing for this one command is simply one off.
 
-**Flydigi's nickname *write* is broken in both SDKs**, byte for byte the same code in
-`Flydigi.ControllerSdk` and `Flydigi.ChargerSdk`:
+**A factory-fresh pad does not hold zeroes.** This one shipped with `01 01 09 09 09 64 04 5e`,
+whose first byte is neither 0x00 nor 0xFF — so by Flydigi's own test Space Station shows an unnamed
+pad as having a name. `identity.read_nickname` keeps their test and adds a second: a field that
+does not decode as printable UTF-8 is not a name.
 
-```csharp
-array[4] = (byte)(2 + bytes.Length);
-Array.Copy(bytes, 0, array, 5, bytes.Length);
-array[6] = array.Crc(3, 3 + array[4]);     // <- fixed index
-```
+**Command 24 works, and three things about it are not what the SDK implies.** All measured, by
+writing names to the pad here and reading them back:
 
-The checksum belongs at `3 + array[4]`, which is 6 only for a one-byte name. For anything longer
-their packet writes the checksum *into the name*, over its second byte, and leaves the real
-checksum slot at zero — and a config-family packet with a bad checksum draws no reply from this
-pad at all. So either command 24 is not checksummed, or Space Station's rename has never worked
-past one character. `identity.nickname_packet` sends the packet the framing says is right and
-takes `reference=True` for theirs; `tools/flydigi-devices name --reference` is the one run that
-settles it.
+  * **It is not checksum-validated.** A packet with the checksum slot at zero is acknowledged and
+    stored, where a mapping packet with a bad checksum draws no reply at all.
+  * **The pad keeps `buf[4] - 1` bytes from buf[5]**, one more than the name, so anything in the
+    slot after the name is stored as part of it. "Desk" with a dutifully-appended checksum came
+    back as `44 65 73 6b a5`; without one, as `44 65 73 6b`. So the packet this project sends
+    carries no checksum. The same arithmetic sets the length limit at **26 bytes** rather than the
+    27 that fit — 27 and 28 both came back truncated. UTF-8 round-trips, so it is bytes rather
+    than characters.
+  * **Flydigi's own builder is broken for every name but a one-letter one**, byte for byte the
+    same code in both SDKs:
+
+    ```csharp
+    array[4] = (byte)(2 + bytes.Length);
+    Array.Copy(bytes, 0, array, 5, bytes.Length);
+    array[6] = array.Crc(3, 3 + array[4]);     // fixed index
+    ```
+
+    Index 6 is the right slot only for a one-byte name; for anything longer the checksum overwrites
+    the name's second character. Their "Desk" is stored by the pad as `44 a5 73 6b`. Space
+    Station's rename has never worked past one character, and the pad was never the reason.
+    `nickname_packet(..., reference=True)` reproduces their packet, which is how this was found.
 
 **The dock's nickname read is one byte long, and this project shortens it.** Flydigi slice
 `data[6 : 6 + data[3] - 3]`, and the measured framing says that runs onto the checksum: the unset

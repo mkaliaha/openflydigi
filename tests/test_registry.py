@@ -250,6 +250,63 @@ def test_a_selected_pad_is_the_one_that_is_opened():
 
 
 @with_bus(TWO_PADS_TWO_DOCKS)
+def test_naming_a_pad_reproduces_what_the_hardware_does():
+    """Command 24, and every claim here came off the pad rather than the SDK.
+
+    Written the way the reference builds it, this fails; written the way the
+    framing implied, it *also* failed, because the pad keeps one byte more than
+    the name and an appended checksum lands inside it. Three findings, and the
+    fake reproduces all three -- so a reader or writer that regresses to either
+    wrong shape fails here rather than on hardware.
+    """
+    with registry.open_pad("Desk") as pad:
+        # Factory state: the field is not zeroes, it is the control bytes the
+        # pad here shipped with -- which Flydigi's own emptiness test calls a
+        # name, and which this reads as unnamed because it is not printable.
+        mock.instance(pad.path).nickname_bytes = b""
+        check("a never-named pad reads as unnamed, though its field is not zero",
+              identity.read_nickname(pad) is None)
+
+        check("an ASCII name round-trips",
+              identity.write_nickname(pad, "Desk") == "Desk")
+        check("and a long one",
+              identity.write_nickname(pad, "Desk pad (left)") == "Desk pad (left)")
+        check("and a one-character one, where both packet forms agree",
+              identity.write_nickname(pad, "K") == "K")
+        check("UTF-8 round-trips, so a name is bytes rather than characters",
+              identity.write_nickname(pad, "\u0421\u0442\u043e\u043b")
+              == "\u0421\u0442\u043e\u043b")
+
+        # Flydigi's own builder, byte for byte. Their checksum lands on the
+        # name's second character: "Desk" is stored as 44 a5 73 6b, which is
+        # not valid UTF-8 and so reads as no name at all.
+        check("Flydigi's own bytes corrupt the name",
+              identity.write_nickname(pad, "Desk", reference=True) is None)
+        stored = mock.instance(pad.path).nickname_bytes
+        check("and corrupt it in the measured way",
+              stored == bytes((0x44, 0xa5, 0x73, 0x6b)), stored.hex(" "))
+
+        # The packet carries no checksum, because the pad does not check one
+        # and because anything in that slot is stored as part of the name.
+        packet = identity.nickname_packet("Desk")
+        check("no checksum is written after the name",
+              packet[9] == 0, packet[:12].hex(" "))
+        check("where the reference writes one over the name",
+              identity.nickname_packet("Desk", reference=True)[6] != 0x65)
+
+    check("a name too long to fit is refused rather than truncated",
+          _refuses_long_name())
+
+
+def _refuses_long_name():
+    try:
+        identity.nickname_packet("x" * (identity.NICKNAME_MAX + 1))
+    except ValueError:
+        return True
+    return False
+
+
+@with_bus(TWO_PADS_TWO_DOCKS)
 def test_state_survives_the_handle_being_closed():
     """A mock device is a device, not a fresh object per open.
 
@@ -305,6 +362,7 @@ def main():
                  test_an_ambiguous_name_is_refused_rather_than_guessed,
                  test_a_kind_narrows_the_search,
                  test_a_selected_pad_is_the_one_that_is_opened,
+                 test_naming_a_pad_reproduces_what_the_hardware_does,
                  test_state_survives_the_handle_being_closed,
                  test_a_device_that_is_not_present_is_not_on_the_bus,
                  test_the_key_is_stable_and_the_mac_is_not_used):

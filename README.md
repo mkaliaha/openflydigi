@@ -167,7 +167,7 @@ tools/flydigi-charger list              # every dock on the bus; --device picks 
 # every Flydigi device attached, whichever kind
 tools/flydigi-devices list              # node, uid, model, firmware, battery, nickname
 tools/flydigi-devices show --device Couch
-tools/flydigi-devices name "Couch" --device uid:1420   # unproven; it asks first
+tools/flydigi-devices name "Couch" --device uid:1420   # up to 26 bytes; it asks first
 #   every other tool takes the same --device: a node, a uid or a prefix, a mac, or a nickname
 
 # devices nobody owns, for trying any of the above with more than one attached
@@ -189,7 +189,7 @@ tools/apex5-setup install-rules         # the one subcommand that needs root
 | `tools/flydigi_cmd.py` | one-off vendor commands: device info, trigger effects, rumble |
 | `tools/flydigi-auto` | which games the daemon may act on by itself, and which route it takes |
 | `tools/flydigi-charger` | the CD2 charging dock: `show`, `list`, its four switches, and `light <mode>` over the eight computable effects |
-| `tools/flydigi-devices` | every device attached: `list`, `show`, and `name` to nickname one |
+| `tools/flydigi-devices` | every device attached: `list`, `show`, and `name` to nickname one (which Space Station cannot do correctly) |
 | `tools/flydigid` | daemon: detect a running game, apply its route, reset on exit |
 | `tools/flydigi-ds5` | virtual DualSense over uhid |
 | `tools/flydigi-ds5-usbip` | virtual DualSense over usbip + vhci, with haptic audio |

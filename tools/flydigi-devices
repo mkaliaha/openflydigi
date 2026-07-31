@@ -14,9 +14,9 @@
 Every other tool here takes `--device` with the same meaning: a node path, a
 uid or a prefix of one, a mac, or a nickname. `list` is what prints all four.
 
-**Nothing here writes except `name`**, and that one is unproven -- command 24
-has never been acknowledged by hardware, and Flydigi's own builder for it is
-broken past a one-character name in both of their SDKs. It asks before sending.
+**Nothing here writes except `name`**, which is measured and works -- unlike
+Space Station's own rename, whose builder corrupts the second character of any
+name longer than one. It asks before sending anyway, since it is a write.
 
 Devices that are not there can be conjured with `FLYDIGI_MOCK_BUS`, which is how
 the multi-device paths are exercised on a desk with one pad and one dock:
@@ -90,10 +90,8 @@ def name(args):
     what = registry.label(entry)
     if not args.yes:
         print(f"Naming {what} ({entry['path']}) {args.nickname!r}.")
-        print("Command 24 has never been acknowledged by hardware from here, "
-              "and Flydigi's own\nbuilder for it puts the checksum inside the "
-              "name for anything past one character.\nThis sends the packet "
-              "the framing says is right.")
+        print("The pad stores this until it is named again; there is no way to "
+              "clear it back to\nthe bytes it shipped with.")
         if input("Go ahead? [y/N] ").strip().lower() not in ("y", "yes"):
             print("nothing sent")
             return 1
@@ -139,8 +137,10 @@ def main():
     rename.add_argument("nickname")
     rename.add_argument("--yes", action="store_true", help="do not ask first")
     rename.add_argument("--reference", action="store_true",
-                        help="send Flydigi's own bytes, checksum bug included, "
-                             "to find out what the pad makes of them")
+                        help="send Flydigi's own bytes, checksum bug included. "
+                             "The pad stores the name with its second "
+                             "character overwritten, which is what Space "
+                             "Station does to it")
 
     args = ap.parse_args()
     if not args.cmd:

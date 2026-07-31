@@ -79,13 +79,6 @@ the settings block" in [docs/device-settings.md](docs/device-settings.md).
   * **Restore a profile slot to factory** — `ResetMappingConfigByCfgId`, command **175**. The
     Buttons page's "reset all" only clears key mappings in the in-memory blob; Space Station's
     resets the whole slot on the pad.
-  * **Naming a pad on the pad** — write **24**, `identity.write_nickname` and
-    `tools/flydigi-devices name`, built and never acknowledged by hardware. The read half
-    (command 2) *is* measured. Worth one run because **Flydigi's own builder for it is broken in
-    both SDKs**: `array[6] = Crc(3, 3 + array[4])` puts the checksum at a fixed index, which is
-    only the right slot for a one-character name, so for anything longer their packet overwrites
-    the name's second byte and leaves the checksum slot at zero. This sends the packet the framing
-    says is right; `--reference` sends theirs, byte for byte, to find out which the pad takes.
   * **The cooperative lock** — `AcquireController`, command **28**, with a 20-byte ASCII tag. The
     read half is built as `motion.read_transport`; the write half is not.
   * **Custom stick curves.** The page offers presets and a Custom label; Space Station drags the two
@@ -128,7 +121,7 @@ All command factories are decompiled under `decompiled/Flydigi.ControllerSdk/`.
 |---|---|---|
 | Mapping profiles | status 161, apply 162, read 163, write 164/165, save 166 | `flydigi/mapping.py`, `tools/flydigi-mapping`, GUI |
 | Device-type guard | identify read 1 | `flydigi/identity.py` — `require()` refuses anything but a k5, and `flydigi/` calls it nowhere itself; `flydigi-mapping`, `flydigi-settings` and the app take it once per connection, so their reads are refused too |
-| **Choosing between devices** | uid 4, nickname 2 / 24, and the command-1 address | `flydigi/registry.py` — one list over pads and docks, selection by node, uid, mac or nickname with an ambiguous name refused; `tools/flydigi-devices`, `--device` on every tool, the app's picker, and `prefs.primary_pad` for the daemon. Uid and nickname reads **measured on the pad**; the address reads all-zero and the nickname write has never been acked — [detail](docs/findings-other-devices.md) |
+| **Choosing between devices** | uid 4, nickname 2 / 24, and the command-1 address | `flydigi/registry.py` — one list over pads and docks, selection by node, uid, mac or nickname with an ambiguous name refused; `tools/flydigi-devices`, `--device` on every tool, the app's picker, and `prefs.primary_pad` for the daemon. Uid, nickname read *and* nickname write all **measured on the pad**; the address reads all-zero and is not usable — [detail](docs/findings-other-devices.md) |
 | **Devices that are not there** | — | `flydigi/mock/` behind `FLYDIGI_MOCK_BUS` — the fakes moved out of `tests/` so the app, the tools and the daemon can all run against a bus with several pads and docks on it. Off unless the variable is set |
 | Buttons, sticks, vibration, stored triggers | inside the 840-byte profile blob | same module — [detail](docs/findings-profile-blob.md) |
 | Gyro mapped to a stick | the profile's motion block at 137 | `flydigi/mapping.py` (`motion`/`set_motion`), `tools/flydigi-mapping gyro`, GUI — **measured on the pad** with `tools/gyro-map-probe`: it plays the block, both enable keys gate it, Click toggles, and the response curve at 830 is inert — [detail](docs/findings-profile-blob.md) J2 |
@@ -299,12 +292,20 @@ the test files are re-export shims and the tests import them by the old names.
     this pad: `04 5a a5 04 01 00 | 14 20 6e 7a 1c 00 00 00 00 dc ba 3e 00`, thirteen bytes at the
     offset the SDK predicts, and command 1's four address bytes are all zero. So the identifier
     that costs an exchange is the one that works and the free one is not usable.
-  * **A pad's nickname starts one byte earlier than every other payload, and the pad's own reply
-    proves it.** `ReadNickNameControllerCommandNewXInput` slices from its data[4] — raw 5 here —
-    where the charger SDK slices from 6, and an unnamed pad answered
-    `04 5a a5 02 01 00 01 01 09 09 09 64 04 5e ...`: raw 5 is 0x00, which is Flydigi's own test for
-    an erased name, while raw 6 is 0x01 and would have decoded as a name that is not there. Each
-    SDK is right about its own device.
+  * **Naming a pad works, and Space Station's own rename does not.** Command 24, measured. The
+    pad acknowledges it whatever is in the packet -- **it does not check the checksum** -- and
+    stores `buf[4] - 1` bytes from buf[5], one *more* than the name, so a checksum written after
+    the name is kept as part of it: "Desk" plus a checksum reads back as `44 65 73 6b a5`. So the
+    packet carries none, and the limit is 26 bytes rather than the 27 that fit. Flydigi's own
+    builder puts the checksum at a fixed index 6, which is the right slot only for a
+    one-character name — their "Desk" is stored as `44 a5 73 6b`, with the `e` eaten. UTF-8
+    round-trips.
+  * **A pad that has never been named holds `01 01 09 09 09 64 04 5e`, not zeroes**, and the
+    nickname payload is at raw 6 like every other single-frame reply — not raw 5, where the
+    controller SDK's own slice points and where an unnamed pad's index byte made it look right.
+    Both were transcribed from the reference, both were wrong, and both were caught by writing a
+    name and reading it back. Flydigi's emptiness test calls that factory field a name, so
+    `read_nickname` adds a second test: a field that is not printable UTF-8 is not a name.
   * **The dock's "Intelligent start" turns the lighting off on both devices.** Observed on the
     hardware here: with it on, docking a pad takes the lighting down on the pad *and* on the dock
     for as long as it sits there — so it overrides Lighting sync and Power display during the only

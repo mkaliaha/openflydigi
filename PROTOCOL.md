@@ -996,21 +996,47 @@ RX  04 5a a5 04 01 00 | 14 20 6e 7a 1c 00 00 00 00 dc ba 3e 00 | 00 …
 byte kept — the same slot as every other single-frame payload. The dock's uid read is the same
 command with the same shape (§10b).
 
-**Command 2 is the nickname, and it starts one byte earlier than everything else.**
-`ReadNickNameControllerCommandNewXInput` slices `data.Slice(4, data.Length - 6)` — raw 5 here —
-where `Flydigi.ChargerSdk`'s equivalent slices from its own data[6]. An unnamed pad answers:
+**Command 2 is the nickname, at raw 6 like every other single-frame payload.**
+`ReadNickNameControllerCommandNewXInput` slices `data.Slice(4, data.Length - 6)`
+where `Flydigi.ChargerSdk`'s equivalent slices from its own data[6], and an unnamed pad seemed to
+side with the earlier one — it answers 0x00 at raw 5, which is Flydigi's own test for an erased
+name. That was the index byte, zero in every single-frame reply. Writing a name and reading it back
+is what settled it:
 
 ```
-RX  04 5a a5 02 01 00 01 01 09 09 09 64 04 5e 00 00 …
-                     ^^ raw 5
+TX  03 5a a5 18 06 44 65 73 6b …          ("Desk")
+RX  04 5a a5 02 01 00 44 65 73 6b 00 …
+                       ^^ raw 6
 ```
 
-Raw 5 is 0x00, which is Flydigi's own test for an erased name. Raw 6 is 0x01, which under the
-charger's offset would have decoded as the first byte of a name that is not there — so the
-controller SDK's offset is right for a controller and the charger's for a charger.
+**A pad that has never been named does not answer with zeroes.** This one shipped with
+`01 01 09 09 09 64 04 5e` in the field, which passes Flydigi's emptiness test — so Space Station
+shows a factory-fresh pad as having a name. `identity.read_nickname` keeps their test and adds
+one: a field that does not decode as printable UTF-8 is not a name either.
 
-**Command 24 writes a nickname, and Flydigi's builder for it is broken in both SDKs.** Byte for
-byte the same code in `Flydigi.ControllerSdk` and `Flydigi.ChargerSdk`:
+**Command 24 writes a nickname. Three things about it are not what the SDK implies**, and all
+three were measured by writing names and reading them back.
+
+*It is not checksum-validated.* A packet with the checksum slot left at zero is acknowledged and
+stored, where a mapping packet with a bad checksum draws no reply at all (§7).
+
+*The pad stores `buf[4] - 1` bytes from buf[5]* — one more than the name — so anything sitting in
+the slot after the name is stored **as part of the name**:
+
+```
+TX  03 5a a5 18 06 44 65 73 6b a5 …       ("Desk" + checksum at 3 + buf[4])
+RX  04 5a a5 02 01 00 44 65 73 6b a5 …    -> b"Desk\xa5"
+
+TX  03 5a a5 18 06 44 65 73 6b 00 …       (no checksum)
+RX  04 5a a5 02 01 00 44 65 73 6b 00 …    -> "Desk"
+```
+
+So `identity.nickname_packet` writes no checksum at all. The same rule fixes the length: 27 bytes
+fit after buf[5], but the pad reads one past the name, so **26 bytes is the limit** — 27 and 28
+both came back truncated to 26. UTF-8 round-trips; Cyrillic and CJK names were written and read
+back intact, so the limit is bytes rather than characters.
+
+*Flydigi's own builder is broken for every name but a one-letter one*:
 
 ```csharp
 array[4] = (byte)(2 + bytes.Length);
@@ -1018,9 +1044,14 @@ Array.Copy(bytes, 0, array, 5, bytes.Length);
 array[6] = array.Crc(3, 3 + array[4]);     // fixed index, not 3 + array[4]
 ```
 
-Index 6 is the right slot only for a one-byte name. For anything longer the checksum lands inside
-the name, over its second byte, and the real slot stays zero — and a config-family packet with a
-bad checksum draws no reply from this pad at all (§7). So either 24 is not checksummed, or Space
-Station's rename has never worked past one character. `identity.nickname_packet` builds the packet
-the framing implies and takes `reference=True` for theirs; **neither has been sent to hardware**.
+Index 6 is the right slot only when the name is one byte. For anything longer the checksum
+overwrites the name's second character, and the pad stores that:
+
+```
+TX  03 5a a5 18 06 44 a5 73 6b 00 …       (their bytes for "Desk")
+RX  04 5a a5 02 01 00 44 a5 73 6b 00 …    -> b"D\xa5sk"
+```
+
+Space Station's rename has never worked past one character, and the pad was never the reason.
+`nickname_packet(..., reference=True)` reproduces their packet, which is how this was established.
 

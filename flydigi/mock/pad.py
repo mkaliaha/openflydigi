@@ -23,11 +23,12 @@ the tests import it by. Nothing constructs one unless `FLYDIGI_MOCK_BUS` is set
 
 **It answers the identity commands too**, which is what makes two of these
 tellable apart: command 1 carries a device type, an address and the firmware,
-command 4 a uid, and commands 2 and 24 read and write a nickname. Those four are
-transcribed from the SDK and **none of them is measured on a pad**, so what this
-fake asserts about them is the reference's claim, not the hardware's -- which is
-the useful thing for it to assert, because a disagreement then shows up as a
-test that passes and a pad that does not.
+command 4 a uid, and commands 2 and 24 read and write a nickname. All four are
+now measured on the pad here, and two of them are modelled the opposite way
+round from how the SDK reads: the nickname payload is at raw 6 rather than raw
+5, and an unnamed pad answers with `FACTORY_NICKNAME` rather than with zeroes.
+Both were transcribed from the reference first, both were wrong, and both were
+caught by writing a name and reading it back.
 """
 import contextlib
 
@@ -44,6 +45,12 @@ BLOB_LEN = PACKAGE_COUNT * 10          # 840 bytes, matching a real v3.1 config
 UNCHECKSUMMED = frozenset((device.CMD_SET_FORCE_TRIGGER,
                            device.CMD_SET_FORCE_TRIGGER_GRIP,
                            device.CMD_RUMBLE))
+
+# Checksummed in the sense that a checksum *fits*, and not checked. Measured:
+# command 24 with the checksum slot left at zero is acknowledged and stored,
+# where a mapping packet with a bad one draws no reply at all. It is its own set
+# because the payload slicing is the checksummed kind -- see `send`.
+UNVERIFIED = frozenset((identity.CMD_WRITE_NICKNAME,))
 
 
 def blank_blob(title="Profile"):
@@ -101,6 +108,10 @@ DEFAULT_MAC = "00:00:00:00"
 # its first byte replaced per device, so a mock pad reads like a pad.
 DEFAULT_UID = "00206e7a1c00000000dcba3e00"
 DEFAULT_FIRMWARE = "7.0.4.5"       # what the pad on this desk reports
+# What command 2 answers on a pad nobody has ever named -- read off this one,
+# and not the zeroes anybody would have guessed. Flydigi's emptiness test is
+# "first byte is neither 0x00 nor 0xFF", so their own UI calls this a name.
+FACTORY_NICKNAME = bytes((0x01, 0x01, 0x09, 0x09, 0x09, 0x64, 0x04, 0x5E))
 
 
 def _version_bytes(text):
@@ -129,7 +140,11 @@ class FakePad:
         self.mac = mac
         # 13 bytes, the length command 4 answers with.
         self.uid = uid or DEFAULT_UID
+        # Bytes, not text: what the pad stores is a field, and a name written
+        # by Flydigi's own builder is not decodable. `nickname` stays as the
+        # constructor's convenience.
         self.nickname = nickname
+        self.nickname_bytes = (nickname.encode("utf-8") if nickname else b"")
         self.battery = battery
         self.charging = charging
         self.wired = wired
@@ -274,7 +289,7 @@ class FakePad:
         # takes them anyway. Checking every command here counted those as
         # corrupt and answered nothing, which reads exactly like a pad that
         # refused the effect.
-        if cmd not in UNCHECKSUMMED:
+        if cmd not in UNCHECKSUMMED and cmd not in UNVERIFIED:
             if buf[3 + length] != device.checksum(buf, 3, 3 + length):
                 self.bad_checksums += 1
                 return []              # the real pad simply does not answer
@@ -286,6 +301,14 @@ class FakePad:
         # "clear the effect" arrived as one byte and was dropped as malformed.
         payload = (buf[5 : 5 + length] if cmd in UNCHECKSUMMED
                    else buf[5 : 3 + length])
+        # A third convention, for one command. The pad keeps `buf[4] - 1` bytes
+        # from buf[5] -- one more than the name -- so anything written into the
+        # slot after the name is stored as part of it. That is what makes a
+        # dutifully-appended checksum come back as a trailing character, and
+        # modelling it is the whole reason this fake can be trusted about
+        # nicknames at all.
+        if cmd in UNVERIFIED:
+            payload = buf[5 : 4 + length]
         handler = {
             device.CMD_GET_INFO: self._info,
             identity.CMD_READ_NICKNAME: self._read_nickname,
@@ -389,34 +412,41 @@ class FakePad:
         return self._single(identity.CMD_READ_UID, bytes.fromhex(self.uid))
 
     def _read_nickname(self, _payload):
-        """Command 2, with the name where the *controller* SDK looks for it.
+        """Command 2. The name is at raw 6, like every other payload.
 
-        `ReadNickNameControllerCommandNewXInput` slices from its own data[4],
-        raw 5 here -- one earlier than every other single-frame payload, and
-        one earlier than the charger SDK reads its own nickname. Unmeasured on
-        a pad. Put at 5 because that is what the code for this device says; if
-        hardware answers at 6 like the dock, this line and
-        `identity.read_nickname` are the two that move.
+        **Measured**, by writing one and reading it back -- it was modelled at
+        raw 5 first, on the strength of the SDK's own slice, and the pad
+        disagreed. See `identity.read_nickname`.
 
-        An unset name is 0xFF, which is their own test for an erased one.
+        An unnamed pad does not answer with zeroes either: the one here shipped
+        with `FACTORY_NICKNAME` in the field, which Flydigi's emptiness test
+        reads as a name. That is what this fake ships with too, so a reader
+        that only handles clean zeroes fails here rather than on hardware.
         """
-        raw = (self.nickname or "").encode("utf-8")
-        return self._single(identity.CMD_READ_NICKNAME, raw or b"\xff",
-                            start=5)
+        return self._single(identity.CMD_READ_NICKNAME,
+                            self.nickname_bytes or FACTORY_NICKNAME)
 
     def _write_nickname(self, payload):
-        """Command 24. Never reached with Flydigi's own bytes for a long name.
+        """Command 24. Stores the bytes given, checksum and all.
 
-        Their factory writes the checksum at a fixed index 6 instead of at
-        `3 + length`, so for any name past one byte the packet arrives with a
-        wrong checksum -- and `send` above drops it in silence, exactly as the
-        pad drops a mapping packet with a bad one. That is the point: the
-        reference form failing here is the prediction, and a pad that accepts
-        it is the finding. See `identity.nickname_packet`.
+        Three measured behaviours, all of them the opposite of what the SDK
+        suggests, and each one caught a bug in this project's own reader or
+        writer before it was modelled here:
+
+          * The checksum is not checked, so `send` lets this through whatever
+            is in that slot -- including nothing.
+          * `buf[4] - 1` bytes are kept, one more than the name, so a checksum
+            appended after the name is stored *inside* it.
+          * Flydigi's own builder puts that checksum at index 6, over the
+            name's second character, so their form of "Desk" is stored as
+            `44 a5 73 6b`.
+
+        Stored as raw bytes rather than as text: "Desk" plus a checksum is not
+        valid UTF-8, and a fake that decoded leniently here would hide exactly
+        the corruption this exists to reproduce.
         """
-        name = bytes(payload).split(b"\x00", 1)[0]
-        self.nickname = name.decode("utf-8", "replace").strip() or None
-        self.nickname_writes.append(self.nickname)
+        self.nickname_bytes = bytes(payload).split(b"\x00", 1)[0]
+        self.nickname_writes.append(self.nickname_bytes)
         return [self._ack(identity.CMD_WRITE_NICKNAME)]
 
     def _read_transport(self, _payload):

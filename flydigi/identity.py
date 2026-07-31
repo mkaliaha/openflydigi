@@ -215,9 +215,15 @@ CMD_READ_NICKNAME = 2
 CMD_WRITE_NICKNAME = 24
 
 UID_LEN = 13
-# Payload starts at raw 5 and the checksum needs the slot after the name, so a
-# 32-byte packet leaves this many bytes for one. Refused rather than truncated:
-# half a name written to flash is worse than a rejected one.
+# **26, measured to the byte.** The payload starts at buf[5] in a 32-byte
+# packet, which leaves 27 bytes -- but the pad stores `buf[4] - 1` of them,
+# one more than the name, whether or not anything was written there. So a
+# 27-byte name asks it to read past the end of the packet, and 27 and 28 both
+# came back truncated to 26 with the tail lost. Refused rather than truncated
+# here: a name silently shortened on the device is worse than a rejected one.
+#
+# Bytes, not characters. UTF-8 round-trips -- Cyrillic and CJK names were
+# written and read back intact -- so a name of eight characters may be 24 bytes.
 NICKNAME_MAX = 26
 
 
@@ -251,54 +257,75 @@ def read_uid(ctrl, wait=0.6):
 def read_nickname(ctrl, wait=0.6):
     """The name stored on the pad, or None when it has never been given one.
 
-    **The two SDKs disagree about where a nickname starts, and the pad's reply
-    settles it.** `ReadNickNameControllerCommandNewXInput` slices
-    `data.Slice(4, data.Length - 6)` -- raw 5 here, the index byte's slot, one
-    earlier than every other payload -- while the charger's slices from its own
-    data[6]. An unnamed pad on this desk answered
+    **The payload is at raw 6, like every other single-frame reply**, and this
+    took writing a name to find out. It was read from raw 5 first, on the
+    strength of `ReadNickNameControllerCommandNewXInput` slicing
+    `data.Slice(4, data.Length - 6)` where the charger SDK slices from its own
+    data[6] -- and an unnamed pad seemed to agree, answering 0x00 at raw 5,
+    which is Flydigi's own test for an erased name. It was the index byte, zero
+    for every single-frame reply. Writing "Desk" and reading it back settled it:
 
-        04 5a a5 02 01 00 | 01 01 09 09 09 64 04 5e 00 00 ...
-                        ^^ raw 5
+        04 5a a5 02 01 00 | 44 a5 73 6b 00 00 ...
+                            ^^ raw 6
 
-    and only the earlier slice reads that as unset: raw 5 is 0x00, which is
-    their own test for an erased name, while raw 6 is 0x01 and would have been
-    decoded as the first byte of a name that is not there. So the controller
-    SDK's offset is right for a controller, and the dock's is right for a dock.
+    So the two SDKs do not disagree after all, and the reference's own
+    indexing for this one command is one byte off from every other.
 
-    Their emptiness test is kept exactly: a first byte of 0x00 or 0xFF is an
-    erased name rather than a name. The cut at the first NUL is ours -- their
-    span is sized by a HID layer that hands them the report's own length, and a
-    64-byte read here cannot know it.
+    **A pad that has never been named does not answer with zeroes.** The one
+    here shipped with `01 01 09 09 09 64 04 5e` in the field, and Flydigi's
+    emptiness test -- first byte neither 0x00 nor 0xFF -- calls that a name, so
+    Space Station shows it as one. Their test is kept, and a second one added:
+    a field that is not printable text is not a name either. Showing
+    `\\x01\\x01\\t\\t\\td\\x04^` in a device picker would be worse than showing
+    nothing, and this is what a factory-fresh pad actually contains.
     """
     reply = _ask(ctrl, CMD_READ_NICKNAME, wait)
     if reply is None or len(reply) < 8:
         return None
-    raw = bytes(reply[5 : len(reply) - 2])
+    raw = bytes(reply[6:]).split(b"\x00", 1)[0].split(b"\xff", 1)[0]
     if not raw or raw[0] in (0x00, 0xFF):
         return None
-    name = raw.split(b"\x00", 1)[0].split(b"\xff", 1)[0]
-    return name.decode("utf-8", "replace").strip() or None
+    try:
+        name = raw.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return None
+    # `str.isprintable` is false for the control bytes a never-named pad holds,
+    # and true for every name a person would type, spaces included.
+    if not name or not name.isprintable():
+        return None
+    return name
 
 
 def nickname_packet(name, reference=False):
     """The command-24 packet for `name`. Raises ValueError if it will not fit.
 
-    **Flydigi's own version of this is broken for every name but a one-letter
-    one**, and that is worth stating rather than quietly fixing:
+    **No checksum, and that is measured rather than lazy.** Three things about
+    this command came out of writing names to the pad here and reading them
+    back, and every one of them contradicts what the SDK suggests:
 
-        array[4] = (byte)(2 + bytes.Length);
-        Array.Copy(bytes, 0, array, 5, bytes.Length);
-        array[6] = array.Crc(3, 3 + array[4]);     // <- fixed index
+      * **It is not checksum-validated.** A packet with the checksum slot left
+        at zero is acknowledged and stored, where a mapping packet with a bad
+        checksum draws no reply at all.
+      * **The pad stores `buf[4] - 1` bytes from buf[5]**, which is one more
+        than the name. So a checksum written where the framing says -- at
+        `3 + buf[4]`, immediately after the name -- is stored *as part of the
+        name*: "Desk" with a checksum came back as `44 65 73 6b a5`, and
+        without one as `44 65 73 6b`.
+      * **Flydigi's builder is broken anyway**, for every name but a one-letter
+        one::
 
-    The checksum belongs at `3 + array[4]`, which is 6 only when the name is a
-    single byte. For anything longer their write puts the checksum *inside the
-    name*, overwriting its second byte, and leaves the real checksum slot at
-    zero. A mapping packet with a bad checksum draws no reply from this pad at
-    all, so either command 24 is not checksummed, or Space Station's rename has
-    never worked past one character.
+            array[4] = (byte)(2 + bytes.Length);
+            Array.Copy(bytes, 0, array, 5, bytes.Length);
+            array[6] = array.Crc(3, 3 + array[4]);     // <- fixed index
 
-    `reference=True` produces their bytes exactly, for settling that on
-    hardware. The default produces the packet the framing says is right.
+        Index 6 is the right slot only when the name is a single byte. For
+        anything longer it overwrites the name's second character: "Desk" sent
+        their way is stored by the pad as `44 a5 73 6b`. Space Station's rename
+        has never worked past one character, and the pad was never the reason.
+
+    So the packet this builds carries the name and nothing after it.
+    `reference=True` still produces their bytes exactly, which is how the above
+    was established and how it can be re-checked.
     """
     raw = name.encode("utf-8")
     if not raw:
@@ -309,7 +336,8 @@ def nickname_packet(name, reference=False):
     buf = build(CMD_WRITE_NICKNAME)
     buf[4] = 2 + len(raw)
     buf[5 : 5 + len(raw)] = raw
-    buf[6 if reference else 3 + buf[4]] = checksum(buf, 3, 3 + buf[4])
+    if reference:
+        buf[6] = checksum(buf, 3, 3 + buf[4])
     return buf
 
 
@@ -318,14 +346,15 @@ def write_nickname(ctrl, name, wait=0.6, reference=False):
 
     Verified by reading it back rather than by the ack, for the reason every
     write in `flydigi/settings.py` is: an ack carries the command id and nothing
-    about what it changed.
+    about what it changed. Here it matters more than usual -- the pad
+    acknowledges this command whatever is in it, including Flydigi's own
+    corrupted form, so the ack is worth nothing at all as evidence.
     """
     buf = nickname_packet(name, reference=reference)
     replies = ctrl.send(buf, wait=wait)
     if not any(len(r) > 3 and r[3] == CMD_WRITE_NICKNAME for r in replies):
         raise NicknameRefused(
-            f"the pad did not acknowledge the name {name!r}. Command 24 has "
-            "never been sent to hardware from here, and Flydigi's own version "
-            "of it puts the checksum in the wrong slot for a name longer than "
-            "one byte -- see nickname_packet.")
+            f"the pad did not acknowledge the name {name!r} -- which it does "
+            "even for a malformed packet, so silence here means it is not "
+            "listening at all.")
     return read_nickname(ctrl, wait=wait)
