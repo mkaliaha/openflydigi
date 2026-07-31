@@ -40,10 +40,8 @@ not into any packet:
     770..790 title, UTF-16LE
     790..840 v3.1+: joystick extra, macro cycle, motion curve
 
-Only the key table and the title are interpreted here. Everything else is
-carried through byte-for-byte, so writing a config back cannot disturb settings
-this code does not understand -- which matters, because a config also holds the
-trigger and macro state.
+Everything this module does not interpret is carried through byte-for-byte, so
+writing a config back cannot disturb settings it does not understand.
 """
 import struct
 
@@ -71,9 +69,76 @@ OFF_FORCE_TRIGGER = 185    # 2 x 20: the adaptive-trigger effect
 # byte layout with no opinion about what the effects mean.
 FORCE_TRIGGER_BIND_MODE = 5
 OFF_DATA_VERSION = 225
+OFF_MACROS = 230           # 538 bytes: the macro page, header and bodies
 OFF_TITLE = 770
 OFF_JOYSTICK_EXTRA = 790   # 2 x 12: the 9-point bank, circularity and edge
+OFF_MACRO_CYCLE = 820      # v3.1+: one repeat interval per macro slot
 TITLE_BYTES = 20
+
+# -- macros -------------------------------------------------------------------
+#
+# A macro is a sequence of button events the *pad* plays: the key table entry
+# for its trigger key holds TARGET_MACRO, and the firmware runs the steps with
+# nothing on the host involved. `m_fdg_macro_unit_struct_t` (btn, count, type,
+# step[64]) and `m_fdg_macro_state_struct_t` (active, a unit pointer, cur_step,
+# cur_time, keystate) are the firmware's own structs, carried into the SDK --
+# the second is a running state machine no host would keep.
+#
+# The page at 230 is `m_fdg_macro_page_struct_t`: a count byte, one offset per
+# slot, then the bodies.
+#
+#     [0]           how many macros, 1..5; anything else means none
+#     [1..6]        each macro's offset into the bodies, in 4-byte words
+#     [6..538]      the bodies, each one
+#                       [0] trigger key id   [1..3] step count, little endian
+#                       [3] type             then 4 bytes per step:
+#                       cumulative time (16-bit, in 10 ms ticks), key id, event
+#
+# Times are stored cumulative and read back as gaps, which is what Flydigi's
+# own bean holds, so a step's `delay` here is the pause before it.
+#
+# **Where this lives depends on the protocol version.** From v3.2 the macros
+# move out of the blob into their own store behind commands 172/173/174, with
+# ten macros at 1 ms resolution. An Apex 5 reports v3.1 and keeps them here --
+# confirmed by the hardware dump, which holds five cycle bytes at 820. Anything
+# newer is refused rather than written to a region its firmware does not read.
+MACRO_REGION = 538
+MACRO_SLOTS = 5
+MACRO_WORD = 4
+MACRO_HEADER = 1 + MACRO_SLOTS
+# 133 words for the bodies, and each macro spends one of them on its own header
+# -- which is exactly Flydigi's pair of limits, five macros and 128 steps in
+# total, rather than a second constraint on top of them.
+MACRO_WORDS = (MACRO_REGION - MACRO_HEADER) // MACRO_WORD
+MACRO_STEP_BUDGET = MACRO_WORDS - MACRO_SLOTS
+MACRO_TICK_MS = 10         # the stored unit below protocol 3.2
+MACRO_MAX_VERSION = 2      # (proto & 0xF) at or above this keeps macros elsewhere
+
+# MacroEnableType: what pressing the trigger key does.
+MACRO_NONE, MACRO_ONCE, MACRO_WHILE_HELD, MACRO_TOGGLE = 0, 1, 2, 3
+MACRO_TYPES = {
+    MACRO_ONCE: "once",              # one pass per press
+    MACRO_WHILE_HELD: "while held",  # repeats until the key is let go
+    MACRO_TOGGLE: "toggle",          # a press starts it, another stops it
+}
+
+# MacroActionEvent. Hold is 5 and not 4 -- the enum skips a value, and guessing
+# it from position would write an event the firmware does not know.
+MACRO_RELEASE, MACRO_PRESS = 0, 1
+MACRO_LEFT_STICK, MACRO_RIGHT_STICK, MACRO_HOLD = 2, 3, 5
+MACRO_EVENTS = {
+    MACRO_RELEASE: "release",
+    MACRO_PRESS: "press",
+    MACRO_HOLD: "hold",
+    MACRO_LEFT_STICK: "left stick",
+    MACRO_RIGHT_STICK: "right stick",
+}
+
+# The repeat interval at 820, one byte per slot, stored as milliseconds / 10.
+# 0xFF is what an untouched slot holds and is carried through as None rather
+# than reported as 2550 ms.
+MACRO_INTERVAL_UNSET = 0xFF
+MACRO_INTERVAL_MAX = 2540
 
 # The trigger motor's strength byte holds the percentage Flydigi's own slider
 # shows (`SaveTriggerVibrationConfig` assigns it straight across), unlike the
@@ -454,6 +519,17 @@ class MappingConfig:
         as 255 rather than as the key's own id.
         """
         offset, key_id = self._entry(key)
+        # Pointing a key at something other than its macro orphans the body,
+        # and the firmware goes on playing it: the macro page and the key table
+        # are read independently, so the key sends its new binding *and* runs
+        # the old macro underneath it. Measured -- M1 remapped to A with a body
+        # of three X taps gives `press a`, `x x x`, `release a`. Flydigi's own
+        # repository drops the macro at exactly this moment, and this is the
+        # only place that can see the change happen.
+        if (target != "macro" and self.macros_in_blob
+                and self.blob[offset] == TARGET_MACRO):
+            name = KEY_NAMES.get(key_id)
+            self.set_macros([m for m in self.macros() if m["key"] != name])
         if target is None:
             target_id = TARGET_IDENTITY
         elif isinstance(target, str):
@@ -488,6 +564,227 @@ class MappingConfig:
             if target != key or frequency:
                 out[key] = (target, mode, frequency)
         return out
+
+    # -- macros ------------------------------------------------------------
+    #
+    # See the block comment beside OFF_MACROS for the page layout. A macro is
+    # a dict:
+    #
+    #     {"key": "m1", "type": MACRO_ONCE, "interval": 30,
+    #      "steps": [{"delay": 0, "key": "a", "event": MACRO_PRESS}, ...]}
+    #
+    # `delay` is the pause in milliseconds before that step, quantised to 10 ms
+    # on the wire. `interval` is Flydigi's own per-slot field, the one the
+    # factory leaves at 30 ms; None means the slot has never been written.
+
+    @property
+    def macro_page(self):
+        """The stored macro bytes, for asking whether they have changed.
+
+        **Why a caller needs this.** A key-table write takes effect the moment
+        the packet lands, but a macro does not: the firmware parses the page
+        into its own structs when a profile is *loaded*, so a macro written and
+        not applied is stored and never played. Measured on hardware -- the
+        same macros produced nothing until command 162 went out, and played to
+        the millisecond afterwards. So anything writing a profile compares this
+        and applies when it differs, rather than applying every time and making
+        the pad re-seat its trigger motors over a remap that did not need it.
+        """
+        page = bytes(self.blob[OFF_MACROS : OFF_MACROS + MACRO_REGION])
+        cycles = bytes(self.blob[OFF_MACRO_CYCLE : OFF_MACRO_CYCLE + MACRO_SLOTS])
+        return page + cycles
+
+    @property
+    def macros_in_blob(self):
+        """Whether this profile is one that carries its macros at 230.
+
+        False from protocol 3.2, where they move to their own command family.
+        Reading is allowed either way -- an older blob still parses -- but
+        writing is not, because on such a pad this region is not what the
+        firmware plays.
+        """
+        return (self.proto_version & 0xF) < MACRO_MAX_VERSION
+
+    def _macro_intervals(self):
+        """The five repeat intervals, in ms, or None where never written."""
+        base = OFF_MACRO_CYCLE
+        if len(self.blob) < base + MACRO_SLOTS:
+            return [None] * MACRO_SLOTS
+        return [None if raw == MACRO_INTERVAL_UNSET else raw * MACRO_TICK_MS
+                for raw in self.blob[base : base + MACRO_SLOTS]]
+
+    def macros(self):
+        """Every macro stored in this profile, in slot order.
+
+        Permissive on purpose: a step whose key id is not one a host can
+        receive is reported as the raw id rather than refused, so a profile
+        written by something else reads back as what it is. `set_macros` is
+        the strict half.
+        """
+        data = self.blob[OFF_MACROS : OFF_MACROS + MACRO_REGION]
+        count = data[0] if data else 0
+        # An untouched region is 0xFF throughout, so the count byte alone
+        # separates "five macros" from "never written" -- as Flydigi's reader
+        # does, which returns nothing outside 1..5.
+        if not 1 <= count <= MACRO_SLOTS:
+            return []
+        offsets = list(data[1 : 1 + count])
+        intervals = self._macro_intervals()
+        out = []
+        for slot in range(count):
+            start = MACRO_HEADER + offsets[slot] * MACRO_WORD
+            end = (MACRO_HEADER + offsets[slot + 1] * MACRO_WORD
+                   if slot + 1 < count else len(data))
+            if not 0 <= start <= end <= len(data) or end - start < MACRO_WORD:
+                continue
+            body = data[start:end]
+            steps_stored = body[1] | (body[2] << 8)
+            # Trust the space, not the count: a truncated body would otherwise
+            # read past its own end into the next macro's first step.
+            steps = min(steps_stored, (len(body) - MACRO_WORD) // MACRO_WORD)
+            actions, previous = [], 0
+            for index in range(steps):
+                at = MACRO_WORD + index * MACRO_WORD
+                when = (body[at] | (body[at + 1] << 8)) * MACRO_TICK_MS
+                actions.append({
+                    "delay": when - previous,
+                    "key": KEY_NAMES.get(body[at + 2], body[at + 2]),
+                    "event": body[at + 3],
+                })
+                previous = when
+            out.append({
+                "key": KEY_NAMES.get(body[0], body[0]),
+                "type": body[3],
+                "interval": intervals[slot],
+                "steps": actions,
+            })
+        return out
+
+    def macro(self, key):
+        """The macro bound to one key, or None."""
+        name = KEY_NAMES.get(key, key) if not isinstance(key, str) else key
+        return next((m for m in self.macros() if m["key"] == name), None)
+
+    def set_macros(self, macros):
+        """Replace the whole macro page.
+
+        Everything is written from this list, so a caller edits by reading
+        `macros()`, changing it, and passing it back -- the same read-modify-
+        write the rest of this module uses for blocks with more than one field.
+
+        The key table is left alone. Binding a key to its macro is
+        `set_mapping(key, "macro")`, and `set_macro` does both.
+        """
+        if not self.macros_in_blob:
+            raise ProtocolError(
+                f"protocol {self.proto_version >> 8}.{self.proto_version & 0xF} "
+                "keeps macros in their own store, not in the profile")
+        macros = list(macros)
+        if len(macros) > MACRO_SLOTS:
+            raise ValueError(f"the pad holds {MACRO_SLOTS} macros, got {len(macros)}")
+        total = sum(len(m.get("steps", ())) for m in macros)
+        if total > MACRO_STEP_BUDGET:
+            raise ValueError(
+                f"{total} steps across {len(macros)} macro(s); the page holds "
+                f"{MACRO_STEP_BUDGET} in total")
+
+        header = bytearray(MACRO_HEADER)
+        header[0] = len(macros)
+        body = bytearray()
+        word = 0
+        for slot, macro in enumerate(macros):
+            header[1 + slot] = word
+            steps = list(macro.get("steps", ()))
+            body += bytes([self._macro_key(macro.get("key")),
+                           len(steps) & 0xFF, (len(steps) >> 8) & 0xFF,
+                           int(macro.get("type", MACRO_ONCE)) & 0xFF])
+            ticks = 0
+            for step in steps:
+                # Each gap is quantised on its own and the ticks accumulated,
+                # which is what Flydigi's writer does. Summing first and
+                # dividing once would drift away from what their app produces
+                # for the same recording.
+                ticks = min(0xFFFF, ticks + max(0, int(step.get("delay", 0)))
+                            // MACRO_TICK_MS)
+                body += bytes([ticks & 0xFF, ticks >> 8,
+                               self._macro_step_key(step.get("key")),
+                               int(step.get("event", MACRO_PRESS)) & 0xFF])
+            word += 1 + len(steps)
+
+        # 0xFF fill behind the bodies, as their writer emits -- so a page we
+        # write matches one Space Station wrote byte for byte.
+        region = bytearray(b"\xff" * MACRO_REGION)
+        region[: len(header) + len(body)] = header + body
+        self.blob[OFF_MACROS : OFF_MACROS + MACRO_REGION] = region
+
+        # The intervals belong to the slots rather than to the macros in them,
+        # and Flydigi's writer re-emits all five from the read -- so a slot
+        # nobody set keeps its byte instead of being blanked. Passing None
+        # therefore means "leave this slot alone", which is what a factory 30 ms
+        # survives on.
+        if len(self.blob) >= OFF_MACRO_CYCLE + MACRO_SLOTS:
+            for slot, macro in enumerate(macros):
+                interval = macro.get("interval")
+                if interval is not None:
+                    self.blob[OFF_MACRO_CYCLE + slot] = max(
+                        0, min(MACRO_INTERVAL_MAX, int(interval))) // MACRO_TICK_MS
+
+    def set_macro(self, key, steps, macro_type=MACRO_ONCE, interval=None):
+        """Bind a macro to one key, replacing any macro already on it.
+
+        Writes the key table as well: a body with no `TARGET_MACRO` beside it
+        is a macro the pad will never run, and a key set to `TARGET_MACRO` with
+        no body is a key that does nothing. The two are one edit.
+        """
+        name = self._macro_key_name(key)
+        macros = [m for m in self.macros() if m["key"] != name]
+        if len(macros) >= MACRO_SLOTS:
+            raise ValueError(
+                f"all {MACRO_SLOTS} macro slots are taken; clear one first")
+        macros.append({"key": name, "type": macro_type, "interval": interval,
+                       "steps": list(steps)})
+        self.set_macros(macros)
+        self.set_mapping(name, "macro")
+
+    def clear_macro(self, key):
+        """Drop the macro on a key and give the key back to itself."""
+        name = self._macro_key_name(key)
+        macros = [m for m in self.macros() if m["key"] != name]
+        self.set_macros(macros)
+        # The body is already gone, so `set_mapping` finds nothing to clean up
+        # and this is a plain key-table write.
+        if self.mapping(name)[0] == "macro":
+            self.set_mapping(name, None)
+
+    @staticmethod
+    def _macro_key_name(key):
+        name = key if isinstance(key, str) else KEY_NAMES.get(key)
+        if name not in KEY_IDS:
+            raise KeyError(f"no key {key!r}")
+        return name
+
+    @staticmethod
+    def _macro_key(key):
+        """A trigger key id. Any key on the shell may run a macro."""
+        if isinstance(key, int):
+            return key & 0xFF
+        return KEY_IDS[MappingConfig._macro_key_name(key)]
+
+    @staticmethod
+    def _macro_step_key(key):
+        """A key id for one step, refusing the ones nothing can receive.
+
+        M1-M4 and C/Z are remap *sources*: they have no XInput equivalent, so a
+        step that presses one is a step the host never sees. Same reasoning as
+        XINPUT_TARGETS, and the same failure if it is skipped -- a macro that
+        plays perfectly and does nothing.
+        """
+        name = key if isinstance(key, str) else KEY_NAMES.get(key)
+        if name not in XINPUT_TARGETS:
+            raise ValueError(
+                f"a macro step cannot send {key!r}: only {', '.join(XINPUT_TARGETS)} "
+                "reach a host, the rest are remap sources with no XInput id")
+        return KEY_IDS[name]
 
     # -- grip vibration ---------------------------------------------------
     #

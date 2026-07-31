@@ -14,6 +14,10 @@
     tools/flydigi-mapping apply 1
     tools/flydigi-mapping backup 0 profile0.bin
     tools/flydigi-mapping restore 0 profile0.bin --save
+    tools/flydigi-mapping macros 0
+    tools/flydigi-mapping macro-record 0 m1 --seconds 8 --save
+    tools/flydigi-mapping macro-set 0 m2 press:a wait:80 release:a --save
+    tools/flydigi-mapping macro-clear 0 m1 --save
 
 Edits land in the pad's working memory immediately; --save commits them to
 flash so they survive a power cycle. Always back up before writing -- these
@@ -24,7 +28,11 @@ import sys
 
 sys.path.insert(0, __file__.rsplit("/", 2)[0])
 
-from flydigi import device, mapping
+from flydigi import device, macros as macro_recorder, mapping
+
+MACRO_TYPES = {"once": mapping.MACRO_ONCE,
+               "held": mapping.MACRO_WHILE_HELD,
+               "toggle": mapping.MACRO_TOGGLE}
 
 
 def open_pad():
@@ -55,9 +63,63 @@ def describe(config):
     return ", ".join(parts)
 
 
+def parse_steps(tokens):
+    """`press:a wait:80 release:a` into macro steps.
+
+    `wait` is the pause before whatever comes next, which is how the blob
+    stores it -- each step carries the gap in front of it, not behind.
+    """
+    steps, pending = [], 0
+    for token in tokens:
+        verb, _, argument = token.partition(":")
+        if verb == "wait":
+            try:
+                pending += int(argument)
+            except ValueError:
+                sys.exit(f"error: {token!r} needs a number of milliseconds")
+        elif verb in ("press", "release"):
+            if not argument:
+                sys.exit(f"error: {token!r} needs a key")
+            steps.append({
+                "delay": pending,
+                "key": argument,
+                "event": mapping.MACRO_PRESS if verb == "press"
+                         else mapping.MACRO_RELEASE,
+            })
+            pending = 0
+        else:
+            sys.exit(f"error: {token!r} is not press:<key>, release:<key> "
+                     "or wait:<ms>")
+    if not steps:
+        sys.exit("error: a macro needs at least one step")
+    return steps
+
+
+def show_macros(config):
+    stored = config.macros()
+    if not stored:
+        print("no macros in this profile")
+        return
+    for macro in stored:
+        kind = mapping.MACRO_TYPES.get(macro["type"], macro["type"])
+        interval = ("unset" if macro["interval"] is None
+                    else f"{macro['interval']} ms")
+        print(f"{macro['key']}: {kind}, repeat interval {interval}, "
+              f"{len(macro['steps'])} step(s), "
+              f"{macro_recorder.total_ms(macro['steps'])} ms")
+        for line in macro_recorder.describe(macro["steps"]):
+            print(f"    {line}")
+
+
 def commit(ctrl, cfg_id, new, old, save):
     sent = mapping.write_config(ctrl, cfg_id, new, old=old)
     print(f"wrote {sent} packet(s) to profile {cfg_id}")
+    # A changed macro is stored but not played until the profile is paged in
+    # again -- verified on hardware. Only then, since applying makes the pad
+    # re-seat its trigger motors.
+    if sent and new.macro_page != old.macro_page:
+        mapping.apply_config(ctrl, cfg_id)
+        print("re-applied the profile so the pad plays the new macro")
     if save:
         print("saved to flash" if mapping.save_config(ctrl)
               else "warning: no reply to save -- change may be lost on power cycle")
@@ -107,6 +169,35 @@ def main():
     p.add_argument("path")
     p.add_argument("--save", action="store_true")
 
+    p = sub.add_parser("macros", help="show a profile's macros")
+    p.add_argument("cfg", type=int)
+
+    p = sub.add_parser("macro-record",
+                       help="record a macro off the pad and bind it to a key")
+    p.add_argument("cfg", type=int)
+    p.add_argument("key", help="the key that will run it, e.g. m1")
+    p.add_argument("--seconds", type=float, default=10.0,
+                   help="how long to record for (default 10)")
+    p.add_argument("--type", choices=sorted(MACRO_TYPES), default="once",
+                   help="once per press, while held, or toggle (default once)")
+    p.add_argument("--interval", type=int,
+                   help="milliseconds between repeats, for held and toggle")
+    p.add_argument("--save", action="store_true")
+
+    p = sub.add_parser("macro-set", help="bind a macro written out by hand")
+    p.add_argument("cfg", type=int)
+    p.add_argument("key")
+    p.add_argument("steps", nargs="+",
+                   help="press:<key>, release:<key> or wait:<ms>")
+    p.add_argument("--type", choices=sorted(MACRO_TYPES), default="once")
+    p.add_argument("--interval", type=int)
+    p.add_argument("--save", action="store_true")
+
+    p = sub.add_parser("macro-clear", help="drop the macro on a key")
+    p.add_argument("cfg", type=int)
+    p.add_argument("key")
+    p.add_argument("--save", action="store_true")
+
     args = parser.parse_args()
     ctrl = open_pad()
 
@@ -137,6 +228,13 @@ def main():
             note = "" if target == key and not frequency else "   <-- remapped"
             turbo = f" turbo {frequency}" if frequency else ""
             print(f"  {key:<7} -> {target}{turbo}{note}")
+        if config.macros():
+            print()
+            show_macros(config)
+        return
+
+    if args.cmd == "macros":
+        show_macros(config)
         return
 
     if args.cmd == "backup":
@@ -157,6 +255,39 @@ def main():
         new.set_mapping(args.key, None)
     elif args.cmd == "rename":
         new.title = args.title
+    elif args.cmd in ("macro-record", "macro-set"):
+        if args.key not in mapping.KEY_IDS:
+            sys.exit(f"error: unknown key {args.key!r}")
+        if args.cmd == "macro-set":
+            steps = parse_steps(args.steps)
+        else:
+            if config.mapping(args.key)[0] == "macro":
+                print(f"note: {args.key} already runs a macro, so pressing it "
+                      "now plays that one rather than recording it")
+            print(f"Recording for {args.seconds:g} s — play the sequence on "
+                  "the pad now. Anything still held is released at the end.")
+            try:
+                steps = macro_recorder.record(args.seconds)
+            except OSError as exc:
+                sys.exit(f"error: {exc}")
+            if not steps:
+                sys.exit("error: nothing was recorded. If another program has "
+                         "taken the pad over, the evdev node stops reporting — "
+                         "turn third-party control off and try again.")
+            print(f"{len(steps)} step(s), "
+                  f"{macro_recorder.total_ms(steps)} ms:")
+            for line in macro_recorder.describe(steps):
+                print(f"    {line}")
+        try:
+            new.set_macro(args.key, steps, MACRO_TYPES[args.type], args.interval)
+        except (ValueError, mapping.ProtocolError) as exc:
+            sys.exit(f"error: {exc}")
+    elif args.cmd == "macro-clear":
+        if args.key not in mapping.KEY_IDS:
+            sys.exit(f"error: unknown key {args.key!r}")
+        if config.macro(args.key) is None:
+            sys.exit(f"error: {args.key} has no macro on it")
+        new.clear_macro(args.key)
     elif args.cmd == "restore":
         with open(args.path, "rb") as fh:
             blob = fh.read()

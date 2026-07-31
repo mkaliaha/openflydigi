@@ -17,7 +17,7 @@ Mapping profile, 840 bytes (42 packets of 20), protocol v3.1:
 109..123 joystick curves      123..137 trigger travel curves
 137..145 motion               145..154 grip vibration (master + 2 x 4)
 154..183 trigger motors       183..185 wheel
-185..225 force trigger (2 x 20)   225..227 data version   230..768 macros
+185..225 force trigger (2 x 20)   225..227 data version   230..768 macros (J6)
 770..790 title UTF-16LE       790..840 joystick extra, macro cycle, motion curve
 ```
 
@@ -276,6 +276,94 @@ from the core one on every write and a blob where they disagree is a state no ve
 Whether the *firmware* branches on it at all, or whether it is a UI label and the bank is what
 actually plays, is still unknown — testable by writing a bank that sharply disagrees with the 109
 curve and feeling the stick.
+
+## J6 — macros, and the pad really does play them
+
+**Done, and verified on hardware.** A macro is a sequence of button events the *firmware* plays: the
+key table entry for its trigger key holds `TARGET_MACRO` (32), the steps live at **offset 230**, and
+nothing on the host is involved once it is written. `m_fdg_macro_unit_struct_t` (`btn, count_l,
+count_h, type, step[64]`) and `m_fdg_macro_state_struct_t` (`active`, a unit pointer, `cur_step`,
+`cur_time`, `keystate`) are the firmware's own structs carried into the SDK — the second is a
+running state machine no host would keep.
+
+The page is `m_fdg_macro_page_struct_t`, 538 bytes:
+
+```
+[0]        how many macros, 1..5; anything else means none
+[1..6]     each macro's offset into the bodies, in 4-byte words
+[6..538]   the bodies, each  [0] trigger key id   [1..3] step count, LE
+                             [3] type             then 4 bytes per step:
+                             cumulative time (16-bit, 10 ms ticks), key id, event
+820..825   one repeat interval per slot, milliseconds / 10
+```
+
+Five macros and 128 steps between them, which is not two limits but one: 133 words of body space,
+each macro spending one on its own header. `MacroEnableType` is `None=0, Once=1, WhileHeld=2,
+Toggle=3`; `MacroActionEvent` is `Release=0, Press=1, LeftJoystick=2, RightJoystick=3, **Hold=5**` —
+the enum skips 4, and guessing it from position would write an event the firmware does not know.
+
+**Where this lives depends on the protocol version.** From v3.2 macros move out of the blob into
+their own store behind commands 172/173/174, ten of them at 1 ms resolution. An Apex 5 reports
+v3.1 and keeps them here. Confirmed twice over: `MappingConfigParser` branches on
+`(ProtoVersion & 0xF) < 2`, and the hardware holds five cycle bytes at 820.
+
+**What the hardware settled**, with four paddles each given a signature no finger can produce —
+three taps of one letter in 300 ms:
+
+  * **They play.** `M1` produced `a a a` at exactly the 40/60 ms gaps written, `M3` held down
+    produced `x x x` seven times over. The stored timings come back to the millisecond.
+  * **A write is not enough — the profile has to be applied.** The same macros, read back off the
+    pad to prove they were stored, sat through a whole test window and did nothing, while a plain
+    remap written in the same packet run worked throughout — that control is what makes the result
+    mean anything. Command **162** made them live. So the firmware parses this page into its structs
+    when a profile is *loaded*, while the key table is read as it stands. `MappingConfig.macro_page`
+    exists for exactly this: a caller compares it and applies when it moved, rather than applying on
+    every write and making the pad re-seat its trigger motors over a remap that never needed it.
+  * **Saving is not required.** Isolated with a fifth macro written and applied and never committed:
+    it played. So 166 only decides whether a macro survives a sleep, the ordinary rule.
+
+**Before re-running any of this, check the transport.** The first two attempts here measured
+nothing and meant nothing: third-party control was on, which switches `controller_data` off and
+leaves the evdev node present and silent. A capture in that state cannot tell a firmware that will
+not play a macro from a pad that is not reporting. `motion.read_transport` says which state you are
+in, and the third window — with it off, a control remap in place, and the macros read back first —
+is the one that answered anything.
+  * **The repeat interval at 820 is the gap between repeats**, not a delay before starting or a
+    step scale: 300 ms written, 300 ms measured between passes of a held macro. It had been
+    documented from its name alone.
+  * **An orphaned body still runs, *alongside* the key table rather than instead of it.** The two
+    are read independently and both fire. The first sighting had the key table and the body both
+    aimed at `b`, which coalesces into what looks like the macro alone; setting them to different
+    keys shows what is really happening — M1 with a table entry of `a` and an orphaned body of three
+    X taps produced `press a`, `x x x`, then `release a` when the paddle came up. Reproduced three
+    times across two runs, identical every time.
+
+    **Space Station prevents this rather than repairing it**, and at exactly the same moment we do.
+    `ControllerRepository` drops the macro as the key is remapped:
+
+    ```csharp
+    if (keyConfig.MapType != KeyMapType.Macro
+        && config.KeyConfigBeans.KeyConfigBean[keyId].MapType == KeyMapType.Macro
+        && config.MacroConfigBean.Macros.Count > 0) {
+        macroUpdated = true;
+        var macroItem = config.MacroConfigBean.Macros.FirstOrDefault(i => i.KeyId == keyConfig.KeyId);
+        if (macroItem != null) config.MacroConfigBean.Macros.Remove(macroItem);
+    }
+    ```
+
+    The follow-up `WriteMacroConfigPartial` is gated on `ProtoVersion >= 770`, because below that —
+    our pad — the removal rides along inside the mapping blob write. So neither application ever
+    produces the state, and nothing in the firmware cleans it up: it has to be built deliberately,
+    which is how it was measured here. `set_mapping` does the same removal, so a key remapped away
+    from its macro stops running it.
+
+  * **`Once` plays to the end whether or not the key is still down.** Visible in the same trace: the
+    paddle came up between the second and third tap and the third tap arrived anyway. So a long
+    macro keeps going after you let go, which is worth knowing before binding a ten-second one.
+
+Steps are limited to keys XInput can carry, for the same reason `XINPUT_TARGETS` is: a step that
+presses M1 is a step the host never sees. The trigger key has no such limit — a paddle runs one
+perfectly well, which is the usual way to bind one.
 
 ## J2 — gyro mapped to a stick, on the pad
 

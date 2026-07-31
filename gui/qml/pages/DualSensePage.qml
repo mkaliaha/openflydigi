@@ -77,7 +77,14 @@ Kirigami.ScrollablePage {
                              + "Flydigi has never heard of. Attaching a USB "
                              + "device needs your password once."
                 checked: App.dsmode.running
+                // Refused rather than warned about while another driver holds
+                // the pad: the relay's own input source is switched off in that
+                // state, so starting it produces a DualSense with working
+                // motion and dead sticks -- which reads as a broken mapping
+                // rather than as a source that was taken away. The message
+                // above says so; this makes it true.
                 enabled: App.dsmode.available && !App.dsmode.busy
+                         && (App.dsmode.running || !App.device.thirdParty)
                 onToggled: App.dsmode.setRunning(checked)
             }
 

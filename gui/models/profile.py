@@ -622,6 +622,241 @@ class KeyMapModel(QAbstractListModel):
                                   self.index(self.rowCount() - 1, 0))
 
 
+# What pressing a macro's key does, in the order the picker shows them.
+MACRO_TYPES = [("Once per press", mapping.MACRO_ONCE),
+               ("While held", mapping.MACRO_WHILE_HELD),
+               ("Toggle", mapping.MACRO_TOGGLE)]
+
+MACRO_EVENT_LABELS = {mapping.MACRO_PRESS: "press",
+                      mapping.MACRO_RELEASE: "release",
+                      mapping.MACRO_HOLD: "hold"}
+
+# Long enough for a combo nobody would type out by hand, short enough that a
+# forgotten recording ends by itself. Stop ends it sooner.
+RECORD_SECONDS = 30.0
+
+
+@QmlElement
+class MacroModel(QAbstractListModel):
+    """The macros stored in the open profile, one row each.
+
+    The pad plays these itself, so a row is a piece of the profile blob and
+    not something this app runs: what is here is an editor, plus the recorder
+    that fills a row in.
+    """
+
+    KeyRole = Qt.UserRole + 1
+    LabelRole = Qt.UserRole + 2
+    TypeRole = Qt.UserRole + 3
+    IntervalRole = Qt.UserRole + 4
+    StepCountRole = Qt.UserRole + 5
+    DurationRole = Qt.UserRole + 6
+    StepsRole = Qt.UserRole + 7
+
+    countChanged = Signal()
+    recordingChanged = Signal()
+    refused = Signal(str)
+    recordRequested = Signal(float)      # matches the worker's slot
+
+    def __init__(self, profile):
+        super().__init__(profile)
+        self._profile = profile
+        self._recording = False
+        self._record_key = ""
+
+    def roleNames(self):
+        return {
+            self.KeyRole: b"key",
+            self.LabelRole: b"label",
+            self.TypeRole: b"typeIndex",
+            self.IntervalRole: b"interval",
+            self.StepCountRole: b"stepCount",
+            self.DurationRole: b"duration",
+            self.StepsRole: b"steps",
+        }
+
+    def _macros(self):
+        config = self._profile.config
+        return config.macros() if config is not None else []
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._macros())
+
+    @Property(int, notify=countChanged)
+    def count(self):
+        return len(self._macros())
+
+    @Property(int, constant=True)
+    def slots(self):
+        return mapping.MACRO_SLOTS
+
+    @Property(int, constant=True)
+    def stepBudget(self):
+        return mapping.MACRO_STEP_BUDGET
+
+    @Property(int, notify=countChanged)
+    def stepsUsed(self):
+        return sum(len(macro["steps"]) for macro in self._macros())
+
+    @Property("QStringList", constant=True)
+    def typeNames(self):
+        return [label for label, _value in MACRO_TYPES]
+
+    @Property("QStringList", constant=True)
+    def triggerKeys(self):
+        """Every key that can run a macro, as the shell labels them.
+
+        All of them, unlike the remap targets: a macro's trigger key is read by
+        the pad, so a paddle with no XInput id runs one perfectly well. The
+        keys a macro may *press* are the smaller set, and the backend refuses
+        the rest.
+        """
+        return [key_label(key) for key in mapping.APEX5_KEYS]
+
+    @Property(int, constant=True)
+    def intervalMax(self):
+        return mapping.MACRO_INTERVAL_MAX
+
+    @Property(bool, notify=recordingChanged)
+    def recording(self):
+        return self._recording
+
+    @Property(str, notify=recordingChanged)
+    def recordingKey(self):
+        return key_label(self._record_key) if self._record_key else ""
+
+    @Property(bool, notify=countChanged)
+    def canAdd(self):
+        return (self._profile.config is not None
+                and len(self._macros()) < mapping.MACRO_SLOTS)
+
+    def data(self, index, role=Qt.DisplayRole):
+        macros = self._macros()
+        row = index.row()
+        if not 0 <= row < len(macros):
+            return None
+        macro = macros[row]
+        if role == self.KeyRole:
+            return macro["key"]
+        if role in (self.LabelRole, Qt.DisplayRole):
+            return key_label(macro["key"])
+        if role == self.TypeRole:
+            return next((i for i, (_l, v) in enumerate(MACRO_TYPES)
+                         if v == macro["type"]), 0)
+        if role == self.IntervalRole:
+            return macro["interval"] or 0
+        if role == self.StepCountRole:
+            return len(macro["steps"])
+        if role == self.DurationRole:
+            return sum(step["delay"] for step in macro["steps"])
+        if role == self.StepsRole:
+            return self.stepsAt(row)
+        return None
+
+    @Slot(int, result="QVariantList")
+    def stepsAt(self, row):
+        """One macro's steps, ready to list."""
+        macros = self._macros()
+        if not 0 <= row < len(macros):
+            return []
+        return [{"delay": step["delay"],
+                 "key": key_label(step["key"]) if isinstance(step["key"], str)
+                        else str(step["key"]),
+                 "event": MACRO_EVENT_LABELS.get(step["event"], str(step["event"]))}
+                for step in macros[row]["steps"]]
+
+    def _write(self, macros):
+        config = self._profile.config
+        if config is None:
+            return False
+        try:
+            config.set_macros(macros)
+        except (ValueError, mapping.ProtocolError) as exc:
+            self.refused.emit(str(exc))
+            return False
+        self.refresh()
+        self._profile.markChanged()
+        return True
+
+    @Slot(int, int)
+    def setType(self, row, type_index):
+        macros = self._macros()
+        if not 0 <= row < len(macros):
+            return
+        index = max(0, min(len(MACRO_TYPES) - 1, int(type_index)))
+        macros[row]["type"] = MACRO_TYPES[index][1]
+        self._write(macros)
+
+    @Slot(int, int)
+    def setInterval(self, row, milliseconds):
+        macros = self._macros()
+        if not 0 <= row < len(macros):
+            return
+        macros[row]["interval"] = max(0, min(mapping.MACRO_INTERVAL_MAX,
+                                             int(milliseconds)))
+        self._write(macros)
+
+    @Slot(int)
+    def remove(self, row):
+        """Drop a macro and give its key back to itself."""
+        macros = self._macros()
+        if not 0 <= row < len(macros):
+            return
+        config = self._profile.config
+        key = macros[row]["key"]
+        try:
+            config.clear_macro(key)
+        except (ValueError, KeyError, mapping.ProtocolError) as exc:
+            self.refused.emit(str(exc))
+            return
+        self.refresh()
+        self._profile.keys.refresh()
+        self._profile.markChanged()
+
+    # -- recording ---------------------------------------------------------
+
+    @Slot(int)
+    def record(self, key_index):
+        """Start recording, for the key at `key_index` in `triggerKeys`."""
+        if self._recording or self._profile.config is None:
+            return
+        if not 0 <= key_index < len(mapping.APEX5_KEYS):
+            return
+        self._record_key = mapping.APEX5_KEYS[key_index]
+        self._recording = True
+        self.recordingChanged.emit()
+        self.recordRequested.emit(RECORD_SECONDS)
+
+    @Slot(list)
+    def recorded(self, steps):
+        """Steps back from the worker. An empty list means nothing was played."""
+        key, self._record_key = self._record_key, ""
+        self._recording = False
+        self.recordingChanged.emit()
+        config = self._profile.config
+        if config is None or not key:
+            return
+        if not steps:
+            self.refused.emit(
+                "Nothing was recorded. If another program has taken the pad "
+                "over, its evdev node stops reporting — turn third-party "
+                "control off on the Controller page and try again.")
+            return
+        try:
+            config.set_macro(key, steps)
+        except (ValueError, mapping.ProtocolError) as exc:
+            self.refused.emit(str(exc))
+            return
+        self.refresh()
+        self._profile.keys.refresh()
+        self._profile.markChanged()
+
+    def refresh(self):
+        self.beginResetModel()
+        self.endResetModel()
+        self.countChanged.emit()
+
+
 @QmlElement
 class ProfileListModel(QAbstractListModel):
     """The pad's profile slots, and the cache of what was read from each."""
@@ -778,6 +1013,7 @@ class ProfileModel(QObject):
         self._saved = True
         self._slots = ProfileListModel(self)
         self._keys = KeyMapModel(self)
+        self._macros = MacroModel(self)
         self._vibration = VibrationModel(self)
         self._triggers = TriggerModel(self)
         self._sticks = StickModel(self)
@@ -796,6 +1032,10 @@ class ProfileModel(QObject):
     @Property(KeyMapModel, constant=True)
     def keys(self):
         return self._keys
+
+    @Property(MacroModel, constant=True)
+    def macros(self):
+        return self._macros
 
     @Property(VibrationModel, constant=True)
     def vibration(self):
@@ -937,6 +1177,7 @@ class ProfileModel(QObject):
         self.loadedChanged.emit()
         self.titleChanged.emit()
         self._keys.refresh()
+        self._macros.refresh()
         self._vibration.refresh()
         self._triggers.refresh()
         self._sticks.refresh()
@@ -1049,6 +1290,7 @@ class ProfileModel(QObject):
         self._edited = mapping.MappingConfig(bytearray(blob), self._cfg_id)
         self.titleChanged.emit()
         self._keys.refresh()
+        self._macros.refresh()
         self._vibration.refresh()
         self._triggers.refresh()
         self._sticks.refresh()

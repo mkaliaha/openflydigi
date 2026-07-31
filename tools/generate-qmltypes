@@ -161,6 +161,7 @@ def collect():
         (models.ProfileModel, False),
         (models.ProfileListModel, False),
         (models.KeyMapModel, False),
+        (models.MacroModel, False),
         (models.VibrationModel, False),
         (models.VibrationSideModel, False),
         (models.TriggerModel, False),

@@ -82,6 +82,9 @@ class App(QObject):
         # channel the user has to learn to look at.
         self._setup.failed.connect(self._setup_failed)
         self._dsmode.failed.connect(self._setup_failed)
+        # A macro the pad cannot hold, or a recording that caught nothing, is
+        # the same kind of news -- it goes to the same banner.
+        self._profile.macros.refused.connect(self._setup_failed)
         # And its ordinary news goes where every other passing message goes,
         # rather than through the error banner: stopping DualSense mode is
         # something the user asked for, not something that went wrong.
@@ -119,6 +122,7 @@ class App(QObject):
         self.requestVibration.connect(worker.apply_vibration)
         self._profile.loadRequested.connect(worker.load_profile)
         self._profile.writeRequested.connect(worker.write_profile)
+        self._profile.macros.recordRequested.connect(worker.record_macro)
         self._lighting.writeRequested.connect(worker.write_lighting)
         self.requestScreen.connect(worker.refresh_screen)
         self._screen.uploadRequested.connect(self._screen_upload_starting)
@@ -132,6 +136,7 @@ class App(QObject):
         worker.active_changed.connect(self._profile.setActive)
         worker.profile_loaded.connect(self._profile.profileLoaded)
         worker.profile_written.connect(self._written)
+        worker.macro_recorded.connect(self._profile.macros.recorded)
         worker.transport_changed.connect(self._device.transportReceived)
         worker.versions_changed.connect(self._device.versionsReceived)
         worker.lighting_loaded.connect(self._lighting.configLoaded)
@@ -213,6 +218,18 @@ class App(QObject):
         self.requestTransport.emit()
         self.requestScreen.emit()
         self._profile.forget()
+
+    @Slot()
+    def stopMacroRecording(self):
+        """End a recording early.
+
+        A direct call and not a signal, on purpose: the worker thread is inside
+        the recorder's poll loop, so anything queued would only arrive once the
+        recording had finished by itself. Setting a bool is what the shutdown
+        path does for the same reason.
+        """
+        if self.thread is not None:
+            self.thread.worker.request_stop_recording()
 
     @Slot(int)
     def applyGamePreset(self, row):

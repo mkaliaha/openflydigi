@@ -861,12 +861,212 @@ def test_suggested_colours_differ():
           f"{first} {second}")
 
 
-def _raises(call):
+def _raises(call, kind=ValueError):
     try:
         call()
-    except ValueError:
+    except kind:
         return True
     return False
+
+
+# -- macros -------------------------------------------------------------------
+
+TAP_A = [{"delay": 0, "key": "a", "event": mapping.MACRO_PRESS},
+         {"delay": 80, "key": "a", "event": mapping.MACRO_RELEASE}]
+
+
+def test_a_macro_round_trips():
+    config = mapping.MappingConfig(blank_blob())
+    check("a blank page holds no macros", config.macros() == [])
+
+    steps = TAP_A + [{"delay": 40, "key": "b", "event": mapping.MACRO_PRESS},
+                     {"delay": 80, "key": "b", "event": mapping.MACRO_RELEASE}]
+    config.set_macro("m1", steps, macro_type=mapping.MACRO_TOGGLE, interval=50)
+    stored = config.macros()
+    check("one macro is stored", len(stored) == 1, str(stored))
+    check("the trigger key round-trips", stored[0]["key"] == "m1")
+    check("the type round-trips", stored[0]["type"] == mapping.MACRO_TOGGLE)
+    check("the interval round-trips", stored[0]["interval"] == 50,
+          str(stored[0]["interval"]))
+    check("the steps round-trip", stored[0]["steps"] == steps, str(stored[0]["steps"]))
+
+
+def test_a_macro_binds_its_key_and_gives_it_back():
+    """A body with no key-table entry is a macro the pad never runs."""
+    config = mapping.MappingConfig(blank_blob())
+    config.set_macro("m1", TAP_A)
+    offset = mapping.OFF_KEY_TABLE + mapping.KEY_IDS["m1"] * mapping.KEY_ENTRY
+    check("binding writes the macro sentinel",
+          config.blob[offset] == mapping.TARGET_MACRO, str(config.blob[offset]))
+    check("the key reports itself as a macro", config.mapping("m1")[0] == "macro")
+
+    config.clear_macro("m1")
+    check("clearing drops the body", config.macros() == [])
+    check("clearing restores the key",
+          config.blob[offset] == mapping.TARGET_IDENTITY, str(config.blob[offset]))
+
+
+def test_remapping_a_key_away_from_its_macro_drops_the_body():
+    """Otherwise the key sends its new binding and plays the old macro too.
+
+    The firmware reads the macro page and the key table independently, so a
+    body left behind at 230 keeps running underneath the remap -- measured on
+    hardware, and prevented rather than repaired by Space Station as well.
+    """
+    config = mapping.MappingConfig(blank_blob())
+    config.set_macro("m1", TAP_A)
+    config.set_mapping("m1", "b")
+    check("the orphaned body is gone", config.macros() == [], str(config.macros()))
+    check("and the remap went through", config.mapping("m1")[0] == "b")
+
+    # Only the key being remapped: a second macro is none of its business.
+    config.set_macro("m2", TAP_A)
+    config.set_macro("m3", TAP_A)
+    config.set_mapping("m2", None)
+    check("the other macro survives",
+          [m["key"] for m in config.macros()] == ["m3"], str(config.macros()))
+
+
+def test_the_macro_page_matches_flydigis_writer():
+    """Header, word offsets, cumulative ticks and the 0xFF tail."""
+    config = mapping.MappingConfig(blank_blob())
+    config.set_macros([
+        {"key": "m1", "type": mapping.MACRO_ONCE, "steps": TAP_A},
+        {"key": "m2", "type": mapping.MACRO_WHILE_HELD, "steps": TAP_A},
+    ])
+    page = bytes(config.blob[mapping.OFF_MACROS :
+                             mapping.OFF_MACROS + mapping.MACRO_REGION])
+    check("the count byte counts macros", page[0] == 2, str(page[0]))
+    # Offsets are in 4-byte words, and each body spends one on its own header:
+    # the first macro starts at 0, the second three words later (1 + 2 steps).
+    check("offsets are word offsets", (page[1], page[2]) == (0, 3),
+          f"{page[1]} {page[2]}")
+    check("unused offset slots stay zero", page[3:6] == b"\x00\x00\x00")
+
+    body = page[mapping.MACRO_HEADER:]
+    check("a body leads with its key and step count",
+          (body[0], body[1], body[2]) == (mapping.KEY_IDS["m1"], 2, 0),
+          f"{body[0]} {body[1]} {body[2]}")
+    check("the type is the body's fourth byte", body[3] == mapping.MACRO_ONCE)
+    # Times are stored cumulative in 10 ms ticks: 0 for the press, 8 for a
+    # release 80 ms later. Read back as gaps, which is what a caller edits.
+    check("the first step is at tick zero", (body[4], body[5]) == (0, 0))
+    check("the second step is 80 ms later in ticks", (body[8], body[9]) == (8, 0),
+          f"{body[8]} {body[9]}")
+    check("a step carries key then event",
+          (body[10], body[11]) == (mapping.KEY_IDS["a"], mapping.MACRO_RELEASE))
+    check("the tail is 0xFF fill", set(page[mapping.MACRO_HEADER + 24:]) == {0xFF})
+
+
+def test_macro_delays_are_quantised_not_summed():
+    """Each gap is divided on its own, as Flydigi's writer does."""
+    config = mapping.MappingConfig(blank_blob())
+    steps = [{"delay": 0, "key": "a", "event": mapping.MACRO_PRESS},
+             {"delay": 15, "key": "a", "event": mapping.MACRO_RELEASE},
+             {"delay": 15, "key": "b", "event": mapping.MACRO_PRESS}]
+    config.set_macro("m1", steps)
+    delays = [step["delay"] for step in config.macros()[0]["steps"]]
+    # 15 ms truncates to one tick each, so the third step lands at 20 ms and not
+    # at the 30 ms a single division of the total would have given.
+    check("each gap truncates to a tick", delays == [0, 10, 10], str(delays))
+
+
+def test_the_macro_page_is_bounded():
+    config = mapping.MappingConfig(blank_blob())
+    too_many = [{"key": key, "type": mapping.MACRO_ONCE, "steps": TAP_A}
+                for key in ("m1", "m2", "m3", "m4", "c", "z")]
+    check("a sixth macro is refused", _raises(lambda: config.set_macros(too_many)))
+
+    step = dict(TAP_A[0])
+    over_budget = [{"key": "m1", "type": mapping.MACRO_ONCE,
+                    "steps": [step] * (mapping.MACRO_STEP_BUDGET + 1)}]
+    check("more steps than the page holds is refused",
+          _raises(lambda: config.set_macros(over_budget)))
+    check("the page still holds nothing after a refusal", config.macros() == [])
+
+    at_budget = [{"key": "m1", "type": mapping.MACRO_ONCE,
+                  "steps": [step] * mapping.MACRO_STEP_BUDGET}]
+    config.set_macros(at_budget)
+    check("a full page fits exactly",
+          len(config.macros()[0]["steps"]) == mapping.MACRO_STEP_BUDGET,
+          str(len(config.macros()[0]["steps"])))
+
+
+def test_a_macro_step_cannot_send_what_xinput_has_no_id_for():
+    """Same reasoning as the remap targets -- and the same silent failure."""
+    config = mapping.MappingConfig(blank_blob())
+    for key in ("m1", "c"):
+        check(f"a step on {key} is refused",
+              _raises(lambda: config.set_macro("m2", [
+                  {"delay": 0, "key": key, "event": mapping.MACRO_PRESS}])))
+    check("a paddle is still allowed to *run* one",
+          config.set_macro("m1", TAP_A) is None)
+
+
+def test_macros_are_read_permissively():
+    """A profile written elsewhere reads back as what it is."""
+    config = mapping.MappingConfig(blank_blob())
+    page = bytearray(b"\xff" * mapping.MACRO_REGION)
+    page[0] = 1
+    page[1] = 0
+    page[mapping.MACRO_HEADER : mapping.MACRO_HEADER + 8] = bytes([
+        mapping.KEY_IDS["m1"], 1, 0, mapping.MACRO_ONCE,
+        0, 0, mapping.KEY_IDS["m1"], mapping.MACRO_PRESS])
+    config.blob[mapping.OFF_MACROS : mapping.OFF_MACROS + mapping.MACRO_REGION] = page
+    stored = config.macros()
+    check("a step nothing can receive still reads back",
+          stored and stored[0]["steps"][0]["key"] == "m1", str(stored))
+
+
+def test_a_count_outside_the_page_reads_as_nothing():
+    config = mapping.MappingConfig(blank_blob())
+    for count in (0, mapping.MACRO_SLOTS + 1, 0xFF):
+        config.blob[mapping.OFF_MACROS] = count
+        check(f"a count of {count} reads as no macros", config.macros() == [])
+
+
+def test_the_interval_belongs_to_the_slot_not_the_macro():
+    """A factory 30 ms survives a macro that does not set one."""
+    config = mapping.MappingConfig(blank_blob())
+    config.set_macro("m1", TAP_A)
+    check("an unset interval keeps the factory byte",
+          config.blob[mapping.OFF_MACRO_CYCLE] == 3,
+          str(config.blob[mapping.OFF_MACRO_CYCLE]))
+    check("and reads back as the milliseconds it is",
+          config.macros()[0]["interval"] == 30)
+
+    config.blob[mapping.OFF_MACRO_CYCLE] = mapping.MACRO_INTERVAL_UNSET
+    check("an unwritten slot reads as None",
+          config.macros()[0]["interval"] is None)
+
+
+def test_editing_macros_does_not_disturb_its_neighbours():
+    config = mapping.MappingConfig(blank_blob())
+    before = bytes(config.blob)
+    config.set_macros([{"key": "m1", "type": mapping.MACRO_ONCE, "steps": TAP_A}])
+    after = bytes(config.blob)
+    changed = {index for index, (old, new) in enumerate(zip(before, after))
+               if old != new}
+    inside = set(range(mapping.OFF_MACROS,
+                       mapping.OFF_MACROS + mapping.MACRO_REGION))
+    key_entry = mapping.OFF_KEY_TABLE + mapping.KEY_IDS["m1"] * mapping.KEY_ENTRY
+    inside |= {key_entry}
+    check("only the page and the bound key move", changed <= inside,
+          str(sorted(changed - inside)))
+    check("the data version is untouched",
+          before[mapping.OFF_DATA_VERSION:mapping.OFF_DATA_VERSION + 2]
+          == after[mapping.OFF_DATA_VERSION:mapping.OFF_DATA_VERSION + 2])
+    check("the title is untouched", config.title == "Profile", config.title)
+
+
+def test_a_newer_protocol_keeps_its_macros_elsewhere():
+    """From v3.2 the page moves behind commands 172/173/174."""
+    blob = blank_blob()
+    blob[mapping.OFF_PROTO_VERSION] = 2          # v3.2
+    config = mapping.MappingConfig(blob)
+    check("v3.2 is not a blob-macro profile", not config.macros_in_blob)
+    check("and writing one is refused",
+          _raises(lambda: config.set_macro("m1", TAP_A), mapping.ProtocolError))
 
 
 def test_cycle_time_is_a_duration():
@@ -912,6 +1112,18 @@ def main():
                  test_choosing_a_preset_restores_its_whole_shape,
                  test_editing_extras_does_not_disturb_buttons,
                  test_targets_exclude_buttons_xinput_cannot_send,
+                 test_a_macro_round_trips,
+                 test_a_macro_binds_its_key_and_gives_it_back,
+                 test_remapping_a_key_away_from_its_macro_drops_the_body,
+                 test_the_macro_page_matches_flydigis_writer,
+                 test_macro_delays_are_quantised_not_summed,
+                 test_the_macro_page_is_bounded,
+                 test_a_macro_step_cannot_send_what_xinput_has_no_id_for,
+                 test_macros_are_read_permissively,
+                 test_a_count_outside_the_page_reads_as_nothing,
+                 test_the_interval_belongs_to_the_slot_not_the_macro,
+                 test_editing_macros_does_not_disturb_its_neighbours,
+                 test_a_newer_protocol_keeps_its_macros_elsewhere,
                  test_lighting_round_trip, test_lighting_brightness_is_clamped,
                  test_lighting_effects_write_frames, test_cycle_time_is_a_duration,
                  test_effects_by_id_and_colours, test_suggested_colours_differ):

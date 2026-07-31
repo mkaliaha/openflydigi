@@ -35,9 +35,30 @@ Kirigami.ScrollablePage {
 
     footer: ProfileFooter {}
 
+    // Remapping is the pad's own key handling, and another driver holding the
+    // pad takes that over -- so the controls are shut off rather than left to
+    // write a key table nothing is currently reading.
+    Kirigami.InlineMessage {
+        objectName: "buttonsThirdParty"
+        parent: page.overlay
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.margins: Kirigami.Units.largeSpacing
+        z: 10
+        visible: App.device.thirdParty
+        type: Kirigami.MessageType.Warning
+        text: "Other software is allowed to take the pad over"
+              + (App.device.controlBy !== ""
+                 ? " (" + App.device.controlBy + ")" : "")
+              + ", so it is handling the buttons rather than the pad. Turn it "
+              + "off on the Controller page to remap them."
+    }
+
     ListView {
         id: keyList
         objectName: "keyList"
+        enabled: !App.device.thirdParty
         // Null, not merely hidden. KeyMapModel reports a constant 23 rows and
         // invents an identity mapping when no config is open, so a view bound
         // to it with nothing to show renders 23 editable rows of fiction.

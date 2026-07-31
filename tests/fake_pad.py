@@ -46,6 +46,15 @@ def blank_blob(title="Profile"):
         extra = mapping.OFF_JOYSTICK_EXTRA + side * mapping.JOYSTICK_EXTRA_ENTRY
         blob[extra : extra + 12] = bytes(
             [0, 50, 62, 75, 87, 100, 112, 125, 137, 150, 0, 0])
+    # The macro page and its repeat intervals, as a real pad holds them: a
+    # six-byte header of zeroes and 0xFF behind it, and 3 -- 30 ms -- in all
+    # five interval slots. Read off the hardware, like the curves above; the
+    # 0xFF fill this used to have parses as "no macros" too, but by a different
+    # route, so a reader tested against it was not tested against the pad.
+    blob[mapping.OFF_MACROS : mapping.OFF_MACROS + mapping.MACRO_HEADER] = (
+        bytes(mapping.MACRO_HEADER))
+    blob[mapping.OFF_MACRO_CYCLE : mapping.OFF_MACRO_CYCLE + mapping.MACRO_SLOTS] = (
+        bytes([3] * mapping.MACRO_SLOTS))
     config = mapping.MappingConfig(blob)
     config.title = title
     return bytearray(config.blob)

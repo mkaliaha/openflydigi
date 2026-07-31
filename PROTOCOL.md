@@ -479,6 +479,17 @@ stored frames, cycling `loop_start`..`loop_end` every `cycle_time`. The `mode` b
 which of Space Station's generators produced the data, so writing a different mode number changes
 nothing visible. Changing the lighting means writing frames.
 
+**For macros, 162 is not optional.** They ride inside the mapping profile — the page at offset 230,
+laid out in [docs/findings-profile-blob.md](docs/findings-profile-blob.md) — and there is no macro
+command in this protocol version at all: the `ReadMacroConfig`/`WriteMarcoConfig` family (172, 173,
+174) belongs to protocol 3.2 and later, where the macros moved out of the blob. What matters on the
+wire is that a macro written with 164/165 is **stored and not played** until the profile is applied
+with 162; the firmware parses the page into its own structs at load time, while the key table beside
+it is read as it stands. Verified on hardware: four macros, read back off the pad to prove they were
+there, sat silent through a full test window while an ordinary remap beside them worked; they played
+to the millisecond after a 162; and a fifth written and applied with no 166 at all played as well.
+So 166 decides whether macros survive a sleep, not whether they run.
+
 ---
 
 ## 8. The screen

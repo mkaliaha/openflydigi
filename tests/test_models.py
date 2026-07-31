@@ -112,6 +112,99 @@ def test_editing_a_key_marks_dirty_and_lands_in_the_blob():
           str(role(keys, row, b"target")))
 
 
+RECORDED = [{"delay": 0, "key": "a", "event": mapping.MACRO_PRESS},
+            {"delay": 80, "key": "a", "event": mapping.MACRO_RELEASE}]
+
+
+def key_index(name):
+    return mapping.APEX5_KEYS.index(name)
+
+
+def test_a_recording_becomes_a_macro_row():
+    profile, _ = make_profile()
+    macros = profile.macros
+    check("a fresh profile has no macros", macros.count == 0, str(macros.count))
+    check("and has room for one", macros.canAdd)
+
+    requested = []
+    macros.recordRequested.connect(requested.append)
+    macros.record(key_index("m1"))
+    check("recording asks the worker", len(requested) == 1, str(requested))
+    check("and says so while it waits", macros.recording)
+    check("naming the key it is recording for", macros.recordingKey == "M1",
+          macros.recordingKey)
+
+    macros.recorded(RECORDED)
+    check("recording ends when the steps arrive", not macros.recording)
+    check("the macro is a row", macros.count == 1, str(macros.count))
+    check("the row is labelled by its key", role(macros, 0, b"label") == "M1",
+          str(role(macros, 0, b"label")))
+    check("the row counts its steps", role(macros, 0, b"stepCount") == 2,
+          str(role(macros, 0, b"stepCount")))
+    check("the row reports how long it takes",
+          role(macros, 0, b"duration") == 80, str(role(macros, 0, b"duration")))
+    check("editing marks the profile dirty", profile.dirty)
+    check("the key now runs it", profile.config.mapping("m1")[0] == "macro")
+    # The Buttons page has to notice: the key's row changed under it.
+    check("the key list was told to refresh",
+          role(profile.keys, profile.keys.rowForKey("m1"), b"target") == "macro")
+
+
+def test_a_recording_that_caught_nothing_says_why():
+    """The likeliest reason is third-party control, and it is not guessable."""
+    profile, _ = make_profile()
+    refusals = []
+    profile.macros.refused.connect(refusals.append)
+    profile.macros.record(key_index("m1"))
+    profile.macros.recorded([])
+    check("an empty recording is refused", len(refusals) == 1, str(refusals))
+    check("and the reason names what to do about it",
+          "third-party" in refusals[0], refusals[0])
+    check("nothing was stored", profile.macros.count == 0)
+
+
+def test_a_macros_type_and_interval_write_through():
+    profile, _ = make_profile()
+    macros = profile.macros
+    macros.record(key_index("m1"))
+    macros.recorded(RECORDED)
+
+    macros.setType(0, models.MACRO_TYPES.index(("While held",
+                                                mapping.MACRO_WHILE_HELD)))
+    check("the type reaches the blob",
+          profile.config.macros()[0]["type"] == mapping.MACRO_WHILE_HELD,
+          str(profile.config.macros()[0]["type"]))
+    macros.setInterval(0, 300)
+    check("the interval reaches the blob",
+          profile.config.macros()[0]["interval"] == 300,
+          str(profile.config.macros()[0]["interval"]))
+    check("and the row reports it", role(macros, 0, b"interval") == 300,
+          str(role(macros, 0, b"interval")))
+
+
+def test_deleting_a_macro_gives_the_key_back():
+    profile, _ = make_profile()
+    macros = profile.macros
+    macros.record(key_index("m1"))
+    macros.recorded(RECORDED)
+    macros.remove(0)
+    check("the row is gone", macros.count == 0, str(macros.count))
+    check("the key is its own again", profile.config.mapping("m1")[0] == "m1",
+          str(profile.config.mapping("m1")))
+
+
+def test_the_page_stops_offering_more_than_the_pad_holds():
+    profile, _ = make_profile()
+    macros = profile.macros
+    for name in ("m1", "m2", "m3", "m4", "c"):
+        macros.record(key_index(name))
+        macros.recorded(RECORDED)
+    check("all five slots are used", macros.count == mapping.MACRO_SLOTS,
+          str(macros.count))
+    check("and a sixth is not offered", not macros.canAdd)
+    check("the budget is reported", macros.stepsUsed == 10, str(macros.stepsUsed))
+
+
 def test_turbo_survives_a_target_change():
     """Setting one field must not silently clear the others."""
     profile, _ = make_profile()
@@ -1392,6 +1485,11 @@ def main():
     for test in (test_selecting_an_unread_profile_requests_it_once,
                  test_a_loaded_profile_is_clean,
                  test_editing_a_key_marks_dirty_and_lands_in_the_blob,
+                 test_a_recording_becomes_a_macro_row,
+                 test_a_recording_that_caught_nothing_says_why,
+                 test_a_macros_type_and_interval_write_through,
+                 test_deleting_a_macro_gives_the_key_back,
+                 test_the_page_stops_offering_more_than_the_pad_holds,
                  test_turbo_survives_a_target_change,
                  test_write_carries_the_blob_and_the_previous_copy,
                  test_confirming_a_write_clears_dirty,

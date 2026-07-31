@@ -18,7 +18,7 @@ from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 import time
 
-from flydigi import (blobs, device, effects, lighting, mapping, motion,
+from flydigi import (blobs, device, effects, lighting, macros, mapping, motion,
                      screen, screen_ota)
 
 
@@ -36,6 +36,7 @@ class DeviceWorker(QObject):
     screen_finished = Signal(bool)
     lighting_loaded = Signal(bytes)
     lighting_written = Signal(int, bool)
+    macro_recorded = Signal(list)        # steps; empty means nothing was played
     active_changed = Signal(int)
     status = Signal(str)
     failed = Signal(str)
@@ -44,6 +45,18 @@ class DeviceWorker(QObject):
         super().__init__()
         self._ctrl = None
         self._stopping = False
+        self._stop_recording = False
+
+    def request_stop_recording(self):
+        """End a recording early. Called straight from the UI thread.
+
+        Deliberately not a slot. This thread is inside the recorder's own poll
+        loop for the whole recording, so a queued slot call would not be
+        delivered until the recording it is meant to stop had already ended.
+        A plain bool, set from one thread and read from the other, is what
+        `request_stop` does for the same reason.
+        """
+        self._stop_recording = True
 
     def request_stop(self):
         """Stop retrying. Called from the owning thread as the app quits.
@@ -177,6 +190,13 @@ class DeviceWorker(QObject):
             # got between the two would be committed along with this profile.
             with ctrl.claim():
                 sent = mapping.write_config(ctrl, cfg_id, new, old=old)
+                # A changed macro needs the profile paged in again before the
+                # firmware will play it -- a write alone leaves it stored and
+                # silent, which is measured, not assumed. Only when the macro
+                # bytes moved: applying makes the pad re-seat its trigger
+                # motors audibly, and a remap has no need of it.
+                if sent and (old is None or new.macro_page != old.macro_page):
+                    mapping.apply_config(ctrl, cfg_id)
                 # Pass the config's own id so committing does not overwrite the
                 # slot's version tag with zero.
                 saved = mapping.save_config(ctrl, new.data_version) if save else False
@@ -234,6 +254,29 @@ class DeviceWorker(QObject):
         result = self._attempt(work, "writing lighting")
         if result is not None:
             self.lighting_written.emit(*result)
+
+    @Slot(float)
+    def record_macro(self, seconds):
+        """Watch the pad and turn what is played into macro steps.
+
+        Not routed through `_attempt`: this touches the evdev node rather than
+        the hidraw one, so there is no stale handle to reconnect, and a silent
+        second attempt would start a recording nobody asked for. It runs on
+        this thread because it blocks -- for as long as someone keeps playing.
+        """
+        self._stop_recording = False
+        self.status.emit("Recording — play the sequence on the pad")
+        try:
+            steps = macros.record(seconds,
+                                  should_stop=lambda: self._stop_recording
+                                  or self._stopping)
+        except OSError as exc:
+            self.failed.emit(f"recording a macro: {exc}")
+            self.macro_recorded.emit([])
+            return
+        self.macro_recorded.emit(steps)
+        self.status.emit(f"Recorded {len(steps)} step(s)" if steps
+                         else "Nothing was recorded")
 
     # -- screen ------------------------------------------------------------
 

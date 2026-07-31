@@ -47,8 +47,8 @@ WARNINGS = []
 STARTED = []
 
 # The sections the global drawer offers, in order.
-SECTIONS = ["Controller", "Buttons", "Sticks", "Vibration", "Triggers",
-            "Lighting", "Screen", "Games", "DualSense", "Setup"]
+SECTIONS = ["Controller", "Buttons", "Macros", "Sticks", "Vibration",
+            "Triggers", "Lighting", "Screen", "Games", "DualSense", "Setup"]
 
 
 def check(name, condition, detail=""):
@@ -342,6 +342,43 @@ def test_loading_the_window_is_warning_free(qt_app):
           "; ".join(WARNINGS[:5]))
 
 
+def test_a_changed_macro_is_applied_and_a_remap_is_not(qt_app):
+    """Measured on hardware: a macro is stored by the write and played by the
+    apply. The same macros produced nothing until command 162 went out and
+    played to the millisecond afterwards, so the write path sends one when the
+    macro bytes move -- and not otherwise, since applying makes the pad
+    audibly re-seat its trigger motors over a remap that never needed it."""
+    from flydigi import mapping
+
+    pad = TestPad()
+    app_object, _engine, _window = load_shell(qt_app, pad)
+    pump(qt_app)
+    profile = app_object.profile
+    if profile.config is None:
+        check("a profile is open to edit", False)
+        app_object.shutdown()
+        return
+
+    pad.switches.clear()
+    profile.config.set_mapping("m2", "a")
+    profile.markChanged()
+    profile.write(False)
+    pump(qt_app)
+    check("a remap does not re-apply the profile", pad.switches == [],
+          str(pad.switches))
+
+    pad.switches.clear()
+    profile.config.set_macro("m1", [
+        {"delay": 0, "key": "a", "event": mapping.MACRO_PRESS},
+        {"delay": 80, "key": "a", "event": mapping.MACRO_RELEASE}])
+    profile.markChanged()
+    profile.write(False)
+    pump(qt_app)
+    check("a macro edit re-applies the profile it was written to",
+          pad.switches == [profile.cfgId], str(pad.switches))
+    app_object.shutdown()
+
+
 def main():
     QQuickStyle.setStyle("org.kde.desktop")
     qt_app = QGuiApplication.instance() or QGuiApplication([])
@@ -355,6 +392,7 @@ def main():
                      test_the_i18n_functions_are_installed,
                      test_a_game_list_update_that_fails_is_reported,
                      test_a_game_list_update_that_succeeds_replaces_the_list,
+                     test_a_changed_macro_is_applied_and_a_remap_is_not,
                      test_an_unexpected_worker_error_is_reported,
                      test_shutdown_stops_the_thread_before_closing_the_device,
                      test_loading_the_window_is_warning_free):
