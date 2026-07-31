@@ -1,74 +1,92 @@
 # Device settings
 
-Everything the pad exposes that is not a profile: the one read that returns the lot,
-the small write commands behind it, the battery nibble, and the RGB test command that
-does nothing.
+Everything the pad holds outside a profile: the command-3 status block, the command-19
+and 20..23/29 writes behind it, the battery nibble and the firmware versions, the LED
+config blob and the sequence that saves it, and the command inventory.
 
 Index: [PROGRESS.md](../PROGRESS.md).
 
-**Built.** `flydigi/settings.py` is the read and every write; `tools/flydigi-settings`
-is the CLI; the app's **Device** page is the UI. Four of the write commands are
-verified on hardware — 19 sub 1 (quick-switch), 21 (precision), 22 (sensitivity) and
-23 (sleep time) — each written and read back through command 3. Command 29 (restart)
-is built and has never been sent. Report rate is read and shown and deliberately has
-no control; see below.
+`flydigi/settings.py` is the read and every write; `tools/flydigi-settings` is the CLI; the app's
+**Device** page is the UI, with the two screen bits (subs 8 and 9) on its **Screen** page.
+`tests/test_settings.py` runs standalone — `python3 tests/test_settings.py`, no pytest — against
+`tests/fake_pad.FakePad`, and covers the reply decode, the packet framing for 19, 20..23 and 29, the
+read-back path, and the fact that the pad ACKs sub-ids it reports unsupported.
+
+Five write commands are verified on hardware — 19 sub 1 (quick-switch), 19 sub 9 (always-on
+display), 21 (precision), 22 (sensitivity) and 23 (sleep time) — each written and read back through
+command 3. Command 29 (restart) is built and has never been sent; it is the only write with no
+read-back, and any handle open across it has to be reopened (`flydigi/settings.py:246-253`,
+`tools/flydigi-settings:139-147`). Report rate is read and shown; the app offers no control for it,
+and `tools/flydigi-settings report-rate` sits behind `--i-know`.
+
+The CLI has 16 subcommands: `show`, ten on/off switches (`quick-switch`, `xbox-home`,
+`motion-debounce`, `mapping-switch`, `stick-debounce`, `auto-calibration`, `stick-rebound`,
+`status-bar`, `always-on`, `audio`), `sleep <0..60|never>`, `precision`, `sensitivity`,
+`report-rate` and `restart`. The three numeric ones take names, not the wire values below: `8bit`,
+`9bit`, `10bit`, `11bit`, `12bit`, `14bit`, `16bit`; `highest`, `high`, `middlehigh`, `middle`,
+`lowmiddle`, `low`, `lowest`; and a rate in Hz — 125, 250, 500 or 1000 — inverted to the wire value
+on the way out (`tools/flydigi-settings:61-64`, `:160-161`). `report-rate` and `xbox-home` refuse to
+run without `--i-know`. Every operation, `show` included, goes through `identity.require(ctrl)`
+first: the pad opens by vendor id alone, so without that guard the tool would write a Vader 4 Pro's
+settings block under this pad's field names.
 
 ## Command 3: the whole settings block in one read
 
-One read covers most of a device-settings page by itself. `ReadHardwareFunctionStatus`,
-NewXInput command **3**, payload length 2 (no arguments). The reply carries capability and enabled
-bits separately, so the pad tells you both what it supports and what is on:
+`ReadHardwareFunctionStatus`, NewXInput command **3**, payload length 2 (no arguments). The reply
+carries capability and enabled bits separately, so the pad reports both what it supports and what is
+on:
 
 ```
 data[5]  supported   bit0 quick-switch config   bit1 Xbox home button  bit2 motion debounce
                      bit3 mapping switch        bit4 stick debounce    bit5 stick auto-calibration
                      bit6 stick rebound         bit7 status bar always on
 data[6]  enabled     same bit order
-data[7]  supported   bit0 off-screen   bit1 audio
+data[7]  supported   bit0 always-on display (SDK: `OffScreen`)   bit1 audio
 data[8]  enabled     same
 data[9]  sleep time        data[10] report rate
 data[11] stick precision   data[12] stick sensitivity
 ```
 
-So sleep time is readable as well as writable — worth reading before `UpdateSleepTime` writes it.
-
-**Run on hardware, and the layout above is right.** Command 3 answered first try on a wired Apex 5:
+A command-3 reply from a wired Apex 5:
 
 ```
-reply  90 165   3   1   0 251 123   1   0  15   0   2  17 ...
+reply  5a a5 03 01 00 fb 7b 01 00 0f 00 02 11 …
 ```
 
-| bit | supported | enabled |  | bit | supported | enabled |
-|---|---|---|---|---|---|---|
-| quick-switch config | yes | **on** | | stick debounce | yes | on |
-| Xbox home button | yes | on | | stick auto-calibration | yes | on |
-| motion debounce | **no** | — | | stick rebound | yes | on |
-| mapping switch | yes | on | | status bar always on | yes | **off** |
-| always-on display (SDK: "off screen") | yes | off — **the panel is dark** | | audio | **no** | — |
+Everything is supported except **motion debounce** and **audio**, and everything supported is on
+except **always-on display** — so the panel is dark — and **status bar always on**. Sleep time is
+**15** (minutes), report rate **0**, stick precision **2**, stick sensitivity **17**.
 
-sleep time **15** (minutes), report rate **0**, stick precision **2**, stick sensitivity **17**.
+Sleep time is a byte of minutes, readable as well as writable. 0 is Flydigi's "never", and
+`settings.set_sleep_minutes` clamps to 60, which is their own picker's ceiling rather than the
+byte's.
 
-Three things to note. `audio` is unsupported, which matches `AudioUsable` being gated — so the
-audio sub-command is dead on this pad. `motion debounce` is unsupported too, so sub-id 3 is not
-worth a UI. And **report rate reads 0**, which is not in the documented `{1000=1, 500=2, 250=4,
-125=8}` map — either 0 means "default/unset" or the map is incomplete. Do not write that field
-until a read on a pad whose rate has actually been set says which.
+`audio` is unsupported, which matches `AudioUsable` being gated — so the audio sub-command is dead
+on this pad. `motion debounce` is unsupported too, so sub-id 3 needs no UI. And **report rate
+reads 0**, which is not in the Hz map `{1000=1, 500=2, 250=4, 125=8}` — the enum's only other member
+is `ReportRate_None = 0`, so 0 reads as "default/unset". Do not write that field until a read on a
+pad whose rate has actually been set confirms that.
 
-**The endpoint descriptors argue for "default".** Both input endpoints poll at the USB minimum:
+**The endpoint descriptors argue for "default".** All three IN endpoints poll at the USB minimum;
+the two OUT endpoints are at 4 ms:
 
 ```
-3-4:1.0  xpad    ep_81 IN  interrupt  interval=1ms    the gamepad
-3-4:1.2  usbhid  ep_83 IN  interrupt  interval=1ms    the vendor interface
+3-4:1.0  xpad    ep_81 IN   interrupt  1 ms    the Xbox-compatible gamepad
+                 ep_02 OUT  interrupt  4 ms
+3-4:1.1  usbhid  ep_82 IN   interrupt  1 ms    keyboard/mouse node, `05 01 09 06` descriptor
+3-4:1.2  usbhid  ep_83 IN   interrupt  1 ms    the vendor interface, `06 a0 ff` descriptor
+                 ep_03 OUT  interrupt  4 ms
 ```
 
 The pad is full-speed (12 Mbit/s), where 1 ms is the shortest frame, so 1000 Hz is the ceiling for
-both and the pad is already at it. A setting of 0 alongside a 1 ms endpoint reads as "default =
-1000" rather than "unset". Note the two paths differ in *delivery*, not in rate: evdev is
-event-driven and emits nothing while a stick is still, whereas the vendor stream sends regardless —
-measured at ~970 Hz, essentially saturating its endpoint.
+all three and the pad is already at it: a setting of 0 alongside a 1 ms endpoint reads as "default =
+1000" rather than "unset". The 4 ms OUT interval bounds how fast commands can be written. The two
+input paths differ in *delivery*, not in rate — evdev is event-driven and emits nothing while a
+stick is still, whereas the vendor stream sends regardless, ~970 Hz wired. Interface 1.1's
+keyboard/mouse descriptor is what exposes the `Flydigi Flydigi APEX5  Keyboard` and `… Mouse` evdev
+devices; 1.2 is the vendor node this project opens.
 
-**Decoding the two numeric fields — and a trap in one of them.** Both are enums in
-`Flydigi.SharedResources`, and neither is the number it looks like:
+Both numeric fields are enums in `Flydigi.SharedResources`, and neither is the number it looks like:
 
 ```
 JoystickPrecision   None, 8Bit, 10Bit, 12Bit, 9Bit, 11Bit, 14Bit, 16Bit    (declaration order!)
@@ -77,12 +95,12 @@ JoystickSensitivity None=0, Highest=14, High=15, MiddleHigh=16,
 ```
 
 `JoystickPrecision` is ordered as it was **written**, not by bit depth: 9-bit and 11-bit were added
-after 8/10/12, and 14/16 later still. So our pad's `precision = 2` is **10 bit**, and any mapping
+after 8/10/12, and 14/16 later still. So this pad's `precision = 2` is **10 bit**, and any mapping
 that assumes the value climbs with resolution is wrong. `sensitivity = 17` is **Middle** — the
 "Center sensitivity: Fast / Medium / Slow" control, which has seven wire values behind three UI
 choices.
 
-**Which debounce is which.** Three settings look alike and only two exist on a k5:
+Three settings look alike, and only two exist on a k5:
 
 | Setting | sub-id | on this pad | English UI string |
 |---|---|---|---|
@@ -90,143 +108,98 @@ choices.
 | Rebound algorithm | 7 | supported, on | "Rebounce algorithm" — filters the reverse spike a stick's inertia produces on release |
 | Motion debounce | 3 | **unsupported** | none, in any of the twelve locales — only a dangling `IpcCommandEnum_EnableMotionDebounce` |
 
-So Space Station's debounce toggle is sub-id 5. Sub-id 3 needs no UI.
+Space Station's debounce toggle is sub-id 5. The app greys its stick-auto-calibration row unless
+stick debounce is on (`SettingsModel.autoCalibrationUsable`), following Flydigi's own
+`disable_joy_debounce_desc` string: turning debounce off prevents automatic calibration from
+working.
 
-**Precision is device state, not profile state**, so it does not make the profile's curve bytes
-multi-scale: 21 and 22 are standalone commands read back through command 3, while the control points
-live in the 840-byte blob, and all four factory profiles carry identical ones. The stick's 0..127
-and the trigger's 0..255 therefore read as two fixed normalisations of the stored format, with
-bitness changing only how finely the output is quantised.
-
-**Proven, not assumed any more.** Precision was written to 12-bit, profile 1 read back, precision
-put back to 10-bit and the profile read again. Both curve regions came back byte-identical:
+Precision is device state, not profile state: 21 and 22 are standalone commands read back through
+command 3, while the control points live in the 840-byte blob, and all four factory profiles carry
+identical ones. Profile 1 read at 12-bit and at 10-bit returns byte-identical curve regions:
 
 ```
 curve  00003f3f7f7f7f 00003f3f7f7f7f      at 12-bit and at 10-bit
 extra  00323e4b5764707d8996 0000 …        likewise
 ```
 
-So the stored control points are on their own fixed scale. A curve editor does not have to know the
-pad's bitness.
+The stored control points are on their own fixed scale, so the stick's 0..127 and the trigger's
+0..255 are two fixed normalisations of the stored format, with bitness changing only how finely the
+output is quantised; a curve editor does not have to know the pad's bitness.
 
-### What precision actually changes — measured, and it is only one of the two streams
+### Precision quantises the evdev report, not the vendor stream
 
-The setting is real, it does exactly what its name says, and **it acts on the gamepad report, not on
-the vendor stream.** Both were sampled by sweeping the sticks in full circles for a fixed 20 seconds
-and counting how many *distinct* values each axis produced. Quantising to N bits inside a 16-bit
-field caps that count at 2^N, so the count running into a power of two is the tell.
+Sampled by sweeping the sticks in full circles for a fixed 20 seconds and counting how many
+*distinct* values each axis produced; quantising to N bits inside a 16-bit field caps that count
+at 2^N.
 
 | Stream | at 10-bit | at 12-bit |
 |---|---|---|
 | evdev gamepad node (`Flydigi Apex 5`) | **1008, 1014, 1013, 1020** — all four axes against 1024 = 2¹⁰, none over | **~3050 per axis** — far past 1024, heading for 4096 |
 | vendor input report (hidraw, marker `0xEF`) | ~2100 per axis, no lattice | ~1800 per axis, no lattice |
 
-The evdev numbers are the finding: four axes independently landing within 1.6% of 1024 and never
-exceeding it is not sampling luck. At 12-bit the same sweep goes straight past that ceiling.
+The vendor stream shows no ceiling at either setting, and the gcd of its distinct values is 1 rather
+than 64 or 16 — so **the raw stream is not quantised by this setting at all**. It carries the pad's
+own resolution and the control sits downstream of it, on the XInput path: a relay or a probe reading
+sticks off the vendor stream is unaffected by this setting, and an evdev reader is not.
 
-The vendor stream shows no such ceiling at either setting, and the gcd of its distinct values is 1
-rather than 64 or 16 — so **the raw stream is not quantised by this setting at all**. It carries the
-pad's own resolution and the precision control sits downstream of it, on the XInput path. Anything
-reading sticks off the vendor stream — a relay, a probe — is therefore unaffected by what this
-control is set to, and anything reading evdev is.
+The sticks themselves are in that report, at `motion.STICK_OFFSETS`, and nothing reads them —
+[PROGRESS.md](../PROGRESS.md).
 
-**Where the sticks are in the vendor report.** Found while measuring the above, and not documented
-anywhere else here: the four axes are **signed 16-bit little-endian at offsets 4, 6, 8 and 10** —
-left X, left Y, right X, right Y. `00 80` is −32768 and `ff 7f` is +32767. `flydigi/motion.py` only
-ever decoded gyro (18) and accel (24) out of this report; the sticks were sitting in front of them
-the whole time. That matters for the relays, which take sticks from evdev and motion from here, and
-so go blind the moment another driver switches `controller_data` off — the same report still carries
-the sticks on the `raw_data` side.
-
-**Measuring it needs third-party mode off.** With it on, `controller_data` is off and the evdev node
-sends nothing at all, so the 10-bit run above reads as a dead pad rather than a quiet one.
-
-## Small commands worth having
-
-**S1. Reset one profile slot to factory** — `ResetMappingConfigByCfgIdCommandFactory`, **175**,
-`[4]=3, [5]=cfgId, [6]=crc`. A 10 s timeout like the save, so it is a flash operation. Gated on
-`ResetAllMappingUsable`, which the SDK sets unconditionally in the NewXInput branch — our mode.
-Gives us the stock app's "Restore default". Destructive: test on slot 4 or the fake pad first.
-
-**S2. Controller nickname** — write `UpdateNicknameCommandFactory` **24**, read
-`ReadNicknameCommandFactory` **2**. Self-verifying, and it makes a two-pad setup legible. Note the
-decompiled writer puts the CRC at `[6]`, which would overwrite the second name byte — assume it
-belongs at `5 + len`.
-
-**S3. Cooperative lock** — `AcquireControllerCommandFactory` **28**, `[5]=acquire`, `[6..25]` an
-ASCII tag. Advisory only, and still outstanding. **This also closes an open
-question in PROTOCOL.md §5:** it is *not* a precondition for trigger commands — the SDK never calls
-it before `SetForceTrigger`, and our hardware tests already prove 81/82 work without it.
-
-The read half is **built**: `motion.read_transport` (command **16**) returns the four transport
-flags plus the 20-byte `control_by` tag, so "is something else driving the pad, and what" is one
-read. The tag fills in with `SDL` on its own once third-party control is allowed —
+Measuring any of this needs third-party mode off: with it on, `controller_data` is off and the evdev
+node sends nothing at all, so a 10-bit run reads as a dead pad rather than a quiet one —
 [findings-steam.md](findings-steam.md).
 
-**S4. Device settings — the sub-command map.** Command **19** is a generic "set feature N":
-`[4]=4, [5]=subId, [6]=value, [7]=crc`.
+## Command 19: the sub-command map
 
-**The reply echoes the value, not the sub-id.** Measured: `5a a5 13 01 00 <value> <crc>`. So
-Flydigi's own `data[5]==subId` test never matches on this pad — match on `data[2]==19 &&
-data[5]==value` instead. The consequence matters more than the fix: **nothing in the reply says
-which sub-setting was written**, so an ACK means "a setting was written", not "this setting was
-written". Read command 3 back when it matters which, as `screen.read_screen_status` does.
+Command **19** is a generic "set feature N": `[4]=4, [5]=subId, [6]=value, [7]=crc`.
+
+**Sub-id N is bit N-1 of the command-3 reply**, with 9 and 10 rolling into the second byte pair. The
+read layout above and the sub-command map below are one list, `settings.FEATURES`, and
+`tests/test_settings.py` asserts the invariant.
 
 | sub | feature | sub | feature |
 |---|---|---|---|
-| 1 | **Quick-switch config** — `FN + A/B/X/Y` picks a profile, on the pad, nothing running | 6 | joystick auto-calibration |
+| 1 | **Quick-switch config** — Flydigi call it "Fast Swap Config"; their string templates the modifier as `{{key}} + A/B/X/Y` and does not name FN. Picks a profile on the pad, nothing running | 6 | joystick auto-calibration |
 | 2 | Xbox home button — reachable on the wire, refused by Flydigi's wrapper; see below | 7 | joystick rebound |
-| 3 | motion debounce | 8 | status bar always on |
-| 4 | mapping switch (no UI string; *not* the third-party toggle) | 9 | **always-on display** — the SDK calls it `OffScreen` and the name is inverted: 1 keeps the picture up, 0 blanks the panel |
+| 3 | motion debounce | 8 | status bar always on — [findings-screen.md](findings-screen.md) |
+| 4 | mapping switch (no UI string; *not* the third-party toggle) | 9 | **always-on display** — the SDK's `OffScreen` name is inverted against what the bit does; measured in [PROTOCOL.md](../PROTOCOL.md) §8c |
 | 5 | joystick debounce | 10 | audio (gated on the `AudioUsable` bit from command 3) |
 
 Standalone, `[4]=3, [5]=value, [6]=crc`: **20** report rate `{1000=1, 500=2, 250=4, 125=8}`,
 **21** joystick precision, **22** joystick sensitivity, **23** sleep time in minutes. **29** restart
 takes no argument: `[4]=2, [5]=crc`.
 
-**Sub-id 2 is refused by the SDK, not by the pad — and `ControllerType` is not about the host OS.**
-Worth getting straight, because the obvious reading of the name is wrong. `ControllerHidManager`
-decides the type from the HID device it opened, in one line:
+Replies to 20, 21, 22 and 23 are matched on the command byte alone: only command 19's reply has ever
+been measured, so no success-flag position is asserted for the other four.
 
-```csharp
-// ControllerHidManager.cs:35
-ControllerType controllerType = (hid.ManufacturerString == "Microsoft") ? ControllerType.XInput
-                              : (hid.VendorId != 14295)                 ? ControllerType.DInput
-                              :                                           ControllerType.NewXInput;
-```
-
-`14295` is `0x37D7`, Flydigi's vendor id — what `flydigi/device.py` matches on. So the enum records
-*which interface the SDK is talking through*, not a mode the pad is in and nothing to do with
-Windows: **XInput** is an older pad or dongle that enumerates as a Microsoft device and takes its
-commands through that impersonated interface (hence the separate command 48 framing); **NewXInput**
-is a device on Flydigi's own vendor id, which is this pad's vendor interface and every `5a a5`
-packet we send. The Apex 5 is a composite device and is both at once — `1.0` is the Xbox-compatible
-gamepad that `xpad` binds and evdev exposes, `1.2` is the vendor interface — so "XInput to the
-kernel" and "NewXInput to the SDK" describe two endpoints, not a contradiction.
+**Sub-id 2 is refused by the SDK, not by the pad, and `ControllerType` is not about the host OS.**
+`ControllerHidManager.cs:35` decides the type from the HID device it opened:
+`ManufacturerString == "Microsoft"` → `XInput`, else `VendorId != 14295` → `DInput`, else
+`NewXInput`. `14295` is `0x37D7`, Flydigi's vendor id — what `flydigi/device.py` matches on. The
+enum records *which interface the SDK talks through*: **XInput** is a pad or dongle enumerating as a
+Microsoft device, commanded through that impersonated interface, where the Xbox-home write is
+command **48** with `[2] = 10` to enable and `9` to disable; **NewXInput** is a device on Flydigi's
+own vendor id, this pad's vendor interface and every `5a a5` packet this project sends. The Apex 5
+is composite and is both at once — `1.0` is the Xbox-compatible gamepad `xpad` binds, `1.2` is the
+vendor interface.
 
 `EnableXboxHomeButtonCommandFactory` has a full NewXInput branch building command 19 with sub-id 2,
-so the command exists for our mode. What stops it is the wrapper, twice over:
+so the command exists for this mode. The wrapper stops it twice over: `ControllerSdk.cs:780` and
+`EnableXboxHomeButtonImpl` at `:342` both guard the call with
+`if (controller.ControllerType == ControllerType.XInput)`. There is no locale string for the setting
+in any of the twelve languages, and their service forwards only the `Usable`/`Enabled` bits to the
+UI. This pad reports it supported **and on**, and `19 / 2 / 0` takes the same path as every other
+sub-command; what it does to the Home key is unmeasured.
 
-```csharp
-// ControllerSdk.cs:779, and again in EnableXboxHomeButtonImpl at :342
-if (controller.ControllerType == ControllerType.XInput)
-    Instance.EnableXboxHomeButtonImpl(controller, enable);
-```
-
-A branch of their own code that can never run on a pad like ours. Space Station's service forwards
-only the `Usable`/`Enabled` bits to the UI, and there is no locale string for the setting in any of
-the twelve languages, so nothing in their app calls it either. Our pad reports it supported **and
-on**, and sending `19 / 2 / 0` goes through the same path as every other sub-command — so what it
-does is a one-line experiment rather than a dead end. The legacy framing (command 48, `byte[2] =
-9/10`) hints at whether Home reaches the host or is handled on the pad, but that is inference; only
-the pad settles it.
-
-**Sub-ID 1 was done first** — quick-switch is the only one here that gives a Linux user something
-otherwise unobtainable: switching profiles from the pad with nothing running. Verified on hardware:
-`19 / 1 / 0` turned it off and command 3 reported it off, `19 / 1 / 1` put it back.
-
-**What each write is verified to do**, all through `settings.apply`, which writes and then reads
-command 3 back:
+Every write goes through `settings.apply(ctrl, name, value)`, the single entry point the CLI and the
+GUI share: it dispatches by setting name to either a command-19 sub-id or one of the four standalone
+commands, writes, and returns the command-3 block as it reads afterwards; an unknown name raises
+`SettingsError` rather than silently writing nothing. The read-back is load-bearing — a command-19
+ACK is `5a a5 13 01 00 <value> <crc>`, echoing the value and never the sub-id, so it cannot say
+which setting moved, and the pad acknowledges sub-ids it does not support at all. Flydigi's own
+`data[5] == subId` test therefore compares the value against the sub-id and matches only where the
+two coincide, at sub 1 written to 1; match on `data[2] == 19 && data[5] == value` instead, as
+`flydigi/settings.py:193` does.
 
 | Command | Written | Read back as |
 |---|---|---|
@@ -235,174 +208,191 @@ command 3 back:
 | 22 | 16 | sensitivity Middle-high (from Middle) |
 | 23 | 30, then 15 | sleep 30 min, then 15 |
 
-The read-back is not politeness. A command-19 reply echoes the value and never the sub-id, so an
-ACK cannot say which setting moved — and the pad acknowledges sub-ids it does not support at all.
+## Commands beyond the settings block
 
-## Battery — settled: there is no percentage in this SDK
+**Reset one profile slot to factory** — `ResetMappingConfigByCfgIdCommandFactory`, **175**,
+`[4]=3, [5]=cfgId, [6]=crc`. A 10 s timeout like the save, so it is a flash operation. Gated on
+`ResetAllMappingUsable`, which the SDK sets unconditionally in the NewXInput branch — this pad's
+mode. This is the stock app's "Restore default". Destructive: test on slot 4 or the fake pad first.
 
-Every path resolves to
-the same 4-bit nibble. `HeartBeatCommandFactory`'s NewXInput branch is
-`Battery = (data[i] >> 4 == 1) ? 6 : (data[i] & 0xF)`, and the XInput and DInput branches do the
-identical thing at `data[23]` and `data[10]`. `ExtraInfoCommandFactory` carries no battery field at
-all. The only richer variant is a `DeviceCode == "f4"` special case remapping raw 3→2 and 5→6. If a
-percentage exists it is in the dongle or the input report, not the command set, and that is where to
-look.
+**Controller nickname** — write `UpdateNicknameCommandFactory` **24**, read
+`ReadNicknameCommandFactory` **2**. The decompiled writer puts the CRC at `[6]`, which would
+overwrite the second name byte — assume it belongs at `5 + len`.
+
+**Cooperative lock** — `AcquireControllerCommandFactory` **28**, `[4]=23, [5]=acquire, [6..25]` an
+ASCII tag truncated at 20 bytes, `[26]=crc`; the reply carries the grant in `data[5]`. Advisory
+only, and unimplemented here. It is *not* a precondition for trigger commands: the SDK never calls
+it before `SetForceTrigger`, and 81/82 are hardware-verified without it.
+
+**Transport flags** — `motion.read_transport` (command **16**) returns the five flags
+`controller_data`, `raw_data`, `keyboard`, `mouse` and `third_party`, plus the 20-byte `control_by`
+tag, so "is something else driving the pad, and what" is one read. The tag fills in with `SDL` on
+its own once third-party control is allowed — [findings-steam.md](findings-steam.md).
+
+## Battery: a 0..5 level, and no finer figure
+
+The pad reports charge as a level of 0..5 plus a separate charging state — six states, so 20%
+granularity. Nothing in the command set carries a finer figure than that.
+
+Every path resolves to the same 4-bit nibble, at raw index 12 of the command-1 reply: the high
+nibble is 1 while charging, the low nibble is the level (`flydigi/motion.py:115-131`).
+`HeartBeatCommandFactory`'s NewXInput branch is `Battery = (data[i] >> 4 == 1) ? 6 : (data[i] & 0xF)`,
+and the XInput and DInput branches do the identical thing at `data[23]` and `data[10]`.
+`ExtraInfoCommandFactory` carries no battery field at all, so a 1% figure exists nowhere in the
+command set; if one exists it is in the dongle or the input report. The only richer variant is a
+`DeviceCode == "f4"` special case remapping raw 3→2 and 5→6.
 
 **The scale is 0..5, not 0..15.** The nibble is four bits, but the values are not a byte range:
 Space Station ships exactly seven battery icons and picks one as `Power${level <= 6 ? level : 0}.svg`,
 while the SDK turns the charging bit into the literal **6**. So the domain is 0..6 with 6 meaning
-*charging*, leaving **0..5 for charge and 5 as a full pad**. `motion.MAX_LEVEL` is the one source of
-truth; the GUI reads `BATTERY_STEPS = motion.MAX_LEVEL` rather than repeating the number.
+*charging*, leaving **0..5 for charge and 5 as a full pad**. `motion.CHARGING_LEVEL = 6` and
+`motion.MAX_LEVEL = 5` (`flydigi/motion.py:91-92`) are the one source of truth; the GUI reads
+`BATTERY_STEPS = motion.MAX_LEVEL` rather than repeating the number.
 
-Confirmed against the pad on the desk: wired, `battery_level: 5, charging: False` — full.
+Confirmed on hardware: wired, `battery_level: 5, charging: False` — full.
 
-What the same multi-packet reply *does* carry, in order after device type and connect type: MAC
-(4 bytes, reversed), the battery nibble, chip type, motion chip type, then seven BCD firmware
-versions — main, dongle, switch/SI, trigger, screen, ADC, NearLink. `IsAckFinished` is
+The same multi-packet reply carries, in order after device type and connect type: MAC (4 bytes,
+reversed), the battery nibble, chip type, motion chip type, then seven BCD firmware versions — main,
+dongle, switch/SI, trigger, screen, ADC, NearLink. `IsAckFinished` is
 `data[4] > data[3] || data[4] == data[3] - 1`, so it is fragmented.
 
-**The version decode is built**: `motion.parse_versions` / `read_versions`. Versions start at raw
-offset 16, two BCD bytes each, one version field per nibble — `0x70 0x45` is 7.0.4.5. **All-zero
-means "not present"**, not version zero, which is how a wired pad reports no dongle and an Apex 5
-reports no ADC chip (that one is a Vader 4 part).
+`motion.parse_versions` / `read_versions` decode them: versions start at raw offset 16, two BCD bytes
+each, one version field per nibble — `0x70 0x45` is 7.0.4.5. **All-zero means "not present"**, not
+version zero, which is how a wired pad reports no dongle and an Apex 5 reports no ADC chip (that one
+is a Vader 4 part).
 
-**Comparing them, do not copy Flydigi.** `DeviceUtil.CompareVersion` is
-`string.Compare(new, old, Ordinal) >= 0` — an ordinal *string* comparison, so their own gate rejects
-firmware 7.0.10.0 against a 7.0.3.0 minimum, because "1" sorts below "3". `motion.version_at_least`
-compares numerically, which differs from them only where they are wrong.
+`DeviceUtil.CompareVersion` is `string.Compare(new, old, Ordinal) >= 0` — an ordinal *string*
+comparison, so their own gate rejects firmware 7.0.10.0 against a 7.0.3.0 minimum, because "1" sorts
+below "3". `motion.version_at_least` compares numerically.
 
-## An editor for the vibration bind
+## The vibration bind
 
-Tier 1 is one bind — game rumble drives the trigger
-motors — and each "supported game" is a **preset** of numbers for it: `vibType`, `vibFilter`,
-`pwmScal`, and `vibParams` (stroke, pressure, strength, frequency per side). That is a sensible
-design; the labels just have to say so, or it reads as a per-game integration like the other four
-routes. Wording was fixed; the numbers still cannot be edited from the GUI, only through
-`tools/flydigi_cmd.py bind`.
+Tier 1 is one bind — game rumble drives the trigger motors — and each "supported game" is a
+**preset** of numbers for it: `vibType`, `vibFilter`, `pwmScal`, and `vibParams` (stroke, pressure,
+strength, frequency per side). The bind's four numbers — intensity coefficient, vibration threshold,
+travel range and frequency — are the Vibration effect's knobs on the app's **Triggers** page
+(`flydigi/effects.py:139-149`), and are also reachable from `tools/flydigi_cmd.py bind`. Its stored
+form is the profile blob's `bind` sub-struct, J4 in
+[findings-profile-blob.md](findings-profile-blob.md).
 
-**The persistent form exists, and it is settled** — see J4 in
-[findings-profile-blob.md](findings-profile-blob.md). The profile blob's force-trigger section holds
-a `bind` sub-struct at **offset 185** + 20 per side of `type, filter, scale + 5 params`, against live
-command 82's `bindType, filter, scale + 4 params`: the same structure with one spare byte. It is
-where a *profile's* own Vibration effect belongs — Space Station's stored trigger type 5 — and
-`MappingConfig.set_trigger_effect(..., bind=)` already writes it.
-
-**It is not, however, where a per-game preset belongs, and Space Station agrees.** Their game path
-is `ControllerBusinessService.OnTriggerBindGrip` → `UpdateAdapterTriggerConfig(left, right)` →
-`SetForceTriggerConfig(..., onlyPreview: true)`: a live 82 per side, no config bean touched, nothing
-written or saved. The only bind they store is the profile's, and even that they do not trust the pad
-to re-arm — `OnAppliedConfigRead` rebuilds a live 82 from the stored bytes 500 ms after every
-applied-config read, including the `fromDeviceChanged: true` one on reconnect. Store and replay.
-
-So what the Games page was missing was never the storage. It was the replay: the pad leaves the USB
-bus when it sleeps, the vibration route leaves no driver running to notice, and the game played on
-with loose triggers. `tools/flydigid` now does the reconnect half —
+Storing it engages nothing: `effects.engage_stored` rebuilds a live command per side from the
+profile's bytes after a 500 ms wait — **82** for a stored Vibration bind, 81 for the other effects —
+and `tools/flydigi-mapping` and `gui/worker.py` call it after every mutating write. Never side 3, a
+command addressed to `Both` ACKs and does nothing ([PROTOCOL.md](../PROTOCOL.md) §3a). A bind is
+live state that does not survive the pad leaving the bus, so the route replays rather than stores —
 [findings-games.md](findings-games.md).
 
-## RGB: not working via the test command
+## RGB: the LED config blob
 
-`TestLedCommandFactory` (command **245**, `[4]=5, [5]=R, [6]=G, [7]=B, [8]=sum(3,3+5)`) ACKs
-cleanly and echoes the exact RGB values back, but **the controller's lighting does not change** --
-tested with 3-second holds per colour, re-sent at 4 Hz, so an overriding mode would have shown as a
-flicker.
+`TestLedCommandFactory` (command **245**, `[4]=5, [5]=R, [6]=G, [7]=B, [8]=sum(3,3+5)`) ACKs cleanly
+and echoes the exact RGB values back, but **the controller's lighting does not change** — tested
+with 3-second holds per colour, re-sent at 4 Hz, so an overriding mode would have shown as a
+flicker. 245 lives in `command.test/` alongside
+TestScreen/TestJoystick/TestRF and is exposed as `IpcCommandEnum_TestRgb`; these are factory-test
+commands and may require the device to be in a diagnostic state first.
 
-Most likely explanation: 245 lives in `command.test/` alongside TestScreen/TestJoystick/TestRF and
-is exposed as `IpcCommandEnum_TestRgb`. These are factory-test commands and may require the device
-to be in a diagnostic state first.
-
-**The real path is the persistent config, and it is built** — `flydigi/lighting.py`, with a Lighting
-page in the app. Three commands, sharing the blob transfer of PROTOCOL.md §9:
+The real path is the persistent config: `flydigi/lighting.py`, with a Lighting page in the app.
+Three commands, sharing the blob transfer of [PROTOCOL.md](../PROTOCOL.md) §9:
 
   * `ReadLedConfigCommand` = **167**, `[4]=4, [5]=cfgId, [6]=pkgSize, [7]=sum`
-  * `WriteRgbConfigStart` = **168**, `[cfgId, startIdx, nPkts, pkgSize]`
+  * `WriteRgbConfigStart` = **168**, `[4]=6, [5]=cfgId, [6]=startIdx, [7]=nPkts, [8]=pkgSize, [9]=crc`
   * `WriteRgbConfigCommand` = **169**, written in packs: `[4]=len+3, [5]=packNum, [6..]=pack data`
 
-**The Apex 5's config is 380 bytes**, and not the shape the older decompiled struct describes — do
-not assume `id[16]` × 10 or a 490-byte blob:
+Both LED and mapping blobs move as contiguous runs of changed packets diffed against an `old` blob,
+with a 168-style header per run announcing how many packets follow — so the pad is tracking a
+sequence, and nothing else may interleave (`flydigi/blobs.write_blob` holds `ctrl.claim()` for the
+whole transfer).
+
+**The Apex 5's config is 380 bytes**, 19 packets of 20, and not the shape the older decompiled
+struct describes — do not assume `id[16]` × 10 or a 490-byte blob:
 
 ```
- 2      click feedback        7      LED count
- 3, 4   loop start / end      8      mode
- 5      cycle time            9      grip sync
- 6      brightness           20..    frames: 10 x 12 LEDs, 3 bytes each, RGB
+ 0, 1   config version, little endian (0x0300 on this pad)
+ 2      click feedback
+ 3, 4   loop start / loop end frame
+ 5      cycle time -- a larger number is a *slower* animation
+ 6      brightness, 0..100
+ 7      LED count (12 on an Apex 5)
+ 8      mode
+ 9      grip sync
+10..20  0xFF fill, written deliberately by `RgbConfigParserV30`, not merely reserved
+20..    animation frames: 10 x 12 LEDs, 3 bytes each, RGB
 ```
+
+Derive the geometry from the blob rather than assuming it: `leds_per_frame` is byte 7 and `frames`
+is `(len(blob) - 20) // (3 * leds_per_frame)`. Writing colours against assumed dimensions runs off
+the end and silently grows the config.
 
 **The mode byte does not select an effect.** The pad has no animation generator — it plays the
 stored frames, cycling `loop_start`..`loop_end` every `cycle_time`. `mode` only records which of
 Space Station's generators produced the data, so writing a different mode number changes nothing
-visible. Changing the lighting means **writing frames**, which is what `set_breath`, `set_flow`,
-`set_rainbow` and `set_solid` do.
+visible. Its values are `LedType`: 0 Unknown, 1 Flow, 2 Breath, 3 Gradient, 4 Feedback, 5 On,
+6 Close, 7 Default (`Flydigi.SharedResources.decompiled.cs:29278`, written as
+`configBean.LedMode = (int)config.Mode` at `ControllerDataMapper.cs:185` and parsed back at `:72`).
+An Apex 5 ships storing 7, `Default`, which is the first config
+`ControllerDataMapper.GetDefaultLedConfigsByDevice` builds for a pad on this protocol.
+
+Changing the lighting means **writing frames**. `LedConfig.apply_effect(effect, colours)` dispatches
+to nine generators — `set_off`, `set_flow`, `set_rotation`, `set_breath`, `set_solid`,
+`set_static_multi`, `set_rainbow`, `set_wave`, `set_flash` — and writes the effect id into the mode
+byte alongside their frames. The ids are `RgbEffectTypeProto`'s (the cooler and dock enum), not
+`LedType`'s, so the number a config records is not the one Space Station would map back to its own
+picker.
 
 So bridging the DualSense lightbar to the pad is a frame write (`set_solid`), not a mode write. The
-lightbar bytes themselves are already parsed (`data[45..47]` of the DS5 output report).
+lightbar is `data[45..47]` of the DualSense output report, R/G/B, in the same indexing
+`flydigi/ds5.py` uses for everything else in that report. Nothing here decodes it —
+`ds5.parse_output` takes only rumble and the two trigger-effect blocks.
 
-### Byte 9 is the vibration light effect and it works; byte 2 is not, and does nothing alone
+### Byte 9 is GripSync; byte 2 is ClickFeedback
 
-Two bytes near each other, both about the lighting reacting to something, and this project had them
-confused for its whole life: `flydigi/lighting.py` called byte **2** "click feedback — light reacts
-to rumble" and the app's Lighting page labelled it **"React to rumble"**. Both were on the wrong
-byte. **Fixed**: `LedConfig.grip_sync` writes byte 9 and the page now says "Vibration light effect".
+`LedConfig.grip_sync` writes byte 9; the Lighting page's switch is labelled "Vibration light
+effect", Flydigi's own string for it, described as "There will be a special light effect when the
+grip vibrates". `LedConfigParser`'s v3.0 branch reads it at index 9, and it is set to **1** on the
+pad here.
 
-**Byte 9 is `GripSync`.** Flydigi's own English string for it is **"Vibration light effect"**,
-described as "There will be a special light effect when the grip vibrates". `LedConfigParser`'s v3.0
-branch reads it at index 9 — inside the `9..20 reserved` range this module never touched, and set to
-**1** on the pad here all along.
-
-**Measured, with the causality pinned.** Brightness raised to 80 so nothing subtle could be missed,
-the same left-grip-only rumble run twice, and *only byte 9 differing* between the two:
+Measured at brightness 80, the same left-grip-only rumble run twice with only byte 9 differing:
 
 | byte 9 | what the ring did while the motor ran |
 |---|---|
 | 0 | nothing at all |
 | 1 | **a segment of the bar dimmed**, and came back when the rumble stopped |
 
-An earlier pass at brightness 20 saw the same dimming. Which segment dims did not reproduce between
-runs — left in one, right in another, not obviously following the motor that was running — so the
-side mapping is open. That the effect exists, and that byte 9 is what causes it, is not.
+The same dimming appears at brightness 20. Which segment dims did not reproduce between runs — left
+in one, right in another, not obviously following the motor that was running — so the side mapping
+is open.
 
 **Byte 2 is `ClickFeedback`, and Space Station sets it as a consequence rather than as a control**:
 `configBean.ClickFeedback = config.Mode == LedType.Feedback` — true exactly when the user picks the
-**Feedback** lighting mode, `LedType` 4 of `Unknown, Flow, Breath, Gradient, Feedback, On, Close,
-Default`. Feedback and `On` generate byte-identical frames — the one chosen colour in frame 0 and
-every other frame black, since the v3 builder blacks out `frame != 0` for both — so the only wire
-difference between the two modes is byte 2 and `loop_end` (1 for Feedback, 0 for On).
+**Feedback** lighting mode, `LedType` 4. Feedback and `On` generate byte-identical frames — the one
+chosen colour in frame 0 and every other frame black, since the v3 builder blacks out `frame != 0`
+for both — so the only wire difference between the two modes is byte 2 and `loop_end` (1 for
+Feedback, 0 for On).
 
-**Setting byte 2 on its own does nothing on this pad.** Written as a one-packet diff over the pad's
-stock Default frames, read back as 1, then exercised against face buttons, shoulders, triggers,
-paddles, C/Z, stick clicks and stick movement — with third-party control **on, and again with it
-off** so the gamepad report was definitely live. No reaction of any kind. Rumble and a live
-trigger-vibration effect produced only the byte-9 dimming above.
+**Space Station offers Feedback on a Vader 4 and on no other pad.**
+`ControllerDataMapper.GetDefaultLedConfigsByDevice` builds the mode picker per device and adds
+`LedType.Feedback` behind exactly one condition, `deviceCode == "f4"` — with `Brightness = 50`,
+`Period = 15` and one colour, blue 100. The Apex 5 is `k5`, so the mode never reaches this pad's
+picker. Whether it means anything beyond the latch below can only be answered on a Vader 4 Pro,
+where it is offered; none of the twelve locales describes it, just the bare word.
 
-So byte 2 is not a rumble switch, and by itself it is not a click switch either. It is kept as an
-accessor, because a writer reproducing Space Station's Feedback mode would need it, and nothing
-binds to it.
+**Byte 2 drives no input feedback on this pad.** Written as a one-packet diff over the pad's stock
+Default frames and read back as 1, it produced no reaction to face buttons, shoulders, triggers,
+paddles, the LM/RM shoulder pair, D-pad, stick clicks, stick movement or motion — with third-party control **on, and
+again with it off** so the gamepad report was definitely live. Rumble and a live trigger-vibration
+effect produced only the byte-9 dimming above. Space Station's whole Feedback write — undiffed
+42-packet mapping write, RGB config with mode 4, byte 2 set, one colour in frame 0 and every other
+frame black, `loop_end = 1`, then 171, 250 ms, 166 — renders the colour and holds it, with no
+reaction to any of those inputs either.
 
-**Settled: Feedback is not an Apex 5 feature.** `ControllerDataMapper.GetDefaultLedConfigsByDevice`
-builds the mode picker per device, and adds `LedType.Feedback` behind exactly one condition:
+**What byte 2 does on a k5 is latch the display.** With it set the ring freezes on the frame it is
+showing and later frame writes do not appear — blue and white frames written while it was set left
+the panel on the previous red, clearing the byte alone made the new frames appear at once, and
+setting it again froze them. `write_config` sends packet 0 first, and byte 2 lives there, so setting
+it in the same write freezes the pad **before its own frames arrive**. A save (171, then 166)
+re-renders past the latch.
 
-```csharp
-if (deviceCode == "f4")        // Vader 4 -- and nothing else
-{
-    ledConfigs.LedConfig.Add(new LedConfig { Mode = LedType.Feedback,
-                                             Brightness = 50, Period = 15,
-                                             Color = { new Color { Blue = 100 } } });
-}
-```
-
-The Apex 5 is `k5`, so Space Station never offers the mode for this pad, and mode 4 doing nothing
-here is the expected result rather than a failure to reproduce. The Vader 4 Pro is the machine that
-can answer what it does.
-
-**What byte 2 does do on a k5: it latches the display.** With it set the ring freezes on the frame it
-is showing and later frame writes do not appear. Measured directly -- blue and white frames written
-while it was set left the panel on the previous red, and clearing the byte alone made the new frames
-appear at once, then setting it again froze them. This is a testing trap more than a feature:
-`write_config` sends packet 0 first, and byte 2 lives there, so setting it in the same write freezes
-the pad **before its own frames arrive**. Every observation made in that state is of a stale panel.
-A save (171, then 166) re-renders past the latch.
-
-**The full sequence Space Station sends for a lighting change**, which took several passes to get
-right and is worth writing down:
+**The full sequence Space Station sends for a lighting change:**
 
 | # | call | wire | note |
 |---|---|---|---|
@@ -411,33 +401,16 @@ right and is worth writing down:
 | 3 | `PermanentSaveSwitchMappingConfig` | **171** | `[ver_lo, ver_hi, cfgId]`, 10 s timeout, a fresh random data version |
 | 4 | `SaveConfig` → `PermanentSaveMappingConfig` | **166** | 250 ms later, a *second* new data version |
 
-**171 is a command this project did not have** — we only ever had 166. Both ACK on hardware; 171's
+**171 is not implemented here** — `flydigi/mapping.py` has only 166. Both ACK on hardware; 171's
 builder has the same self-contradiction as command 242, with a length byte of 4 implying a checksum
 at offset 7 while `cfgId` sits there and the crc goes at 8 over a range that excludes it. The pad
 answers the literal bytes, so their placement wins over their length byte.
 
-**`OldLedConfig` is mapping-profile bytes 3..13**, ten bytes `flydigi/mapping.py` skips entirely --
+**`OldLedConfig` is mapping-profile bytes 3..13**, ten bytes `flydigi/mapping.py` skips entirely —
 it goes from offset 2 straight to the key table at 13. On the pad here it reads
 `[32, 4, 40, 160, 0, 0, 255, 0, 0, 0]`; the `4` matches the LED config's `cycle_time` and `255, 0, 0`
 looks like a colour, so it is probably a stale mirror of the older LED format. Nothing outside
-`MappingConfigParser` computes it, and both applications preserve it unchanged. Undecoded, recorded.
-
-**On an Apex 5 byte 2 is tested, and what it does is freeze the backlight.** That is the settled
-result, not an open question: the ring stops on the frame it is showing, and frames written
-afterwards do not appear until the byte is cleared or a save re-renders past it. Measured both ways
-round, single-variable, twice — see the latch section above.
-
-The full Space Station sequence was sent too, exactly as the table describes it: undiffed 42-packet
-mapping write, the RGB config with mode 4, byte 2 set, one colour in frame 0 and every other frame
-black, `loop_end = 1`, then 171, 250 ms, 166. The ring rendered the colour and held it, and **nothing
-reacted to any input** — no face button, shoulder, trigger, paddle, C/Z, stick click, D-pad, motion
-or rumble. So on this pad byte 2 is a latch and nothing more.
-
-**What remains open is the Vader's behaviour, not this pad's.** `Feedback` is gated to `f4` in Space
-Station's own picker, so whether the mode means anything beyond the latch can only be answered on a
-Vader 4 Pro, where it is offered. None of the twelve locales describes the mode — just the bare word
-— so there is nothing further to read on this side.
-
+`MappingConfigParser` computes it, and both applications preserve it unchanged.
 
 ## Command inventory, by feature
 
@@ -446,10 +419,10 @@ each (all in `decompiled/`).
 
 | Feature | Commands |
 |---|---|
-| Screen image (gamepad + charging dock) | `UploadPic2K2Start/Data/End/Finish`, `UploadPicCommandK1/K2`, `TestScreen`, `OffScreen`, `ReadScreenSetting`, `EnableScreenStatusBarAlwaysOn` |
-| Trigger config, game-independent | `SetForceTriggerCommandFactory` (working), `K6Trigger*` |
+| Screen image (gamepad + charging dock) | `TestScreen`, `OffScreen`, `ReadScreenSetting`, `EnableScreenStatusBarAlwaysOn`. The HID upload family (`UploadPic2K2Start/Data/End/Finish`, `UploadPicCommandK1/K2`, 208..211) parses and ACKs on an Apex 5 and puts no picture on the panel, while still changing stored state — 211 commits picture metadata, and an upload leaves the status-bar flag on ([findings-screen.md](findings-screen.md)). The serial path of [PROTOCOL.md](../PROTOCOL.md) §8d is what drives this screen |
+| Trigger config, game-independent | `SetForceTriggerCommandFactory`, `K6Trigger*` |
 | Profile switching | `ApplyMappingConfigByCfgId`, `SaveCurrentMappingConfig`, `ReadCurrentMappingConfigId`, `WriteAllMappingConfig`, `ResetMappingConfigByCfgId` |
 | RGB / LED | `WriteRgbConfig`, `WriteAllRgbConfig`, `ReadLedConfig`, `TestLed` |
-| Macros | **done** — the profile's own page at 230, plus command 162 to make one live. `ReadMacroConfig` (172) and `WriteMarcoConfig` (173/174) belong to protocol 3.2 and later, which is not this pad; `SetHardwareMacroEnable` (80) is XInput/DInput-only dead code and was not needed. → [findings-profile-blob.md](findings-profile-blob.md) |
+| Macros | The profile's own page at 230, plus command 162 to make one live. `ReadMacroConfig` (172) and `WriteMarcoConfig` (173/174) belong to protocol 3.2 and later, which is not this pad; `SetHardwareMacroEnable` (80) is XInput/DInput-only dead code. → [findings-profile-blob.md](findings-profile-blob.md) |
 | Device settings | 22 in `command.setting/`: report rate, stick sensitivity/precision, debounce, rebound, auto-calibration, motion debounce, sleep time, dock smart stop, mode switch, nickname |
-| Dock / cooler | `Flydigi.ChargerSdk.dll`, `Flydigi.CoolerSdk.dll` (in `bundle/`, not yet decompiled) |
+| Dock / cooler | `Flydigi.ChargerSdk.dll`, `Flydigi.CoolerSdk.dll` (in `bundle/`, not decompiled) |

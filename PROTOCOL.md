@@ -3,10 +3,21 @@
 Reverse-engineered from **Flydigi Space Station 4.2.0.9** (Windows installer, run under Wine).
 Source: decompiled .NET assemblies from `SpaceStationService.exe` (single-file bundle).
 
-Status: **verified against hardware** (Apex 5, wired, Linux hidraw). Confirmed accepted and
-physically effective: `0x01`, `81`, `82`, `0x12`, the stored-config families `161`–`166` and
-`167`–`169` (§9), the screen settings `19`/`242` (§8c) and the serial screen upload behind `31`
-(§8d). See §7 for the detail and §5 for what is still open.
+Accepted and physically effective on a wired Apex 5 over Linux hidraw: `0x01`, `81`, `82`, `0x12`,
+the stored-config families `161`–`166` and `167`–`169` (§9), the screen settings `19`/`242` (§8c)
+and the serial screen upload behind `31` (§8d). §7 has the detail, §5 what is still open.
+
+| § | Subject |
+|---|---|
+| 1 | Stack architecture and the assemblies the protocol was read out of |
+| 2 | Packet framing — report id, length byte, checksum, retries |
+| 3 | Trigger commands: live (3a), the K6 family (3b), the same effects stored in a profile (3c) |
+| 4 | Ingress — the DSX UDP protocol, and Forza's Data Out telemetry |
+| 5 | Open questions |
+| 6 | Implementation path on Linux |
+| 7 | Apex 5 behaviour on the wire |
+| 8 | The screen — image format (8a), the HID picture family (8b), settings (8c), the serial upload (8d), recovery from command 31 (8e) |
+| 9 | Stored configs — the packetised blob transfer |
 
 ---
 
@@ -28,20 +39,14 @@ Key assemblies (in `bundle/`):
 - `Flydigi.Basic.dll` — packet framing + CRC
 - `GameFinder.Wine.dll` — game discovery incl. **Wine/Proton prefixes**
 
-### Linux-relevant discoveries
+### Linux-relevant properties of the stack
 
-1. **The Electron client already has a Unix-socket code path:**
-   ```js
-   this.pipePath = n || (process.platform === "win32"
-       ? path.join("\\\\?\\pipe", "fcs.sock")
-       : "/tmp/fcs.sock")
-   ```
-   A Linux service listening on `/tmp/fcs.sock` and speaking their protobuf would drive the
-   real UI natively.
+1. **The Electron client already has a Unix-socket code path:** `pipePath` is
+   `\\?\pipe\fcs.sock` on win32 and `/tmp/fcs.sock` everywhere else.
 2. They ship `GameFinder.Wine.dll` — Wine/Proton game discovery is already a supported concept.
-3. Ingress is the **DualSenseX (DSX) UDP protocol**, an open de-facto standard with an existing
-   mod ecosystem. Flydigi did not invent an ingress protocol for it; they adopted DSX's, which is
-   why the 11 third-party mods in their 94-game list drive the pad with no work from us.
+3. Ingress is the **DualSenseX (DSX) UDP protocol** (§4), an open de-facto standard Flydigi adopted
+   rather than invented, so the eleven third-party mods in their 94-game list drive the pad
+   unmodified — [docs/third-party-mods.md](docs/third-party-mods.md).
 
 ---
 
@@ -59,15 +64,28 @@ Key assemblies (in `bundle/`):
 | `[5…]` | payload |
 | `[3+len]` | 8-bit sum over `[3, 3+len)` |
 
-`CreateSimpleCommand` does **not** set `[4]`; each command factory does, which is why the value has
-to be read per command rather than inferred. Commands 81 and 82 are the exception that carries no
-checksum byte — see §7.
+`CreateSimpleCommand` does not set `[4]`; each command factory does, so read the length per command.
+
+`flydigi/blobs.py` follows the `+2` rule for every checksummed command. `flydigi/device.py`'s
+`build`, which serves 81, 82 and 18, writes the **raw payload length and no checksum** — the pad
+accepts both, see §3a and §7. A capture from this project will therefore disagree with the table
+above on those three commands without being malformed.
+
+Of the SDK builders that emit this envelope, `SetForceTriggerCommandFactory` (81, 82) and
+`VibrationCommandFactory` (18) are the only two that set no checksum byte at all. The rest end with
+`Crc(3, 3 + len)` — 19, 20–23, 29, 31, 161–169, 171 and 242 among them. The picture family 208–211
+is checksummed but not from `[3]`: it is built in the legacy envelopes, so its sum starts at `[1]`
+in the XInput branch and `[2]` in the DInput one (§8b). Command 87 also sums from `[1]` (§3b).
 
 Legacy (`isNewProtocol: false`) is a 15-byte buffer: `[0]`=report ID, `[1]`=CommandId.
 
 This is the **same V2 envelope SDL implements** in `SDL_hidapi_flydigi.c`
-(`5A A5 <cmd> <len>`, report ID `0x03`) — SDL uses a different report ID because it drives a
-different device mode.
+(`5A A5 <cmd> <len>`, report ID `0x03`) — the same report ID this project uses. The SDK's
+`6`/`165`/`5` belong to other connection modes; see §7.
+
+**The default is 3 retries with a 500 ms timeout** — the constructor defaults on
+`AbstractControllerCommand`. The commands that override it are the flash writers — 166, 171 and 175
+(reset a slot) at 10 000 ms — and two of the picture family, 209 at 1000 ms and 210 at 30 000 ms.
 
 ### CRC
 
@@ -87,9 +105,9 @@ Note `end` is **exclusive**.
 ## 3. Command families
 
 Two distinct trigger families exist, and the Apex 5's is `SetForceTrigger` — confirmed by
-hardware (§7) and by the SDK, which gates `K6Trigger*` on `DeviceCode == "k6"`. This pad is `k5`;
-what `k6` is, and why nobody can test it, is §3b. For the device codes generally — `k2` is the
-Apex 4, not the Apex 2 — see `docs/findings-other-devices.md`.
+hardware (§7) and by the SDK, which gates `K6Trigger*` on a device type or code this pad does not
+report. This pad is `k5`; `k6` is §3b. For the device codes generally — `k2` is the Apex 4, not the
+Apex 2 — see [docs/findings-other-devices.md](docs/findings-other-devices.md).
 
 ### 3a. `SetForceTrigger` — effect-based (used by the DSX/adapter-trigger path)
 
@@ -111,15 +129,14 @@ Effect vocabulary — `params[0]`=side, `params[1]`=mode:
 `ForceTriggerSide { Left=1, Right=2, Both=3 }`
 
 **`Both=3` is in the enum and the pad ignores it.** Measured on a wired Apex 5 with rumble pulses
-marking each phase, so the phases could not be confused: one command with `side=3` at full
-resistance produced **no resistance at all**, twice, while two commands with `side=1` and `side=2`
-between them produced it every time. All three ACKed — this is the pad's usual answer, where a reply
-means the firmware parsed the shape of what you sent and nothing more.
+marking each phase: one command with `side=3` at full resistance produced **no resistance at all**,
+twice, while two commands with `side=1` and `side=2` between them produced it every time. All three
+ACKed — an ACK means the firmware parsed the shape of what you sent and nothing more.
 
-Flydigi corroborate it by construction: `SetForceTriggerConfigImpl` takes a *left* config and a
-*right* config and sends **two separate commands**, so `side=3` is a value their own code never
-produces. **Send one command per trigger.** `device.SIDE_BOTH` exists because the enum has it, and
-nothing in this repository uses it.
+`SetForceTriggerConfigImpl` takes a *left* config and a *right* config and sends **two separate
+commands**, so `side=3` is a value Flydigi's own code never produces. **Send one command per
+trigger.** `device.SIDE_BOTH` exists because the enum has it; `tests/fake_pad.py` models it as
+ACK-and-do-nothing so a caller that addresses `Both` cannot look like it worked.
 
 | Effect | mode | params after `side, mode` |
 |---|---|---|
@@ -127,10 +144,12 @@ nothing in this repository uses it.
 | `Race` | 1 | `stroke, resistance(min 1), matchStroke` |
 | `Sniper` | 2 | `stroke, pressureLevel(min 1), strength(min 1), frequency(min 1), matchStroke` |
 | `Recoil` | 3 | `stroke, recoilStroke, strength(min 1), 0, matchStroke` |
-
 | `Lock` | 4 | `stroke, strength(255 in every call Flydigi makes), matchStroke` |
 | `Vibration` | 5 | `stroke, pressureLevel(min 1), strength(min 1), frequency(min 1), matchStroke` |
-| `SyncWithGrip` | cmd 82 | `bindType, filter, scale, stroke, pressureLevel, strength, frequency` |
+
+**Command 82 has no mode byte**, so it is not a row in that table: its payload is
+`side, bindType, filter, scale, stroke, pressureLevel, strength, frequency` with `[4]=11` and no
+applyFlag (`ForceTriggerConfigSyncWithGrip.CreateParams`, `flydigi/effects.py`).
 
 `min 1` is the builder's own clamp: it raises a zero rather than refusing the packet, so a
 caller that sends 0 gets the weakest setting. `Recoil`'s fourth slot is genuinely empty — the
@@ -147,7 +166,7 @@ Indices are into the params: `[0]` side, `[1]` mode, `[2]` stroke, `[3]` resista
 matchStroke. It happens silently — no error, no report — so a packet capture will disagree with what
 the caller asked for.
 
-Which builder runs decides whether it applies, and Flydigi split it deliberately:
+Which builder runs decides whether it applies:
 
 | Path | Builder | Rewrite? |
 |---|---|---|
@@ -156,27 +175,23 @@ Which builder runs decides whether it applies, and Flydigi split it deliberately
 | stored profile config (`ControllerRepository.cs:832`, `:859`) | `ForceTriggerConfigRace` | no — only `resistance` clamped to ≥1 |
 
 So a live Race at stroke 0 never gets input matching, whatever the mod asked for, while the same
-effect stored in a profile keeps it. `flydigi/effects.py`'s `common_effect_payload` mirrors this, and
-is likewise reached only from the DSX listener, the Forza rule engine and `relay.translate_ds5` —
-profile effects are written as blob bytes (§9) and never pass through it.
-
-At stroke 0 there is no engagement point for matching to track, so this reads as a guard against a
-degenerate combination.
+effect stored in a profile keeps it. `flydigi/effects.py`'s `common_effect_payload` mirrors this and
+is likewise reached only from the live paths — `dsx.py`, `forza.py`, `monitor.py` and the two
+DualSense relays; profile effects are written as blob bytes (§9) and never pass through it.
 
 **The length byte is not enforced for 81.** Flydigi always write `[4]=10`; the pad accepts shorter
 values matching the real payload, and the effect is felt either way — the same latitude §7 records
-for the missing checksum on 81/82. A packet dump that disagrees with the `10` above is not
-malformed.
+for the missing checksum on 81/82.
 
 **Modes 2 and 3 are labelled the other way round in Space Station's UI, and the behaviour follows
 the label.** Their picker binds `AdapterTriggerType_Sniper` to `trigger_mode_K2_recoil` ("Recoil",
 zh 机枪 *machine gun*) and `AdapterTriggerType_Recoil` to `trigger_mode_K2_sniper` ("Sniper", zh
 狙击) — verified in the bundled `index-*.js`, and consistent with the parameter panels, which give
 mode 2 the `trigger_vibration_*` strings and mode 3 the `trigger_recoil_*` ones. Felt on hardware
-the same way: mode 2 rattles, mode 3 resists and breaks through. The DualSense mapping agrees, since
-its vibration/automatic-gun effect maps to mode 2.
+the same way: mode 2 rattles, mode 3 resists and breaks through. The DualSense mapping agrees: its
+vibration/automatic-gun effect (`data[11] == 6`) maps to mode 2.
 
-So an effect has two names, and which one is right depends on who you are talking to:
+An effect therefore has two names:
 
 | Mode | SDK enum | Space Station UI | Behaviour |
 |---|---|---|---|
@@ -189,111 +204,58 @@ applications.
 
 The mode numbers are `AdapterTriggerType`, and the same six are the first byte of the
 per-profile block (§3c). `Race` is the racing-throttle resistance effect — the Forza Horizon
-case. **Modes 0–4 are confirmed by feel on an Apex 5** (§7); mode 5 is the exception, and the
-next few paragraphs are about why.
+case. **Modes 0–4 are confirmed by feel on an Apex 5** (§7).
 
-**Nothing in Flydigi's software ever sends mode 5.** Worth establishing before reading the
-hardware results below, because it explains them. Every path that can produce a mode byte:
+**Nothing in Flydigi's software ever sends mode 5.** Every path that can produce a mode byte:
 
 | Source | Modes it emits |
 |---|---|
 | Profile/config (`ControllerRepository.CreateForceAdapterConfig`) | 0, 1, 2, 3, 4 — stored type 5 becomes **command 82**, not mode 5 |
-| DualSense relay (`PS5DataManager`, and our `relay.translate_ds5`) | 0, 1, 2, 3 only — never 4, never 5 |
+| DualSense relay (`PS5DataManager`, and `flydigi/relay.py`) | 0, 1, 2, 3 only — never 4, never 5 |
 | `ForceTriggerConfigVibration`, the mode-5 builder | `SetForceTriggerCommandFactory.cs:197` — defined, **never constructed anywhere** |
 
 Nor is it for another pad. Pads with real trigger motors (`IsSupportTriggerVibration`: Vader 3, 4,
 5) do not use `SetForceTrigger` for them at all — trigger vibration there is **command 18** (`0x12`,
 the same id §7 lists as grip rumble), `VibrationCommandFactory` with `VibrationType.Trigger`. In the
 NewXInput branch the levels are at `[7]`/`[8]`; grip levels stay at `[5]`/`[6]`. Every pad that *does*
-have force triggers goes through the repository path above. So mode 5 is a vestigial enum slot, and
-firmware that does nothing with it has never been asked to do anything else.
+have force triggers goes through the repository path above. So mode 5 is a vestigial enum slot.
 
-Two names worth keeping straight, because "Vibration" is a red herring twice over. The vibration
-effect in real use is **mode 2**: the DualSense's own vibration/automatic-gun effect
-(`data[11] == 6`) maps to it, and Space Station labels it 机枪, *machine gun*. And the "Vibration"
-a user picks in their UI is the **stored** type 5, which is delivered as command 82 — the rumble
-bind, which works.
+`Sniper` and `Vibration` take byte-identical parameters; the mode byte is the only difference.
+Mode 2 works. Mode 5 produced a buzz with the pad's own grip bind in place and nothing with the bind
+suppressed by `82` at bindType 2, filter 255, scale 0 and zero params; mode 2 vibrates on press
+under the same suppression, so the silence is not the suppression killing the vibration path. Mode 5
+ACKs and visibly seats the triggers either way, so the ACK settles nothing (§5).
 
-**`Sniper` and `Vibration` take identical parameters. Mode 2 works. Mode 5 measured inconclusively**
-— written three different ways in one session, so what follows is the measurements, not a
-conclusion. Given that nothing sends it, this is a curiosity rather than a gap.
+**On the wire, `bindType` is 2** — every `SyncWithGrip` Flydigi construct passes it
+(`flydigi/effects.py:439`), and all 34 gamelist entries flagged `isVibration` carry `vibType: 2`.
+`0` appears to mean no bind at all: with it set, neither `Normal` nor mode 5 produces anything under
+rumble. The stored block writes 2 for the Vibration effect and 0 for every other (§3c). (34 is the
+flag count; the vibration *tier* is 33, because Fallout 4 also ships a mod and `games.tier()`
+classifies it as bespoke.)
 
-| # | Bind state | Effect | Rumble | Felt |
-|---|---|---|---|---|
-| 1 | the pad's own, untouched | mode 5 | yes | **buzzed** |
-| 2 | suppressed (`82`, bindType 2, filter 255, scale 0, zero params) | mode 5 | yes | nothing |
-| 3 | suppressed, same params | mode 2 | no | vibrates on press |
-| 4 | `82` sent with **bindType 0** | Normal, and mode 5 | yes | nothing either side |
+**The live bind survives a config apply.** Applying a config does not restore it, so anything that
+alters the bind leaves it altered until something sets it back.
 
-Run 3 is the control for run 2: the vibration path is alive with the bind zeroed, so mode 5's
-silence there is not the suppression killing everything. Run 4 does **not** test an active bind —
-`bindType` is `2` in every `SyncWithGrip` Flydigi constructs and in all 34 vibration games in the
-gamelist, so `0` is not a value they ever send and appears to mean no bind at all. It was sent by
-mistake here while trying to restore the pad, which is why runs after it read as silence.
+### 3b. `K6Trigger*` — low-level / waveform, gated to `k6` in the SDK
 
-So mode 5 did something once with the pad's own bind and nothing with the bind suppressed. Left
-open, and not worth more bench time given that no caller exists: the run that would settle it is a
-bindType-2 bind at working values with `Normal` on one trigger and mode 5 on the other, under one
-rumble.
+**Nothing in this section is hardware-verified — the layouts are transcribed from the SDK.** It
+gates this family on
+`ControllerType == NewXInput && (DeviceType == 149 || DeviceCode == "k6")`
+(`ControllerSdk.IsK6TriggerProtocolSupported`), so a pad reporting DeviceType 149 passes even if the
+code lookup fails, and a non-NewXInput connection never does. `DeviceCode == "k6"` resolves to
+`GenerateControllerApex6` — `DeviceType.K6 = 149`, `K6Pro = 150`, and
+`RecognizeDeviceCodeFromProductName` returns `k6` for a product name containing "APEX" and a 6.
 
-One thing this did settle, and it cost two wasted runs: **a config apply does not restore live bind
-state.** It survives the switch, so an experiment that alters the bind leaves it altered until
-something sets it back — "I re-applied the profile" is not a restore.
-
-### 3c. The same effects, stored in a profile
-
-A mapping config carries 20 bytes per trigger at offset 185, which is the same vocabulary
-sitting in the pad rather than on the wire — so it applies with no host process:
-
-```
-[0]      effect mode (AdapterTriggerType)
-[1]      bind type: 2 for the Vibration effect, 0 for every other
-[2]      bind filter          [3] bind scale
-[4..8]   bind params          [9] mixed border
-[10..19] effect params
-```
-
-Which effect uses which parameter slot (`ControllerRepository.SaveTriggerAdapterConfig`):
-
-| Effect | `[10]` | `[11]` | `[12]` | `[13]` | `[14]` |
-|---|---|---|---|---|---|
-| `Normal` | start | end | 0 | 0 | 0 |
-| `Race` | start | resistance | 0 | 0 | 0 |
-| `Sniper` | start | pressLevel | vibrationLevel | frequency | matchStart |
-| `Recoil` | start | end | resistance | 0 | matchStart |
-| `Lock` | start | 255 | 1 | 0 | 0 |
-| `Vibration` | stroke | frequency | 1 | 90 | 0 |
-
-`Vibration` is the one effect that reaches into the bind half: `filter` = its shielding value,
-`scale` = its intensity coefficient, bind params = `[stroke, 1, 1, frequency, 0]`. Slots the
-effect does not use are not free space — Lock's 255/1 and Vibration's 1/90 are constants
-Flydigi writes, and every effect shares all ten slots, so a slot holds whatever the last effect
-put there.
-
-Slider bounds, from Space Station's own UI (not the byte range): travel positions run 0–192,
-`Lock`'s position 20–200, `Vibration`'s intensity 0–200 and travel 1–200, everything else
-1–255.
-
-### 3b. `K6Trigger*` — low-level / waveform, and unreachable
-
-**Everything in this section is transcription, not knowledge.** The SDK gates this family on
-`DeviceCode == "k6"`, which its own factory resolves to `GenerateControllerApex6` —
-`DeviceType.K6 = 149`, `K6Pro = 150`, and `RecognizeDeviceCodeFromProductName` returns `k6` for a
-product name containing "APEX" and a 6.
-
-**As of July 2026 no Apex 6 has shipped** — Flydigi's current flagship is the Apex 5 — but it is
-coming rather than hypothetical: an FCC registration appeared in July 2026, and a manual for an
-"Apex6 Haptics Elite" is dated 2026-07-17. The SDK carries the support ahead of the hardware.
-
-So the layouts below have never been sent to anything, and nothing here is hardware-verified. Keep
-them — this is the one section of this file that has a release date coming toward it — but re-check
-the whole of it against a real device before trusting a byte, exactly as §7 did for `SetForceTrigger`.
+The SDK carries the support ahead of the hardware —
+[docs/findings-other-devices.md](docs/findings-other-devices.md).
 
 | Command | ID | Layout |
 |---|---|---|
 | **Mode** | `83` | `[4]=4, [5]=triggerMode, [6]=gripMode, [7]=Crc(3, 3+4)` |
+| **Local mode** | `84` | `[4]=9, [5]=side, [6]=startTravel, [7]=endTravel, [8]=loopEnabled, [9]=loopInterval, [10]=startGain, [11]=endGain, [12]=Crc(3, 3+9)` |
 | **Waveform** | `85` | `[4]=27, [5]=side, [6..7]=totalLen BE, [8]=segment#, [9..29]=21B chunk, [30]=Crc(3, 3+27)` |
-| **Realtime** | `87` | `[4]=28, [5]=channel, 8×3B samples at `6+i*3`, `[30]=Crc(1,30)` |
+| **Strength mapping** | `86` | `[4]=12, [5]=target, [6]=segmentIndex (0..9), [7]=startIntensity, [8]=endIntensity, [9]=startFrequency, [10]=endFrequency, [11]=startAmplitude, [12]=endAmplitude, [13]=waveformMode, [14]=waveformShape, [15]=Crc(3, 3+12)` |
+| **Realtime** | `87` | `[4]=28, [5]=channel, 8×3B samples at 6+i*3, [30]=Crc(1,30)` |
 
 Realtime sample = `(Trigger, LeftGrip, RightGrip)`, each 0–255. 8 samples per 32-byte packet.
 
@@ -317,16 +279,70 @@ K6RealtimeFrame(EffectiveChannel, IReadOnlyList<K6RealtimeSample>)
 K6RealtimeSample(Trigger, LeftGrip, RightGrip)
 ```
 
-**`K6TriggerMode.Local` matters a lot**: with `K6LocalModeConfig` the controller runs a
-travel-position-driven effect autonomously (start/end travel, gain ramp, optional loop). No host
-streaming required — good for games with zero integration.
+In `K6TriggerMode.Local`, with a `K6LocalModeConfig` carried by command 84, the controller runs a
+travel-position-driven effect autonomously — start/end travel, gain ramp, optional loop — with no
+host streaming.
 
 ACK: `IsAck(data)` → `data.Length > 5 && data[2] == CommandId`; success = `data[5] == 1`.
-Retries: 3, timeout 500 ms.
+
+### 3c. The same effects, stored in a profile
+
+A mapping config carries 20 bytes per trigger at offset 185, which is the same vocabulary sitting in
+the pad rather than on the wire:
+
+```
+[0]      effect mode (AdapterTriggerType)
+[1]      bind type: 2 for the Vibration effect, 0 for every other
+[2]      bind filter          [3] bind scale
+[4..8]   bind params          [9] mixed border
+[10..19] effect params
+```
+
+**Storing an effect does not engage it.** Measured by putting `Lock` into the blob, applying, and
+finding the triggers loose.
+The effect starts when a live command 81 (or 82 for stored type 5) carries the stored bytes back
+out: Space Station sends exactly that 500 ms after every applied-config read
+(`ControllerBusinessService.cs:1595`), and `effects.engage_stored` is the same. Write the blob first
+and send the live commands after; the reverse order silently loses the write.
+
+Which effect uses which parameter slot (`ControllerRepository.SaveTriggerAdapterConfig`):
+
+| Effect | `[10]` | `[11]` | `[12]` | `[13]` | `[14]` |
+|---|---|---|---|---|---|
+| `Normal` | start | end | 0 | 0 | 0 |
+| `Race` | start | resistance | 0 | 0 | 0 |
+| `Sniper` | start | pressLevel | vibrationLevel | frequency | matchStart |
+| `Recoil` | start | end | resistance | 0 | matchStart |
+| `Lock` | start | 255 | 1 | 0 | 0 |
+| `Vibration` | stroke | frequency | 1 | 90 | 0 |
+
+**`Normal`'s `start`/`end` are inert on an Apex 5** — the pair at blob offsets 195/196 and 215/216.
+The trigger travel window this pad plays is the **curve block at blob offset 123**
+(`mapping.OFF_TRIGGER_CURVE`; the force-trigger block is `OFF_FORCE_TRIGGER = 185`). Measured with
+`tools/trigger-stroke-probe`: a degenerate 0..16 window in the curve block gave 17 distinct evdev
+values against the other trigger's 240 in the same run, while the same window in the parameter pair
+gave 238 against 239. The probe takes exactly one of `--curve`, `--param`, `--lock` or `--baseline`
+a run, gives the `--side` trigger the window and reads the other as the control; 0..16 is its
+default `--start`/`--end`. Both triggers still span 0..255 output, so the window moves physical
+travel rather than what the game reads. Space Station's one "Stroke Setting" slider has two destinations
+chosen by `supportAdaptTrigger` and is hidden entirely on an adaptive pad
+(`triggerStrokeUsable = !supportAdaptTrigger`), so their k5 write path is the dead one.
+
+The window has nothing to act on under `Lock`, which makes the axis digital (§7).
+
+`Vibration` is the one effect that reaches into the bind half: `filter` = its shielding value,
+`scale` = its intensity coefficient, bind params = `[stroke, 1, 1, frequency, 0]`. Slots the
+effect does not use are not free space — Lock's 255/1 and Vibration's 1/90 are constants
+Flydigi writes, and every effect shares all ten slots, so a slot holds whatever the last effect
+put there.
+
+Slider bounds, from Space Station's own UI (not the byte range): travel positions run 0–192,
+`Lock`'s position 20–200, `Vibration`'s intensity 0–200 and travel 1–200, everything else
+1–255.
 
 ---
 
-## 4. Ingress — DSX UDP protocol
+## 4. Ingress — DSX UDP protocol and Forza Data Out
 
 `AdapterTriggerRunner` listens on UDP **port 7878** (default), forwards raw datagrams to **8787**.
 Config: `~/Documents/Flydigi/adapter_trigger_config.json`
@@ -337,7 +353,7 @@ Service only starts when `Enable == true && UsingBy == 4`.
 
 Payload is ASCII JSON:
 ```json
-{"instructions":[{"type":1,"parameters":[...]}]}
+{"instructions":[{"type":1,"parameters":[0, side, 19, mode, p1, p2, p3, p4]}]}
 ```
 ```
 InstructionType { Invalid=0, TriggerUpdate=1, RGBUpdate=2, PlayerLED=3,
@@ -345,21 +361,71 @@ InstructionType { Invalid=0, TriggerUpdate=1, RGBUpdate=2, PlayerLED=3,
 Trigger { Invalid=0, Left=1, Right=2 }
 ```
 
+**`type` is accepted as a name as well as an integer** — `"TriggerUpdate"`, case-insensitive with
+underscores stripped — because Flydigi deserialise with Newtonsoft, which takes either form, and
+mods in the wild use both. Every parameter is coerced from a string for the same reason, and
+datagrams may be NUL-padded. Matching on `type == 1` alone drops the mods that send the name.
+
 `TriggerUpdate` → `SetForceTrigger` mapping (`ControllerBusinessService.OnTriggerCommandReceived`):
 ```
 params[1]        → side   (2 = Right, else Left)
 params[3..]      → mode + effect params
-params[0], [2]   → ignored
+params[0], [2]   → ignored (controller index, and a constant 19)
 ```
 Duplicate consecutive packets are suppressed (`lastPacket` equality check).
 
+This is implemented by `flydigi/dsx.py` (`DSX_PORT = 7878`, `FORWARD_PORT = 8787`), driven by
+`tools/flydigi-dsx` (`--port`, `--forward`, `--dump`, `--quiet`). Only `TriggerUpdate` is acted on;
+`RGBUpdate`, `PlayerLED`, `MicLED` and `TriggerThreshold` are skipped on the `type` alone, their
+parameters never read (`flydigi/dsx.py:106-109`) —
+[docs/third-party-mods.md](docs/third-party-mods.md).
+
+Wine shares the host loopback, so `127.0.0.1:7878` from inside a Proton prefix reaches a Linux
+daemon unchanged.
+
+**Forza's "Data Out" stream is the second ingress protocol** — UDP port 5300, and the whole
+`DataPacket` layout, field name → type, byte offset and whether the buffer offset applies, is
+`FIELDS` in `flydigi/forza.py`. Only the lengths in
+`BUFFER_OFFSETS` decode — 311 at offset 0, 324 at offset 12 — and `parse` returns nothing for any
+other size until `tools/flydigi-forza --accept LEN:OFFSET` adds one; the offset shifts only the
+fields from byte 232 on, the 232-byte sled below them being stable across game versions, which is
+why one number is enough and why the tool suggests `LEN-312` for a size it does not know. And
+`forza.listen()` binds **127.0.0.1** with no flag to change it, so the game has to be on this
+machine — a Proton prefix qualifies, as above.
+
 ---
 
-## 7. Hardware verification results
+## 5. Open questions
 
-Tested on a wired Apex 5 (`37d7:2501`) via `/dev/hidraw4`, using `tools/flydigi_cmd.py`.
+- Report ID over **Bluetooth**. Report ID `0x03` on the `06 a0 ff` node holds over the 2.4G dongle
+  as well as wired, which `flydigi/device.py` relies on; Bluetooth is untested.
+- **Whether mode 5 (`Vibration`) does anything.** Nothing in Flydigi's stack sends it, so no route
+  depends on the answer (§3a).
+- **Whether the upgrade-mode flag is volatile** — whether a pad switched with command 31 but never
+  written to comes back on its own (§8e). Nothing in the decompiled code writes the flag to flash,
+  and it lives in firmware that has not been dumped.
 
-**Transport — confirmed.**
+---
+
+## 6. Implementation path (Linux)
+
+The hidraw writer (§2 framing, §3 commands) is `flydigi/device.py` and `flydigi/effects.py`; the
+DSX listener is `flydigi/dsx.py` + `tools/flydigi-dsx`; the telemetry provider for titles with no
+mod is `flydigi/forza.py` + `tools/flydigi-forza`, reading Forza's "Data Out" UDP stream.
+
+Nothing here implements a `/tmp/fcs.sock` protobuf server, which would drive the stock Electron UI
+on Linux (§1). [PROGRESS.md](PROGRESS.md) is the status index.
+
+---
+
+## 7. Apex 5 behaviour on the wire
+
+Tested on a wired Apex 5 (`37d7:2501`) via `/dev/hidraw4`, using `python3 tools/flydigi_cmd.py
+<subcommand>`. Subcommands: `info, listen, normal, race, sniper, recoil, lock, vibrate, k6mode,
+k6realtime, bind, rumble, game, raw`, with `--device` and `--report-id` as globals and
+`raw --sum-range start,end,pos` for placing a checksum by hand.
+
+**Transport.**
 - Vendor interface is the hidraw node whose descriptor starts `06 a0 ff` (usage page `0xffa0`).
   Wired Apex 5 exposes two nodes; `hidraw3` is the keyboard/mouse composite, **`hidraw4`** is
   the command interface (`report 0x03: output 31B`, `report 0x04: input 31B`, `report 0x08: output 12B`).
@@ -367,7 +433,7 @@ Tested on a wired Apex 5 (`37d7:2501`) via `/dev/hidraw4`, using `tools/flydigi_
   SDL uses `0x03` too. The `6`/`165`/`5` values belong to other connection modes.
 - Packets are written as 32 bytes: `03 5A A5 <cmd> <len> <payload…>`.
 
-**ACK format — confirmed.** Replies arrive on report `0x04`, same magic, command echoed:
+**ACK format.** Replies arrive on report `0x04`, same magic, command echoed:
 ```
 TX  03 5a a5 01 00 …
 RX  04 5a a5 01 01 00 80 01 …
@@ -375,7 +441,7 @@ RX  04 5a a5 01 01 00 80 01 …
 Decoding as `ParseAckData` does (strip report-ID byte, then index): `data[2]` = command id,
 `data[5]` = success flag. `[6] = 0x80` = 128 = Apex 5 device id (matches SDL's `case 128/129`).
 
-**Commands confirmed working.**
+**Commands confirmed working on hardware.**
 
 | Cmd | What | Result |
 |---|---|---|
@@ -384,7 +450,7 @@ Decoding as `ParseAckData` does (strip report-ID byte, then index): `data[2]` = 
 | `81` | SetForceTrigger — `Normal` | ACK, clears the effect |
 | `81` | SetForceTrigger — `Sniper` | ACK + **felt**: vibrates on its own past the travel point |
 | `81` | SetForceTrigger — `Recoil` | ACK + **felt**: resists, then gives way |
-| `81` | SetForceTrigger — `Lock` | ACK + **felt**: trigger stops dead at the position |
+| `81` | SetForceTrigger — `Lock` | ACK + **felt**: trigger stops dead at the position, and the axis goes digital — see below |
 | `81` | SetForceTrigger — `Vibration` | ACK; what it produces is unresolved — see §3a |
 | `82` (`0x52`) | SyncWithGrip (Tier-1 vibration bind) | ACK + **physically confirmed** |
 | `0x12` (18) | Grip rumble — `[4]=6, [5]=leftLevel, [6]=rightLevel`, `VibrationCommandFactory` NewXInput branch. SDL sends the identical packet; the layout is Flydigi's own | ACK, drives motors |
@@ -392,13 +458,22 @@ Decoding as `ParseAckData` does (strip report-ID byte, then index): `data[2]` = 
 Every mode ACKed and echoed its own parameters back — `[success=1][mode][params…]`, with the
 side byte dropped — so the pad is parsing the payload, not just acknowledging the command id.
 
+**`Lock` makes the trigger axis digital.** With it on the axis reports 0 or 255 and nothing between:
+2 distinct values and 35 evdev events over a 15-second run of pulls, against ~240 values and ~1100
+events with no effect. That is why the profile's travel window (§3c) does nothing under `Lock` —
+there is no analogue reading to rescale — while under `Race` the same window works normally, 2
+distinct values against a control's 29 in the same run.
+
 **Additional findings.**
-- **Replies are broadcast to every reader of the hidraw node.** A `Get info` ACK belonging to the
-  desktop app's 30-second poll was read by a second process that had sent nothing of the sort.
-  Anything that matches replies by command id can therefore pick up someone else's answer; this
-  is the arbitration problem, observed rather than reasoned about.
+- **Replies are broadcast to every reader of the hidraw node**, so anything that matches replies by
+  command id can pick up another process's answer: a `Get info` ACK belonging to the desktop app's
+  30-second poll was read by a second process that had sent nothing of the sort. Arbitration is
+  `Controller.claim()`, an advisory `flock(2)` on the node —
+  [docs/findings-steam.md](docs/findings-steam.md). `send` drains already-queued replies before
+  writing and takes an `until` predicate; without one it always burns its full timeout, which turns
+  a thousand-packet one-for-one exchange from two seconds into nine minutes.
 - **No checksum byte is required for `81`/`82`** — packets sent with the CRC field left zero were
-  accepted. The `Crc()` sum only appears in the `K6Trigger*` builders.
+  accepted; Flydigi's own builders for 81, 82 and 18 set none either (§2).
 - **Effects persist in controller state** with no host software running, until explicitly changed
   (`Normal`). Not a streamed-only feature.
 - Tier-1 "vibration" games use `82`/SyncWithGrip, which routes the game's ordinary rumble into the
@@ -408,110 +483,17 @@ side byte dropped — so the pad is parsing the payload, not just acknowledging 
   `GET https://api.flydigi.com/pc/adapter_trigger/list` → 94 games with per-game trigger configs
   and mod download URLs. No app, no login, no headers.
 
-## 5. Open questions
-
-Four of the six questions that used to sit here are answered, in §7 of this file and in
-`docs/findings-other-devices.md` and `docs/device-settings.md`, and are recorded there rather than
-repeated: the Apex 5's family is `SetForceTrigger` (`K6Trigger*`
-is gated on `DeviceCode == "k6"`, a model that had not shipped as of July 2026, and this pad is
-`k5`); the wired report ID is `0x03`
-on the vendor node, found by its `06 a0 ff` descriptor prefix; no CRC byte is required for 81/82;
-and `AcquireController` is not a precondition for trigger commands. What is genuinely still open:
-
-- Report ID over **Bluetooth**. Report ID `0x03` on the `06 a0 ff` node holds over the 2.4G dongle
-  as well as wired, which `flydigi/device.py` relies on; Bluetooth is untested.
-- ~~Whether this pad implements the picture-upload family (208..211).~~ **Answered, and the answer
-  is worse than a no**: all four parse and acknowledge, echoing every field back, and none of it
-  reaches the panel — §8b. Protocol conformance without effect. The serial path of §8d is what
-  drives an Apex 5's screen.
-- **Why Flydigi split the two models.** Every other screen pad takes the HID route and the k5 takes
-  the serial one, and no source-backed reason was found: the k2 has the *same* separate
-  `ChipScreen`/`ChipType.Freq`, so "a separate screen chip" is not the discriminator. The decision
-  is unambiguous in their code; the motive is not in it.
-- **Whether mode 5 (`Vibration`) does anything** — a curiosity, not a gap: nothing in Flydigi's
-  stack sends it (§3a), so no route depends on the answer. Modes 0–4 are settled and felt (§7).
-- Whether the pad honours a stored effect on profile switch without the host re-sending it. Effects
-  applied live persist until changed, but that is not the same claim.
-
----
-
-## 6. Implementation path (Linux)
-
-1. `hidraw` writer implementing §2 framing + §3 commands.
-2. Bench-verify with `Race` (`SetForceTrigger`) — directly observable, and done: §7. Not `K6`
-   realtime; `83`/`85`/`87` are gated on `DeviceCode == "k6"`, which had no shipping hardware as of
-   July 2026 (§3b), so that family is reachable on nothing we can put on a desk.
-3. UDP listener on 7878 speaking §4 DSX JSON → existing DSX mods work under Proton
-   (Wine shares the host loopback, so `127.0.0.1:7878` from inside the prefix reaches a Linux daemon).
-4. Optional: `/tmp/fcs.sock` protobuf server to drive the stock Electron UI on Linux.
-5. Optional: telemetry providers (e.g. Forza "Data Out" UDP) for titles with no mod.
-
----
-
-## 9. Stored configs — the packetised blob transfer
-
-Mapping profiles and RGB lighting are the two stored configs, and they move the same way. The
-framing is in `flydigi/blobs.py`; the layouts are in
-[docs/findings-profile-blob.md](docs/findings-profile-blob.md) and `flydigi/lighting.py`.
-
-| Cmd | Family | What | Payload |
-|---|---|---|---|
-| `161` | mapping | status — active slot and a version per slot | — |
-| `162` | mapping | apply a slot (switches the running profile) | `[cfgId]` |
-| `163` | mapping | read a stored profile | `[cfgId, pkgSize]` |
-| `164` | mapping | write start | `[cfgId, startIdx, nPkts, pkgSize]` |
-| `165` | mapping | write pack | `[pktNum, data…]` × N |
-| `166` | mapping | **save to flash** — slow, ~10 s | `[data_version]` |
-| `167` | lighting | read | `[cfgId, pkgSize]` |
-| `168` | lighting | write start | `[cfgId, startIdx, nPkts, pkgSize]` |
-| `169` | lighting | write pack | `[pktNum, data…]` × N |
-
-**161 is the cheap read, and the only one with no side effect.** `data[5]` is the active slot —
-reported across two banks of four, so 4..7 mean the same profiles as 0..3 — and `data[6 + 2i]` is
-slot *i*'s `data_version` as a little-endian 16-bit. `0xFFFF` means the slot has never been written.
-A cached copy can be checked for staleness without reading the config at all.
-
-**163 switches the pad.** Reading a profile makes it the running one; there is no read that leaves
-the pad where it was.
-
-**166 commits whichever config the pad is running**, not a slot you name — it carries a version and
-nothing else. The slot-addressed variant is a different command (171, `[7] = cfgId`).
-
-**Transfer rules**, both families:
-
-  * 20 bytes per packet on NewXInput (10 on older protocols).
-  * A read reply carries `(total, index, cfgId, data)`, so packets can be reassembled out of order.
-  * Writes are sent as **contiguous runs of changed packets** — an unchanged prefix or suffix is not
-    resent, which is what `startIdx`/`nPkts` are for.
-  * **A bad checksum is answered with silence**, not with an error. Time out; do not wait for a NAK.
-
-**For lighting, the frames *are* the effect.** The pad has no animation generator: it plays the
-stored frames, cycling `loop_start`..`loop_end` every `cycle_time`. The `mode` byte only records
-which of Space Station's generators produced the data, so writing a different mode number changes
-nothing visible. Changing the lighting means writing frames.
-
-**For macros, 162 is not optional.** They ride inside the mapping profile — the page at offset 230,
-laid out in [docs/findings-profile-blob.md](docs/findings-profile-blob.md) — and there is no macro
-command in this protocol version at all: the `ReadMacroConfig`/`WriteMarcoConfig` family (172, 173,
-174) belongs to protocol 3.2 and later, where the macros moved out of the blob. What matters on the
-wire is that a macro written with 164/165 is **stored and not played** until the profile is applied
-with 162; the firmware parses the page into its own structs at load time, while the key table beside
-it is read as it stands. Verified on hardware: four macros, read back off the pad to prove they were
-there, sat silent through a full test window while an ordinary remap beside them worked; they played
-to the millisecond after a 162; and a fifth written and applied with no 166 at all played as well.
-So 166 decides whether macros survive a sleep, not whether they run.
-
 ---
 
 ## 8. The screen
 
-The Apex 5 has a 160×80 colour screen (`IsSupportScreen`, set only for this pad and the k2
-family). **Both halves are now settled**: the image format offline against Flydigi's own files
-(§8a), and the transport on hardware over the serial OTA path (§8d), which is what
-`flydigi/screen_ota.py` implements. The SDK's HID picture family (§8b) is recorded as
-**parsed but inert** on this pad — it answers every packet and drives nothing.
+The Apex 5 has a 160×80 colour screen (`IsSupportScreen`, set for the k1, k2 and k5 families). The
+image format is verified offline against Flydigi's own files (§8a) and the transport on hardware
+over the serial OTA path (§8d), which is what `flydigi/screen_ota.py` implements. The SDK's HID
+picture family (§8b) **answers every packet and puts no picture on the panel** on this pad, while
+still altering stored state.
 
-### 8a. Image format — verified offline, against Flydigi's own files
+### 8a. Image format — LVGL v8 binary, 25604 bytes a frame
 
 A frame is **25604 bytes** and is an **LVGL v8 binary image**:
 
@@ -523,34 +505,32 @@ A frame is **25604 bytes** and is an **LVGL v8 binary image**:
 ```
 
 A `.bin` is frames concatenated with no container of any kind: file size is always an exact
-multiple of 25604.
+multiple of 25604. The row stride is 320 bytes = 160 × 2, and `always_zero` and `reserved` are zero
+in every shipped file. All **14** files Flydigi ships under
+`Configs/Controller/{k2,k5}/default/default_screen_image_*.bin` — **821** frames, 550 under `k5`
+and 271 under `k2` — decode and re-encode **byte-identical** through `flydigi/screen.py`.
 
-Three independent things pin this down. `always_zero` and `reserved` really are zero, which a wrong
-bit layout would not produce. Width falls out as 160, and an autocorrelation over the pixel bytes
-finds its lowest inter-row difference at a stride of exactly 320 = 160 × 2. And decoding this way
-gives a picture where the other byte order gives colour noise. All **14** files Flydigi ships under
-`Configs/Controller/{k2,k5}/default/default_screen_image_*.bin` — 686 frames — decode and re-encode
-**byte-identical** through `flydigi/screen.py`.
-
-Byte order is worth stating because LVGL treats it as a build option rather than part of the
-format: this is `LV_COLOR_16_SWAP = 1`. Space Station's own converter is the LVGL one — its image
+Byte order is an LVGL build option rather than part of the format: this is
+`LV_COLOR_16_SWAP = 1`. Space Station's own converter is the LVGL one — its image
 picker carries `ICF_TRUE_COLOR_ARGB8332 / 8565 / 8565_RBSWAP / 8888` and `CF_RAW` verbatim.
 
 `default_screen_image_<deviceType>.bin` is per device *type*, not per model: an Apex 5 has six
-(128, 129, 133, 134, 135, 136), and 134 is the EVA edition.
+(128 `K5`, 129 `K5Eva`, 133 `K5Mm`, 134 `K5Srs`, 135 `K5GS`, 136 `K5LZ`).
 
-### 8b. Picture upload — the SDK's HID path, and why the Apex 5 does not use it
+### 8b. Picture upload — the SDK's HID path, which puts no picture on the panel
 
-**Settled on hardware, and the answer is not "slower".** Two complete uploads went out over this
-family — 9623 packets, no errors, every field echoed back — and **the display never changed**. So it
-is live firmware that drives nothing on this pad, not a slow path Flydigi chose against. Why they
-split it that way is not explained by anything found: the k2 has the *same* separate
-`ChipScreen`/`ChipType.Freq`, so "separate screen chip" is not the discriminator.
+**All four commands are live on an Apex 5 and no picture reaches the panel.** Two complete uploads
+went out over this family — 9623 packets, no errors, every field echoed back — **and the display
+never changed**. Stored state is another matter: 211 commits metadata (below), and the two uploads
+left the status-bar flag on, which `19` sub `8` puts back (§8c).
 
-**One trap if you do run it:** 208 followed by 211 commits picture metadata for a frame that was
-never sent, and on a wired Apex 5 that destroyed a stored custom image — the screen fell back to its
-status view after the next reboot. `screen.probe()` therefore sends only the start.
+Why Flydigi split the two screen models — the k5 on serial, every other screen pad on HID — is
+unexplained: the k2 has the *same* separate `ChipScreen`/`ChipType.Freq`, so "separate screen chip"
+is not the discriminator.
 
+**211 is a commit, not punctuation.** 208 followed by 211 commits picture metadata for a frame that
+was never sent; on a wired Apex 5 that destroys a stored custom image and the screen falls back to
+its status view at the next reboot. `screen.probe()` sends only the start.
 
 Four commands, in the *legacy* envelope rather than the `5A A5` one — they predate it, and the SDK
 has **no NewXInput branch for them at all**. Its XInput and DInput branches are the same packet with
@@ -563,7 +543,9 @@ bare    03       <cmd> <len> <payload…> <crc>      the SDK's XInput branch
 ```
 
 `len` counts the command and length bytes as well as the payload; the checksum is the usual 8-bit
-sum from the command byte up to it.
+sum from the command byte up to it — with one exception in Flydigi's own code. 211's `a5` branch
+writes `array[9] = array.Crc(2, 7)` where 208 uses `Crc(2, 11)` and 210 uses `Crc(2, 9)`: two bytes
+short for a length of 7.
 
 | Cmd | What | Payload |
 |---|---|---|
@@ -576,21 +558,21 @@ sum from the command byte up to it.
 and `size` is **25604** — the frame *including* its four header bytes, which Flydigi pass as the
 literal pair `(100, 4)`. The data offsets run over the same 25604 bytes. `period` is
 `frameInterval / 100` in the XInput branch; the DInput branch writes a literal zero there instead
-and adds one to `picType` and `picIdx` on top of the caller's numbering. Only one of those can be
-what the firmware wants, and the branch that carries the frame interval is the one that can
-describe an animation at all.
+and adds one to `picType` and `picIdx` on top of the caller's numbering.
+
+A 209 data packet carries **24 payload bytes** in the `new` envelope (`device.PACKET_LEN - 8`: one
+report id, four envelope bytes — `5A`, `A5`, command, length — two offset bytes, one checksum), and
+**the tail chunk is zero-padded to full length rather than sent short** — Flydigi pad theirs too,
+so a pad counting bytes rather than reading the offset field still lands in the right place.
+Flydigi's own XInput branch sizes it `32 - 6 = 26`.
 
 **Space Station never sends any of this to an Apex 5.** `upload_pic2screen` in the Electron layer
-branches on the device code: for `k5` it sends `SwitchUsb` — which is `SwitchToFirmwareUpgradeMode`,
-**command 31**, with `chipModule = CHIP_SCREEN` and `chipType = FREQ` — waits five seconds, and then
-runs `firmware/FirmwareConsole.exe --upgrade_type 2 --pic_type … --pic_num … --frame_rate …` over a
-temp file of the frames. Every other pad takes the HID path above. `ControllerSdk.UploadPicImpl`
-gates only on `IsSupportScreen`, so the SDK *would* send 208..211 to a k5 if asked — nothing in
-their UI asks.
+branches on the device code: `k5` gets `SwitchUsb` and the serial route of §8d, every other pad
+takes the HID path above. `ControllerSdk.UploadPicImpl` gates only on `IsSupportScreen`, so the SDK
+*would* send 208..211 to a k5 if asked — nothing in their UI asks.
 
-**All four are live on a wired Apex 5, in the `new` envelope.** Measured, because nothing in the
-SDK predicts it — there is no NewXInput branch for this family at all. Every field varied in a
-payload comes back echoed, which is the same signature the trigger commands show:
+They answer in the `new` envelope, and every field varied in a payload comes back echoed — the same
+signature the trigger commands show:
 
 ```
 TX 208 picType=1 count=5 idx=2 period=3   RX 5a a5 18 01 00 | 01 05 02 03
@@ -606,20 +588,62 @@ byte from their echo, the way `SetForceTrigger` drops the side byte, while 210 a
 whole and carry a length of 7 where the other two carry 1. Match on the id the pad uses, not the one
 you sent: `screen.ACK_ID` has the map.
 
-So Space Station's choice to route k5 through the firmware console looks like a speed decision
-rather than a capability one — 24 bytes of payload per 32-byte packet is ~1067 packets a frame,
-where the serial path moves 55 bytes at 921600 baud.
-
 Upload is **wired only** in Space Station — its UI refuses with "please use wired connection"
 before it gets as far as the device.
 
-### 8d. The serial path — decompiled, implemented, and **verified on hardware**
+### 8c. Screen settings — ordinary NewXInput commands, no upload involved
 
-**This is the one that works.** A test card and a 14-frame Bad Apple both went onto a wired Apex 5's
-screen from Linux, each written at base `0x002ff000`, each followed by the pad rebooting itself and
-coming back on the HID bus. `flydigi/screen_ota.py`.
+| Cmd | What | Layout |
+|---|---|---|
+| `242` | flood the screen with a colour | `[4]=len, [5]=on, [6]=R, [7]=G, [8]=B, [9]=crc` |
+| `19` sub `8` | status bar always on | `[4]=4, [5]=8, [6]=enable, [7]=crc` |
+| `19` sub `9` | **always-on display** (the SDK's `OffScreen`) | `[4]=4, [5]=9, [6]=enable, [7]=crc` |
+| `3` | reads both back | `data[5] bit7`/`data[6] bit7` status bar supported/on; `data[7] bit0`/`data[8] bit0` **always-on** supported/on |
 
-Numbers worth having before planning anything around it:
+The sender is `flydigi/settings.py` (`CMD_SETTING = 19`, `SUB_STATUS_BAR = 8`, `SUB_OFF_SCREEN = 9`),
+reached from `tools/flydigi-settings` and `tools/flydigi-screen status`; `flydigi/screen.py` binds
+the same constants for screen callers. The rest of the command-19 sub-id list and the command-3
+status block are in [docs/device-settings.md](docs/device-settings.md).
+
+**The SDK name for `19` sub `9` is inverted — do not implement it from the name.** Flydigi call the
+bit `OffScreen` (息屏显示), which reads as a screen-*off* switch. Measured on a wired Apex 5 while
+watching the panel, it is the opposite:
+
+```
+[6] = 1   the stored picture stays up — an always-on display
+[6] = 0   the panel is dark; the logo button wakes the status view for ~2 seconds
+```
+
+`[6]=0` is a genuine screen blank, a control Space Station never surfaces; `flydigi/screen.py`
+reports the command-3 bits as `always_on_usable`/`always_on`.
+
+**An ACK to command 19 does not say which sub-setting was written** — the reply carries the command
+id, not the sub-id, so read command 3 back if you need to know what landed.
+
+**242 is confirmed on a wired Apex 5.** Sent with the length-6 reading it ACKed and the screen went
+solid orange immediately. Two things the SDK does not say:
+
+  * **it floods the RGB LEDs as well as the screen.** This is a whole-device indicator test, not a
+    screen test; Space Station keeps it in `data.command.test` beside the factory-line commands.
+  * **`on=0` does not clear it.** The command ACKs, the pad stays flooded, and the only exit found
+    was the pad's own power switch.
+
+**Flydigi's 242 builder disagrees with itself.**
+It writes four payload bytes (on, R, G, B), sets the length byte to **5**, then puts the checksum at
+offset **9** and sums it over the range a length of 5 implies. A length of 5 means three payload
+bytes and a checksum at offset 8; a length of 6 means four and a checksum at 9. The placement says
+6, the length byte says 5, and one of them is a typo. `flydigi/screen.py` defaults to 6 — it is the
+reading that keeps the blue byte — and can send their exact bytes instead.
+
+The neighbouring LED test command, `TestLedCommandFactory` = **245**
+(`[4]=5, [5]=R, [6]=G, [7]=B, [8]=sum(3, 3+5)`), ACKs on an Apex 5, echoes the RGB values back and
+changes nothing — [docs/device-settings.md](docs/device-settings.md).
+
+### 8d. The serial path — UART OTA over USB CDC, the route that drives the panel
+
+`flydigi/screen_ota.py`. Verified on a wired Apex 5: a test card and a 14-frame animation, each
+written at base `0x002ff000` as returned by `PicGetBaseAddr`, each followed by the pad rebooting
+itself and coming back on the HID bus.
 
 | | |
 |---|---|
@@ -628,43 +652,47 @@ Numbers worth having before planning anything around it:
 | 14 frames | 88 erases + 6518 writes = 6606 exchanges, **5 m 46 s** (predicted 346 s, measured 346 s) |
 | The 255-frame ceiling | about **1.8 hours** |
 
-It is slow because the unit is 55 bytes and every one waits for its reply. Space Station is stuck
-with exactly the same arithmetic, which is worth remembering before assuming a faster route exists.
+It is slow because the unit is 55 bytes and every one waits for its reply; Space Station runs the
+same arithmetic.
+
+**The 255-frame ceiling is not enforced on this path.** `screen_ota.upload` sends
+`len(frames) & 0xFF` as the picture count, so a 300-frame set writes all 300 frames of data while
+telling the chip there are 44. The check exists only in the dead HID path (`screen.upload` raises
+above 255) and in the GUI (`MAX_FRAMES = 255`, which truncates and says so).
 
 **The pad does not leave the HID bus.** Observed mid-upload: with the bootloader tty live, the pad's
 own `37d7:2501` hidraw nodes were still enumerated and `find_device` resolved normally. So command
 31 for the screen *adds* a CDC interface beside the gamepad rather than replacing the device with a
 bootloader — the main firmware keeps running throughout. (Only the nodes were checked, not whether
-input still flowed, so take it at that strength.) This is a materially smaller risk than the phrase
-"firmware upgrade mode" suggests.
+input still flowed.)
 
 **The tty needs a udev rule.** It lands as `root:dialout`, and a screen upload without one gets as
 far as finding the port and then cannot open it — with the pad already switched over. See
-`udev/72-flydigi-apex5.rules`; `flydigi/setup.py` fails an absent rules file for this reason even
-when every other device is already reachable, because this is the one node that cannot be tested
-until it is too late to fix.
+`udev/72-flydigi-apex5.rules`; `flydigi/setup.py` fails an absent rules file even when every other
+device is already reachable.
 
 #### How Space Station does it
 
 `FirmwareConsole.exe` is a .NET single-file bundle (`sfextract`, then `ilspycmd`), and the screen
-work is all managed code in `FirmwareLibrary.dll`. It dispatches on chip type, and only some
-branches shell out to a vendor tool:
+work is all managed code in `FirmwareLibrary.dll`. The updater is chosen by chip type in
+`FirmwareConsole.decompiled.cs:151-186`, and every branch but one reaches a vendor blob — an
+external tool or a P/Invoked DLL:
 
 | `ChipType` | Updater | Implementation |
 |---|---|---|
 | `Freq` — **the screen** | `OtaNewUpdater` | **managed C#, UART OTA over a serial port** |
 | `Telink` | `HidUpdater` | managed, HID |
-| `Megahunt` / `NearLink` / `Jieli` | `MhExeUpdater` / `HshExeUpdater` / `ExeUpdater` | shells out to `firmware/tool/*` |
-| `Wch` | `CH375Updater` / `WCH59XUpdater` | the WCH DLLs |
+| `Megahunt` | `MhExeUpdater` | runs `tool/mhtool/hid_boot_command.exe` |
+| `NearLink` | `HshExeUpdater` | runs `tool/hsh_tool/BurnTool.exe` |
+| `Jieli` | `ExeUpdater`, or `JieLiUpdater` for a `.ufw` | `Process.Start` on the firmware file itself; the `.ufw` branch P/Invokes `jl_firmware_upgrade_x64.dll` |
+| `Wch` | `CH375Updater` / `WCH59XUpdater` | P/Invokes `CH375DLL64.dll` or `WCH55xISPDLL.dll`. `WCH55xISPDLL.dll` is 32-bit only, so on a 64-bit host `WCH59XUpdater` re-launches `FirmwareConsole_wch_x86/FirmwareConsole.exe` as a helper |
 
-**So the screen chip is the one branch with no vendor blob in it.** After command 31 the pad
+**So the screen chip is the only *screen* branch with no vendor blob in it** — `Telink` is managed
+too, but over HID, and `JieLiUpdater` is a screen updater that P/Invokes. After command 31 the pad
 re-enumerates as a **USB CDC serial device, VID `FFAA` PID `5555`**, and the upload is a plain
 request/response protocol at **921600 8N1**.
 
-#### The whole chain, end to end
-
-Traced through all four layers rather than inferred, because guessing at it is expensive: the HID
-family answers every packet on a k5 and changes nothing, so "the pad accepted it" is not evidence.
+#### The chain, Electron to tty
 
 1. **Electron** converts each frame to the 25604-byte LVGL image of §8a and concatenates them into
    a temp `.bin`. No container, no header of its own.
@@ -690,9 +718,10 @@ second intervals, then opens it at **921600 8N1, no parity, no handshake, DTR an
 (`InitSerialPort` in the same class says 115200 and is never called on this path — 921600 is the
 one that runs.)
 
-On Linux the port lookup is the only part that does not transfer: theirs is a WMI query against
-`Win32_PnPEntity`, ours is `/dev/serial/by-id/` or the `idVendor`/`idProduct` files under
-`/sys/class/tty/ttyACM*/device/../`. Everything after that is bytes on a tty.
+On Linux the port lookup is the only part that does not transfer: Space Station runs a WMI query against
+`Win32_PnPEntity`; `screen_ota.find_port` walks `/sys/class/tty/ttyACM*` and
+`ttyUSB*` and reads the `idVendor`/`idProduct` files under each node's `device/../`. The pad binds
+`cdc_acm`, so it lands on `ttyACM*`; `screen_ota.wait_for_port` polls until it appears.
 
 #### The state machine
 
@@ -708,9 +737,8 @@ and 60 ticks without a reply — 18 seconds — aborts.
 12  PicResetDevice   len=8   totalLength uint32, crc32 uint32         -> done
 ```
 
-The first column above is the opcode, as it is for 3/5/12. **The base address is fetched first even
-though it is the higher opcode** — `PicGetVersion = 10, PicGetBaseAddr = 11`, and the state machine
-runs 11 then 10. Read the transitions, not the enum order.
+The first column is the opcode. **The base address is fetched first even though it is the higher
+opcode** — `PicGetVersion = 10, PicGetBaseAddr = 11`, and the state machine runs 11 then 10.
 
 **Do not compute the length field.** It means something different per opcode and is inconsistent
 with the bytes that follow in three of the five: `PicGetVersion` says 6 and sends no payload,
@@ -718,27 +746,31 @@ with the bytes that follow in three of the five: `PicGetVersion` says 6 and send
 payload. Only `PicGetBaseAddr` and `PicResetDevice` state their own payload length. Copy the
 constants.
 
-The CRC is a CRC-32 variant of their own: the standard reflected table, but fed MSB-first
-(`crc = (crc << 8) ^ table[((crc >> 24) ^ byte) & 0xFF]`), seeded 0, no final xor, computed over the
-data in 256-byte chunks. Note their `crc / 256` is signed integer division in C#, which is not
-`>> 8` for negative values — port it as an explicit unsigned shift and mask.
+The CRC is a CRC-32 variant of their own: the standard reflected table, but fed MSB-first and
+indexed with **bits 8..15** of the running value rather than its top byte, seeded 0, no final xor,
+computed over the data in 256-byte chunks (`Crc32CalByByte`, `AppOtasCrcCal`):
+
+```
+q = crc / 256;  crc = (crc << 8) ^ table[(q ^ byte) & 0xFF]
+```
+
+`crc` is a C# `int`, so `crc / 256` is signed integer division that truncates toward zero — neither
+an arithmetic nor a logical shift once the value has gone negative. Port it as an explicit signed
+truncating division, not as `>> 8`; `flydigi/screen_ota.checksum` does exactly that.
 
 After the last reply the screen **syncs for about 15 seconds and reboots itself**; Space Station's
 own dialog says so and warns against cutting power during it.
 
-**Three things make CUSTOM_PIC much safer than "flashing firmware" sounds.** The picture base
-address is **read back from the device** (`PicGetBaseAddr`), and every erase and write is
-`base + offset`, so the program region is only reachable through `ScreenUpgradeType.PROGRAM`, which
-a picture upload never sends. There is a defined way out — `PicResetDevice` ends the session and
-resets the chip — on top of Flydigi's own "toggle the power switch on the back of the controller".
-And a botched upload is recoverable: `isRestoreDefault = 1` with the stock
-`default_screen_image_<deviceType>.bin` puts the factory animation back.
+**Three things bound a CUSTOM_PIC upload.** The picture base address is **read back from the
+device** (`PicGetBaseAddr`), and every erase and write is `base + offset`, so the program region is
+only reachable through `ScreenUpgradeType.PROGRAM`, which a picture upload never sends.
+`PicResetDevice` ends the session and resets the chip, on top of Flydigi's own "toggle the power
+switch on the back of the controller". And a botched upload is recoverable: `isRestoreDefault = 1`
+with the stock `default_screen_image_<deviceType>.bin` puts the factory animation back.
 
 ### 8e. Coming back from command 31
 
-Four statements from Space Station's own dialogs, which is the best evidence available short of
-trying it. Together they describe a state its designers expect users to get into and out of
-unaided.
+Four statements from Space Station's own dialogs:
 
 | When | What their UI says |
 |---|---|
@@ -747,74 +779,85 @@ unaided.
 | Any firmware update failed | "Upgrade failed with {type}. Please attempt the upgrade again" — with a Retry button |
 | Controller abnormal after an SI flash | "**Hold the START button (lower right of LOGO) for 8 seconds** to restore controller function" |
 
-So: a successful upload **reboots the pad by itself**; a failed one is cleared by the power switch;
-a failed flash is expected to be retried rather than mourned, which means upgrade mode stays
-addressable; and there is a hardware escape hatch on the pad itself.
+A failed flash is retried rather than recovered from, so upgrade mode stays addressable. Two uploads
+have gone across and back on hardware (§8d). A failed *picture* upload leaves a pad that is still a
+gamepad with a stale picture region, retryable with `--port` and without a second command 31. A
+power cycle is *contraindicated* only during the ~15 s resource sync after a successful write.
 
-**All of that is now backed by having done it.** Two uploads went across and back with no drama, the
-pad rebooted itself both times, and — the part none of the dialogs say — the HID nodes never went
-away at all (§8d). A failed *picture* upload leaves a pad that is still a gamepad with a stale
-picture region, retryable with `--port` and without a second command 31.
+---
 
-The one window where a power cycle is *contraindicated* is the ~15 s resource sync after a
-successful write — their warning is explicit about it, and it is the only place in the flow where
-cutting power is worse than waiting.
+## 9. Stored configs — the packetised blob transfer
 
-Two supporting details, weaker but pointing the same way. Flydigi's own name for the command is
-**`SwitchUsb`**, not "enter bootloader" — it reads as a change of USB personality. And the upload is
-a *UART* OTA reached over a USB CDC device, which is what a main firmware bridging to the screen
-chip's serial port looks like, rather than a main chip that has replaced itself with a bootloader.
+Mapping profiles and RGB lighting are the two stored configs, and they move the same way. The
+framing is in `flydigi/blobs.py`; the mapping commands and blob accessors are in
+`flydigi/mapping.py` with the macro page in `flydigi/macros.py`, driven by `tools/flydigi-mapping`;
+lighting is `flydigi/lighting.py`. The layouts are in
+[docs/findings-profile-blob.md](docs/findings-profile-blob.md).
 
-**What none of this proves** is whether the mode flag is volatile. Nothing in the decompiled code
-writes it to flash, but the flag lives in firmware we do not have. The evidence is Flydigi telling
-their own users to power-cycle out of exactly this state — strong, and still not the same as having
-done it.
+| Cmd | Family | What | Payload |
+|---|---|---|---|
+| `161` | mapping | status — active slot and a version per slot | — |
+| `162` | mapping | apply a slot (switches the running profile) | `[cfgId]` |
+| `163` | mapping | read a stored profile | `[cfgId, pkgSize]` |
+| `164` | mapping | write start | `[cfgId, startIdx, nPkts, pkgSize]` |
+| `165` | mapping | write pack | `[pktNum, data…]` × N |
+| `166` | mapping | **save to flash** — one of the 10 s timeouts of §2, against the 500 ms default | `[versionLo, versionHi]`, LE16 |
+| `171` | mapping | save to flash, slot-addressed | `[versionLo, versionHi, cfgId]` |
+| `167` | lighting | read | `[cfgId, pkgSize]` |
+| `168` | lighting | write start | `[cfgId, startIdx, nPkts, pkgSize]` |
+| `169` | lighting | write pack | `[pktNum, data…]` × N |
 
-Both of the Linux-specific questions that used to sit here — whether the pad enumerates as `cdc_acm`
-and whether it comes back — were answered by the two uploads above. It does, `wait_for_port()` finds
-it, and it reboots itself afterwards. The volatility of the mode flag, in the paragraph above, is the
-one thing still open.
+**161 is the cheap read.** It has no side effect, and neither does the lighting read 167
+(`flydigi/lighting.py:137`); 163 is the one that moves the pad. `data[5]` is the active slot —
+reported across two banks of four, so 4..7 mean the same profiles as 0..3 — and `data[6 + 2i]` is
+slot *i*'s `data_version` as a little-endian 16-bit. `0xFFFF` means the slot has never been written.
+A cached copy can be checked for staleness without reading the config at all.
 
-### 8c. Screen settings — ordinary NewXInput commands, no upload involved
+The same field lives in the blob at **offset 225**, little-endian uint16
+(`mapping.OFF_DATA_VERSION`), and it is the value 166 wants, so a caller passes the config's own to
+leave it alone. What the pad does with a 0 there is unconfirmed (`flydigi/mapping.py:427-430`).
+Observed values — 23224, 65078, 65535 for an untouched slot — look like random change-detection
+tags rather than a counter.
 
-| Cmd | What | Layout |
-|---|---|---|
-| `242` | flood the screen with a colour | `[4]=len, [5]=on, [6]=R, [7]=G, [8]=B, [9]=crc` |
-| `19` sub `8` | status bar always on | `[4]=4, [5]=8, [6]=enable, [7]=crc` |
-| `19` sub `9` | **always-on display** (the SDK's `OffScreen`) | `[4]=4, [5]=9, [6]=enable, [7]=crc` |
-| `3` | reads both back | `data[5] bit7`/`data[6] bit7` status bar supported/on; `data[7] bit0`/`data[8] bit0` **always-on** supported/on |
+**163 switches the pad**, and it switches on the *first* reply packet, before the reader knows
+whether the whole config arrived. A read that raises has therefore still moved the pad, and a retry
+launders it: the next status read truthfully reports the browsed slot as active, so the restore is
+skipped. Which slot to return to has to be decided before the read
+(`mapping.read_config_preserving`).
 
-**The SDK name for `19` sub `9` is inverted — do not implement it from the name.** Flydigi call the
-bit `OffScreen` (息屏显示), which reads as a screen-*off* switch. Measured on a wired Apex 5 while
-watching the panel, it is the opposite:
+**166 commits whichever config the pad is running**, not a slot you name — it carries a version and
+nothing else. The slot-addressed variant is 171. An applied-but-unsaved config does not survive the
+pad's next **sleep**, not merely a power cycle: applying is working memory, and 166 is what makes it
+last. Observed with lighting; it is the general rule for every stored config.
 
-```
-[6] = 1   the stored picture stays up — an always-on display
-[6] = 0   the panel is dark; the logo button wakes the status view for ~2 seconds
-```
+Space Station's own save is four commands, all four ACKing on hardware; the sequence is in
+[docs/device-settings.md](docs/device-settings.md).
 
-So `[6]=0` is a genuine screen blank, and it is a control Space Station never surfaces.
-`flydigi/screen.py` reports the command-3 bits as `always_on_usable`/`always_on` for this reason.
-Implementing this from the SDK name has already produced an inverted switch once in this project.
+**Transfer rules**, both families:
 
-**An ACK to command 19 does not say which sub-setting was written** — the reply carries the command
-id, not the sub-id, so read command 3 back if you need to know what landed.
+  * 20 bytes per packet on NewXInput (10 on older protocols).
+  * A mapping profile is **840 bytes = 42 packets**. An Apex 5's lighting blob is **380 bytes = 19
+    packets**: a 20-byte header, then 10 frames × 12 LEDs × 3 bytes.
+  * A read reply carries `(total, index, cfgId, data)`, so packets can be reassembled out of order.
+  * Writes are sent as **contiguous runs of changed packets** — an unchanged prefix or suffix is not
+    resent, which is what `startIdx`/`nPkts` are for.
+  * **A bad checksum is answered with silence**, not with an error. Time out; do not wait for a NAK.
 
-**242 is confirmed on a wired Apex 5, and it is stickier than its name suggests.** Sent with our
-length-6 reading, it ACKed and the screen went solid orange immediately — so the screen does take
-host commands, and the corrected length is the right one. Two things the SDK does not say:
+**For lighting, the frames *are* the effect.** The pad has no animation generator: it plays the
+stored frames, cycling `loop_start`..`loop_end` every `cycle_time`. The `mode` byte only records
+which of Space Station's generators produced the data, so changing the lighting means writing
+frames, and writing a different mode number changes nothing visible.
 
-  * **it floods the RGB LEDs as well as the screen.** This is a whole-device indicator test, not a
-    screen test — which also explains why Space Station keeps it in `data.command.test` beside the
-    factory-line commands rather than on any user-facing page.
-  * **`on=0` does not clear it.** The command ACKs, the pad stays flooded, and the only exit found
-    was the pad's own power switch. So entering this mode is a deliberate act with a physical undo.
-    An earlier draft of this section said "`on=0` puts it back"; that was written from the builder,
-    not from the pad.
+One wire-ordering trap goes with that: LED-blob byte 2 latches the ring on the frame it is showing
+([docs/device-settings.md](docs/device-settings.md)), and `write_config` sends packet 0 first, so
+setting byte 2 in the same write freezes the pad before its own frames arrive.
 
-**Flydigi's 242 builder disagrees with itself**, which matters because there is no third source.
-It writes four payload bytes (on, R, G, B), sets the length byte to **5**, then puts the checksum at
-offset **9** and sums it over the range a length of 5 implies. A length of 5 means three payload
-bytes and a checksum at offset 8; a length of 6 means four and a checksum at 9. The placement says
-6, the length byte says 5, and one of them is a typo. `flydigi/screen.py` defaults to 6 — it is the
-reading that keeps the blue byte — and can send their exact bytes instead.
+**For macros, 162 is not optional.** They ride inside the mapping profile — the page at offset 230,
+laid out in [docs/findings-profile-blob.md](docs/findings-profile-blob.md) — and there is no macro
+command in this protocol version at all: the `ReadMacroConfig`/`WriteMarcoConfig` family (172, 173,
+174) belongs to protocol 3.2 and later, where the macros moved out of the blob. A macro written with 164/165 is
+**stored and not played** until the profile is applied with 162: the firmware parses the page into
+its own structs at load time, while the key table beside it is read as it stands. Verified on
+hardware — four macros sat silent while an ordinary remap beside them worked, played after a 162,
+and a fifth written and applied with no 166 at all played as well. So 166 decides whether macros
+survive a sleep, not whether they run.

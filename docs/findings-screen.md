@@ -1,176 +1,158 @@
 # The 160x80 screen
 
-How the panel is driven, why the SDK's HID picture family is a dead end on this
-pad, and the serial route that works. The wire protocol is [PROTOCOL.md](../PROTOCOL.md) §8 —
-read §8d before touching the upload.
+How the panel is driven. The wire protocol — image format, both upload families, the settings and
+the OTA state machine — is [PROTOCOL.md](../PROTOCOL.md) §8.
 
 Index: [PROGRESS.md](../PROGRESS.md).
 
-## Upload: done, and validated by putting Bad Apple on the pad
+## Uploading a picture
 
-`flydigi/screen.py` (format and settings), `flydigi/screen_ota.py` (the upload that works),
-`tools/flydigi-screen`, `tests/test_screen.py` + `tests/test_screen_ota.py`. Full write-up in
-PROTOCOL.md §8, and read §8d before touching it.
+`flydigi/screen.py` (image format, the HID picture family, command 242 and the two settings),
+`flydigi/screen_ota.py` (the serial upload that works), `tools/flydigi-screen`, the GUI's Screen
+page, and `tests/test_screen.py` + `tests/test_screen_ota.py`, whose `FakeScreenChip` in
+`tests/fake_pad.py` stands in for `OtaLink` and the bootloader tty.
 
-A test card and a 14-frame Bad Apple are both on a wired Apex 5's screen, written from Linux at base
-`0x002ff000`, each followed by the pad rebooting itself. **It is slow and that is inherent**: ~19
-exchanges a second, ~25 s a frame, 5 m 46 s for fourteen, and about 1.8 hours at the 255-frame
-ceiling. Space Station is stuck with the same arithmetic.
+An upload runs at ~19 exchanges a second, ~25 s a frame. PROTOCOL.md §8d has the full timings, the
+base address and the hardware runs; §8a has the 25604-byte LVGL frame that
+`tools/flydigi-screen check` round-trips against Flydigi's own files. An upload is **wired only** —
+Space Station's UI refuses a wireless one before the request reaches the device, which is a
+constraint of their app rather than a measured property of the pad.
 
-**Where the 255-frame ceiling actually lives, because it is not where it reads.** The limit is the
-one-byte picture-count field. It is *enforced* in two places only: the dead HID path
-(`flydigi/screen.py`, `if len(frames) > 255: raise ScreenError`) and the GUI, which truncates at
-`MAX_FRAMES = 255` and says so. The serial path that works has **no check** —
-`flydigi/screen_ota.py` sends `len(frames) & 0xFF` as the count, and `tools/flydigi-screen
-animate/send` pass frames through uncapped. So a 300-frame GIF writes all 300 frames of data while
-telling the chip there are 44. The guard belongs in `screen_ota.upload`; until it is there, treat the
-ceiling as a rule the CLI does not keep for you.
+### The command line
 
-That is why the GUI page is shaped the way it is: the frame count and the time estimate sit next to
-the button rather than in a tooltip, because an upload runs for minutes and **cannot be stopped**;
-and the preview is the encoded frame decoded back, not a scaled copy of the source, so what you
-check is what the pad will get. **Every** frame is encoded and decoded back to a cached PNG at load
-time, and the page plays them at the chosen frame interval — an animation is checked before a
-multi-minute upload, not after.
+`tools/flydigi-screen` needs Pillow for `show`, `animate`, `convert` and `preview`; `check` is pure
+backend and needs nothing.
 
-**The image format is settled, and settled *hard*.** A frame is 25604 bytes: a 4-byte LVGL v8
-header (`cf=4 TRUE_COLOR, 160x80`, the constant `04 80 02 0A`) then 160x80 RGB565 with the **high
-byte first**, and a `.bin` is frames concatenated with no container at all. All 14 files Flydigi
-ships under `Configs/Controller/{k2,k5}/default/` — 686 frames — decode and re-encode
-**byte-identical** through our codec. `tools/flydigi-screen check` runs that against their files and
-`preview` renders one back to PNG, which is how the byte order was settled: one way gives an anime
-face, the other gives colour noise.
+| Subcommand | What it does |
+|---|---|
+| `check FILE` | decode and re-encode every frame of a `.bin`, byte for byte |
+| `preview FILE OUT.png` | frames back to a PNG — all of them stacked into one sheet 160 wide and 80×N tall, or one with `--frame N` |
+| `convert IMAGE OUT.bin` | turn an image into a `.bin` offline, `--mode fill\|fit\|stretch` |
+| `status` | the screen bits out of command 3, read-only — the only free probe here |
+| `on` / `off` | 19 sub 9, the always-on display |
+| `statusbar on\|off` | 19 sub 8 |
+| `test RRGGBB` / `test off` | command 242; `--faithful` sends Flydigi's own byte layout |
+| `probe` | ask each envelope whether the pad knows 208 — announces a frame it never sends |
+| `show IMAGE` | upload **only the first frame** of whatever file it is given, always at 100 ms |
+| `animate IMAGE` | every frame, at the file's own longest delay unless `--interval` overrides it |
+| `send FILE.bin` | a `.bin` unchanged, at `--interval` or 100 ms |
 
-The hint in the old version of this entry was right — the encoding *is* in the Electron layer. It is
-the LVGL image converter, and their picker carries `ICF_TRUE_COLOR_ARGB8332 / 8565 / 8565_RBSWAP /
-8888` and `CF_RAW` verbatim.
+`convert` resamples with Pillow's Lanczos. `flydigi/screen.fit` is the pure-Python resampler behind
+the same three modes — box averaging down, nearest up — for a caller with no imaging library.
 
-**The transport was the open question, and the answer was that Space Station does not upload to an
-Apex 5 over HID at all.** `upload_pic2screen` branches on the device code: everything
-else gets `IpcCommandEnum_UploadPic` and the SDK's 208/209/210/211 family, and `k5` gets
-`SwitchUsb` — which is `SwitchToFirmwareUpgradeMode`, **command 31**, `chipModule = CHIP_SCREEN`,
-`chipType = FREQ` — followed five seconds later by `firmware/FirmwareConsole.exe --upgrade_type 2`
-over a temp file of the frames.
+`show`, `animate` and `send` share `--via serial|hid`, `--port`, `--restore-default` and
+`--dialect`, and `show`/`animate` take `--mode` as well; `serial` is the default and the route that
+works. `--wait` (seconds to wait for each reply, default 0.5) is on every subcommand that talks to
+the pad.
 
-So the pad's screen is written by the firmware updater, and that is what this project does.
-`flydigi/screen_ota.py` sends command 31 (`CMD_SWITCH_USB`, `enter_upgrade_mode`), reached from
-`tools/flydigi-screen` and the GUI's Screen page. It targets **the screen chip only**
-(`CHIP_SCREEN`) — `enter_upgrade_mode` takes no chip argument, so no other chip is reachable through
-it. Full protocol in PROTOCOL.md §8d.
+### Driving the serial route
 
-`FirmwareConsole.exe` unpacks with `sfextract` and decompiles cleanly, and the screen work is all
-managed code in `FirmwareLibrary.dll`. It dispatches on chip type, and the screen's — `ChipType.Freq`
-— is **the one branch with no vendor blob in it**: `OtaNewUpdater`, a plain request/response UART
-protocol. JieLi, WCH, Megahunt and NearLink shell out to `firmware/tool/*`; Freq does not. After
-command 31 the pad re-enumerates as a **USB CDC serial device, VID `FFAA` PID `5555`**, 921600 8N1,
-and the upload is five opcodes: read the picture base address back from the device, read a version,
-erase 4096 at a time, write 55 bytes at a time, then reset with a length and a CRC.
+`k5` is the one device code Space Station's `upload_pic2screen` sends over serial rather than over
+the HID picture family (`IpcCommandEnum_UploadPic`, the branch every other pad takes), and this
+project takes the same route: `flydigi/screen_ota.py` sends command 31 as `CMD_SWITCH_USB` /
+`enter_upgrade_mode` and then writes the frames over the bootloader tty (PROTOCOL.md §8d), reached
+from `tools/flydigi-screen` and the GUI's Screen page.
 
-Three things make a *picture* upload much safer than the phrase "firmware upgrade mode" implies. The
-picture base address is **read back from the device**, and every erase and write is `base + offset`,
-so the program region is only reachable through `ScreenUpgradeType.PROGRAM` — which a picture upload
-never sends. `isRestoreDefault = 1` with the stock `default_screen_image_<deviceType>.bin` puts the
-factory animation back, so a botched upload has a documented repair. And **coming back out is
-something Flydigi document four ways** — a successful upload reboots the pad by itself, a failed one
-is cleared by the power switch, a failed flash is expected to be retried, and holding START for 8
-seconds restores a misbehaving pad. PROTOCOL.md §8e quotes all four.
+`screen_ota.upload_picture(ctrl, frames, interval_ms, restore_default, progress, settle, port)` is
+the one-call entry point that switches the pad, waits, finds the port and writes; the CLI and the
+GUI worker both open-code the same sequence instead. `find_port()` resolves the bootloader by
+reading `idVendor`/`idProduct` under `/sys/class/tty/ttyACM*/device/../` (and `ttyUSB*`) and
+`wait_for_port()` polls it, so `--port` is unnecessary on a retry — the tool finds an
+already-switched pad by itself. `OtaLink` opens the tty with termios and asserts DTR and RTS, as
+their `SerialPort` does. Timings: `SWITCH_SETTLE` 5.0 s after command 31, `PORT_TIMEOUT` 30.0 s
+polled every 0.5 s for the tty, `REPLY_TIMEOUT` 18.0 s per exchange. `enter_upgrade_mode` catches
+`OSError` and returns False, and False is not a failure — the pad usually leaves the bus before it
+can ACK, so the real check is whether the tty appears.
 
-The one window where cutting power is worse than waiting is the **~15 second resource sync** after a
-successful write: "It will restart automatically when done. Please do not turn off the device."
+The bootloader tty lands as `root:dialout`: without `udev/72-flydigi-apex5.rules` an upload gets as
+far as finding the port and then cannot open it, with the pad already switched over, so
+`flydigi/setup.py` **fails** an absent rules file rather than skipping it. Recovering costs nothing:
+retry with `--port`, no second command 31 needed.
 
-**Everything past command 31 is proven.** The pad enumerates as `cdc_acm`, `flydigi/screen_ota.py`
-finds the port with `wait_for_port()` and drives it through `OtaLink`, and each completed upload
-rebooted the pad by itself. The pad's own `37d7:2501` hidraw nodes stay enumerated with the
-bootloader tty live, so the two interfaces coexist.
+`--restore-default` sends `isRestoreDefault = 1`, which with the stock
+`default_screen_image_<deviceType>.bin` puts the factory animation back. It is CLI-only —
+`ScreenModel.upload` always emits False, so the GUI never sets it. The other ways back out are
+PROTOCOL.md §8e.
 
-One thing is still open: whether the upgrade-mode flag is volatile — whether a pad switched with 31
-but never written to comes back on its own or needs the power switch.
+Do not cut power during the **~15 second resource sync** after a successful write: "It will restart
+automatically when done. Please do not turn off the device."
 
-**The HID family answers on this pad and does not drive the screen. Settled on hardware, and it is
-a dead end — do not spend another session on it.** All four commands parse: the pad ACKs every
-packet and echoes every field back (PROTOCOL.md §8b). Two complete uploads went out, 9623 packets,
-no errors — a single test card and an eight-frame animation — and **the display never changed**.
-The only persistent trace either left was the status-bar flag flipping to always-on, which survives
-a power cycle and needs 19/8 to put back.
+### The 255-frame ceiling and the interval fields
 
-Everything that could be a missing step was checked rather than guessed at, because "the pad
-accepted it" is worth nothing here:
+**The 255-frame ceiling is a one-byte picture-count field, and the path that works does not enforce
+it.** It is checked in two places only: the HID path (`flydigi/screen.py`,
+`if len(frames) > 255: raise ScreenError`) and the GUI, which truncates at `MAX_FRAMES = 255` and
+says so. `screen_ota.upload` sends `len(frames) & 0xFF` as the count, and `animate`/`send` pass
+frames through uncapped, so a 300-frame GIF writes all 300 frames of data while telling the chip
+there are 44.
 
-  * the sequence we send is exactly `UploadPicCommandK2Factory` — start, data x N, end per frame,
-    one finish for the set;
-  * nothing wraps it: `UploadPicAsync` calls the repository with a 300 s timeout and
-    `AddCommandsToCommunicationManager` queues the list, with no preamble or epilogue;
-  * and **there is no commit command anywhere in the id space** — every command id in the SDK was
-    mapped, and 208..211 is the whole picture family. No 166 equivalent exists for pictures.
+The frame interval is a one-byte field too, and the two paths scale it by different divisors: the
+HID start packet uses `interval // 100` (`screen.period_from_interval`), the serial path uses
+`round(interval / 10)` (`screen_ota.frame_rate`), both clamped to 1..255. Only the serial one
+reaches the screen.
 
-The reason is upstream of all that and was in the first file read: **for `k5`, Space Station never
-sends the HID family at all.** `upload_pic2screen` branches `deviceCode == "k5" ? SwitchUsb +
-FirmwareConsole : IpcCommandEnum_UploadPic`. Every other screen pad takes the HID route; this one
-does not. Protocol conformance with no visible effect is what writing to a chip that does not drive
-the panel looks like — and note the k2 has the *same* separate `ChipScreen`/`ChipType.Freq`, so
-"separate screen chip" is not the discriminator and no source-backed reason for the split was found.
+### The GUI page
 
-One trap in it: **the reply command byte is not always the command's own.** 210 and 211 answer as
-themselves, but 208 and 209 answer as `0x18`/`0x19` — real command ids elsewhere, so not a
-"no such command". `screen.ACK_ID` maps it, and the fake pad models the pad rather than the SDK.
+`gui/models/screen.py` and `gui/qml/pages/ScreenPage.qml` put the frame count and the time estimate
+(`SECONDS_PER_FRAME = 25.0`) beside the upload button: an upload runs for minutes and **cannot be
+cancelled**. **Every** frame is encoded and decoded back to a cached PNG at load time, so the
+preview is what the pad will get rather than a scaled copy of the source, and the page plays the
+frames at the chosen interval — an animation is checked before a multi-minute upload rather than
+after. The interval is clamped to 10..2550 ms and the preview timer runs at `max(20, interval)` ms.
 
-**A second trap, and this one cost a picture. 211 is a commit, not punctuation.** 208 followed by
-211 commits picture metadata for a frame that was never sent, and on a wired Apex 5 that
-**destroys a stored custom image** — the screen falls back to its status view after the next reboot.
-`probe()` therefore sends only the start, and even that leaves an announced-but-unsent frame behind.
+The upload bypasses the worker's `_attempt` retry: a silent second attempt would re-run a
+multi-minute write on a pad already in upgrade mode.
 
-Two things worth running first, neither of which uploads anything: `flydigi-screen status` (the
-screen bits out of command 3, read-only) and `flydigi-screen test ff8000` (command 242).
+### The HID picture family, which puts no picture on the panel
 
-**242 works, and it is a trap.** It floods the **RGB LEDs as well as the screen**, and `test off`
-**does not clear it** — the command ACKs and the pad stays flooded. The only exit found was the
-pad's own power switch. Both facts are hardware; the SDK says neither.
+**The HID picture family answers on this pad and puts no picture on the panel**: two complete
+uploads, 9623 packets, no errors, every field echoed back, and no uploaded frame ever appeared
+(PROTOCOL.md §8b). What it does change is stored state — the two uploads left the status-bar flag
+flipped to always-on, which survives a power cycle and needs 19/8 to put back, and 211 commits
+metadata for a frame that was never sent (below).
 
-Also confirmed: upload is **wired only**, refused in their UI before it reaches the device.
+Nothing is missing from the sequence. The packet order is `UploadPicCommandK2Factory`'s; the chunk
+size is not theirs, since they send `(XInput ? 32 : 64) - 6` bytes where this project sends
+`device.PACKET_LEN - 8` = 24. Nothing wraps it either: `UploadPicAsync` calls the repository with a
+300 s timeout and `AddCommandsToCommunicationManager` queues the list, with no preamble or
+epilogue. And **the family carries no separate commit**: every command id in the SDK was mapped,
+208..211 is the whole of it, and there is no picture equivalent of the mapping family's
+save-to-flash 166. 211 is itself the commit, which is why `probe()` sends only the start — 208
+followed by 211 destroys a stored custom image (§8b), and even the lone start leaves an
+announced-but-unsent frame behind.
 
-## The two screen settings, and the one whose SDK name is a lie
+`--via hid` and `--dialect {new,a5,bare}` are the flags that reach this path. `new` (`5A A5`) is the
+default and the only envelope any working command on this pad uses.
 
-**`19` sub `9` is an always-on-display switch, not a screen-off switch — the SDK name is inverted.**
-Flydigi call the bit `OffScreen` (息屏显示). Measured on a wired Apex 5 while watching the panel:
+## Command 242
 
-```
-19/9 = 1   the stored picture plays continuously — an always-on display
-19/9 = 0   the panel is dark; the logo button wakes the status view for ~2 seconds
-```
+**242 floods the RGB LEDs as well as the screen, and `test off` does not clear it**: the command
+ACKs, the pad stays flooded, and the only exit found is the pad's own power switch — both measured
+on a wired Apex 5. The packet layout, and the length-byte disagreement `--faithful` reproduces, are
+PROTOCOL.md §8c.
 
-So `enabled=False` is **a real screen blank**, and it is a control this project exposes that Space
-Station does not surface at all. `flydigi/screen.py` reports the command-3 bits as
-`always_on_usable`/`always_on` for this reason, and `set_off_screen` — which took the wire value
-under the SDK's name — was exactly backwards before it was measured. Anyone re-implementing this
-from the SDK name, from PROTOCOL.md §8c, or from `docs/device-settings.md` will get it inverted;
-that has already happened once here.
+## The two screen settings
 
-`19` sub `8` is the other one, and is what puts the status-bar always-on flag back after the dead HID
-uploads flipped it.
+`19` sub `9` is an always-on-display switch, not a screen-off switch: Flydigi's name for the bit,
+`OffScreen` (息屏显示, the standard Chinese term for an always-on display), inverts against its
+English reading, and `enabled=False` is **a real screen blank**. The measurement and the wire layout
+are PROTOCOL.md §8c; the rest of the command-19 sub-ids are
+[device-settings.md](device-settings.md).
 
-**An ACK to command 19 does not tell you which sub-setting was written.** The reply carries the
-command id, not the sub-id, so the family cannot be told apart by its acknowledgement — read command
-3 back if you need to know what actually landed.
+`flydigi/screen.py` reports the command-3 bits as `always_on_usable`/`always_on` and writes them
+with `set_always_on`, which takes what you mean rather than the wire value. `19` sub `8` is the
+status bar — `set_status_bar_always_on`, which is what puts that flag back after the HID uploads
+flip it.
 
-## Why this sends command 31 when nothing else may
+## Command 31 for the screen chip
 
-**Command 31 for the screen chip is now something this project does**, and
-[findings-other-devices.md](findings-other-devices.md) still says not to send 31. Both are right,
-and the distinction is the whole argument: that section is about *program* images across four bootloader vendors with no recovery. A picture
-upload shares the transport and nothing else — the device hands back the picture base address so
-the program region is never addressed, `ScreenUpgradeType.PROGRAM` is not implemented and should not
-be, and the factory image is on disk to restore. `screen_ota.enter_upgrade_mode` takes no chip
-argument for exactly this reason: it can reach the screen and nothing else.
+Command 31 is `SwitchToFirmwareUpgradeMode` / `SwitchUsb`, and it puts one named chip into upgrade
+mode. `screen_ota.enter_upgrade_mode` takes no chip argument, so the screen is the only chip it can
+reach — [findings-other-devices.md](findings-other-devices.md) has the chip list and why a *program*
+chip has no way back. The bounds on a picture upload — the base address read back from the device,
+`ScreenUpgradeType.PROGRAM` never sent, `--restore-default` as the way home — are PROTOCOL.md §8d.
 
-**And it is milder than the name.** Measured mid-upload: the pad's own `37d7:2501` hidraw nodes were
-still enumerated with the bootloader tty live, so command 31 for the screen *adds* a CDC interface
-beside the gamepad rather than replacing the device. The main firmware keeps running. (Nodes
-observed, not input — take it at that strength.)
-
-**The one thing that will bite a new machine is the udev rule.** The bootloader tty lands as
-`root:dialout`, so without `udev/72-flydigi-apex5.rules` an upload gets as far as finding the port
-and then cannot open it, with the pad already switched over. `flydigi/setup.py` therefore **fails**
-an absent rules file rather than skipping it, even when every other device is reachable without —
-this is the one node that cannot be tested until it is too late to fix. Recovering from that costs
-nothing: retry with `--port`, no second command 31 needed.
-
+31 for the screen is milder than the name: the pad keeps its own `37d7:2501` hidraw nodes with the
+bootloader tty live, so it *adds* a CDC interface beside the gamepad rather than replacing the
+device, and the main firmware keeps running (PROTOCOL.md §8d — the nodes were checked, not whether
+input still flowed).
