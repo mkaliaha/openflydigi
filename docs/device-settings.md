@@ -411,18 +411,21 @@ it goes from offset 2 straight to the key table at 13. On the pad here it reads
 looks like a colour, so it is probably a stale mirror of the older LED format. Nothing outside
 `MappingConfigParser` computes it, and both applications preserve it unchanged. Undecoded, recorded.
 
-**What remains open.** The full sequence *was* sent on hardware, exactly as the table above
-describes it — undiffed 42-packet mapping write, the RGB config with mode 4, byte 2 set, one colour
-in frame 0 and every other frame black, `loop_end = 1`, then 171, 250 ms, 166 — and the ring rendered
-the colour and held it. Nothing reacted: not a face button, shoulder, trigger, paddle, C/Z, stick
-click, D-pad or motion, and not rumble either. Given that the mode is gated to `f4` in Space
-Station's own picker, the reasonable reading is that the k5 firmware has no Feedback behaviour to
-trigger, and byte 2 on this pad is only the latch described above.
+**On an Apex 5 byte 2 is tested, and what it does is freeze the backlight.** That is the settled
+result, not an open question: the ring stops on the frame it is showing, and frames written
+afterwards do not appear until the byte is cleared or a save re-renders past it. Measured both ways
+round, single-variable, twice — see the latch section above.
 
-What would settle it beyond argument is the **Vader 4 Pro**, where the mode is offered — and, more
-cheaply, watching Space Station on Windows to confirm the picker really does not list Feedback for a
-connected Apex 5. None of the twelve locales carries a description for the mode, just the bare word,
-so there is nothing else to read.
+The full Space Station sequence was sent too, exactly as the table describes it: undiffed 42-packet
+mapping write, the RGB config with mode 4, byte 2 set, one colour in frame 0 and every other frame
+black, `loop_end = 1`, then 171, 250 ms, 166. The ring rendered the colour and held it, and **nothing
+reacted to any input** — no face button, shoulder, trigger, paddle, C/Z, stick click, D-pad, motion
+or rumble. So on this pad byte 2 is a latch and nothing more.
+
+**What remains open is the Vader's behaviour, not this pad's.** `Feedback` is gated to `f4` in Space
+Station's own picker, so whether the mode means anything beyond the latch can only be answered on a
+Vader 4 Pro, where it is offered. None of the twelve locales describes the mode — just the bare word
+— so there is nothing further to read on this side.
 
 
 ## Command inventory, by feature
