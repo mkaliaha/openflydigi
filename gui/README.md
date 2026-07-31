@@ -93,9 +93,25 @@ icon.
     qml/              Main.qml, pages/ (thirteen), components/ (six)
     requirements.txt  what the runtime must provide -- documentation, not a pip file
 
-QML constructs `App`, so opening the device is a separate `start()`. Polling is
-a 30 s `Get info` timer (`INFO_INTERVAL_MS`), stopped for the duration of a
-screen upload; `PROFILE_COUNT` is 4.
+QML constructs `App`, so opening the device is a separate `start()`, and
+`beginPolling()` is a further seam so a test can put a fake pad behind the
+worker before anything is asked of a real one.
+
+Polling is one `Get info` timer at two intervals: 30 s while the pad is
+answering (`INFO_INTERVAL_MS`, watching battery and charge) and 2 s while it is
+not (`SEARCH_INTERVAL_MS`, looking for it, since a sleeping pad leaves the USB
+bus and so is missing rather than silent). It is stopped for the duration of a
+screen upload.
+
+**The poll is also how the window fills.** There is no separate first read:
+`beginPolling` asks how the pad is doing, and the pad going from missing to
+answering is what reads the rest — profile, lighting, transport, settings. A pad
+that was there at launch and a pad plugged in ten minutes later come down the
+same path, so the second one cannot quietly stop working. The re-read keeps
+unsaved edits (`_read_the_rest(keep_edits=True)`): the pad sleeps in minutes and
+an editing session never touches it, so waking it must not cost a half-finished
+remap. Pressing **Reload from pad** is the deliberate version and discards them.
+`PROFILE_COUNT` is 4.
 
 Requests reach the worker as signals rather than direct calls: calling a slot on
 an object living in another thread runs it on the caller's thread, which puts

@@ -33,6 +33,7 @@ except ImportError:
     print("PySide6 not installed -- skipping shell tests")
     sys.exit(0)
 
+from gui import app as gui_app
 from gui import main as gui_main
 from tests.qml_harness import TestPad
 
@@ -51,6 +52,12 @@ SECTIONS = ["Controller", "Device", "Buttons", "Macros", "Sticks", "Gyro",
             "Vibration", "Triggers", "Lighting", "Screen", "Games", "DualSense",
             "Setup"]
 
+# The real poll intervals, kept so the tests that shorten them can put them
+# back -- they are module globals, and leaving one at 50 ms would have every
+# later test polling a fake pad twenty times a second.
+INFO_MS = gui_app.INFO_INTERVAL_MS
+SEARCH_MS = gui_app.SEARCH_INTERVAL_MS
+
 
 def check(name, condition, detail=""):
     (PASSED if condition else FAILED).append(name)
@@ -65,8 +72,13 @@ def pump(qt_app, rounds=60):
         qt_app.processEvents()
 
 
-def load_shell(qt_app, pad):
-    """Bring the window up against `pad`, the way main.py brings it up."""
+def load_shell(qt_app, pad, controller=None):
+    """Bring the window up against `pad`, the way main.py brings it up.
+
+    `controller` stands in for the bus rather than for the pad: pass one that
+    raises `DeviceNotFound` on demand and the pad can be taken away and put
+    back, which is the only way to reach the reconnect path.
+    """
     engine = gui_main.build_engine()
     engine.warnings.connect(
         lambda errors: WARNINGS.extend(e.toString() for e in errors))
@@ -76,11 +88,16 @@ def load_shell(qt_app, pad):
     app_object.start(False)
     worker = app_object.thread.worker
     worker._drop()
-    # Both: the lambda so a reconnect after `_drop` finds the fake again rather
-    # than opening real hardware, and `_ctrl` so the shutdown path really does
-    # call close() on it -- which is the thing worth testing about shutdown.
-    worker._controller = lambda: pad
+    # Both: the callable so a reconnect after `_drop` finds the fake again
+    # rather than opening real hardware, and `_ctrl` so the shutdown path really
+    # does call close() on it -- which is the thing worth testing about shutdown.
+    worker._controller = controller or (lambda: pad)
     worker._ctrl = pad
+    # What the window's `App.start()` does, now that the fake is in place.
+    # Nothing else reads the pad at startup: the poll asks how it is doing and
+    # the answer pulls the rest in, so a test that skipped this would be testing
+    # an app that never looked at its pad.
+    app_object.beginPolling()
 
     engine.load(QUrl.fromLocalFile(os.path.join(gui_main.QML_DIR, "Main.qml")))
     roots = engine.rootObjects()
@@ -422,6 +439,200 @@ def test_a_vader_is_refused_before_anything_is_written(qt_app):
     app_object.shutdown()
 
 
+def hotplug(qt_app, pad, absent, search_ms=50, info_ms=None):
+    """Bring the window up over a pad that can be taken away and put back.
+
+    `absent` is a one-key dict the caller flips; the worker asks it on every
+    attempt, so the pad leaves and returns exactly as it does on a bus -- from
+    the app's side, without anything telling it so.
+
+    Both poll intervals are the module's own globals, so a caller shortening
+    either must put it back with `restore_intervals`. `info_ms` is left alone by
+    default: a test that wants to see the pad go away has to shorten it, and one
+    that only wants to see it arrive can then assert the real thirty seconds are
+    back in force.
+
+    The intervals are set before `load_shell`, because it is what starts the
+    poll and the interval it picks is read at that moment.
+
+    The engine comes back with the app because it owns it: the App is the
+    engine's QML singleton, so a caller that keeps only the app gets the C++
+    object deleted underneath it the moment the engine is collected.
+    """
+    from flydigi import device as flydigi_device
+
+    gui_app.SEARCH_INTERVAL_MS = search_ms
+    if info_ms is not None:
+        gui_app.INFO_INTERVAL_MS = info_ms
+
+    def controller():
+        if absent["still"]:
+            raise flydigi_device.DeviceNotFound("no Flydigi controller found")
+        return pad
+
+    return load_shell(qt_app, pad, controller)
+
+
+def restore_intervals():
+    gui_app.INFO_INTERVAL_MS = INFO_MS
+    gui_app.SEARCH_INTERVAL_MS = SEARCH_MS
+
+
+def test_a_pad_that_arrives_late_is_found_and_read(qt_app):
+    """The pad was not there when the window opened, and then it is.
+
+    Two failures in one, and the second is the one that survived being noticed:
+    a pad that answered late used to fill in the header and nothing else, so the
+    sidebar said "Apex 5" over pages that had never been read. Nothing came back
+    until someone pressed Reload.
+    """
+    pad = TestPad()
+    pad.active = 2
+    absent = {"still": True}
+    app_object, engine, window = hotplug(qt_app, pad, absent)
+    try:
+        pump(qt_app)
+        check("a pad that is not there is not claimed to be",
+              not app_object.device.connected)
+        check("and nothing is read off it", pad.reads == [], str(pad.reads))
+        # Looked for on the short interval, which is the difference between
+        # noticing a pad and noticing it half a minute later.
+        check("a missing pad is looked for often",
+              app_object._info_timer.interval() == 50,
+              str(app_object._info_timer.interval()))
+
+        absent["still"] = False
+        pump(qt_app)
+        check("the pad is found without anyone asking",
+              app_object.device.connected)
+        # The one the pad is running, and only that one: a reconnect is no
+        # reason to make the pad re-seat its trigger motors four times.
+        check("and the profile it is running is read", pad.reads == [2],
+              str(pad.reads))
+        check("the lighting comes back too", app_object.lighting.loaded)
+        check("and so does the firmware version",
+              app_object.device.firmware == "7.0.4.5",
+              app_object.device.firmware)
+        # And once it is there the hunt stops: a found pad is only being watched
+        # for battery, and every ask costs it an exchange.
+        check("a pad that is there is left alone",
+              app_object._info_timer.interval() == INFO_MS,
+              str(app_object._info_timer.interval()))
+    finally:
+        restore_intervals()
+    app_object.shutdown()
+
+
+def test_a_pad_that_was_there_all_along_is_read_once(qt_app):
+    """Launching is a reconnect, and must cost what one costs.
+
+    Startup and hotplug come down the same path on purpose -- the poll asks how
+    the pad is doing, and the answer pulls the rest in -- so the thing to hold
+    is that going through it once asks the pad each question once. It caught the
+    real cost of joining them up: `reload` used to be kicked off by the window
+    as well, and its info request arrived on the heels of the one that had just
+    been answered.
+
+    The hunt interval is left long on purpose. At 50 ms it fires two or three
+    times before the first reply lands and slows it down again, and then the
+    counts this is about are whatever the scheduler felt like.
+    """
+    from flydigi import mapping
+
+    pad = TestPad()
+    pad.active = 3
+    absent = {"still": False}
+    app_object, engine, window = hotplug(qt_app, pad, absent, search_ms=5000)
+    try:
+        pump(qt_app)
+        check("the pad is there and says so", app_object.device.connected)
+        check("its profile is read exactly once", pad.reads == [3],
+              str(pad.reads))
+        check("and it is asked what it is running once, not twice",
+              pad.asked.count(mapping.CMD_STATUS) == 1,
+              str(pad.asked.count(mapping.CMD_STATUS)))
+    finally:
+        restore_intervals()
+    app_object.shutdown()
+
+
+def test_a_dismissed_no_controller_message_stays_dismissed(qt_app):
+    """The hunt runs every two seconds and fails the same way every time.
+
+    Reporting each round put the banner back seconds after it was closed, for
+    something the header already says in words. A failure that differs, or one
+    that follows a spell of the pad answering, is still news.
+    """
+    pad = TestPad()
+    absent = {"still": True}
+    # Both shortened: the pad has to be seen going away again at the end, and
+    # that is the slow interval's job.
+    app_object, engine, window = hotplug(qt_app, pad, absent, info_ms=50)
+    try:
+        pump(qt_app, rounds=20)
+        check("the first failure is reported", app_object.device.error != "",
+              app_object.device.error)
+        app_object.device.error = ""                  # what Dismiss does
+        pump(qt_app, rounds=40)                       # many more poll rounds
+        check("and dismissing it makes it stay gone",
+              app_object.device.error == "", app_object.device.error)
+        check("while the header still says what is wrong",
+              not app_object.device.connected)
+
+        # The pad answering and going again is a change, so it is news again.
+        absent["still"] = False
+        pump(qt_app, rounds=20)
+        check("the pad is found", app_object.device.connected)
+        absent["still"] = True
+        pump(qt_app, rounds=20)
+        check("and losing it afterwards is reported",
+              app_object.device.error != "", app_object.device.error)
+    finally:
+        restore_intervals()
+    app_object.shutdown()
+
+
+def test_a_pad_that_comes_back_keeps_unsaved_edits(qt_app):
+    """Sleeping and waking is not the same request as pressing Reload.
+
+    The pad sleeps in minutes and an editing session touches it not at all, so
+    this is the ordinary way an edit meets a reconnect -- and re-reading over
+    the top of it would be the app throwing away work nobody asked it to.
+    """
+    pad = TestPad()
+    pad.active = 1
+    absent = {"still": False}
+    # Both intervals shortened: the pad has to be seen leaving as well as
+    # arriving, and leaving is only ever noticed by the slow one.
+    app_object, engine, window = hotplug(qt_app, pad, absent, info_ms=50)
+    try:
+        pump(qt_app)
+        app_object.profile.title = "Unsaved"
+        app_object.lighting.brightness = 3
+        check("the edits are there to lose", app_object.profile.dirty
+              and app_object.lighting.dirty)
+
+        absent["still"] = True
+        pump(qt_app)
+        check("the pad going away is noticed", not app_object.device.connected)
+        absent["still"] = False
+        pump(qt_app)
+
+        check("it comes back", app_object.device.connected)
+        check("the profile edit survives it",
+              app_object.profile.title == "Unsaved",
+              app_object.profile.title)
+        check("the lighting edit too", app_object.lighting.brightness == 3,
+              str(app_object.lighting.brightness))
+        # Not re-read, which is the same fact from the pad's side: a second read
+        # here is exactly what would have overwritten the edit.
+        check("and the profile is not read over the top of it",
+              pad.reads == [1], str(pad.reads))
+    finally:
+        restore_intervals()
+    app_object.shutdown()
+
+
 def main():
     QQuickStyle.setStyle("org.kde.desktop")
     qt_app = QGuiApplication.instance() or QGuiApplication([])
@@ -439,6 +650,10 @@ def main():
                      test_an_unexpected_worker_error_is_reported,
                      test_shutdown_stops_the_thread_before_closing_the_device,
                      test_a_vader_is_refused_before_anything_is_written,
+                     test_a_pad_that_arrives_late_is_found_and_read,
+                     test_a_pad_that_was_there_all_along_is_read_once,
+                     test_a_dismissed_no_controller_message_stays_dismissed,
+                     test_a_pad_that_comes_back_keeps_unsaved_edits,
                      test_loading_the_window_is_warning_free):
             try:
                 test(qt_app)

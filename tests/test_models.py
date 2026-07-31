@@ -1154,6 +1154,9 @@ class FakeProc:
         return self.returncode
 
 
+STOPS = []
+
+
 def make_dsmode(state, start=None):
     """A model over a stand-in system.
 
@@ -1161,11 +1164,20 @@ def make_dsmode(state, start=None):
     name bound at import, so replacing them here is what the model will
     actually call. `state` is kept by reference: mutate it to make the system
     change under the model, which is the whole thing being tested.
+
+    **`stop` is stood in for whether a test asks for a stop or not.** The real
+    one takes no pids and means every relay it can find in the process table --
+    it is written that way because the relay outlives the app, so the switch
+    cannot go by what this process happens to have started. Left unreplaced,
+    one `setRunning(False)` down here reaches out of the test and takes down the
+    virtual DualSense somebody is playing a game through. It did, and the only
+    trace was a graceful `[ds5] stopping` in the relay's log.
     """
     ds_backend.state = lambda: dict(state)
     ds_backend.latest_status = lambda **_: {"out": 7, "iso_urbs": 99,
                                             "reports": 5}
     ds_backend.tail = lambda **kwargs: []
+    ds_backend.stop = lambda *a, **k: (STOPS.append((a, k)), True)[1]
     if start is not None:
         ds_backend.start = start
     return models.DsModeModel()
@@ -1228,6 +1240,7 @@ def test_dsmode_does_not_call_a_clean_stop_a_failure():
     errors, notes = [], []
     model.failed.connect(errors.append)
     model.note.connect(notes.append)
+    del STOPS[:]
     try:
         model.setRunning(False)
         # The stop runs on its own thread; the relay going is what the poll
@@ -1236,6 +1249,9 @@ def test_dsmode_does_not_call_a_clean_stop_a_failure():
         live["pids"] = []
         model._proc = FakeProc(0)
         model.refresh()
+        model.wait(2000)
+        check("the switch really asks the backend to stop", len(STOPS) == 1,
+              str(STOPS))
         check("a stop that was asked for is not an error", errors == [],
               str(errors))
         check("and does not need announcing either", notes == [], str(notes))

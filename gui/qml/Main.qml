@@ -283,9 +283,11 @@ Kirigami.ApplicationWindow {
         openSection(0)
         // Opening the device is deliberately not something App's constructor
         // does -- see gui/app.py. This is a no-op if a test already started it.
+        //
+        // Nothing kicks a first read off here any more. `start` begins the poll
+        // and asks the pad how it is doing; the answer is what fills the window,
+        // and a pad that is not there yet fills it whenever it arrives instead.
+        // One path for both, so the second one cannot quietly stop working.
         App.start()
-        // Kick the first read off once the window is up, so it appears
-        // immediately rather than after a second of blocking HID traffic.
-        Qt.callLater(App.reload)
     }
 }

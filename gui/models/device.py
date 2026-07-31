@@ -62,6 +62,9 @@ class DeviceModel(QObject):
         self._control_by = ""
         self._third_party_available = False
         self._firmware = ""
+        # The last failure reported, so the same one is not reported twice. See
+        # `failed`.
+        self._last_failure = None
 
     @Property(bool, notify=connectedChanged)
     def connected(self):
@@ -221,6 +224,7 @@ class DeviceModel(QObject):
         """Fold one `motion.read_info` reply into the reported state."""
         self.connected = True
         self.error = ""
+        self._last_failure = None
         self.battery = info.get("battery_level", 0)
         self.charging = bool(info.get("charging"))
         self.connectionType = info.get("connect_type", "")
@@ -230,6 +234,23 @@ class DeviceModel(QObject):
 
     @Slot(str)
     def failed(self, message):
+        """Report a failure, but say the same one only once.
+
+        The hunt for a missing pad runs every two seconds, and every round of it
+        fails with the identical sentence. Posting each one put a banner the user
+        had just dismissed straight back on screen, over and over, for a state
+        the header already reports in words -- "No controller / press a button to
+        wake it". So a repeat while already disconnected is not news.
+
+        A *different* failure still is: "permission denied" arriving where "no
+        controller found" was is the one that has to reach the user, since it is
+        the difference between a sleeping pad and udev rules that were never
+        installed. So is any failure after a spell of the pad answering, which is
+        what `was` covers.
+        """
+        was = self._connected
         self.connected = False
-        self.error = message
+        if was or message != self._last_failure:
+            self.error = message
+        self._last_failure = message
         self.connectedChanged.emit()

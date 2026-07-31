@@ -31,7 +31,14 @@ QML_IMPORT_NAME = "Apex5"
 QML_IMPORT_MAJOR_VERSION = 1
 
 PROFILE_COUNT = 4
+# Two intervals for the same poll, because it does two different jobs. Against a
+# connected pad it is watching battery and charge, which move slowly and cost an
+# exchange to ask about. Against a missing one it is *looking* for the pad -- and
+# a pad that has gone to sleep has left the USB bus entirely, so "missing" is the
+# ordinary state of a pad nobody is holding rather than a fault. Waiting thirty
+# seconds to notice one that was just woken reads as never noticing it.
 INFO_INTERVAL_MS = 30_000
+SEARCH_INTERVAL_MS = 2_000
 
 
 class FetchThread(QThread):
@@ -99,6 +106,12 @@ class App(QObject):
         self._info_timer = QTimer(self)
         self._info_timer.timeout.connect(self.requestInfo)
         self._polling = False
+        # Our own copy, because `connectedChanged` is not an edge: both
+        # `infoReceived` and `failed` emit it unconditionally so that `summary`
+        # re-evaluates, which makes it "the pad reported in" rather than "the
+        # pad's connectedness moved".
+        self._was_connected = False
+        self._device.connectedChanged.connect(self._connection_changed)
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -152,10 +165,26 @@ class App(QObject):
         worker.screen_progress.connect(self._screen.progressReceived)
         worker.screen_finished.connect(self._screen_finished)
 
-        self._polling = poll
         if poll:
-            self._info_timer.start(INFO_INTERVAL_MS)
-            self.requestSettings.emit()
+            self.beginPolling()
+
+    @Slot()
+    def beginPolling(self):
+        """Start watching the pad, which is also how the first read happens.
+
+        Separate from `start` for the same reason `start` is separate from the
+        constructor: a test builds the graph, puts a fake pad behind the worker,
+        and only then lets anything be asked of a real one.
+
+        There is no startup read apart from this. Asking for the info and
+        letting the answer drive the rest means a pad that was there all along
+        and a pad plugged in later come down one path -- the path that gets
+        exercised on every launch, rather than one that only runs when something
+        has gone missing and so is the first thing to rot.
+        """
+        self._polling = True
+        self._resume_polling()
+        self.requestInfo.emit()
 
     @Slot()
     def shutdown(self):
@@ -178,6 +207,40 @@ class App(QObject):
             # dump -- an ugly way to end an otherwise ordinary quit.
             if self.thread.stop():
                 self.thread = None
+
+    # -- staying in touch with the pad -------------------------------------
+
+    def _resume_polling(self):
+        """(Re)start the info poll at whichever interval the state calls for.
+
+        Never while a screen upload is running: the pad spends minutes bridging
+        to its screen chip with no vendor node to answer on, so polling it would
+        bury the upload's own progress under a failure every two seconds. The
+        upload's end calls this again.
+        """
+        if self._screen.busy:
+            return
+        self._info_timer.start(
+            INFO_INTERVAL_MS if self._device.connected else SEARCH_INTERVAL_MS)
+
+    def _connection_changed(self):
+        """Hunt for the pad while it is gone, and read it whole when it returns.
+
+        The poll only ever asked for device info, so a pad that arrived after
+        startup got a header saying "Apex 5" over pages that had never been
+        filled -- no active profile, no lighting, no device settings, nothing
+        until someone pressed Reload. Coming back is precisely the moment when
+        everything is worth re-reading; unsaved edits are what it must not cost.
+        """
+        connected = self._device.connected
+        if connected == self._was_connected:
+            return
+        self._was_connected = connected
+        if not self._polling:
+            return
+        self._resume_polling()
+        if connected:
+            self._read_the_rest(keep_edits=True)
 
     # -- what QML binds to -------------------------------------------------
 
@@ -223,14 +286,35 @@ class App(QObject):
         pad audibly re-seat its trigger motors.
         """
         self.requestInfo.emit()
+        self._read_the_rest(keep_edits=False)
+
+    def _read_the_rest(self, keep_edits):
+        """Everything the window shows apart from the device info.
+
+        Apart, because the two callers arrive differently. The Reload button
+        asks for the info along with the rest; a reconnect is *triggered* by an
+        info reply, and asking again there would be putting a question to the
+        pad it has just answered.
+
+        `keep_edits` is the other difference. Pressing Reload is someone asking
+        for the pad's version of the truth, so it wins over anything unsaved. A
+        pad falling asleep on a half-finished remap and being woken again is not
+        anyone asking for anything, and answering it by dropping the remap would
+        be the app losing work nobody told it to lose -- and the pad does sleep,
+        in minutes, while an editing session touches it not at all.
+        """
         self.requestStatus.emit()
-        self.requestLighting.emit()
         self.requestTransport.emit()
         # One read for both: the screen's two toggles are two bits of the
         # device-settings block, so asking for the block fills the Screen page
-        # as well and the pad is not asked the same question twice.
+        # as well and the pad is not asked the same question twice. Never held
+        # back for edits: every device setting is written the moment it is
+        # toggled, so there is no unsaved version of it to lose.
         self.requestSettings.emit()
-        self._profile.forget()
+        if not (keep_edits and self._lighting.dirty):
+            self.requestLighting.emit()
+        if not (keep_edits and self._profile.dirty):
+            self._profile.forget()
 
     @Slot()
     def stopMacroRecording(self):
@@ -313,7 +397,7 @@ class App(QObject):
         """
         self._screen.uploadFinished(ok)
         if self._polling:
-            self._info_timer.start(INFO_INTERVAL_MS)
+            self._resume_polling()
         if ok:
             self.requestScreen.emit()
 

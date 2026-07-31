@@ -65,6 +65,11 @@ class TestPad(FakePad):
         self.switches = []
         self.reads = []
         self.binds = []
+        # Every command id the pad was sent, in order. `reads` and `switches`
+        # answer "which profile", which is the usual question; this answers "how
+        # many times was it asked at all", which is how you catch the app asking
+        # the same question twice over.
+        self.asked = []
         self.battery = battery
         self.charging = charging
         self.wired = wired
@@ -80,6 +85,7 @@ class TestPad(FakePad):
 
     def send(self, buf, wait=0.3, until=None):
         buf = bytes(buf)
+        self.asked.append(buf[3])
         # Only the history is kept here; answering command 82 is `FakePad`'s
         # job now that it knows the trigger-effect family carries no checksum.
         # This used to build its own ack to dodge that check, which meant two

@@ -103,7 +103,11 @@ The QML cases are the eleven `tests/qml/tst_*.qml`, one per page; Macros and Set
 [gui/README.md](../gui/README.md). Importing `gui.app` there is load-bearing — the decorators
 register the types at import time, and without it the test files fail to compile with "module Apex5
 is not installed". `App.start(False)` is the test seam: the harness starts the app with no polling
-timer and swaps the fake pad in behind the worker, so QML's later `start()` is a no-op.
+timer and swaps the fake pad in behind the worker, so QML's later `start()` is a no-op. The QML
+cases then drive `App.reload()` themselves. `tests/test_shell.py` instead calls `beginPolling()`
+once the fake is in place, because that is now the *only* thing that reads the pad at startup —
+`Main.qml` no longer kicks a `reload()` off, so a shell test that skipped it would be testing an app
+that never looked at its pad.
 
 Traps:
 
@@ -126,6 +130,14 @@ Traps:
     QtQuickTest shows and activates, so a page under test is instantiated inside the `TestCase` —
     with `createTemporaryObject`, so a case that fails an assertion cannot leave a page behind to
     confuse the next one.
+  * **A model test that leaves `dsmode.stop` real reaches out of the test and stops the relay
+    somebody is playing through.** `stop()` takes no pids on purpose — the relay outlives the app,
+    so the switch has to go by the process table rather than by what this process started — and one
+    `setRunning(False)` in `make_dsmode` therefore SIGTERMed a live virtual DualSense. It cost a
+    session in a running game, and the only trace was a graceful `[ds5] stopping` in
+    `~/.local/state/flydigi/ds5-relay.log`. The helper now stands `stop` in along with `state`,
+    `latest_status` and `tail`. `tests/test_dsmode.py` stays on the real one and is safe for the
+    opposite reason: it only ever passes the pid of a relay it started itself.
 
 ## Placeholders and visibility
 
