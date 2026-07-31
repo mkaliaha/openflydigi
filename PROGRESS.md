@@ -16,8 +16,8 @@ remapping, macros, sticks, vibration, per-profile trigger effects, lighting, the
 list and its own setup. The daemon detects a running game and applies its route unattended.
 
 **Left to build, in size order: the device-settings page and the charging dock** — plus the
-device-type guard, which is a safety item rather than polish, and the smaller entries in What's
-next.
+device-type guard, which is a safety item rather than polish, and a group of small pieces that are
+an afternoon each, all listed in What's next.
 
 | Tier | Mechanism | Games | Validated in |
 |---|---|---|---|
@@ -56,11 +56,26 @@ Roughly in order of value. Each is a fresh-context-sized piece of work.
     plus a bindings-storage nuisance. Optional workaround, which neither app does: re-assert the flag
     on connect, off then on once SDL has enumerated. The real fixes are upstream.
     → [docs/findings-steam.md](docs/findings-steam.md)
- 1. **A device-settings page.** Command 3 returns the whole block in one read — supported *and*
-    enabled bits, sleep time, report rate, stick precision and sensitivity. **Do quick-switch
-    (sub-id 1) first**: picking a profile with `FN + A/B/X/Y` is the one thing here a Linux user
-    cannot get any other way. Then sleep time (cmd 23) — the pad ships at 15 minutes and dropping
-    off the bus mid-session has interrupted nearly every test.
+ 1. **A device-settings page.** Nine controls, and narrower than that sounds: command 3 returns the
+    whole block in one read — supported *and* enabled bits, sleep time, report rate, stick precision
+    and sensitivity — and the generic write, command 19, covers five of them by sub-id. One read and
+    two write commands span the page:
+
+    | Control | Command | Note |
+    |---|---|---|
+    | Quick-switch config | 19 sub 1 | **do this first** — `FN + A/B/X/Y` picks a profile on the pad, with nothing running, which a Linux user cannot get any other way |
+    | Sleep time | 23 | **and this second** — the pad ships at 15 minutes, and dropping off the bus mid-session has interrupted nearly every test |
+    | Joystick debounce | 19 sub 5 | off reads subtle movement better and jitters at rest; also disables auto-calibration |
+    | Joystick auto-calibration | 19 sub 6 | |
+    | Rebound algorithm | 19 sub 7 | filters the reverse spike a stick's inertia makes on release |
+    | Mapping switch | 19 sub 4 | supported and on, and it has no UI string in any of the twelve locales — what it does is a bench question |
+    | Joystick precision | 21 | 8/9/10/11/12/14/16-bit in *declaration* order; ours reads 10-bit |
+    | Centre sensitivity | 22 | Fast / Medium / Slow over seven wire values; ours reads Middle |
+    | Report rate | 20 | reads 0, which is not in the documented map — do not write it blind |
+
+    The pad reports motion debounce (sub 3) and audio (sub 10) as **unsupported**, so those two need
+    no UI. The Xbox home button (sub 2) is a third case and not a dead one: supported, on, and
+    reachable on the wire — see the cheap experiments below before giving it a control.
     → [docs/device-settings.md](docs/device-settings.md)
  2. **Stroke Setting on the Triggers page.** 195/215 are `Param[0]` of the force-trigger blocks and
     the General effect's two parameters *are* the stroke window. The page's current "Dead zone"
@@ -79,13 +94,50 @@ Roughly in order of value. Each is a fresh-context-sized piece of work.
     with the pad. → [docs/findings-other-devices.md](docs/findings-other-devices.md)
  6. **Multiple pads.** A Vader 4 Pro is on the desk. The prerequisite is the device-type guard:
     `flydigi/device.py` matches on vendor id plus report-descriptor prefix today, neither of which
-    tells the models apart, so it would happily write an Apex 5 config to a Vader.
+    tells the models apart, so it would happily write an Apex 5 config to a Vader. It also unlocks
+    work that is already written: the **trigger-vibration editor** (J5, offset 154) is in
+    `MappingConfig.trigger_motor()` with the layout asserted in tests and no UI, because
+    `IsSupportTriggerVibration` is a Vader flag and this pad has no such motors. The Vader is
+    likewise the machine for the ADC calibration command, which `GenerateControllerVader4` is the
+    only factory to set. → [docs/findings-profile-blob.md](docs/findings-profile-blob.md) J5
  7. **An interactive crop for the Screen page.** Everything else there is done.
+
+**Small, testable, an afternoon each.** These came out of diffing Space Station's own English locale
+file — its complete user-facing string set — and the 22 factories in `command.setting/` against what
+we ship. Every one is verifiable on the hardware here, and several were already written up in
+[docs/device-settings.md](docs/device-settings.md) without ever reaching this index.
+
+  * **Restore a profile slot to factory** — `ResetMappingConfigByCfgId`, command **175** (S1). The
+    Buttons page's "reset all" only clears key mappings in the in-memory blob; Space Station's
+    resets the whole slot on the pad. It is also the only repair for a blob written into 123..137,
+    which this pad does not read — see J3.
+  * **Controller nickname** — read **2**, write **24** (S2). Self-verifying, and it makes a two-pad
+    desk legible.
+  * **The cooperative lock** — `AcquireController`, command **28** (S3). The read half is built as
+    `motion.read_transport`; the write half is not.
+  * **Custom stick curves.** The page offers presets and a Custom label; Space Station drags the two
+    interior breakpoints. `set_stick()` already takes `point1`/`point2`, so this is GUI-only work.
+  * **Stick diagnostics** — "Test circularity" with an average-error readout, and a centre-offset
+    check whose tolerance decides whether a stick needs calibrating before its dead zone is touched.
+    `tools/joystick-curve-probe` and `tools/stick-feel` cover this on the bench; nothing does in the
+    app.
+  * **A grip vibration test.** Space Station's is a toggle, not a button: while it is on, pulling a
+    trigger vibrates that side's grip, harder the further it goes. Host-driven — triggers off evdev
+    into `effects.rumble()`, which is what `tools/stick-feel` already does from the sticks — and it
+    makes the Vibration page self-checking. Their tooltip has a second form for pads that also
+    buzz the trigger itself, which is the Vader's hardware, not this one's.
+  * **Macro editing.** We record and delete. Space Station edits a recorded macro's steps — output
+    key, duration, interval — and builds one without recording at all. `set_macro()` already takes
+    arbitrary steps, so this is GUI-only too.
+  * **Restart the controller** — command **29**, no argument.
 
 **Cheap experiments, each one sitting.** The `center`/`edge` sign encoding — write 236 to byte 110
 with apply-and-no-save, sweep the stick, watch evdev; the three outcomes are unmistakable. Whether
 stick precision rescales the profile's curve bytes — write a different precision, re-read a profile.
-Whether the firmware accepts 164/165 aimed at a slot it is not running.
+Whether the firmware accepts 164/165 aimed at a slot it is not running. What the **Xbox home button**
+toggle does (19 sub 2): the pad reports it supported *and* on, and the NewXInput command exists for
+our mode — it is Flydigi's own wrapper that declines to send it — so sending it and watching whether
+Home still reaches evdev costs one line.
 
 **Haptic audio: working.** A game writes haptics to a virtual DualSense, and the Apex 5's motors
 reproduce them. Nothing else does this -- every other project either uses real hardware or emulates

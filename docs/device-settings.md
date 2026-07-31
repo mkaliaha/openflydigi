@@ -126,7 +126,7 @@ written". Read command 3 back when it matters which, as `screen.read_screen_stat
 | sub | feature | sub | feature |
 |---|---|---|---|
 | 1 | **Quick-switch config** — `FN + A/B/X/Y` picks a profile, on the pad, nothing running | 6 | joystick auto-calibration |
-| 2 | Xbox home button (XInput-gated; unreachable in our mode) | 7 | joystick rebound |
+| 2 | Xbox home button — reachable on the wire, refused by Flydigi's wrapper; see below | 7 | joystick rebound |
 | 3 | motion debounce | 8 | status bar always on |
 | 4 | mapping switch (no UI string; *not* the third-party toggle) | 9 | **always-on display** — the SDK calls it `OffScreen` and the name is inverted: 1 keeps the picture up, 0 blanks the panel |
 | 5 | joystick debounce | 10 | audio (gated on the `AudioUsable` bit from command 3) |
@@ -134,6 +134,43 @@ written". Read command 3 back when it matters which, as `screen.read_screen_stat
 Standalone, `[4]=3, [5]=value, [6]=crc`: **20** report rate `{1000=1, 500=2, 250=4, 125=8}`,
 **21** joystick precision, **22** joystick sensitivity, **23** sleep time in minutes. **29** restart
 takes no argument: `[4]=2, [5]=crc`.
+
+**Sub-id 2 is refused by the SDK, not by the pad — and `ControllerType` is not about the host OS.**
+Worth getting straight, because the obvious reading of the name is wrong. `ControllerHidManager`
+decides the type from the HID device it opened, in one line:
+
+```csharp
+// ControllerHidManager.cs:35
+ControllerType controllerType = (hid.ManufacturerString == "Microsoft") ? ControllerType.XInput
+                              : (hid.VendorId != 14295)                 ? ControllerType.DInput
+                              :                                           ControllerType.NewXInput;
+```
+
+`14295` is `0x37D7`, Flydigi's vendor id — what `flydigi/device.py` matches on. So the enum records
+*which interface the SDK is talking through*, not a mode the pad is in and nothing to do with
+Windows: **XInput** is an older pad or dongle that enumerates as a Microsoft device and takes its
+commands through that impersonated interface (hence the separate command 48 framing); **NewXInput**
+is a device on Flydigi's own vendor id, which is this pad's vendor interface and every `5a a5`
+packet we send. The Apex 5 is a composite device and is both at once — `1.0` is the Xbox-compatible
+gamepad that `xpad` binds and evdev exposes, `1.2` is the vendor interface — so "XInput to the
+kernel" and "NewXInput to the SDK" describe two endpoints, not a contradiction.
+
+`EnableXboxHomeButtonCommandFactory` has a full NewXInput branch building command 19 with sub-id 2,
+so the command exists for our mode. What stops it is the wrapper, twice over:
+
+```csharp
+// ControllerSdk.cs:779, and again in EnableXboxHomeButtonImpl at :342
+if (controller.ControllerType == ControllerType.XInput)
+    Instance.EnableXboxHomeButtonImpl(controller, enable);
+```
+
+A branch of their own code that can never run on a pad like ours. Space Station's service forwards
+only the `Usable`/`Enabled` bits to the UI, and there is no locale string for the setting in any of
+the twelve languages, so nothing in their app calls it either. Our pad reports it supported **and
+on**, and sending `19 / 2 / 0` goes through the same path as every other sub-command — so what it
+does is a one-line experiment rather than a dead end. The legacy framing (command 48, `byte[2] =
+9/10`) hints at whether Home reaches the host or is handled on the pad, but that is inference; only
+the pad settles it.
 
 **Do sub-ID 1 first** — quick-switch is the only one here that gives a Linux user something
 otherwise unobtainable: switching profiles from the pad with nothing running.

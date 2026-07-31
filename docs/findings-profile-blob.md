@@ -93,6 +93,14 @@ What this settles without a single guess:
 `gui/models/profile.py`. Verified end to end on hardware: a 25% dead zone compiles, writes in two
 packets and reads back byte-identical.
 
+**One thing the page does not offer that Space Station does: editing the curve itself.** Ours picks
+between the presets below and shows the result; theirs lets you drag `p1` and `p2`, the two interior
+breakpoints, which is what `JoystickSensitivityType.Custom` is for. `set_stick()` already takes
+`point1`/`point2` and the compiler already samples whatever polyline it is given, so this is a GUI
+gap rather than a protocol one. Their own UI makes the curve read-only until Custom is selected, and
+any manual edit forces the type to Custom — worth copying, since a shape that no longer matches a
+preset must not go on claiming to be one.
+
 **J1 is validated by hand, not just by byte.** `tools/stick-feel` applies a curve and drives the
 grip motors from the stick's own output, so the buzz is the reading — no terminal to watch. A 60%
 dead zone compiled to `[0, 0, 0, 0, 26, 56, 87, 118, 150]`, and the bottom of the travel went
@@ -279,7 +287,12 @@ curve and feeling the stick.
 
 ## J6 — macros, and the pad really does play them
 
-**Done, and verified on hardware.** A macro is a sequence of button events the *firmware* plays: the
+**Done, and verified on hardware — recording, playing and clearing. Editing is the gap**: the app
+records a sequence off the pad and deletes it, where Space Station also edits a recorded macro's
+steps (output key, duration, interval) and builds one from nothing without recording at all.
+`set_macro()` takes arbitrary steps already, so that too is GUI work rather than protocol work.
+
+A macro is a sequence of button events the *firmware* plays: the
 key table entry for its trigger key holds `TARGET_MACRO` (32), the steps live at **offset 230**, and
 nothing on the host is involved once it is written. `m_fdg_macro_unit_struct_t` (`btn, count_l,
 count_h, type, step[64]`) and `m_fdg_macro_state_struct_t` (`active`, a unit pointer, `cur_step`,
