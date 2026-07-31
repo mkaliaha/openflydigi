@@ -56,32 +56,51 @@ class WrongDevice(Exception):
     """A device answered, and it is not one this caller is willing to write to."""
 
 
-# DeviceType -> DeviceCode, straight from `FlydigiControllerFactory`. One entry
-# per SKU rather than per model, which is why a single code owns several numbers
-# -- 128 and 129 are the Apex 5 base model and the Eva edition, and SDL's own
-# Flydigi driver recognises exactly that pair.
+# DeviceType -> DeviceCode, from `FlydigiControllerUtil.GetDeviceCodeById`. One
+# entry per SKU rather than per model, which is why a single code owns several
+# numbers -- 128 and 129 are the Apex 5 base model and the Eva edition, and
+# SDL's own Flydigi driver recognises exactly that pair.
+#
+# `GetDeviceCodeById` maps neither `K5LZ = 136` nor `F5_DBZ = 144`, and never
+# returns `fp1` or `fp2` for anything; those reach the dispatch only through
+# `RecognizeDeviceCodeFromProductName`, which derives a code from the product
+# string. The entries below marked "by name" are the enum's own names for those
+# SKUs rather than something the dispatch produces, and they are here because
+# this table exists so a refusal can say *what* it found.
 DEVICE_TYPES = {
     24: "k1", 26: "k1", 29: "k1",
     84: "k2", 86: "k2", 87: "k2", 92: "k2", 93: "k2",
     102: "k2", 103: "k2", 104: "k2",
     128: "k5", 129: "k5", 133: "k5", 134: "k5", 135: "k5", 136: "k5",
     149: "k6", 150: "k6",
-    28: "f3", 80: "f3", 81: "f3", 88: "f3",
+    # `f3` is the plain Vader 3 alone; the three Pro SKUs are their own code.
+    28: "f3",
+    80: "f3p", 81: "f3p", 88: "f3p",
     85: "f4", 91: "f4",
     130: "f5", 144: "f5", 145: "f5",
-    25: "fp1", 30: "fp1", 31: "fp1", 82: "fp1", 83: "fp1", 95: "fp1",
-    132: "fp1", 146: "fp1", 147: "fp1", 148: "fp1",
+    25: "fp1", 30: "fp1", 31: "fp1",                        # by name
+    82: "fp2", 83: "fp2", 89: "fp2", 90: "fp2", 94: "fp2",  # by name
+    95: "fp3",
+    97: "fp3",                                              # by name
+    132: "fp4", 146: "fp4", 147: "fp4", 148: "fp4",
 }
 
+# As Flydigi's own locales name them, so a refusal reads the way the box does.
+# They have no strings for `fp1` or `fp2`; those two names follow the pattern
+# and nothing else.
 PRODUCT_NAMES = {
     "k1": "Apex 3",
     "k2": "Apex 4",          # not the Apex 2
     "k5": "Apex 5",
     "k6": "Apex 6",
     "f3": "Vader 3",
+    "f3p": "Vader 3 Pro",
     "f4": "Vader 4",
-    "f5": "Vader 5",
+    "f5": "Vader 5 Pro",
     "fp1": "Direwolf",
+    "fp2": "Direwolf 2",
+    "fp3": "Direwolf 3",
+    "fp4": "Direwolf 4",
 }
 
 # What this project actually drives. Everything else is recognised so the error

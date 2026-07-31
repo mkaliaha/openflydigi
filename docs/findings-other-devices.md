@@ -19,16 +19,95 @@ model and the Eva edition.
 | `k2` | `GenerateControllerApex4` | **Apex 4** — not the Apex 2 | 84, 86, 87, 92, 93, 102, 103, 104 |
 | `k5` | `GenerateControllerApex5` | **Apex 5 — this pad** | 128, 129, 133, 134, 135, 136 |
 | `k6` | `GenerateControllerApex6` | Apex 6 — not shipped as of July 2026 | 149, 150 (`K6Pro`) |
-| `f3`, `f3p` | `GenerateControllerVader3` | Vader 3 | 28, 80, 81, 88 |
+| `f3` | `GenerateControllerVader3` | Vader 3 | 28 |
+| `f3p` | `GenerateControllerVader3` | Vader 3 Pro | 80, 81, 88 |
 | `f4` | `GenerateControllerVader4` | Vader 4 | 85, 91 |
-| `f5` | `GenerateControllerVader5` | Vader 5 | 130, 144, 145 |
-| `fp1`–`fp4` | `GenerateControllerDirewolf` | Direwolf | 25, 30, 31, 82, 83, 95, 132, 146–148 |
+| `f5` | `GenerateControllerVader5` | Vader 5 Pro | 130, 144, 145 |
+| `fp1` | `GenerateControllerDirewolf` | Direwolf | 25, 30, 31 |
+| `fp2` | `GenerateControllerDirewolf` | Direwolf 2 | 82, 83, 89, 90, 94 |
+| `fp3` | `GenerateControllerDirewolf` | Direwolf 3 | 95, 97 |
+| `fp4` | `GenerateControllerDirewolf` | Direwolf 4 | 132, 146, 147, 148 |
 
 The code column and the number column are not in step. `GetDeviceCodeById` maps neither
 `K5LZ = 136` nor `F5_DBZ = 144`, and no `fp1`/`fp2` at all: those reach the dispatch only through
 `RecognizeDeviceCodeFromProductName`, which derives a code from the product name — "APEX", "VADER"
-or "DireWolf" plus a digit. The enum also carries `Fp2Wired = 89`, `Fp2Switch = 90`, `Fp2M = 94`
-and `Fp3PNaruto = 97`, which neither the table above nor `flydigi/identity.py` maps.
+or "DireWolf" plus a digit. `Fp3PNaruto = 97` is mapped by neither, and is put with `fp3` here on
+its enum name.
+
+**Four rows of that table were wrong until this was checked against the dispatch.** The three
+Vader 3 Pro SKUs are `f3p`, not `f3`; and the whole Direwolf family collapsed onto `fp1`, so a
+Direwolf 4 would have been refused under the name of a Direwolf 1. The table exists so a refusal
+can say what it found, which makes a wrong name the one defect that defeats its purpose.
+
+## Which pads speak `5a a5`, and how to tell without one in hand
+
+`IsOldProtocol()` is `VendorId != 0x37D7`, which is a runtime test — so the question "would this
+model be reachable on Linux" cannot be answered by reading a device's own record. It can be
+answered from `ControllerHidManager`, which partitions on exactly that vendor id and names the
+other side:
+
+```csharp
+CreateDeviceFromHid:
+    ManufacturerString == "Microsoft" ? XInput
+  : VendorId != 0x37D7               ? DInput
+  :                                    NewXInput
+
+FindSpecialHidDevice:
+    if (VendorId == 0x37D7)
+        return UsagePage == 0xFFA0 && pid >> 12 == 2 && pid >> 8 != 8;
+    if (!ProductString.Contains("Direwolf 3") && !…("Direwolf 4")
+        && !…("VADER3") && !…("VADER4") && !…("APEX 4") && !…("APEX4"))
+        return false;
+```
+
+The second branch is the list of models Space Station reaches by **product string** because they
+do not carry Flydigi's vendor id: **Direwolf 3, Direwolf 4, Vader 3, Vader 4, Apex 4**. Everything
+else Flydigi drive is `0x37D7` and NewXInput. Apex 3 and Direwolf 1/2 are in neither branch, which
+is why `GetDeviceCodeById` never returns `fp1` or `fp2` — Space Station cannot find those at all.
+(`"VADER3"` is tested twice in that condition, a harmless slip.)
+
+**A `DeviceType` in the high band does not mean the new protocol, and this nearly went in the
+docs as though it did.** `FP4` is 132, above the Apex 5's 128, and the Direwolf 4 is still old —
+its two model-specific code paths, the `DockSmartStopUsable` flag and the `Serial != 3` carve-out,
+sit in the XInput and DInput classes and appear nowhere in the NewXInput one. The number band
+tracks release order, not dialect.
+
+So the reachable set is **Apex 5, Vader 5, Apex 6** and nothing else.
+
+## What separates the models that are reachable
+
+Straight out of `FlydigiControllerFactory`:
+
+| | Apex 5 (`k5`) | Vader 5 (`f5`) | Apex 6 (`k6`) |
+|---|---|---|---|
+| Keys | 27 | 29 | 27 |
+| `Serial` | 1 | 2 | 1 |
+| `IsSupportForceTrigger` | ✅ | — | ✅ (commands 83–87, a different family) |
+| `IsSupportScreen` | ✅ | — | — |
+| `IsSupportLed` | ✅ | ✅ | — |
+| `IsSupportTriggerVibration` | — | ✅ | — |
+
+**`Serial` is the product line, not a protocol version** — 1 Apex, 2 Vader, 3 Direwolf — and in the
+whole SDK it is read in three places, all the same `Serial != 3` test, deciding whether report rate,
+joystick precision and joystick sensitivity come from the reply or read 0. A Direwolf carve-out and
+nothing else, so it says nothing about an Apex 5 against a Vader 5.
+
+**Four capability flags are consumed and three are inert.** `IsSupportForceTrigger`,
+`IsSupportScreen`, `IsSupportLed` and `IsSupportTriggerVibration` are read across the service layer
+and mapped into the protobuf the renderer receives (`ChargerDataMapper`'s controller twin renames
+them `SupportAdaptTrigger`, `SupportLed`, `SupportScreen`). `IsSupportMotion`, `HasAdcChip` and
+`IsSupportWheel` are set by the factory and read nowhere at all — every pad declares motion, so it
+gates nothing and implies nothing about how gyro is driven.
+
+Two consequences worth having before any per-model work:
+
+  * **PS5 mode is gated on force triggers in Flydigi's own code** — `if (controller.IsSupportForceTrigger && EnablePs5)`. A pad without them has nothing for a virtual DualSense to translate, so DualSense mode is an Apex feature rather than a general one. Everything in [findings-games.md](findings-games.md)'s tier table is trigger-effect delivery and follows the same flag.
+  * **`IsSupportTriggerVibration` changes a live command**, not just a page: `SetVibration` sends `VibrationType.Both` where it is set and `VibrationType.Grip` where it is not. A Vader 5's vibration addresses trigger motors as well as grips.
+
+**Gyro does not distinguish anything.** It reaches a host two ways and neither is protocol-specific:
+the profile blob's motion block at offset 137 maps it onto a stick pad-side, and
+`EnableRawDataTransportIn` streams it live with a variant per dialect — NewXInput **17**, XInput
+**80**, DInput **245**.
 
 ## Multiple pads
 

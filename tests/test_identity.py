@@ -57,7 +57,30 @@ def test_the_table_matches_the_sdk_dispatch():
     check("84 is an Apex 4, not an Apex 2", identity.code_for(84) == "k2")
     check("k2's product name says Apex 4", identity.PRODUCT_NAMES["k2"] == "Apex 4")
     check("an unlisted type is None, not a guess", identity.code_for(200) is None)
-    check("0x59 was never a real DeviceType", identity.code_for(0x59) is None)
+    check("127 was never a real DeviceType", identity.code_for(127) is None)
+    # 0x59 asserted None here for as long as the table was missing the Fp2
+    # SKUs. The enum has carried it all along, as Fp2Wired.
+    check("0x59 is Fp2Wired, and now says so", identity.code_for(0x59) == "fp2")
+
+    # The Vader 3 Pro SKUs are their own code, which this table had as plain f3.
+    check("28 is a plain Vader 3", identity.code_for(28) == "f3")
+    check("80 is a Vader 3 Pro", identity.code_for(80) == "f3p")
+    check("88 is a Vader 3 Pro too", identity.code_for(88) == "f3p")
+
+    # Direwolf: `GetDeviceCodeById` returns fp3 and fp4 and never fp1 or fp2,
+    # and the whole family used to collapse onto fp1 here.
+    check("95 is a Direwolf 3", identity.code_for(95) == "fp3")
+    check("132 is a Direwolf 4", identity.code_for(132) == "fp4")
+    check("148 is a Direwolf 4", identity.code_for(148) == "fp4")
+    check("25 is still a Direwolf 1", identity.code_for(25) == "fp1")
+    check("82 is a Direwolf 2", identity.code_for(82) == "fp2")
+    check("a Direwolf 4 is named as one",
+          identity.name_for(132).startswith("Direwolf 4"), identity.name_for(132))
+
+    # Every code the table produces can be named, or a refusal says "None".
+    unnamed = sorted({c for c in identity.DEVICE_TYPES.values()
+                      if c not in identity.PRODUCT_NAMES})
+    check("every code has a product name", not unnamed, unnamed)
 
 
 def test_an_apex5_is_accepted():

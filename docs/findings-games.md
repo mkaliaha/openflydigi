@@ -336,3 +336,24 @@ The compact version is in [PROGRESS.md](../PROGRESS.md); this is the long-form s
 | 4. PS5 emulation (uhid) | 23 flagged `isPS5`, **any DS5-aware game in practice** | Game natively speaks DualSense; uhid virtual DS5 | Validated in Deathloop — input relay, DS5 binding, effect translation, rumble, gyro and battery. **No haptic audio**, structurally impossible on uhid. Fallback for a machine with no `vhci-hcd`; M1-M6 reach a game only by re-using an existing DualSense control, and only via the pad's own onboard remapping |
 | 4b. PS5 emulation over USB | same, **any DS5-aware game** | usbip + `vhci-hcd` composite DS5: `hid-playstation` binds the HID interface, `snd-usb-audio` the audio ones | Validated in Deathloop, and supersedes tier 4 wherever both work — same input and triggers, *plus* PS5 haptic audio reaching the pad's motors. What the app's DualSense switch turns on |
 | 5. Third-party mods | 11 | Game-side mods (REFramework, ScriptHookV, F4SE, Bannerlord module, F1 telemetry) | Works via 2b; deliberately not shipped or supported — see [third-party-mods.md](third-party-mods.md) |
+
+**The tiers stop being interchangeable once a second pad is on the desk**, and they split by where
+the effect data comes from rather than by tier number.
+
+  * **Tier 1 is the only one that scales for free.** Command `82` is a *pad-side* setting — the pad
+    drives its own triggers from its own rumble, with nothing host-side in the per-frame loop — so
+    every bound pad reacts correctly and independently. Applying it to all of them is a loop.
+  * **Tiers 2 and 3 are single-source by nature.** Forza's Data Out describes one car and
+    XGameMonitor reads one player's state out of memory. There is no second player *in the data*,
+    so mirroring the same effects to every pad is the only coherent multi-pad behaviour.
+  * **Tier 2b carries addressing nobody uses.** DSX's `parameters[0]` is a controller index.
+    `flydigi/dsx.py` ignores it, following `OnTriggerCommandReceived`, which ignores it too.
+    Whether any mod populates it is unmeasured.
+  * **Tiers 4/4b are per-device for input, rumble and triggers, and single for haptic audio** —
+    measured, and ruled out on cost rather than on capability. See
+    [findings-haptics.md](findings-haptics.md) and [PROGRESS.md](../PROGRESS.md#ruled-out).
+
+Space Station has the same ceiling and less of a choice about it: every trigger path in
+`ControllerRepository` — five call sites — is
+`DeviceSlots.FirstOrDefault(c => c?.IsSupportForceTrigger ?? false)`, so it drives the first
+capable pad and no other, out of the four its `CommunicationManager` can hold.

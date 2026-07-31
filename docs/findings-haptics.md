@@ -517,6 +517,34 @@ when the relay is run by hand. `tools/flydigi-ds5`, the uhid relay, takes the in
     and `peak` for all four. Peak is set by one sample and never lowered, so on its own a momentary
     click at stream open looks identical to continuous haptics.
 
+## Two DualSenses at once: what is per-device and what is not
+
+Measured with the virtual pad attached over USB/IP beside a real DualSense, both `054c:0ce6`.
+
+**They coexist.** Both bound `hid-playstation` and both kept a hidraw node, because the committed
+feature report `0x09` carries inputtino's placeholder address rather than the capture's, so no two
+addresses collide. Each got its own 4-channel sink:
+
+    …-00.Direct__Direct__sink     card1   /devices/platform/vhci_hcd.0/usb5/5-1/…   virtual
+    …-00.2.Direct__Direct__sink   card2   /devices/pci…/usb3/3-1/…                  real
+
+**HID output reports are per-device.** A rumble report written to both nodes at once drove both:
+the real pad's motors, and — through the relay — the Apex 5's. Adaptive trigger effects ride the
+same report `0x02` that carried the rumble, so input, rumble and triggers are all per-device.
+
+**Haptic audio is not, and that is the game's doing.** Deathloop with both attached opened exactly
+one DualSense stream at a time and rebuilt it three times in thirty seconds, landing on a different
+sink each time — new stream id every open, so the game was tearing it down rather than PipeWire
+moving it. The real pad had a stream opened against its sink three times and never vibrated once.
+A title that assumes a single DualSense re-resolving which pad is *the* pad is what that looks
+like, and no amount of emulation changes it: two endpoints exist, and the game asks for one.
+
+**Two virtual DualSenses would evict each other.** They would be perfect twins — the same committed
+`0x09` address — which is the eviction above turned inward. Multi-instance would need the address
+derived per pad, from the physical pad's uid (command 4).
+
+That is measured rather than built: see [PROGRESS.md](../PROGRESS.md#ruled-out).
+
 ## Peripheral-mode SBC
 
 An SBC in peripheral mode — a real UDC, a configfs gadget with `hid.usb0` + `uac1.usb0`, one cable

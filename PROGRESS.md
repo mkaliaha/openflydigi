@@ -409,6 +409,19 @@ argument, the hardware proof of 166, and the QML testing traps are in
 
 ## Ruled out
 
+  * **Adaptive triggers for a second pad are one MAC away, and still not worth it.** Measured with
+    the virtual DualSense attached beside a real one: they coexist, and a rumble report written to
+    both nodes at once drove both — the real pad's motors and, through the relay, the Apex 5's. So
+    input, rumble and adaptive triggers are all per-device, since triggers ride the same report
+    `0x02` as the rumble. Haptic **audio** is the exception, and it is the game's decision rather
+    than the stack's: Deathloop with both attached opened one stream at a time and rebuilt it three
+    times in thirty seconds, landing on a different sink each time, while the real pad never
+    vibrated. Two *virtual* pads would evict each other outright, sharing the committed `0x09`
+    address, so multi-pad would need that derived per pad from the physical uid. It stays unbuilt
+    because the case is two Apex 5s in a local co-op game that also does DualSense haptics, and
+    those barely exist. What does work per-pad for free is tier 1, the vibration bind: it is a
+    pad-side setting with nothing host-side in the loop, so every pad drives its own triggers from
+    its own rumble. → [docs/findings-haptics.md](docs/findings-haptics.md)
   * **Older pads are ruled out by the pad, not by the protocol.** `IsOldProtocol()` is
     `VendorId != 0x37D7`: everything before this generation speaks an older dialect of the same
     protocol — same blob and parsers, but a 15-byte `a5 <cmd> <sub>` frame, renumbered commands,
