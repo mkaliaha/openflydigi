@@ -41,20 +41,34 @@ shoulder pair at the top edge either side of the triggers, labelled **LM** and *
 C and Z sit on the front face beside the ABXY block. A Vader 5 declares C, Z, M5 *and* M6
 together, so the SDK treats them as six distinct extras rather than two namings of one pair.
 
-**A key the pad has is not necessarily a key Space Station will rebind.** The factory list
-enumerates the hardware; the k5 hitbox map then carries a `clickable` flag deciding what the
-remapping UI offers, and three are false there: Fn (id 24, the SDK's `Menu`, which switches
-profiles), Turbo (25) and Home (27). Clicking any of them on the device image returns
-`ControllerKey_None` and never reaches the callback.
+**The factory list is the capability list. Space Station's k5 file is not.** That file
+(`asar/.vite/renderer/main_window/assets/device_config_k5-*.js`) is a UI layout table — `id`,
+`name`, `position`, `size`, `rotation` and a `clickable` flag — describing how to draw the
+interactive controller picture, one absolutely-positioned element per entry. `clickable` says
+whether that rectangle reacts to a click, nothing more. It is false for Fn (id 24, the SDK's
+`Menu`, which switches profiles), Turbo (25) and Home (27), so clicking those three returns
+`ControllerKey_None` and their picture offers no way to select them.
 
-**That flag is their policy, not the firmware's.** Measured on a wired Apex 5, both directions:
+**An inert rectangle in their app is not the firmware refusing.** Measured on a wired Apex 5, both
+directions:
 `m1 -> home` made M1 fire the Guide button, and `home -> a` made Home send A with no Guide event
 reaching the pad's evdev node at all. So `APEX5_KEYS` keeps `home` — the remap is worth having for
 a pad whose Home button has failed, which is the one case their UI leaves no way out of. Fn and
-Turbo are likely the same, untried, and deliberately not offered.
+Turbo are likely the same and are untried, but the argument does not carry across: Home takes a
+press every time a Steam overlay is opened, while Fn and Turbo take a few dozen in half a year, so
+neither is offered.
 
-The same map treats `JsLeft` (240) and `JsRight` (241) as rebindable — stick-as-button, which this
-project does not implement.
+`JsLeft` (240) and `JsRight` (241) are in that same file and are `clickable`, but they are the
+stick *bodies* — the rectangles over the two sticks, distinct from the `Thl`/`Thr` clicks at ids 14
+and 15, which are ordinary remappable keys. Clicking one switches the panel to the joystick tab for
+that side; right-clicking a stick click or a trigger jumps to its settings page.
+
+What that tab configures — `JoystickMapType {Joystick=0, Keyboard=1, Mouse=2, DPad=3}` — never
+reaches the pad, and is ruled out in [PROGRESS.md](../PROGRESS.md#ruled-out) along with the rest of
+the keyboard and mouse mapping. Two details specific to sticks: `MappingConfigParser` hardcodes
+`MapType = Joystick` when reading a blob, so a stick's binding cannot be recovered from one at all,
+and the single consequence the pad does store is 127 in the centre byte, meaning "not acting as a
+stick" ([findings-profile-blob.md](findings-profile-blob.md)).
 
 The trigger technology differs:
 

@@ -233,23 +233,32 @@ KEY_IDS = {name: key_id for key_id, name in KEY_NAMES.items()}
 # Remappable buttons on an Apex 5, in the order a UI should present them. The
 # key table has 32 slots but most are unpopulated on this model.
 #
-# Two lists decide this and they are not the same. `GenerateControllerApex5`
-# (FlydigiControllerFactory.cs:525) enumerates the keys the pad *has*: no C and
-# no Z -- those are Vader parts, declared only by the Vader3/4/5 factories --
-# and it does carry M5 and M6. Space Station's own UI then marks which of those
-# may be *rebound*, as a `clickable` flag per key in the renderer's k5 hitbox
-# map (asar/.vite/renderer/main_window/assets/device_config_k5-*.js), and three
-# are false there: Fn (24), Turbo (25) and Home (27). Having a button is not the
-# same as being able to rebind it.
+# `GenerateControllerApex5` (FlydigiControllerFactory.cs:525) is what decides
+# it. That is the device capability list, and it enumerates the keys the pad
+# *has*: no C and no Z -- those are Vader parts, declared only by the
+# Vader3/4/5 factories -- and it does carry M5 and M6.
+#
+# The renderer's k5 file
+# (asar/.vite/renderer/main_window/assets/device_config_k5-*.js) is *not* a
+# second capability list, whatever it looks like. It is a UI layout table --
+# id, name, position, size, rotation and a `clickable` flag -- that draws the
+# interactive controller picture, one absolutely-positioned div per entry.
+# `clickable` decides whether that rectangle reacts to a click at all: it is
+# false for Fn (24), Turbo (25) and Home (27), so Space Station's image offers
+# no way to select those three, and true for JsLeft (240) and JsRight (241),
+# where a click opens the joystick tab rather than a remap. It says what their
+# interface does, and nothing about what the firmware accepts -- see Home.
 #
 # Fn is what the pad is silkscreened with for key id 24, which the SDK calls
 # Menu; it switches profiles. Turbo arms the per-key turbo modes rather than
-# being a mappable input of its own. Neither is listed below. Both are probably
-# rebindable in the same way Home turned out to be, but neither has been tried
-# on this pad and nothing here needs the answer.
+# being a mappable input of its own. Neither is listed below, and neither has
+# been tried on hardware: both are probably rebindable in the same way Home
+# turned out to be, but the case for offering it does not carry across. Home
+# takes a press every time a Steam overlay is opened; Fn and Turbo take a few
+# dozen in half a year, so the worn-out-button argument below is theirs alone.
 #
-# Home *is* listed, because that flag is Space Station's policy and not the
-# firmware's refusal -- measured on a wired Apex 5, both directions:
+# Home *is* listed, because an inert rectangle in their app is not the firmware
+# refusing anything -- measured on a wired Apex 5, both directions:
 #
 #   m1 -> home   pressing M1 fired the Guide button
 #   home -> a    pressing Home sent A, with no Guide event reaching the pad's
@@ -259,9 +268,14 @@ KEY_IDS = {name: key_id for key_id, name in KEY_NAMES.items()}
 # offering for a pad whose Home button has failed, which is the one case Space
 # Station's UI leaves no way out of.
 #
-# Not listed, and a genuine gap rather than a deliberate omission: Space Station
-# also treats JsLeft (240) and JsRight (241) as rebindable, which is stick-as-
-# button and has no support here.
+# JsLeft and JsRight are the stick bodies, not the Thl/Thr clicks at ids 14 and
+# 15, which are ordinary keys here. What their tab configures -- `JoystickMapType
+# {Joystick=0, Keyboard=1, Mouse=2, DPad=3}` -- never reaches the pad: the parser
+# hardcodes `MapType = Joystick` when reading a blob, no command factory in the
+# SDK carries a keyboard key id, and Space Station converts a stick to keyboard
+# or mouse on the host (KeyboardMouseInjectRunner). All the pad ever stores is
+# 127 in a stick's centre byte, meaning "not acting as a stick", which is why
+# that value is a sentinel above rather than a dead zone.
 APEX5_KEYS = [
     "a", "b", "x", "y",
     "up", "down", "left", "right",
