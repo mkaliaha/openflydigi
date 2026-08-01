@@ -433,8 +433,18 @@ class DevicesModel(QAbstractListModel):
             # The daemon reads this file for every route that holds one pad.
             # Written on the change rather than at shutdown: a window that is
             # killed should not take the choice with it.
-            self._prefs.set_primary_pad(selector)
-            self._prefs.save()
+            #
+            # **Only a pad this project drives.** Looking at an unsupported pad
+            # is allowed -- the row is listed, and the page says what it is --
+            # but this field is not "what the window is showing", it is "which
+            # pad the routes drive", and the three drivers the daemon starts
+            # rewrite trigger effects for the length of a session. Writing a
+            # Vader 5 here would aim commands 81 and 82 at it from one click in
+            # a picker. The drivers refuse it themselves as well; this stops the
+            # preferences file ever asking them to.
+            if decoded[self.SupportedRole]:
+                self._prefs.set_primary_pad(selector)
+                self._prefs.save()
         self.padChanged.emit()
         self.padSelected.emit(selector)
 

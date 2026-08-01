@@ -1670,6 +1670,38 @@ def test_choosing_a_pad_tells_the_daemon_and_choosing_a_dock_does_not():
     check("and names it", model.currentLabel == "Shelf", model.currentLabel)
 
 
+def test_a_pad_this_project_does_not_drive_never_becomes_the_daemon_s():
+    """Looking at a Vader 5 is allowed; aiming the drivers at it is not.
+
+    `primary_pad` is not "what the window is showing" -- it is the selector the
+    daemon hands to `flydigi-monitor`, `flydigi-forza` and `flydigi-dsx` as
+    `--device`, and each of those holds that pad for a whole session rewriting
+    its trigger effects. Every Flydigi pad of this generation opens identically,
+    so before this the picker offering an unsupported pad meant one click aimed
+    commands 81 and 82 at it. The drivers refuse it themselves too; this is the
+    half that stops the preferences file ever asking.
+    """
+    model, settings = devices_model()
+    model.devicesReceived([pad_entry(2, "Desk"),
+                           pad_entry(4, "Vader", supported=False)])
+    asked = []
+    model.padSelected.connect(asked.append)
+
+    model.select(0)
+    check("the supported pad is written through",
+          prefs.Prefs(settings.path).primary_pad() == "uid:" + "02" * 13,
+          str(prefs.Prefs(settings.path).primary_pad()))
+
+    model.select(1)
+    check("the window does follow the unsupported pad",
+          model.pad == "uid:" + "04" * 13, model.pad)
+    check("and the worker is still told, so its pages can say what it is",
+          len(asked) == 2, str(asked))
+    check("but the daemon's file is left on the pad it can drive",
+          prefs.Prefs(settings.path).primary_pad() == "uid:" + "02" * 13,
+          str(prefs.Prefs(settings.path).primary_pad()))
+
+
 def test_a_dock_nobody_picked_is_still_read():
     """A dock on the bus has to be pointed at without being chosen first.
 
@@ -3701,6 +3733,7 @@ def main():
                  test_an_unsupported_feature_is_reported_as_such_not_as_off,
                  test_the_device_list_shows_what_each_device_is,
                  test_choosing_a_pad_tells_the_daemon_and_choosing_a_dock_does_not,
+                 test_a_pad_this_project_does_not_drive_never_becomes_the_daemon_s,
                  test_a_dock_nobody_picked_is_still_read,
                  test_the_selection_survives_a_pad_moving_to_another_node,
                  test_a_pad_that_goes_away_is_not_forgotten,

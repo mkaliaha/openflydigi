@@ -23,7 +23,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flydigi import effects, monitor  # noqa: E402
+from flydigi import effects, identity, monitor  # noqa: E402
 from flydigi import registry  # noqa: E402
 from flydigi.device import DeviceNotFound  # noqa: E402
 
@@ -87,6 +87,15 @@ def main():
             ctrl = registry.open_pad(args.device)
         except DeviceNotFound:
             sys.exit("controller not found")
+        # `open_pad` answers "which device", never "may this be written to".
+        # This session rewrites trigger effects continuously, and --device can
+        # name any pad on the bus -- including one this project does not drive,
+        # which the app's picker will happily write into the preferences file
+        # this daemon reads.
+        try:
+            identity.require(ctrl)
+        except identity.WrongDevice as exc:
+            sys.exit(str(exc))
         log(f"controller: {ctrl.path}")
 
     engine = monitor.Engine(config, ctrl, verbose=not args.quiet)

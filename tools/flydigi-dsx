@@ -21,7 +21,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flydigi import dsx, effects  # noqa: E402
+from flydigi import dsx, effects, identity  # noqa: E402
 from flydigi import registry  # noqa: E402
 from flydigi.device import DeviceNotFound  # noqa: E402
 
@@ -60,6 +60,12 @@ def main():
             ctrl = registry.open_pad(args.device)
         except DeviceNotFound:
             sys.exit("controller not found -- is it connected?")
+        # See tools/flydigi-monitor: selection is not permission, and this
+        # session rewrites trigger effects for as long as the mod is sending.
+        try:
+            identity.require(ctrl)
+        except identity.WrongDevice as exc:
+            sys.exit(str(exc))
         log(f"controller: {ctrl.path}")
 
     listener = dsx.Listener(ctrl, forward_port=args.forward,
