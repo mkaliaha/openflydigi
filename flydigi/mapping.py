@@ -43,6 +43,7 @@ not into any packet:
 Everything this module does not interpret is carried through byte-for-byte, so
 writing a config back cannot disturb settings it does not understand.
 """
+import random
 import struct
 
 from . import blobs
@@ -552,6 +553,31 @@ def apply_config(ctrl, cfg_id, wait=0.5):
     return False
 
 
+def next_data_version(current=None):
+    """A fresh change tag for a slot, different from the one it carries now.
+
+    The tag is how anything holding a cached copy of a profile decides whether
+    that copy is still good: `read_status` reports one per slot without reading
+    a config at all. Space Station rerolls a random one on *every* save for
+    exactly that reason -- `SaveConfig` loops on `Random.Next(65535)` until it
+    differs from the current value -- and then trusts the tag thereafter.
+
+    Which is why leaving it alone, as this module used to do, was wrong rather
+    than merely conservative. A rename written with the old tag lands on the
+    pad and every other application goes on showing the name it had cached,
+    because the one flag that says "this changed" says it did not. Measured
+    here: renaming a slot through the CLI left all four tags at their previous
+    values.
+
+    0xFFFF is skipped -- that is what an untouched slot reads, so handing it
+    back would claim a written slot had never been written.
+    """
+    while True:
+        value = random.randrange(0, 0xFFFF)
+        if value != current:
+            return value
+
+
 def save_config(ctrl, version=0, wait=2.0):
     """Commit the working config to flash. Slow -- the pad takes seconds.
 
@@ -560,12 +586,10 @@ def save_config(ctrl, version=0, wait=2.0):
     10 second timeout where every other command gets 500 ms, which is what a
     flash write looks like.
 
-    The observed values (23224, 65078, 65535 for an untouched slot) look like
-    random tags for change detection rather than a counter, so callers should
-    pass the config's own `data_version` to leave it alone. Passing 0 -- the
-    default -- overwrites the slot's id with zero, which is almost certainly
-    not what you want; it is kept as the default only because nothing has yet
-    confirmed what the pad does with the value.
+    Pass `next_data_version(config.data_version)`, not the config's own tag:
+    the point of the field is to change when the profile does. Passing 0 -- the
+    default -- claims the tag is zero, which is a lie of a different shape and
+    is kept only because nothing has confirmed what the pad does with it.
     """
     payload = struct.pack("<H", version & 0xFFFF)
     for body in blobs.replies(ctrl, build(CMD_SAVE, payload), wait,
@@ -614,6 +638,12 @@ class MappingConfig:
     @property
     def data_version(self):
         return struct.unpack_from("<H", self.blob, OFF_DATA_VERSION)[0]
+
+    @data_version.setter
+    def data_version(self, value):
+        # Kept in step with what command 166 was told, so a caller's own copy
+        # agrees with what `read_status` will report for the slot afterwards.
+        struct.pack_into("<H", self.blob, OFF_DATA_VERSION, int(value) & 0xFFFF)
 
     @property
     def title(self):

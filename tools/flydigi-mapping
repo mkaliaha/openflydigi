@@ -163,13 +163,19 @@ def commit(ctrl, cfg_id, new, old, save):
         mapping.apply_config(ctrl, cfg_id)
         print("re-applied the profile so the pad plays the new macro")
     if save:
-        # The config's own id, not the default 0: command 166 writes whatever
-        # it is given into the slot's version tag, and `read_status` reports
-        # that tag as how a caller knows whether a cached copy is still
-        # current. Saving with 0 answers "has this changed?" with a lie. The
-        # GUI has always passed it; this did not.
-        print("saved to flash" if mapping.save_config(ctrl, new.data_version)
-              else "warning: no reply to save -- change may be lost on power cycle")
+        # A *fresh* tag, not the config's own. Command 166 writes whatever it
+        # is given into the slot's version tag, and `read_status` reports that
+        # tag as how anything knows whether a cached copy is still current --
+        # so saving with 0 answers "has this changed?" with a lie, and saving
+        # with the previous value answers it with a different one. Measured:
+        # renaming a slot and re-committing its old tag left every other
+        # application showing the name it had cached.
+        version = mapping.next_data_version(new.data_version)
+        if mapping.save_config(ctrl, version):
+            new.data_version = version
+            print(f"saved to flash (slot tag now {version})")
+        else:
+            print("warning: no reply to save -- change may be lost on power cycle")
     else:
         print("not saved -- pass --save to keep it across a power cycle")
     # Storing a trigger effect does not start it. Space Station replays the

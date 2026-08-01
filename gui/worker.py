@@ -437,9 +437,16 @@ class DeviceWorker(QObject):
                 # motors audibly, and a remap has no need of it.
                 if sent and (old is None or new.macro_page != old.macro_page):
                     mapping.apply_config(ctrl, cfg_id)
-                # Pass the config's own id so committing does not overwrite the
-                # slot's version tag with zero.
-                saved = mapping.save_config(ctrl, new.data_version) if save else False
+                # Roll a fresh slot tag rather than re-committing the old one.
+                # The tag is the only thing that tells another application its
+                # cached copy of this profile is stale, so saving under the
+                # previous value writes the change and announces that nothing
+                # changed -- which is why a rename made here never showed up
+                # anywhere else. Space Station rerolls on every save too.
+                version = mapping.next_data_version(new.data_version)
+                saved = mapping.save_config(ctrl, version) if save else False
+                if saved:
+                    new.data_version = version
                 # A stored trigger effect is inert until a live command starts
                 # it -- writing the block and applying the config engages
                 # nothing, which is measured, not assumed. Space Station
