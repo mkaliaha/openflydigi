@@ -190,6 +190,41 @@ TestCase {
                   "the slot-1 read never landed");
     }
 
+    function test_the_reset_button_asks_before_it_writes() {
+        // 175 is a flash write with no undo, and it takes the profile's name
+        // with it -- the title is a blob field like everything else. A button
+        // that did it on one click would be the wrong shape whatever it said.
+        let button = findChild(page, "resetButton");
+        verify(button, "no reset button");
+        verify(button.enabled, "a loaded profile should be resettable");
+
+        let dialog = findChild(page, "resetDialog");
+        verify(dialog, "no confirmation for a destructive flash write");
+        verify(!dialog.visible, "the dialog should not start open");
+
+        // `clicked()` rather than `mouseClick()`: this card has grown enough
+        // that the button sits below the fold in the test window, and a
+        // synthetic click at an off-screen position lands nowhere. Emitting the
+        // signal still runs the page's own `onClicked`, which is the binding
+        // under test.
+        button.clicked();
+        tryVerify(() => dialog.visible, 2000, "the button did not ask first");
+        dialog.close();
+    }
+
+    function test_copying_to_the_switch_slot_names_the_slot() {
+        // The pad keeps four more profiles for Switch mode and nothing on a PC
+        // can read them back, so the label has to say which one is being
+        // written or there is no way to tell what happened.
+        let button = findChild(page, "switchCopyButton");
+        verify(button, "no switch copy button");
+        verify(button.enabled, "a loaded profile should be copyable");
+        compare(App.profile.switchSlot, App.profile.cfgId + 4,
+                "the open profile should map onto the second bank");
+        verify(button.description.indexOf(String(App.profile.switchSlot)) >= 0,
+               "the label does not say which slot: " + button.description);
+    }
+
     function test_backup_and_restore_wait_for_a_profile() {
         verify(findChild(page, "backupButton").enabled,
                "a read profile can be backed up");

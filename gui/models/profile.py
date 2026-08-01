@@ -1544,6 +1544,8 @@ class ProfileModel(QObject):
     # straight connect with no adapter in between.
     writeRequested = Signal(int, bytes, bytes, bool)   # cfg_id, blob, previous, save
     loadRequested = Signal(int)
+    resetRequested = Signal(int)         # cfg_id -- command 175
+    switchCopyRequested = Signal(int)    # cfg_id -- command 171
     restoreFailed = Signal(str)
     saveRefused = Signal(str)
 
@@ -1923,6 +1925,38 @@ class ProfileModel(QObject):
                                   self._edited.title)
             self._saved = bool(saved)
             self.markChanged()
+
+    @Slot()
+    def resetToFactory(self):
+        """Ask the pad to restore the open profile. Destructive, and no undo.
+
+        Deliberately takes no argument: it acts on the profile that is open,
+        which is the one the pad is running, which is the one the page is
+        describing. A slot id from QML could name a profile the user is not
+        looking at.
+        """
+        if self._cfg_id < 0 or self._edited is None:
+            return
+        self.resetRequested.emit(self._cfg_id)
+
+    @Slot()
+    def copyToSwitch(self):
+        """Copy the open profile into the matching Switch slot -- command 171.
+
+        Same reasoning as above about acting on the open profile, and a harder
+        constraint behind it: 171 commits whatever the pad is *running*, so a
+        slot id that was not the open one would copy the wrong profile.
+        """
+        if self._cfg_id < 0 or self._edited is None:
+            return
+        self.switchCopyRequested.emit(self._cfg_id)
+
+    @Property(int, notify=cfgIdChanged)
+    def switchSlot(self):
+        """Which Switch slot the open profile copies into, for the label."""
+        if self._cfg_id < 0:
+            return -1
+        return mapping.switch_cfg_id(self._cfg_id)
 
     # -- backup and restore ------------------------------------------------
 

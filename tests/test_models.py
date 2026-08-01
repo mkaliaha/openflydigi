@@ -100,6 +100,42 @@ def test_revisiting_a_profile_re_reads_it_because_the_read_is_the_switch():
           requested == [0, 1, 0], str(requested))
 
 
+def test_reset_and_switch_copy_act_on_the_open_profile():
+    """Both take no argument, and that is the point.
+
+    171 commits whatever the pad is *running*, and reading a profile is what
+    makes it run -- so a slot id arriving from QML could name a profile the
+    user is not looking at and copy the wrong one. 175 is merely destructive,
+    which is a weaker reason for the same rule.
+    """
+    profile, _ = make_profile()
+    resets, copies = [], []
+    profile.resetRequested.connect(resets.append)
+    profile.switchCopyRequested.connect(copies.append)
+
+    profile.resetToFactory()
+    profile.copyToSwitch()
+    check("reset asks for the open slot", resets == [0], str(resets))
+    check("so does the switch copy", copies == [0], str(copies))
+
+    check("the open profile knows which Switch slot it copies into",
+          profile.switchSlot == 4, str(profile.switchSlot))
+
+
+def test_neither_acts_before_a_profile_is_open():
+    """A device write aimed at nothing is worse than a disabled button."""
+    profile = models.ProfileModel()
+    profile.setSlotCount(4)
+    resets, copies = [], []
+    profile.resetRequested.connect(resets.append)
+    profile.switchCopyRequested.connect(copies.append)
+
+    profile.resetToFactory()
+    profile.copyToSwitch()
+    check("nothing is reset before a profile is open", resets == [], str(resets))
+    check("and nothing is copied", copies == [], str(copies))
+
+
 def test_a_loaded_profile_is_clean():
     profile, _ = make_profile()
     check("a freshly loaded profile is open", profile.loaded)
@@ -3896,6 +3932,8 @@ def main():
                  test_the_last_gesture_is_the_one_that_lands,
                  test_sending_waits_for_the_framing_it_would_send,
                  test_the_screen_page_reads_fields_rather_than_recomputing_them,
+                 test_reset_and_switch_copy_act_on_the_open_profile,
+                 test_neither_acts_before_a_profile_is_open,
                  test_quitting_mid_encode_leaves_no_thread_running):
         test()
     total = len(PASSED) + len(FAILED)

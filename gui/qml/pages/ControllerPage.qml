@@ -194,6 +194,42 @@ Kirigami.ScrollablePage {
             FormCard.FormDelegateSeparator {}
 
             FormCard.FormButtonDelegate {
+                objectName: "switchCopyButton"
+                text: "Copy to the Switch profile"
+                // Named rather than described as "apply to Switch", because
+                // what it copies into is a slot with a number the pad's own
+                // screen shows.
+                description: App.profile.switchSlot < 0
+                             ? ""
+                             : "The pad keeps four more profiles for Switch "
+                               + "mode. This copies the open one into slot "
+                               + App.profile.switchSlot + ". Nothing on a PC "
+                               + "can read those back — only a Switch shows "
+                               + "the result."
+                icon.name: "edit-copy"
+                enabled: App.profile.loaded
+                onClicked: App.profile.copyToSwitch()
+            }
+
+            FormCard.FormDelegateSeparator {}
+
+            FormCard.FormButtonDelegate {
+                objectName: "resetButton"
+                text: "Restore this profile to factory…"
+                // The name is the part nobody expects to lose, so it is in the
+                // description rather than only in the dialog: the title lives
+                // in the profile blob, so a factory restore brings the factory
+                // name back with it, which on this pad is Chinese.
+                description: "Every mapping, the sticks, the triggers, the "
+                             + "macros — and the name."
+                icon.name: "edit-undo"
+                enabled: App.profile.loaded
+                onClicked: resetDialog.open()
+            }
+
+            FormCard.FormDelegateSeparator {}
+
+            FormCard.FormButtonDelegate {
                 objectName: "backupButton"
                 text: "Back up this profile…"
                 icon.name: "document-save-as"
@@ -273,6 +309,31 @@ Kirigami.ScrollablePage {
                 description: "Steam identifies itself as SDL."
             }
         }
+    }
+
+    // Asked about rather than just done: 175 is a flash write with no undo, and
+    // the casualty nobody predicts is the name, since the title is a field of
+    // the profile blob like any other.
+    Kirigami.PromptDialog {
+        id: resetDialog
+        objectName: "resetDialog"
+        title: "Restore to factory?"
+        subtitle: "Profile " + (App.profile.cfgId + 1) + " goes back to how it "
+                  + "left the factory: every mapping, the sticks, the triggers, "
+                  + "the macros — and its name, which becomes the factory one "
+                  + "again. This is written to the pad's flash and cannot be "
+                  + "undone.\n\nBack it up first if you want it back."
+        standardButtons: Kirigami.Dialog.Cancel
+        customFooterActions: [
+            Kirigami.Action {
+                text: "Restore to factory"
+                icon.name: "edit-undo"
+                onTriggered: {
+                    App.profile.resetToFactory();
+                    resetDialog.close();
+                }
+            }
+        ]
     }
 
     Dialogs.FileDialog {

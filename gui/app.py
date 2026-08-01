@@ -160,6 +160,8 @@ class App(QObject):
         self.requestVibration.connect(worker.apply_vibration)
         self._profile.loadRequested.connect(worker.load_profile)
         self._profile.writeRequested.connect(worker.write_profile)
+        self._profile.resetRequested.connect(worker.reset_profile)
+        self._profile.switchCopyRequested.connect(worker.copy_to_switch)
         self._profile.macros.recordRequested.connect(worker.record_macro)
         self._lighting.writeRequested.connect(worker.write_lighting)
         self.requestScreen.connect(worker.refresh_screen)

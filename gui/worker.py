@@ -373,6 +373,88 @@ class DeviceWorker(QObject):
         self.active_changed.emit(cfg_id)
         self.status.emit(f"Profile {cfg_id + 1} read")
 
+    @Slot(int)
+    def reset_profile(self, cfg_id):
+        """Command 175: put one slot back to factory and re-read it.
+
+        The read afterwards is not a nicety. The slot is a different profile
+        now, so everything the app is holding for it is stale -- and the read is
+        also what puts the pad on the restored profile, which is the state the
+        rest of this class assumes.
+        """
+        self.status.emit(f"Restoring profile {cfg_id + 1} to factory…")
+
+        def work(ctrl):
+            with ctrl.claim():
+                if not mapping.reset_config(ctrl, cfg_id):
+                    return None
+                config = mapping.read_config(ctrl, cfg_id)
+                effects.engage_stored(ctrl, config)
+                return config
+
+        config = self._attempt(work, f"restoring profile {cfg_id + 1}")
+        if config is None:
+            return
+        self.profile_loaded.emit(cfg_id, bytes(config.blob), config.title)
+        self.active_changed.emit(cfg_id)
+        self.status.emit(f"Profile {cfg_id + 1} restored to factory "
+                         f"— it is called {config.title!r} again")
+
+    @Slot(int)
+    def copy_to_switch(self, cfg_id):
+        """Command 171: copy one profile into the matching Switch slot.
+
+        171 carries a version and a slot id and no blob at all: the pad copies
+        its own working memory into the slot named. So the profile has to be
+        read first -- reading is what makes it the running one -- and anything
+        a Switch cannot run has to be stripped *on the pad* rather than in a
+        copy here, because a copy here is not what gets committed.
+
+        That edit is then undone. It is working memory only -- no 166 anywhere
+        in this method, so the source profile's saved copy is never at risk --
+        but leaving someone's running profile silently normalised is a side
+        effect they did not ask for. Nothing made in this app can trigger it:
+        keyboard binding is host-side and unimplemented here, so `stripped` is
+        empty unless the profile came from Space Station.
+        """
+        target = mapping.switch_cfg_id(cfg_id)
+        self.status.emit(f"Copying profile {cfg_id + 1} to Switch slot {target}…")
+
+        def work(ctrl):
+            with ctrl.claim():
+                config = mapping.read_config(ctrl, cfg_id)
+                original = mapping.MappingConfig(bytes(config.blob), cfg_id)
+                stripped = config.normalise_for_switch()
+                if stripped:
+                    mapping.write_config(ctrl, cfg_id, config, old=original)
+                version = mapping.next_data_version(config.data_version)
+                ok = mapping.save_switch_config(ctrl, target, version)
+                if stripped:
+                    # Put the running profile back. The stripped copy only had
+                    # to exist so that 171 had something to commit -- the pad
+                    # copies its own working memory and there is no blob in the
+                    # packet, so the edit could not be avoided. Writing the
+                    # original back is cheaper than the switch-away-and-back
+                    # that would page it in from flash, and it costs no audible
+                    # re-seat of the trigger motors.
+                    mapping.write_config(ctrl, cfg_id, original, old=config)
+                    config = original
+                effects.engage_stored(ctrl, config)
+                return ok, stripped, config
+
+        result = self._attempt(work, f"copying profile {cfg_id + 1} to Switch")
+        if result is None:
+            return
+        ok, stripped, config = result
+        self.profile_loaded.emit(cfg_id, bytes(config.blob), config.title)
+        self.active_changed.emit(cfg_id)
+        if not ok:
+            self.status.emit("The pad did not acknowledge the Switch copy")
+            return
+        note = f"; dropped: {', '.join(stripped)}" if stripped else ""
+        self.status.emit(f"Profile {cfg_id + 1} copied to Switch slot "
+                         f"{target}{note}")
+
     @Slot()
     def refresh_transport(self):
         """Who holds the pad, and whether it is allowed to be held.
