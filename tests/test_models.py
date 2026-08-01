@@ -254,6 +254,231 @@ def test_the_page_stops_offering_more_than_the_pad_holds():
     check("the budget is reported", macros.stepsUsed == 10, str(macros.stepsUsed))
 
 
+def test_a_macro_can_be_built_without_recording_one():
+    """The pad is not involved, so a macro nobody could play by hand is typable.
+
+    Seeded with a tap rather than left empty: a key bound to a macro with no
+    body is a key that does nothing at all, which is a worse starting point
+    than one that does something obvious and wrong.
+    """
+    profile, _ = make_profile()
+    macros = profile.macros
+    macros.build(key_index("m1"))
+
+    check("a macro appears", macros.count == 1, str(macros.count))
+    check("bound to the key that was picked",
+          role(macros, 0, b"label") == "M1", str(role(macros, 0, b"label")))
+    check("the key table points at it",
+          profile.config.mapping("m1")[0] == "macro",
+          str(profile.config.mapping("m1")))
+    check("the Buttons page says so too",
+          role(profile.keys, profile.keys.rowForKey("m1"), b"special") == "macro")
+    check("it starts as a balanced tap", macros.stepEditor.count == 2,
+          str(macros.stepEditor.count))
+    check("so there is nothing to warn about",
+          macros.stepEditor.warning == "", macros.stepEditor.warning)
+    check("and it opens straight into the editor", macros.editingRow == 0,
+          str(macros.editingRow))
+    check("editing marks the profile dirty", profile.dirty)
+
+
+def test_editing_a_step_updates_rows_rather_than_rebuilding_them():
+    """The defect this whole model exists to avoid.
+
+    A step editor is a row of controls per row of data, each writing back into
+    what feeds the row. When that is a list property rebuilt per read, the first
+    edit replaces the view's model and destroys the delegate under the pointer
+    along with its mouse grab -- which is what the Triggers page's knobs did,
+    where a drag reported one `moved` instead of forty. So a value edit has to
+    be `dataChanged` and nothing else.
+    """
+    profile, _ = make_profile()
+    macros = profile.macros
+    macros.build(key_index("m1"))
+    steps = macros.stepEditor
+
+    resets, changed = [], []
+    steps.modelAboutToBeReset.connect(lambda: resets.append(True))
+    steps.dataChanged.connect(
+        lambda _top, _bottom, roles: changed.append(set(roles)))
+
+    macros.setStepKey(0, mapping.XINPUT_TARGETS.index("x"))
+    check("the edit reaches the blob",
+          profile.config.macro("m1")["steps"][0]["key"] == "x",
+          str(profile.config.macro("m1")["steps"][0]))
+    check("the row is updated in place", len(changed) == 1, str(changed))
+    check("with no reset under the pointer", resets == [], str(resets))
+    check("and the roles it moved are named",
+          models.MacroStepsModel.KeyLabelRole in changed[0], str(changed[0]))
+
+    # Adding one really is a different set of rows, and a reset is the only
+    # thing a view can do with that.
+    macros.addStep(-1)
+    check("adding a step resets, because the rows changed",
+          len(resets) == 1, str(resets))
+    check("and it adds a press and its release together",
+          steps.count == 4, str(steps.count))
+
+
+def test_a_step_delay_is_quantised_to_what_the_profile_can_store():
+    """A spin box showing 155 ms on a pad storing 150 is describing fiction.
+
+    The writer floors each gap on its own, so the quantising has to happen
+    where the value is set rather than being discovered on the next read.
+    """
+    profile, _ = make_profile()
+    macros = profile.macros
+    macros.build(key_index("m1"))
+
+    check("an Apex 5 stores tenths of a second", macros.tickMs == 10,
+          str(macros.tickMs))
+    macros.setStepDelay(1, 155)
+    check("the odd 5 ms is dropped on the way in",
+          role(macros.stepEditor, 1, b"delay") == 150,
+          str(role(macros.stepEditor, 1, b"delay")))
+    check("and the blob agrees with the screen",
+          profile.config.macro("m1")["steps"][1]["delay"] == 150,
+          str(profile.config.macro("m1")["steps"][1]["delay"]))
+
+    macros.setStepDelay(1, 999999)
+    check("and a runaway value is capped rather than saturating the clock",
+          role(macros.stepEditor, 1, b"delay") == models.STEP_DELAY_MAX,
+          str(role(macros.stepEditor, 1, b"delay")))
+
+
+def test_a_macro_that_leaves_a_key_held_says_so_and_can_be_fixed():
+    """The pad plays exactly what is stored, with this application closed.
+
+    Warned rather than refused, which is where this parts company with Space
+    Station: theirs declines to apply such a macro at all, and refusing on save
+    would cost the user the macro rather than the mistake -- besides making it
+    impossible to build one a step at a time.
+    """
+    profile, _ = make_profile()
+    macros = profile.macros
+    macros.build(key_index("m1"))
+    macros.removeStep(1)               # drop the release
+
+    check("the editor names what is left down",
+          "A" in macros.stepEditor.warning, macros.stepEditor.warning)
+    check("and the row holding it is marked",
+          role(macros.stepEditor, 0, b"held") is True)
+    check("the card says it too, without opening anything",
+          role(macros, 0, b"heldKeys") == ["A"],
+          str(role(macros, 0, b"heldKeys")))
+
+    macros.balance()
+    check("one press releases everything held", macros.stepEditor.warning == "",
+          macros.stepEditor.warning)
+    check("by appending a release, not by deleting the press",
+          [(s["key"], s["event"]) for s in profile.config.macro("m1")["steps"]]
+          == [("a", mapping.MACRO_PRESS), ("a", mapping.MACRO_RELEASE)],
+          str(profile.config.macro("m1")["steps"]))
+
+
+def test_a_macro_from_other_software_is_shown_and_quarantined():
+    """Reading is permissive and writing is strict, so some macros cannot move.
+
+    `macros()` hands back `m1` for a step Space Station stored; `set_macros`
+    refuses it, because a paddle has no XInput id and no host can receive one.
+    Every step edit rewrites the whole page, so one such step makes the macro
+    unwritable -- and an editor that did not check would refuse every save with
+    a complaint about a step nobody touched.
+    """
+    profile, _ = make_profile()
+    macros = profile.macros
+    # Written straight into the blob, the way another application would have.
+    profile.config.blob[mapping.OFF_MACROS] = 1
+    profile.config.blob[mapping.OFF_MACROS + 1] = 0
+    body = mapping.OFF_MACROS + mapping.MACRO_HEADER
+    profile.config.blob[body : body + 8] = bytes(
+        [mapping.KEY_IDS["m2"], 1, 0, mapping.MACRO_ONCE,
+         0, 0, mapping.KEY_IDS["m1"], mapping.MACRO_PRESS])
+    macros.refresh()
+
+    check("the macro is read rather than hidden", macros.count == 1,
+          str(macros.count))
+    check("and reported as one this application cannot write",
+          role(macros, 0, b"foreign") is True)
+
+    macros.beginEdit(0)
+    check("so the editor refuses to open on it", macros.editingRow == -1,
+          str(macros.editingRow))
+
+
+def test_the_step_editor_follows_its_macro_and_closes_with_it():
+    """The cursor is a key name, not a row, because rows move.
+
+    Deleting a macro above the one being edited shifts it down a slot; deleting
+    the edited one takes it away entirely. An index cursor would keep pointing
+    at whatever slid into that position and edit somebody else's macro.
+    """
+    profile, _ = make_profile()
+    macros = profile.macros
+    macros.build(key_index("m1"))
+    macros.build(key_index("m2"))
+    macros.beginEdit(1)
+    check("the editor is on the second macro", macros.editingLabel == "M2",
+          macros.editingLabel)
+
+    macros.remove(0)
+    check("deleting the one above shifts it down", macros.editingRow == 0,
+          str(macros.editingRow))
+    check("and it is still the same macro", macros.editingLabel == "M2",
+          macros.editingLabel)
+
+    macros.remove(0)
+    check("deleting the edited one leaves nothing to edit",
+          macros.editingRow == -1, str(macros.editingRow))
+
+
+def test_the_shared_step_budget_moves_when_a_step_is_added():
+    """`countChanged` fires only when a *macro* is added or removed.
+
+    A step added inside an existing macro leaves the macro count alone, so a
+    budget notified by that signal sat stale for exactly as long as somebody
+    was editing steps -- and the first they would learn of the ceiling is a
+    refused write.
+    """
+    profile, _ = make_profile()
+    macros = profile.macros
+    macros.build(key_index("m1"))
+
+    seen = []
+    macros.stepsChanged.connect(lambda: seen.append(macros.stepsUsed))
+    before = macros.stepsUsed
+    macros.addStep(-1)
+    check("the budget is told", seen and seen[-1] == before + 2,
+          f"{before} -> {seen}")
+    check("and it really moved", macros.stepsUsed == before + 2,
+          str(macros.stepsUsed))
+
+
+def test_remapping_a_macros_key_drops_the_macro_and_tells_the_page():
+    """The key table and the macro page are read independently by the firmware.
+
+    A key pointed away from its macro with the body still behind it sends its
+    new binding *and* plays the old macro underneath it -- measured, M1 remapped
+    to A over three X taps gives `press a`, `x x x`, `release a`. So the backend
+    deletes the macro at that moment, which means a write through the Buttons
+    page can remove a row from a list that page does not own.
+    """
+    profile, _ = make_profile()
+    macros = profile.macros
+    macros.build(key_index("m1"))
+    check("a macro is bound", macros.count == 1, str(macros.count))
+
+    row = profile.keys.rowForKey("m1")
+    profile.keys.setTarget(row, models.TARGETS.index("a"))
+    check("the key now sends A",
+          profile.config.mapping("m1")[0] == "a",
+          str(profile.config.mapping("m1")))
+    check("the macro went with it in the blob",
+          profile.config.macros() == [], str(profile.config.macros()))
+    check("and the Macros page was told rather than left showing it",
+          macros.count == 0, str(macros.count))
+
+
 def _v32_profile():
     """A profile model holding a v3.2 config and its macro store.
 
@@ -3891,6 +4116,14 @@ def main():
                  test_a_macros_type_and_interval_write_through,
                  test_deleting_a_macro_gives_the_key_back,
                  test_the_page_stops_offering_more_than_the_pad_holds,
+                 test_a_macro_can_be_built_without_recording_one,
+                 test_editing_a_step_updates_rows_rather_than_rebuilding_them,
+                 test_a_step_delay_is_quantised_to_what_the_profile_can_store,
+                 test_a_macro_that_leaves_a_key_held_says_so_and_can_be_fixed,
+                 test_a_macro_from_other_software_is_shown_and_quarantined,
+                 test_the_step_editor_follows_its_macro_and_closes_with_it,
+                 test_the_shared_step_budget_moves_when_a_step_is_added,
+                 test_remapping_a_macros_key_drops_the_macro_and_tells_the_page,
                  test_a_v32_profile_is_offered_its_own_limits_and_marked_experimental,
                  test_an_apex_5_profile_is_not_marked_experimental,
                  test_the_limits_move_when_the_open_profile_does,

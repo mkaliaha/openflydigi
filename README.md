@@ -215,7 +215,8 @@ simulators `forza-simulate` and `haptics-simulate`, `gen_ds5_usb.py` (regenerate
 
 ## Desktop app
 
-Profiles, remapping, macros, sticks, the gyro, vibration, triggers, lighting, device settings, the
+Profiles, remapping, macros — recorded off the pad or built from nothing, then edited step by step —
+sticks, the gyro, vibration, triggers, lighting, device settings, the
 screen and per-game routes — plus a **Devices** page and a picker for every pad and dock attached, a
 **Dock** page for whichever charging dock is selected, a **DualSense** switch that turns the
 virtual-DualSense relay on for the whole system, and a **Setup** page for the daemon's unit,

@@ -187,9 +187,14 @@ Three consequences:
     pass the keyboard and mouse flags as `null`; neither is ever written.
   * The Electron UI fires exactly one IPC command for the switch, and no second call
     (`case "controlByThirdPartyAppEnabled": IpcCommandEnum_EnableControlByThirdPartyApp`).
-  * `KeyboardMouseInjectRunner` is host-side Windows `SendInput` simulation for keyboard/mouse
-    *mappings*. It sends nothing to the pad, and `ControllerBusinessService.cs:76` gates it **off**
-    while third-party control is active.
+  * `KeyboardMouseInjectRunner` is host-side Windows injection for keyboard/mouse *mappings*. It
+    sends nothing to the pad, and `ControllerBusinessService.cs:76` gates it **off** while
+    third-party control is active. **Not `SendInput`**, which this file said for a long time and
+    nobody had checked: `SendInput` and `user32` appear nowhere in `SpaceStationService`. It is a
+    pair of kernel filter drivers — `FeizVKB64.sys` and `FeizVMO64.sys`, installed through
+    `keyfdo.inf`/`mousefdo.inf` and driven via `FeizVKBComm.dll` with PS/2 set-1 scan codes
+    (`FeizVkeyMouHelper.cs:9-60`, `KeyCodeMapDic.cs:13-38`). Wrong about the mechanism, right about
+    the substance.
 
 **What Space Station does in addition:**
 
@@ -210,6 +215,41 @@ and the config-apply path (`PrepareMappingConfigs`) deals only with mapping blob
 `if01-event-mouse` and `if02-hidraw` while command 16 read `keyboard: False, mouse: False,
 third_party: False` — so the extra HID nodes coexist with the flag off and with both transport flags
 off. Whatever puts the pad into that composite, it is not command 17 and not this switch.
+
+**Nothing drives them, and that stays unexplained.** Worth stating as a hole rather than leaving it
+to be rediscovered. `ControllerHidManager.FindSpecialHidDevice` accepts, for vendor 0x37D7, only
+`UsagePage == 0xFFA0` — the vendor collection — so Flydigi's own software never opens these two
+interfaces at all. The pad's self-advertised capability bitmap (command 3,
+`ReadHardwareFunctionStatusCommandFactory.ParseAckData`) lists ten features and keyboard emulation
+is not among them. So the firmware may be able to do something with them that Flydigi's software
+never asks for; nothing here has found a way to ask.
+
+### What a keyboard binding actually is, measured
+
+**The pad acts on `TARGET_KEYBOARD` and does not type.** Both halves measured here with
+`tools/keyboard-target-probe`, against a long-standing claim in this project that 254 was inert.
+
+  * Set A's key-table target byte to 254 and A stops arriving as `BTN_SOUTH` — on the gamepad node,
+    the keyboard node and the mouse node alike. Suppressing its own gamepad output is a decision only
+    the firmware can make, so the sentinel is understood rather than ignored.
+  * Nothing is typed, and nothing was ever going to be: a key-table entry is three bytes and
+    `MappingConfigParser.cs:619-635` zeroes both companion bytes on the same branch that writes 254,
+    with the key code (`MapTypeKey.MapKeyboardKeyId`) in scope and discarded. Candidate codes written
+    into those two bytes by hand — HID usage, Windows virtual key, and the pad's own key id, in
+    either position — produced no keystroke.
+  * Flydigi's *reader* cannot recover the binding either: `MappingConfigParser.cs:596` collapses
+    anything above 32 to identity, which is why `ControllerRepository.cs:496-506` re-injects keyboard
+    bindings from the host's own file after every read. A feature whose configuration cannot be read
+    back from the device is not stored on the device.
+
+So on Windows the two halves meet: the pad suppresses the button, and the filter driver above puts a
+keystroke in its place. On Linux only the first half happens, which makes a key left on 254 a key
+that does nothing — and is why `mapping.normalise_for_switch` strips them.
+
+**A macro step cannot carry a keyboard key either.** `m_fdg_macro_step_struct_t` is
+`{time_l, time_h, btn, event}` and `MacroConfigParser.cs:96` parses `btn` as a `ControllerKey`, on
+the v3.1 page and in the v3.2 store alike. That is why the app's macro editor offers only
+`XINPUT_TARGETS` as a step's output key — a measured constraint rather than a cautious one.
 
 ### Steam's duplicate listing
 

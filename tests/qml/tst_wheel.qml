@@ -64,6 +64,13 @@ TestCase {
         }
     }
 
+    Component {
+        id: macrosComponent
+        MacrosPage {
+            anchors.fill: parent
+        }
+    }
+
     function init() {
         Pad.reset();
         Fixture.resetCounts();
@@ -204,5 +211,69 @@ TestCase {
         compare(slider.value, 40, "the knob moved under the wheel");
         tryVerify(() => flickable.contentY > from, 2000,
                   "the wheel never reached the page");
+    }
+
+    // The step editor's controls, which are the same defect in a new place and
+    // the worst place for it yet: a notch over a step's key picker changes
+    // which button a macro presses, and a macro is a thing the *pad* plays
+    // afterwards with nothing running here to notice.
+    //
+    // **Only the data half is asserted.** These live in a Kirigami.Dialog
+    // rather than on a page, so there is no page Flickable for the event to
+    // fall through to, and "the page moved" is not a claim that means anything
+    // here. That the control did not eat the value is the whole point.
+    function macroStepRow() {
+        let page = createTemporaryObject(macrosComponent, suite);
+        verify(page, "the macros page did not load");
+        waitForRendering(page);
+
+        App.profile.macros.build(App.profile.macros.triggerKeys.indexOf("M1"));
+        let dialog = findChild(page, "stepDialog");
+        verify(dialog, "the macros page has no step dialog");
+        dialog.open();
+        // Through `contentItem`: Kirigami.Dialog keeps its content in a control
+        // that is not a QObject child of the dialog, so findChild on the dialog
+        // -- or on the page, or on the suite -- never reaches a step row. See
+        // tst_macros.qml for the measurement.
+        tryVerify(() => findChild(dialog.contentItem, "macroStep_0") !== null,
+                  2000, "no delegate for the first step");
+        return findChild(dialog.contentItem, "macroStep_0");
+    }
+
+    function test_a_scroll_over_a_step_key_moves_nothing() {
+        let row = macroStepRow();
+        let combo = findChild(row, "macroStep_0Key");
+        verify(combo, "no key picker on the step row");
+        verify(combo.enabled, "a disabled picker would ignore a wheel anyway");
+
+        let before = App.profile.macros.stepEditor.data(
+            App.profile.macros.stepEditor.index(0, 0), 0);
+        let index = combo.currentIndex;
+        // Downwards, which for a picker sitting on its first entry is the
+        // direction that could actually move it.
+        mouseWheel(combo, combo.width / 2, combo.height / 2, 0, -120);
+
+        compare(combo.currentIndex, index,
+                "scrolling over the picker changed which key the step presses");
+        compare(App.profile.macros.stepEditor.count, 2,
+                "the macro should be untouched");
+    }
+
+    function test_a_scroll_over_a_step_delay_moves_nothing() {
+        let row = macroStepRow();
+        let spin = findChild(row, "macroStep_0Delay");
+        verify(spin, "no delay control on the step row");
+        verify(spin.enabled, "a disabled box would ignore a wheel anyway");
+
+        // Set off the floor first, so a notch in either direction is a value
+        // the control could really take -- a box already at zero clamps and
+        // would pass whatever the style does.
+        App.profile.macros.setStepDelay(0, 100);
+        tryCompare(spin, "value", 100, 2000);
+
+        mouseWheel(spin, spin.width / 2, spin.height / 2, 0, 120);
+        compare(spin.value, 100, "the delay moved under the wheel");
+        compare(App.profile.macros.stepEditor.totalMs, 150,
+                "scrolling over the box changed the macro's timing");
     }
 }

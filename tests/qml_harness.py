@@ -287,6 +287,27 @@ class PadProbe(QObject):
         config = mapping.MappingConfig(self._pad.blobs[cfg_id])
         return config.mapping(key)[2]
 
+    @Slot(int, str, result="QVariantList")
+    def macroOf(self, cfg_id, key):
+        """The steps the pad now holds for `key`, or an empty list.
+
+        Straight out of the blob rather than out of the model, which is the
+        whole point: the Macros page can only be trusted about what it wrote if
+        something reads the bytes back independently of it.
+        """
+        config = mapping.MappingConfig(self._pad.blobs[cfg_id])
+        macro = config.macro(key)
+        if macro is None:
+            return []
+        return [{"key": step["key"] if isinstance(step["key"], str)
+                        else str(step["key"]),
+                 "event": step["event"], "delay": step["delay"]}
+                for step in macro["steps"]]
+
+    @Slot(int, result=int)
+    def macroCount(self, cfg_id):
+        return len(mapping.MappingConfig(self._pad.blobs[cfg_id]).macros())
+
     @Slot(int, result=str)
     def titleOf(self, cfg_id):
         return mapping.MappingConfig(self._pad.blobs[cfg_id]).title

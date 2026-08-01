@@ -315,7 +315,7 @@ same, `tests/qml_harness.py` included.
 | `dsmode.py` | `DsModeModel` | the DualSense switch's state |
 | `games.py` | `GameListModel`, `GameFilterModel` | one row per game with its route resolved; the search text and route filter |
 | `lighting.py` | `LightingModel`, `ColourListModel` | one lighting config, edited in memory until written; the up-to-five colours an effect cycles through |
-| `profile.py` | `ProfileModel`, `ProfileListModel`, `KeyMapModel`, `MacroModel`, `StickModel`, `StickSideModel`, `TriggerModel`, `TriggerSideModel`, `VibrationModel`, `VibrationSideModel` | the open profile and the edits held against it; the four slots and what was read from each; one row per key, with what it sends and its turbo; the stored macros; and per side, a stick's response curve, a trigger's stored effect and travel window, and a grip motor's window |
+| `profile.py` | `ProfileModel`, `ProfileListModel`, `KeyMapModel`, `MacroModel`, `MacroStepsModel`, `StickModel`, `StickSideModel`, `TriggerModel`, `TriggerSideModel`, `VibrationModel`, `VibrationSideModel` | the open profile and the edits held against it; the four slots and what was read from each; one row per key, with what it sends and its turbo; the stored macros, and the steps of whichever one is being edited; and per side, a stick's response curve, a trigger's stored effect and travel window, and a grip motor's window |
 | `imaging.py` | — | not a model: the one Qt chore `dock.py` and `screen.py` share, which is getting RGB888 out of a QImage without its row padding |
 | `screen.py` | `ScreenModel` | the picture queued for upload, and the idle display setting |
 | `settings.py` | `SettingsModel` | the command-3 block |
@@ -378,6 +378,22 @@ suite is handed the `tests/qml` directory instead and finds its own cases.
 Every interactive element carries an `objectName`: QtQuickTest addresses items
 with `findChild(page, "name")`, and there is no other handle on an item a
 delegate created.
+
+**Anything inside a `Kirigami.Dialog` is reached through `contentItem`.**
+`findChild(dialog, "…")` finds nothing, and neither does `findChild(page, …)` or
+`findChild(suite, …)` — the dialog keeps its content in a control that is not a
+QObject child of the dialog, so the recursion never reaches it.
+`findChild(dialog.contentItem, "…")` is the one that works. Measured against the
+Macros page's step editor, after the other three had each been tried.
+
+**And `opened` never becomes true** under the offscreen platform, because
+nothing activates the window — while the content is built and laid out anyway.
+So `tryVerify(() => dialog.opened, …)` waits forever on a dialog that is
+demonstrably there; wait on `visible`, or on a delegate appearing.
+
+**A modal dialog eats clicks aimed at the page behind it**, including the
+footer's Apply. Close it before clicking through, or the click lands on the
+overlay and the test fails as "the write never completed".
 
 `tests/fake_pad.py` is shared with the backend tests and stays MIT and Qt-free,
 which is why the two commands only the desktop app asks for — device info and

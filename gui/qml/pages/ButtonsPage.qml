@@ -105,6 +105,7 @@ Kirigami.ScrollablePage {
             required property int turboMode
             required property bool isRemapped
             required property bool isEditable
+            required property string special
 
             objectName: "keyRow_" + key
             width: ListView.view.width
@@ -127,8 +128,19 @@ Kirigami.ScrollablePage {
                         Layout.fillWidth: true
                     }
 
+                    // **What the key actually does, when it is not a remap.**
+                    // A key bound to a macro or a keystroke has no entry in the
+                    // target list, so the combo beside it falls back to
+                    // "(default)" -- which reads as "this key does what the
+                    // shell says" about a key that runs a macro. The row said
+                    // only "not editable here" and the tooltip named both
+                    // possibilities, because nothing on the row could tell them
+                    // apart. `special` can.
                     Controls.Label {
-                        text: "not editable here"
+                        objectName: "keySpecial_" + keyRow.key
+                        text: keyRow.special === "macro" ? "runs a macro"
+                              : keyRow.special === "keyboard" ? "sends a keystroke"
+                              : "not editable here"
                         visible: !keyRow.isEditable
                         font: Kirigami.Theme.smallFont
                         color: Kirigami.Theme.disabledTextColor
@@ -153,8 +165,18 @@ Kirigami.ScrollablePage {
                     onActivated: App.profile.keys.setTarget(keyRow.index, currentIndex)
 
                     Controls.ToolTip.visible: hovered && !keyRow.isEditable
-                    Controls.ToolTip.text: "This key runs a macro or sends a "
-                                           + "keystroke, which this app does not edit yet."
+                    Controls.ToolTip.text: keyRow.special === "macro"
+                        ? "This key runs a macro. Edit it on the Macros page — "
+                          + "deleting it there gives the key back, and remapping "
+                          + "a key here would drop its macro, since the pad "
+                          + "would otherwise send the new binding and play the "
+                          + "old macro underneath it."
+                        : keyRow.special === "keyboard"
+                        ? "This key sends a keystroke, which Flydigi's own "
+                          + "software types on the host rather than the pad. "
+                          + "Nothing here can reproduce that, so the binding is "
+                          + "shown and left alone."
+                        : "This key is not editable here."
                 }
 
                 Controls.SpinBox {

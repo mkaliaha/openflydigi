@@ -921,6 +921,10 @@ class KeyMapModel(QAbstractListModel):
     RemappedRole = Qt.UserRole + 7
     EditableRole = Qt.UserRole + 8
     ClusterRole = Qt.UserRole + 9
+    # "macro", "keyboard", or empty. The two sentinels the key table can hold
+    # that are not a key, kept apart from `TargetIndexRole` because a combo box
+    # over the remap targets has no index for either.
+    SpecialRole = Qt.UserRole + 10
 
     # Not `constant`: the row count is the number of buttons the pad has, and
     # that is not the same on every pad. A constant property would be cached by
@@ -955,6 +959,7 @@ class KeyMapModel(QAbstractListModel):
             self.RemappedRole: b"isRemapped",
             self.EditableRole: b"isEditable",
             self.ClusterRole: b"cluster",
+            self.SpecialRole: b"special",
         }
 
     def rowCount(self, parent=QModelIndex()):
@@ -1015,12 +1020,18 @@ class KeyMapModel(QAbstractListModel):
             return target
         if role == self.TargetIndexRole:
             # Macro and keyboard bindings are real but not editable here, so
-            # they show as default rather than being silently rewritten.
+            # they show as default rather than being silently rewritten. The
+            # row says which of the two it is through `SpecialRole` -- showing
+            # "(default)" and nothing else was a lie about a key that runs a
+            # macro, and the tooltip beside it named both possibilities because
+            # the row could not tell them apart.
             if target == key and not frequency:
                 return 0
             if target in mapping.XINPUT_TARGETS:
                 return mapping.XINPUT_TARGETS.index(target) + 1
             return 0
+        if role == self.SpecialRole:
+            return target if target in ("macro", "keyboard") else ""
         if role == self.TurboRole:
             return frequency
         if role == self.TurboModeRole:
@@ -1066,6 +1077,15 @@ class KeyMapModel(QAbstractListModel):
         config.set_mapping(key, target, TURBO_MODES[turbo_mode][1], turbo)
         top_left = self.index(row, 0)
         self.dataChanged.emit(top_left, top_left)
+        # Pointing a key away from its macro *deletes* the macro, in the backend
+        # and on purpose: the key table and the macro page are read
+        # independently, so a key left pointing elsewhere with a body still
+        # behind it sends its new binding and plays the old macro underneath it
+        # -- measured, M1 remapped to A over three X taps gives `press a`,
+        # `x x x`, `release a`. So this write can remove a row from a list this
+        # model does not own, and the Macros page has to be told or it goes on
+        # offering a macro that is gone.
+        self._profile.macros.refresh()
         self._profile.markChanged()
 
     @Slot(int, int)
@@ -1115,9 +1135,236 @@ MACRO_EVENT_LABELS = {mapping.MACRO_PRESS: "press",
                       mapping.MACRO_RELEASE: "release",
                       mapping.MACRO_HOLD: "hold"}
 
+# What the editor will *write*, which is deliberately smaller than what it will
+# *read*. `MACRO_EVENT_LABELS` above has to name hold and the two stick
+# pseudo-events because a profile written by Space Station can contain them and
+# this page has to say what is in it; this list is the set a person may choose.
+#
+# Press and release only, and not for want of names. `mapping.MACRO_HOLD` and
+# the two stick events exist in the enum, but nothing in this project has ever
+# written a 2, 3 or 5 -- not the recorder, not the CLI -- and Flydigi's own
+# editor does not either: their "Duration" is a UI field their encoder expands
+# into a press and a release. Offering them would put bytes in a profile that
+# nobody can say the pad reads, with no way to tell an ignored step from a
+# stored one. "Add a tap" gives the same behaviour under a name that describes
+# what is stored.
+MACRO_STEP_EVENTS = [("Press", mapping.MACRO_PRESS),
+                     ("Release", mapping.MACRO_RELEASE)]
+
+# The longest gap a single step may carry. Flydigi's own editor caps a step
+# here; the backend imposes no limit at all, and the 16-bit cumulative tick
+# means a runaway value is silently saturated rather than refused
+# (`flydigi/mapping.py`, `min(0xFFFF, ...)`). Eight seconds is past any combo
+# and short enough that a mistyped number is obvious.
+STEP_DELAY_MAX = 8000
+
+# What a macro built by hand starts with, in milliseconds. Explicit rather than
+# None because None means "leave this slot's byte alone" and a freshly built
+# macro may be landing in a slot a deleted one vacated -- see `set_macros`.
+MACRO_DEFAULT_INTERVAL = 50
+
 # Long enough for a combo nobody would type out by hand, short enough that a
 # forgotten recording ends by itself. Stop ends it sooner.
 RECORD_SECONDS = 30.0
+
+
+@QmlElement
+class MacroStepsModel(QAbstractListModel):
+    """The steps of the one macro being edited, one row each.
+
+    **One instance, pointed at a macro, rather than one per macro.** The page
+    creates this once and `MacroModel` hands it out `constant`, because the
+    alternative is the defect the Triggers page was built with: a list property
+    rebuilt on every read and notified by the very signal an edit emits, so the
+    first change replaces the view's model and destroys the delegate under the
+    pointer along with its mouse grab. A knob inside that Repeater reported one
+    `moved` across a whole drag where the same knob outside it reported forty.
+    A step editor is exactly that shape -- a row of controls per row of data,
+    each writing back into what feeds the row -- so it gets a real list model
+    whose value edits are `dataChanged` and nothing else.
+
+    **It decodes nothing.** Every read walks `MacroModel._macros()`, which is
+    the single memoised decode of the 538-byte macro page. `_rows` is a private
+    copy kept only so `refresh` can tell a step list that moved from one that
+    did not; it is never handed out, because the cached dicts are shared with
+    `MacroModel._shown` and mutating one would make the two compare equal while
+    the blob had changed underneath.
+    """
+
+    KeyRole = Qt.UserRole + 1
+    KeyIndexRole = Qt.UserRole + 2
+    KeyLabelRole = Qt.UserRole + 3
+    EventRole = Qt.UserRole + 4
+    EventLabelRole = Qt.UserRole + 5
+    DelayRole = Qt.UserRole + 6
+    SinceStartRole = Qt.UserRole + 7
+    HeldRole = Qt.UserRole + 8
+
+    countChanged = Signal()
+    # What the rows add up to, as opposed to what any one of them says: the
+    # running time and the warning both change when a single delay moves, and
+    # neither is a role on a row.
+    summaryChanged = Signal()
+
+    _VALUE_ROLES = [KeyRole, KeyIndexRole, KeyLabelRole, EventRole,
+                    EventLabelRole, DelayRole, SinceStartRole, HeldRole]
+
+    def __init__(self, macros):
+        super().__init__(macros)
+        self._macros = macros
+        self._rows = []
+
+    # -- what is being edited ----------------------------------------------
+
+    def _steps(self):
+        """The edited macro's steps, straight off the parent's memoised decode."""
+        macro = self._macros.editingMacro()
+        return macro["steps"] if macro is not None else []
+
+    def roleNames(self):
+        return {
+            self.KeyRole: b"stepKey",
+            self.KeyIndexRole: b"keyIndex",
+            self.KeyLabelRole: b"keyLabel",
+            self.EventRole: b"eventIndex",
+            self.EventLabelRole: b"eventLabel",
+            self.DelayRole: b"delay",
+            self.SinceStartRole: b"sinceStart",
+            self.HeldRole: b"held",
+        }
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._steps())
+
+    @Property(int, notify=countChanged)
+    def count(self):
+        return len(self._steps())
+
+    @Property(int, notify=summaryChanged)
+    def totalMs(self):
+        """How long one pass takes -- the gaps are what the time is made of."""
+        return sum(max(0, step.get("delay", 0)) for step in self._steps())
+
+    def _balance(self):
+        """Walk the steps, reporting what is wrong with them and where.
+
+        Three faults, all of which the firmware will happily play, because it
+        plays exactly what is stored: a key pressed and never released (the pad
+        goes on holding it after the macro ends, with this window closed), a key
+        pressed while already down, and a release for a key that is not.
+
+        Returns (held_row_numbers, held_key_names, complaints).
+        """
+        down = {}          # key -> the row that pressed it
+        held_rows, complaints = set(), []
+        for row, step in enumerate(self._steps()):
+            key = step.get("key")
+            event = step.get("event")
+            if event == mapping.MACRO_PRESS:
+                if key in down:
+                    complaints.append(
+                        f"{key_label(key)} is pressed again at step {row + 1} "
+                        "without being released first")
+                down[key] = row
+            elif event == mapping.MACRO_RELEASE:
+                if key in down:
+                    del down[key]
+                else:
+                    complaints.append(
+                        f"step {row + 1} releases {key_label(key)}, which is "
+                        "not being held")
+        for key, row in down.items():
+            held_rows.add(row)
+        return held_rows, list(down), complaints
+
+    @Property(str, notify=summaryChanged)
+    def warning(self):
+        """One line naming everything wrong with this macro, or empty.
+
+        Warned rather than refused, which is where this parts company with
+        Space Station -- theirs declines to apply a macro missing a press or a
+        release at all. Refusing here would make building one step at a time
+        impossible, since every half-finished macro is unbalanced for as long
+        as it takes to add the other half, and refusing on save costs the user
+        the macro rather than the mistake. The pad only ever sees this on
+        Apply, so an unbalanced macro in the editor has harmed nothing yet.
+        """
+        _rows, held, complaints = self._balance()
+        if held:
+            names = ", ".join(key_label(key) for key in held)
+            complaints.insert(
+                0, f"the macro ends with {names} still pressed, so the pad "
+                   "goes on holding it after the macro finishes")
+        longest = self._macros.durationMax
+        if self.totalMs > longest:
+            complaints.append(
+                f"it runs for {self.totalMs} ms and the pad can only time "
+                f"{longest} ms, so the last gaps would be silently shortened")
+        if not complaints:
+            return ""
+        # Not `str.capitalize()`, which lowercases everything after the first
+        # letter and so renames the keys it is complaining about -- "LB" became
+        # "lb" and "A" became "a".
+        line = "; ".join(complaints)
+        return line[0].upper() + line[1:]
+
+    def data(self, index, role=Qt.DisplayRole):
+        steps = self._steps()
+        row = index.row()
+        if not 0 <= row < len(steps):
+            return None
+        step = steps[row]
+        key = step.get("key")
+        if role == self.KeyRole:
+            return key if isinstance(key, str) else str(key)
+        if role in (self.KeyLabelRole, Qt.DisplayRole):
+            return key_label(key) if isinstance(key, str) else str(key)
+        if role == self.KeyIndexRole:
+            # -1 for a key this application cannot write. It cannot be reached
+            # from the editor -- the picker offers XINPUT_TARGETS and nothing
+            # else -- but a macro read off a profile Space Station wrote can
+            # carry one, and a combo box told to show index 0 would quietly
+            # rename that step to "A".
+            return (mapping.XINPUT_TARGETS.index(key)
+                    if key in mapping.XINPUT_TARGETS else -1)
+        if role == self.EventRole:
+            return next((i for i, (_l, v) in enumerate(MACRO_STEP_EVENTS)
+                         if v == step.get("event")), -1)
+        if role == self.EventLabelRole:
+            return MACRO_EVENT_LABELS.get(step.get("event"),
+                                          str(step.get("event")))
+        if role == self.DelayRole:
+            return max(0, step.get("delay", 0))
+        if role == self.SinceStartRole:
+            return sum(max(0, s.get("delay", 0)) for s in steps[: row + 1])
+        if role == self.HeldRole:
+            return row in self._balance()[0]
+        return None
+
+    def refresh(self):
+        """Say what moved, in the three cases a view can absorb differently.
+
+        The same shape as `MacroModel.refresh`, and for the same reason: a reset
+        destroys and rebuilds every delegate, which here means every open combo
+        popup and every mouse grab in the dialog. A delay changing is
+        `dataChanged` with the roles named, so the row updates in place under
+        the pointer that is dragging it.
+        """
+        rows = [dict(step) for step in self._steps()]
+        if rows == self._rows:
+            return
+        if len(rows) == len(self._rows):
+            self._rows = rows
+            self.dataChanged.emit(self.index(0, 0),
+                                  self.index(len(rows) - 1, 0),
+                                  self._VALUE_ROLES)
+            self.summaryChanged.emit()
+            return
+        self.beginResetModel()
+        self._rows = rows
+        self.endResetModel()
+        self.countChanged.emit()
+        self.summaryChanged.emit()
 
 
 @QmlElement
@@ -1135,9 +1382,19 @@ class MacroModel(QAbstractListModel):
     IntervalRole = Qt.UserRole + 4
     StepCountRole = Qt.UserRole + 5
     DurationRole = Qt.UserRole + 6
-    StepsRole = Qt.UserRole + 7
+    ForeignRole = Qt.UserRole + 7
+    HeldKeysRole = Qt.UserRole + 8
+    NameRole = Qt.UserRole + 9
 
     countChanged = Signal()
+    # The step count moved without the macro count moving, which is what an edit
+    # inside a macro looks like. `stepsUsed` and `canAddStep` are the profile's
+    # shared step budget and it has to move with them: `countChanged` fires only
+    # when a macro is added or removed, so the budget line on the page would sit
+    # stale for exactly as long as somebody was editing steps.
+    stepsChanged = Signal()
+    # Which macro the step editor is pointed at, and what it is called.
+    editingChanged = Signal()
     recordingChanged = Signal()
     # Not `constant`: which keys can run a macro is the pad's business, and a
     # constant property would be cached for the life of the window.
@@ -1156,6 +1413,14 @@ class MacroModel(QAbstractListModel):
         self._recording = False
         self._record_key = ""
         self._decoded = Decodes(profile)
+        # Which macro the step editor is pointed at, held as a *key name* and
+        # not as a row. Rows move: deleting another macro shifts every later one
+        # down a slot, so an index cursor would quietly start editing somebody
+        # else's macro halfway through a session. A key name either still names
+        # a macro or does not, and `editingRow` answers -1 when it does not,
+        # which is what closes the dialog.
+        self._editing_key = ""
+        self._steps = MacroStepsModel(self)
         # What the view is currently showing, so `refresh` can tell a profile
         # whose macros differ from one whose macros are the same.
         self._shown = []
@@ -1182,7 +1447,9 @@ class MacroModel(QAbstractListModel):
             self.IntervalRole: b"interval",
             self.StepCountRole: b"stepCount",
             self.DurationRole: b"duration",
-            self.StepsRole: b"steps",
+            self.ForeignRole: b"foreign",
+            self.HeldKeysRole: b"heldKeys",
+            self.NameRole: b"name",
         }
 
     def _macros(self):
@@ -1197,13 +1464,66 @@ class MacroModel(QAbstractListModel):
         return self._decoded(
             "macros", lambda: config.macros() if config is not None else [])
 
-    def _editable_macros(self):
-        """A copy, for the three slots that edit what they have just read.
+    def _editable_macros(self, deep_row=None):
+        """A copy, for the slots that edit what they have just read.
 
-        Shallow per macro is enough: they set a field on one macro or drop one
-        from the list, and nothing here reaches into a macro's steps.
+        Shallow per macro is enough for the ones that set a field on a macro or
+        drop one from the list. It is *not* enough for the step editor, and the
+        failure is a quiet one: the step dicts are shared with the memoised
+        decode and with `_shown`, so mutating one in place would leave
+        `refresh`'s `macros == self._shown` comparing equal -- the blob would
+        change and the screen would not. `deep_row` copies that macro's steps as
+        well, and every step mutator passes it.
         """
-        return [dict(macro) for macro in self._macros()]
+        macros = [dict(macro) for macro in self._macros()]
+        if deep_row is not None and 0 <= deep_row < len(macros):
+            macros[deep_row]["steps"] = [dict(step)
+                                         for step in macros[deep_row]["steps"]]
+        return macros
+
+    # -- which macro the step editor is on ---------------------------------
+
+    def editingMacro(self):
+        """The macro being edited, or None. Python-side; `MacroStepsModel` reads it."""
+        return next((macro for macro in self._macros()
+                     if macro["key"] == self._editing_key), None)
+
+    @Property(int, notify=editingChanged)
+    def editingRow(self):
+        """Where the edited macro currently sits, or -1 once it is gone."""
+        return next((row for row, macro in enumerate(self._macros())
+                     if macro["key"] == self._editing_key), -1)
+
+    @Property(str, notify=editingChanged)
+    def editingLabel(self):
+        return key_label(self._editing_key) if self._editing_key else ""
+
+    @Property(MacroStepsModel, constant=True)
+    def stepEditor(self):
+        """The step list of whichever macro `beginEdit` pointed it at.
+
+        `constant` because the object never changes -- only its contents do,
+        which it reports itself. Handing out a fresh list here instead is the
+        defect described in `MacroStepsModel`.
+        """
+        return self._steps
+
+    @Slot(int)
+    def beginEdit(self, row):
+        macros = self._macros()
+        if not 0 <= row < len(macros) or self.foreignAt(row):
+            return
+        self._editing_key = macros[row]["key"]
+        self._steps.refresh()
+        self.editingChanged.emit()
+
+    @Slot()
+    def endEdit(self):
+        if not self._editing_key:
+            return
+        self._editing_key = ""
+        self._steps.refresh()
+        self.editingChanged.emit()
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._macros())
@@ -1259,13 +1579,76 @@ class MacroModel(QAbstractListModel):
         config = self._profile.config
         return config is not None and not config.macros_in_blob
 
-    @Property(int, notify=countChanged)
+    @Property(int, notify=stepsChanged)
     def stepsUsed(self):
         return sum(len(macro["steps"]) for macro in self._macros())
+
+    @Property(bool, notify=stepsChanged)
+    def canAddStep(self):
+        """Whether a press-and-release pair still fits in the profile's budget."""
+        return (self._profile.config is not None
+                and self.stepsUsed + 2 <= self._limits().steps)
+
+    @Property(int, notify=limitsChanged)
+    def tickMs(self):
+        """The stored time unit: 10 ms below protocol 3.2, 1 ms from it.
+
+        Shown because a delay is quantised to it -- a spin box that let someone
+        type 15 ms on an Apex 5 would be showing a number the blob cannot hold,
+        since the writer floors each gap on its own.
+        """
+        return self._limits().tick_ms
+
+    @Property(int, notify=limitsChanged)
+    def durationMax(self):
+        """The longest macro the stored clock can time.
+
+        The cumulative tick is 16 bits and the backend saturates rather than
+        refusing, so a macro past this writes back with its last gaps silently
+        shortened. 655 s on an Apex 5, which nobody will reach; 65 s at v3.2,
+        which is the number Flydigi's own editor refuses at.
+        """
+        return 0xFFFF * self._limits().tick_ms
+
+    @Property(bool, notify=limitsChanged)
+    def namesSupported(self):
+        """Whether this profile has anywhere to keep a macro's name.
+
+        Only from protocol 3.2, where the store carries twenty bytes per macro.
+        The v3.1 page has no room and `set_macro` drops a name silently by
+        design, so the field is hidden rather than shown and ignored.
+
+        The same condition as `experimental` today, and kept as its own property
+        rather than aliased: they answer different questions -- "does a name fit"
+        and "has this path ever been near hardware" -- and they only coincide
+        because the version that added the store is the version nobody here can
+        test.
+        """
+        config = self._profile.config
+        return config is not None and not config.macros_in_blob
 
     @Property("QStringList", constant=True)
     def typeNames(self):
         return [label for label, _value in MACRO_TYPES]
+
+    @Property("QStringList", constant=True)
+    def stepKeys(self):
+        """What a macro step may press, as the shell labels them.
+
+        `constant`, which the neighbouring `triggerKeys` deliberately is not,
+        and the difference is the point: a macro's *trigger* key is read by the
+        pad, so a paddle runs one perfectly well and the list depends on the
+        model; a step is *sent to the host*, so it has to be a button XInput
+        has an id for. `_macro_step_key` tests the module-level
+        `XINPUT_TARGETS` rather than `targets_for(code)`, and the two agree on
+        every model this project drives, because a Vader's extra C and Z are
+        themselves extra keys with no XInput id.
+        """
+        return [key_label(key) for key in mapping.XINPUT_TARGETS]
+
+    @Property("QStringList", constant=True)
+    def stepEvents(self):
+        return [label for label, _value in MACRO_STEP_EVENTS]
 
     @Property("QStringList", notify=keyLabelsChanged)
     def triggerKeys(self):
@@ -1313,22 +1696,59 @@ class MacroModel(QAbstractListModel):
         if role == self.StepCountRole:
             return len(macro["steps"])
         if role == self.DurationRole:
-            return sum(step["delay"] for step in macro["steps"])
-        if role == self.StepsRole:
-            return self.stepsAt(row)
+            # Clamped per step. A page whose cumulative times are not monotonic
+            # -- hand-crafted, or written by something else -- decodes to a
+            # negative gap, and a macro cannot be minus 40 ms long.
+            return sum(max(0, step["delay"]) for step in macro["steps"])
+        if role == self.NameRole:
+            return macro.get("name") or ""
+        if role == self.ForeignRole:
+            return self.foreignAt(row)
+        if role == self.HeldKeysRole:
+            return self._held_keys(macro["steps"])
         return None
 
-    @Slot(int, result="QVariantList")
-    def stepsAt(self, row):
-        """One macro's steps, ready to list."""
+    @staticmethod
+    def _held_keys_raw(steps):
+        """Keys pressed and never released, in the order they went down.
+
+        The firmware plays exactly what is stored, so these stay down after the
+        macro ends -- with this application closed, on a machine that has never
+        heard of it.
+        """
+        down = []
+        for step in steps:
+            key = step.get("key")
+            if step.get("event") == mapping.MACRO_PRESS:
+                if key not in down:
+                    down.append(key)
+            elif step.get("event") == mapping.MACRO_RELEASE and key in down:
+                down.remove(key)
+        return down
+
+    @classmethod
+    def _held_keys(cls, steps):
+        """The same, labelled -- what the card names when it warns."""
+        return [key_label(key) if isinstance(key, str) else str(key)
+                for key in cls._held_keys_raw(steps)]
+
+    @Slot(int, result=bool)
+    def foreignAt(self, row):
+        """Whether this macro presses something this application cannot write.
+
+        Reading is permissive and writing is strict -- `macros()` hands back
+        `m1`, or a raw id, for a step Space Station stored, while `set_macros`
+        refuses anything outside `XINPUT_TARGETS`. Every step edit is a
+        read-modify-write of the whole page, so one such step makes the entire
+        macro unwritable, and an editor that did not notice would refuse every
+        save with a message about a step nobody touched. The macro is shown and
+        quarantined instead: read, described, deletable, not editable.
+        """
         macros = self._macros()
         if not 0 <= row < len(macros):
-            return []
-        return [{"delay": step["delay"],
-                 "key": key_label(step["key"]) if isinstance(step["key"], str)
-                        else str(step["key"]),
-                 "event": MACRO_EVENT_LABELS.get(step["event"], str(step["event"]))}
-                for step in macros[row]["steps"]]
+            return False
+        return any(step.get("key") not in mapping.XINPUT_TARGETS
+                   for step in macros[row]["steps"])
 
     def _write(self, macros):
         config = self._profile.edited()
@@ -1336,7 +1756,10 @@ class MacroModel(QAbstractListModel):
             return False
         try:
             config.set_macros(macros)
-        except (ValueError, mapping.ProtocolError) as exc:
+        except (ValueError, KeyError, mapping.ProtocolError) as exc:
+            # KeyError as well, because a step dict carrying a key name the pad
+            # does not have reaches `_macro_key_name` and raises one -- and an
+            # exception leaving a @Slot is caught nowhere at all.
             self.refused.emit(str(exc))
             return False
         self.refresh()
@@ -1360,6 +1783,183 @@ class MacroModel(QAbstractListModel):
         macros[row]["interval"] = max(0, min(mapping.MACRO_INTERVAL_MAX,
                                              int(milliseconds)))
         self._write(macros)
+
+    @Slot(int, str)
+    def setName(self, row, name):
+        """Name a macro. Protocol 3.2 only -- see `namesSupported`."""
+        macros = self._editable_macros()
+        if not 0 <= row < len(macros):
+            return
+        macros[row]["name"] = str(name)
+        self._write(macros)
+
+    # -- the steps of one macro --------------------------------------------
+    #
+    # All of these act on the macro `beginEdit` pointed at, take a step index,
+    # and end in `_write`, which is the same read-modify-write the rest of this
+    # model uses. Nothing here touches the pad: the profile is edited in memory
+    # and the footer's Apply is what sends it, so editing a step costs no
+    # traffic and a half-finished macro has harmed nothing.
+
+    def _editing_steps(self):
+        """(row, macros, steps) for the macro being edited, or None."""
+        row = self.editingRow
+        if row < 0:
+            return None
+        macros = self._editable_macros(deep_row=row)
+        return row, macros, macros[row]["steps"]
+
+    @Slot(int, int)
+    def setStepKey(self, step, key_index):
+        editing = self._editing_steps()
+        if editing is None:
+            return
+        _row, macros, steps = editing
+        if not 0 <= step < len(steps):
+            return
+        index = max(0, min(len(mapping.XINPUT_TARGETS) - 1, int(key_index)))
+        steps[step]["key"] = mapping.XINPUT_TARGETS[index]
+        self._write(macros)
+
+    @Slot(int, int)
+    def setStepEvent(self, step, event_index):
+        editing = self._editing_steps()
+        if editing is None:
+            return
+        _row, macros, steps = editing
+        if not 0 <= step < len(steps):
+            return
+        index = max(0, min(len(MACRO_STEP_EVENTS) - 1, int(event_index)))
+        steps[step]["event"] = MACRO_STEP_EVENTS[index][1]
+        self._write(macros)
+
+    @Slot(int, int)
+    def setStepDelay(self, step, milliseconds):
+        """The gap before this step, quantised to what the profile can store.
+
+        Quantised here rather than left to the writer, which floors each gap on
+        its own: a typed 15 becomes 10 in the bytes on an Apex 5, and a spin box
+        that went on showing 15 would be describing a macro the pad is not
+        playing.
+        """
+        editing = self._editing_steps()
+        if editing is None:
+            return
+        _row, macros, steps = editing
+        if not 0 <= step < len(steps):
+            return
+        wanted = max(0, min(STEP_DELAY_MAX, int(milliseconds)))
+        tick = self._limits().tick_ms
+        steps[step]["delay"] = wanted - wanted % tick
+        self._write(macros)
+
+    @Slot(int)
+    def addStep(self, after):
+        """Insert a press and its release. `after` < 0 appends.
+
+        A *pair*, so a macro built by hand is balanced by construction and
+        cannot leave a key held on the pad by simple forgetfulness. Getting
+        there still takes one press per half if somebody wants a key held across
+        other steps -- they delete the release and move it -- which is the point
+        at which the warning appears.
+        """
+        editing = self._editing_steps()
+        if editing is None:
+            return
+        if not self.canAddStep:
+            self.refused.emit(
+                f"this profile holds {self._limits().steps} macro steps in "
+                f"total and {self.stepsUsed} are used, so there is no room for "
+                "another press and release. Shorten or delete another macro.")
+            return
+        _row, macros, steps = editing
+        tick = self._limits().tick_ms
+        at = len(steps) if after < 0 else max(0, min(len(steps), after + 1))
+        steps[at:at] = [{"delay": tick, "key": "a", "event": mapping.MACRO_PRESS},
+                        {"delay": tick, "key": "a", "event": mapping.MACRO_RELEASE}]
+        self._write(macros)
+
+    @Slot(int)
+    def removeStep(self, step):
+        editing = self._editing_steps()
+        if editing is None:
+            return
+        _row, macros, steps = editing
+        if not 0 <= step < len(steps):
+            return
+        del steps[step]
+        self._write(macros)
+
+    @Slot()
+    def balance(self):
+        """Release everything the macro leaves held, in the order it went down.
+
+        The recorder's own rule, so a macro fixed here ends the way a recorded
+        one does rather than in some second style of its own.
+        """
+        editing = self._editing_steps()
+        if editing is None:
+            return
+        _row, macros, steps = editing
+        held = self._held_keys_raw(steps)
+        if not held:
+            return
+        tick = self._limits().tick_ms
+        room = self._limits().steps - self.stepsUsed
+        if len(held) > room:
+            self.refused.emit(
+                f"{len(held)} release(s) are needed and the profile has room "
+                f"for {room} more step(s). Shorten or delete another macro.")
+            return
+        steps.extend({"delay": tick, "key": key, "event": mapping.MACRO_RELEASE}
+                     for key in held)
+        self._write(macros)
+
+    @staticmethod
+    def _held_keys_raw(steps):
+        down = []
+        for step in steps:
+            key = step.get("key")
+            if step.get("event") == mapping.MACRO_PRESS:
+                if key not in down:
+                    down.append(key)
+            elif step.get("event") == mapping.MACRO_RELEASE and key in down:
+                down.remove(key)
+        return down
+
+    @Slot(int)
+    def build(self, key_index):
+        """Make a macro on a key without recording one, and open it.
+
+        Seeded with a tap rather than left empty: a key bound to a macro with no
+        body is a key that does nothing, which is worse than a key that does the
+        obvious wrong thing and can be edited into the right one.
+        """
+        if self._profile.config is None:
+            return
+        if not 0 <= key_index < len(self._profile.padKeys):
+            return
+        key = self._profile.padKeys[key_index]
+        config = self._profile.edited()
+        tick = self._limits().tick_ms
+        try:
+            config.set_macro(
+                key,
+                [{"delay": 0, "key": "a", "event": mapping.MACRO_PRESS},
+                 {"delay": max(tick, 50 - 50 % tick), "key": "a",
+                  "event": mapping.MACRO_RELEASE}],
+                # Explicit, because None means "leave this slot's byte alone"
+                # and a new macro may be landing in a slot a deleted one
+                # vacated -- it would report that macro's repeat gap.
+                interval=MACRO_DEFAULT_INTERVAL)
+        except (ValueError, KeyError, mapping.ProtocolError) as exc:
+            self.refused.emit(str(exc))
+            return
+        self.refresh()
+        self._profile.keys.refresh()
+        self._profile.markChanged()
+        self.beginEdit(next((row for row, macro in enumerate(self._macros())
+                             if macro["key"] == key), -1))
 
     @Slot(int)
     def remove(self, row):
@@ -1408,8 +2008,11 @@ class MacroModel(QAbstractListModel):
                 "control off on the Controller page and try again.")
             return
         try:
-            config.set_macro(key, steps)
-        except (ValueError, mapping.ProtocolError) as exc:
+            # An explicit interval for the reason `build` gives: None means
+            # "leave this slot's byte alone", and a recording may be landing in
+            # a slot a deleted macro vacated.
+            config.set_macro(key, steps, interval=MACRO_DEFAULT_INTERVAL)
+        except (ValueError, KeyError, mapping.ProtocolError) as exc:
             self.refused.emit(str(exc))
             return
         self.refresh()
@@ -1444,6 +2047,16 @@ class MacroModel(QAbstractListModel):
         macros = self._macros()
         if macros == self._shown:
             return
+        # Anything below here means the macros moved, which is the only thing
+        # `stepsUsed` and `canAddStep` depend on -- and a step added inside an
+        # existing macro takes the middle branch, where the macro *count* has
+        # not moved at all. Emitting only from the reset branch left the budget
+        # line stale for exactly as long as somebody was editing steps.
+        self._steps.refresh()
+        self.stepsChanged.emit()
+        # The edited macro may have been the one that went, in which case
+        # `editingRow` is now -1 and the dialog watching it closes itself.
+        self.editingChanged.emit()
         if len(macros) == len(self._shown):
             self._shown = list(macros)
             self.dataChanged.emit(self.index(0, 0), self.index(len(macros) - 1, 0))

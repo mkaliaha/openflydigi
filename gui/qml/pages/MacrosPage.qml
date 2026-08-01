@@ -38,6 +38,20 @@ Kirigami.ScrollablePage {
             enabled: App.profile.loaded && App.profile.macros.canAdd
                      && !page.blocked && !App.profile.macros.recording
             onTriggered: recordDialog.open()
+        },
+        // Building one is the other half of the same job, and the reason it is
+        // a separate action rather than a mode of the recorder: a macro nobody
+        // can play on the pad -- a button held for exactly 40 ms, a sequence
+        // faster than hands go -- has to be typed, and one that is easier
+        // played than typed should be recorded.
+        Kirigami.Action {
+            objectName: "buildAction"
+            text: "Build a macro"
+            icon.name: "list-add"
+            enabled: App.profile.loaded && App.profile.macros.canAdd
+                     && App.profile.macros.canAddStep
+                     && !page.blocked && !App.profile.macros.recording
+            onTriggered: buildDialog.open()
         }
     ]
 
@@ -123,7 +137,9 @@ Kirigami.ScrollablePage {
                 required property int interval
                 required property int stepCount
                 required property int duration
-                required property var steps
+                required property bool foreign
+                required property var heldKeys
+                required property string name
 
                 spacing: 0
                 Layout.fillWidth: true
@@ -167,14 +183,64 @@ Kirigami.ScrollablePage {
 
                     FormCard.FormDelegateSeparator {}
 
+                    // Only from protocol 3.2, whose store keeps twenty bytes
+                    // per macro. The v3.1 page has nowhere to put one and the
+                    // backend drops it silently, so the field is absent rather
+                    // than present and ignored.
+                    FormCard.FormTextFieldDelegate {
+                        objectName: "macroName_" + macroEntry.index
+                        visible: App.profile.macros.namesSupported
+                        label: "Name"
+                        text: macroEntry.name
+                        onEditingFinished: App.profile.macros.setName(
+                                               macroEntry.index, text)
+                    }
+
+                    FormCard.FormDelegateSeparator {
+                        visible: App.profile.macros.namesSupported
+                    }
+
+                    FormCard.FormButtonDelegate {
+                        objectName: "macroEdit_" + macroEntry.index
+                        text: "Edit steps"
+                        description: macroEntry.stepCount + " step"
+                                     + (macroEntry.stepCount === 1 ? "" : "s")
+                                     + ", " + macroEntry.duration + " ms"
+                        icon.name: "document-edit"
+                        enabled: !macroEntry.foreign
+                        onClicked: {
+                            App.profile.macros.beginEdit(macroEntry.index);
+                            stepDialog.open();
+                        }
+                    }
+
+                    // Reading a macro is permissive and writing one is strict,
+                    // so a macro from other software can press a key this
+                    // application cannot store. Every step edit rewrites the
+                    // whole page, so one such step makes the macro unwritable
+                    // -- and an editor that did not check would refuse every
+                    // save with a complaint about a step nobody touched.
                     FormCard.FormTextDelegate {
-                        objectName: "macroSteps_" + macroEntry.index
-                        text: macroEntry.stepCount + " step"
-                              + (macroEntry.stepCount === 1 ? "" : "s")
-                              + ", " + macroEntry.duration + " ms"
-                        description: macroEntry.steps.map(
-                            step => "+" + step.delay + " ms  " + step.event
-                                    + "  " + step.key).join("\n")
+                        objectName: "macroForeign_" + macroEntry.index
+                        visible: macroEntry.foreign
+                        text: "Written by other software"
+                        description: "This macro presses a key this application "
+                                     + "cannot store. The pad reports it and "
+                                     + "plays it, but writing it back would be "
+                                     + "refused, so it cannot be edited here. "
+                                     + "Delete it and record a new one to "
+                                     + "replace it."
+                    }
+
+                    FormCard.FormTextDelegate {
+                        objectName: "macroHeld_" + macroEntry.index
+                        visible: macroEntry.heldKeys.length > 0
+                        text: "Ends with " + macroEntry.heldKeys.join(", ")
+                              + " still pressed"
+                        description: "The pad plays exactly what is stored, so "
+                                     + "it goes on holding that down after the "
+                                     + "macro finishes — with this window "
+                                     + "closed. Open the steps to release it."
                     }
 
                     FormCard.FormDelegateSeparator {}
@@ -210,6 +276,191 @@ Kirigami.ScrollablePage {
                              + (App.profile.macros.experimental
                                 ? "store the pad keeps them in."
                                 : "page the pad keeps them in.")
+            }
+        }
+    }
+
+    // Building one, which is recording with the pad left out of it.
+    Kirigami.Dialog {
+        id: buildDialog
+        objectName: "buildDialog"
+        title: "Build a macro"
+        preferredWidth: Kirigami.Units.gridUnit * 24
+        standardButtons: Kirigami.Dialog.NoButton
+
+        customFooterActions: [
+            Kirigami.Action {
+                objectName: "buildCreateAction"
+                text: "Create"
+                icon.name: "list-add"
+                onTriggered: {
+                    App.profile.macros.build(buildKeyPicker.currentIndex);
+                    buildDialog.close();
+                    // `build` leaves the new macro open for editing, so the
+                    // step editor is where this lands rather than back on a
+                    // card holding a macro that presses A once.
+                    if (App.profile.macros.editingRow >= 0)
+                        stepDialog.open();
+                }
+            },
+            Kirigami.Action {
+                objectName: "buildCancelAction"
+                text: "Cancel"
+                icon.name: "dialog-cancel"
+                onTriggered: buildDialog.close()
+            }
+        ]
+
+        ColumnLayout {
+            spacing: Kirigami.Units.largeSpacing
+
+            Controls.Label {
+                Layout.fillWidth: true
+                Layout.margins: Kirigami.Units.largeSpacing
+                wrapMode: Text.WordWrap
+                text: "Pick the key that will run it. It starts as one tap of "
+                      + "A, which you then edit into what you want — so this is "
+                      + "the way to write a macro nobody could play by hand, "
+                      + "like a button held for exactly 40 ms."
+            }
+
+            Controls.ComboBox {
+                id: buildKeyPicker
+                objectName: "buildKeyPicker"
+                Layout.fillWidth: true
+                Layout.leftMargin: Kirigami.Units.largeSpacing
+                Layout.rightMargin: Kirigami.Units.largeSpacing
+                Layout.bottomMargin: Kirigami.Units.largeSpacing
+                model: App.profile.macros.triggerKeys
+                // A stray notch here would build the macro onto a key nobody
+                // chose. Same defect as the recorder's picker below.
+                wheelEnabled: false
+            }
+        }
+    }
+
+    // The step editor itself. A dialog rather than more card: a macro can run
+    // to 128 steps, and a page that grew by one row per step would bury the
+    // three controls above it.
+    Kirigami.Dialog {
+        id: stepDialog
+        objectName: "stepDialog"
+        title: "Steps — " + App.profile.macros.editingLabel
+        preferredWidth: Kirigami.Units.gridUnit * 34
+        // No `preferredHeight`: Kirigami.Dialog derives its own y from its
+        // height, and pinning both puts that binding into a loop it reports on
+        // every open. It scrolls its content past the window height by itself,
+        // which is what a 128-step macro needs.
+        standardButtons: Kirigami.Dialog.NoButton
+
+        customFooterActions: [
+            Kirigami.Action {
+                objectName: "stepAddAction"
+                text: "Add a tap"
+                icon.name: "list-add"
+                enabled: App.profile.macros.canAddStep
+                onTriggered: App.profile.macros.addStep(-1)
+            },
+            Kirigami.Action {
+                objectName: "stepBalanceAction"
+                text: "Release what is held"
+                icon.name: "edit-clear-all"
+                enabled: App.profile.macros.stepEditor.warning !== ""
+                onTriggered: App.profile.macros.balance()
+            },
+            Kirigami.Action {
+                objectName: "stepDoneAction"
+                text: "Done"
+                icon.name: "dialog-ok"
+                onTriggered: stepDialog.close()
+            }
+        ]
+
+        // A mirrored property rather than a Connections, for the reason the
+        // recorder's dialog gives below. -1 means the macro being edited is
+        // gone -- deleted from the card behind this, or dropped because its key
+        // was remapped on the Buttons page -- and a dialog editing nothing has
+        // nothing to show.
+        readonly property int editing: App.profile.macros.editingRow
+        onEditingChanged: if (editing < 0) stepDialog.close()
+        onClosed: App.profile.macros.endEdit()
+
+        ColumnLayout {
+            spacing: Kirigami.Units.smallSpacing
+
+            Kirigami.InlineMessage {
+                objectName: "stepWarning"
+                Layout.fillWidth: true
+                Layout.margins: Kirigami.Units.smallSpacing
+                visible: App.profile.macros.stepEditor.warning !== ""
+                type: Kirigami.MessageType.Warning
+                text: App.profile.macros.stepEditor.warning
+            }
+
+            Controls.Label {
+                objectName: "stepBudget"
+                Layout.fillWidth: true
+                Layout.margins: Kirigami.Units.smallSpacing
+                wrapMode: Text.WordWrap
+                font: Kirigami.Theme.smallFont
+                color: Kirigami.Theme.disabledTextColor
+                text: App.profile.macros.stepEditor.count + " step"
+                      + (App.profile.macros.stepEditor.count === 1 ? "" : "s")
+                      + ", " + App.profile.macros.stepEditor.totalMs
+                      + " ms per pass — " + App.profile.macros.stepsUsed
+                      + " of " + App.profile.macros.stepBudget
+                      + " steps used across this profile"
+            }
+
+            Kirigami.PlaceholderMessage {
+                objectName: "stepEmpty"
+                Layout.fillWidth: true
+                Layout.margins: Kirigami.Units.gridUnit
+                visible: App.profile.macros.stepEditor.count === 0
+                icon.name: "media-record"
+                text: "No steps"
+                explanation: "A macro with no steps is a key that does nothing. "
+                             + "Add a tap and edit it."
+            }
+
+            Repeater {
+                // The model is the one MacroStepsModel, handed out `constant`
+                // and never replaced. A list property rebuilt per read and
+                // notified by the edit itself would destroy the delegate under
+                // the pointer on the first change -- which is exactly what the
+                // Triggers page's knobs used to do.
+                model: App.profile.macros.stepEditor
+
+                delegate: MacroStepRow {
+                    // Reached through `model` rather than as required
+                    // properties per role, because this delegate *is* the row
+                    // type and already declares `keyIndex`, `delay` and the
+                    // rest -- redeclaring them here would be a name collision
+                    // with the properties being assigned.
+                    required property int index
+                    required property var model
+
+                    objectName: "macroStep_" + index
+                    Layout.fillWidth: true
+                    Layout.leftMargin: Kirigami.Units.smallSpacing
+                    Layout.rightMargin: Kirigami.Units.smallSpacing
+
+                    stepNumber: index + 1
+                    keyIndex: model.keyIndex
+                    eventIndex: model.eventIndex
+                    eventLabel: model.eventLabel
+                    delay: model.delay
+                    held: model.held
+                    tick: App.profile.macros.tickMs
+                    keyNames: App.profile.macros.stepKeys
+                    eventNames: App.profile.macros.stepEvents
+
+                    onKeyChosen: (i) => App.profile.macros.setStepKey(index, i)
+                    onEventChosen: (i) => App.profile.macros.setStepEvent(index, i)
+                    onDelayChosen: (ms) => App.profile.macros.setStepDelay(index, ms)
+                    onInsertRequested: App.profile.macros.addStep(index)
+                    onRemoveRequested: App.profile.macros.removeStep(index)
+                }
             }
         }
     }

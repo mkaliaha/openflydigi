@@ -1262,10 +1262,22 @@ class MappingConfig:
         before it writes one: every key bound to a keyboard key goes back to
         sending itself, and both sticks are forced to act as sticks. Neither
         binding means anything to a Switch -- the keyboard half is host-side
-        injection this project does not do at all (`TARGET_KEYBOARD` is a bare
-        sentinel with no key code anywhere in the blob), and a stick set to
-        something that is not a stick carries `CENTER_NOT_A_STICK` where its
-        dead zone belongs.
+        injection this project does not do at all, and a stick set to something
+        that is not a stick carries `CENTER_NOT_A_STICK` where its dead zone
+        belongs.
+
+        **`TARGET_KEYBOARD` carries no key code, but it is not inert on the
+        pad.** This used to say "a bare sentinel", which was half right and
+        misleading about the half that matters. Measured with
+        `tools/keyboard-target-probe`: with A's target byte set to 254 the pad
+        stops reporting `BTN_SOUTH` at all, so the firmware recognises the
+        sentinel and suppresses its own gamepad output for it. What it does not
+        do is type -- there is no code to type, in the blob or anywhere else,
+        and `MappingConfigParser` zeroes both companion bytes on the very branch
+        that writes 254. That is the whole feature on Windows: the pad stops
+        sending the button and Flydigi's own kernel filter driver puts a
+        keystroke in its place. On Linux nothing does, so a key left on 254 is a
+        key that does nothing, which is exactly why this strips them.
 
         So this matters for profiles that came from Space Station rather than
         for ones made here, which is exactly why it is not optional: the slot
@@ -1575,12 +1587,31 @@ class MappingConfig:
         # nobody set keeps its byte instead of being blanked. Passing None
         # therefore means "leave this slot alone", which is what a factory 30 ms
         # survives on.
+        #
+        # **"Leave it alone" means a slot that still holds a macro.** A slot the
+        # list no longer reaches holds a number belonging to a macro that is
+        # gone, and the next macro to land there inherits it -- which is not a
+        # theory. Traced on the factory blob: `set_macro("m1", interval=100)`,
+        # `set_macro("m2", interval=2000)`, `clear_macro("m1")` leaves the bytes
+        # at `[200, 200, 3, 3, 3]` because clearing shifts m2 down into slot 0
+        # and never touches slot 1; a following `set_macro("m3", steps)` with no
+        # interval then reports 2000 ms that nobody set. So the tail is blanked
+        # to `MACRO_INTERVAL_UNSET`, which is the value `_macro_intervals` reads
+        # back as None -- "never written", which is what a vacated slot is.
+        #
+        # This is the one place here that does not simply reproduce what their
+        # writer emits, and it is a deliberate divergence: the alternative is a
+        # byte that is provably wrong about the macro reading it. The 0xFF fill
+        # above, which *is* byte-for-byte parity, is the macro page at 230; this
+        # is the cycle block at 820 and a different question.
         if len(self.blob) >= OFF_MACRO_CYCLE + MACRO_SLOTS:
             for slot, macro in enumerate(macros):
                 interval = macro.get("interval")
                 if interval is not None:
                     self.blob[OFF_MACRO_CYCLE + slot] = max(
                         0, min(MACRO_INTERVAL_MAX, int(interval))) // MACRO_TICK_MS
+            for slot in range(len(macros), MACRO_SLOTS):
+                self.blob[OFF_MACRO_CYCLE + slot] = MACRO_INTERVAL_UNSET
 
     def set_macro(self, key, steps, macro_type=MACRO_ONCE, interval=None,
                   name=None):

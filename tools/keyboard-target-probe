@@ -1,0 +1,482 @@
+#!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
+"""Ask the pad what it does with a key bound to keyboard, target 254.
+
+This project has always said the keyboard half of Flydigi's remapping is
+host-side: `TARGET_KEYBOARD` is "a bare sentinel with no key code anywhere in
+the blob" (`flydigi/mapping.py`), Space Station's `KeyboardMouseInjectRunner`
+does the typing on Windows, and a Linux host therefore has nothing to act on.
+Every commit that touched the subject repeated it. **None of it was measured.**
+
+Two facts sit awkwardly beside it, and this probe exists because of them.
+
+  * **The pad publishes its own keyboard and mouse HID interfaces.** On if01,
+    descriptor `05 01 09 06`, showing up as `Flydigi Flydigi APEX5  Keyboard`
+    and `... Mouse` -- on a machine that has never had Space Station on it. Every
+    other tool here treats them as an obstacle, since the keyboard node sorts
+    first and `find_device` has to be told `axes=True` to skip it. Nothing has
+    ever asked what drives them.
+  * **A key-table entry is three bytes and only one of them is accounted for.**
+    `[target, turbo_mode, turbo_frequency]`, and `mapping()` returns
+    `("keyboard", TURBO_OFF, 0)` for target 254 without so much as reading the
+    other two, while `set_mapping` writes them as zeros. So if a key code is
+    stored beside the sentinel, this project would blank it on write and drop it
+    on read -- which is exactly the shape of a thing nobody finds by accident.
+
+**One press separates three outcomes**, which is why this is worth a run rather
+than more reading. Bind A -- a button that does have an XInput id, so evdev
+reports it -- to target 254, and press it:
+
+  * **A still arrives as `BTN_SOUTH`.** The firmware does not act on 254 at all;
+    it is inert on the pad and the host is the only thing that could ever have
+    typed. The current belief is right.
+  * **A arrives nowhere.** The firmware *does* act on 254: it has stopped
+    sending the gamepad button, which is a decision only the pad can make. It
+    knows the key is meant to be a keystroke and has no keystroke to send. The
+    current belief is wrong about the mechanism even if no key is ever typed.
+  * **Something arrives on the keyboard node.** Settled outright, and the byte
+    that chose it is worth finding.
+
+The third outcome is the one worth the run and the least likely to come first,
+because a code we never wrote is a code the pad does not have. So `--code`
+writes candidate bytes into the two spare positions and repeats the window: HID
+usage ids (`a` is 0x04), Windows virtual keys (`A` is 0x41), and the pad's own
+key ids, in either byte. A hit types a letter; a miss costs one press.
+
+**M1 is the second key, and it is the cleaner listener.** A paddle has no XInput
+id, so it reports nothing on any node by default -- which makes the keyboard
+node's silence during a control window mean something, and makes any character
+during a probe window unambiguous. A is what separates outcome one from outcome
+two; M1 is what makes outcome three legible.
+
+    tools/keyboard-target-probe                    # the control and both bare windows
+    tools/keyboard-target-probe --code hid:0x04    # ... plus one candidate on M1
+    tools/keyboard-target-probe --code hid:0x04 --code vk:0x41 --code padkey:a
+    tools/keyboard-target-probe --control-only     # baseline, writes nothing
+
+Nothing is ever saved. The profile is written and applied, never committed with
+command 166, and is put back and read back at the end -- and an applied-but-
+unsaved config dies on the pad's next sleep anyway.
+"""
+import argparse
+import os
+import select
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from flydigi import device, evdev, identity, mapping
+
+# The three nodes one pad publishes. `axes` is how they are told apart: only the
+# gamepad has absolute axes, and the keyboard sorts first, so a match on ids
+# alone lands on the wrong one -- the same trap `flydigi/macros.py` documents.
+NODES = [("gamepad", dict(axes=True)),
+         ("keyboard", dict(name="keyboard")),
+         ("mouse", dict(name="mouse"))]
+
+# What the windows below press. `a` has an XInput id and reports as BTN_SOUTH,
+# which is what makes its *absence* readable; `m1` has none and reports nothing,
+# which is what makes a keystroke from it unambiguous.
+PROBE_KEYS = ["a", "m1"]
+
+# evdev codes worth naming in the output. Not a full table: this only has to
+# turn "code 30 arrived" into something a person can act on, and anything
+# unnamed is printed as its number.
+KEY_NAMES = {
+    1: "ESC", 2: "1", 3: "2", 4: "3", 5: "4", 6: "5", 7: "6", 8: "7", 9: "8",
+    10: "9", 11: "0", 14: "BACKSPACE", 15: "TAB", 16: "Q", 17: "W", 18: "E",
+    19: "R", 20: "T", 21: "Y", 22: "U", 23: "I", 24: "O", 25: "P", 28: "ENTER",
+    29: "LEFTCTRL", 30: "A", 31: "S", 32: "D", 33: "F", 34: "G", 35: "H",
+    36: "J", 37: "K", 38: "L", 42: "LEFTSHIFT", 44: "Z", 45: "X", 46: "C",
+    47: "V", 48: "B", 49: "N", 50: "M", 56: "LEFTALT", 57: "SPACE",
+    103: "UP", 105: "LEFT", 106: "RIGHT", 108: "DOWN",
+    272: "BTN_LEFT", 273: "BTN_RIGHT", 274: "BTN_MIDDLE",
+    304: "BTN_SOUTH", 305: "BTN_EAST", 307: "BTN_NORTH", 308: "BTN_WEST",
+    310: "BTN_TL", 311: "BTN_TR", 314: "BTN_SELECT", 315: "BTN_START",
+    316: "BTN_MODE", 317: "BTN_THUMBL", 318: "BTN_THUMBR",
+}
+
+
+def name_of(code):
+    return KEY_NAMES.get(code, f"code {code}")
+
+
+def parse_code(text):
+    """`hid:0x04`, `vk:0x41` or `padkey:a` into (label, byte).
+
+    Three encodings because three are plausible and none is established. A HID
+    usage id is what the pad's own keyboard interface speaks and is the reading
+    that needs no host at all; a Windows virtual key is what Space Station's
+    injector would carry and would mean the field is a note to *that* process; a
+    ControllerKey id would mean the byte is the same vocabulary as the rest of
+    the key table and the keyboard half is something else entirely.
+    """
+    kind, _, value = text.partition(":")
+    kind = kind.strip().lower()
+    if not value:
+        raise argparse.ArgumentTypeError(
+            f"{text!r}: expected kind:value, e.g. hid:0x04")
+    if kind == "padkey":
+        name = value.strip().lower()
+        if name not in mapping.KEY_IDS:
+            raise argparse.ArgumentTypeError(f"{value!r} is not a key on the pad")
+        return f"padkey:{name}", mapping.KEY_IDS[name]
+    if kind not in ("hid", "vk"):
+        raise argparse.ArgumentTypeError(
+            f"{kind!r}: expected hid, vk or padkey")
+    try:
+        number = int(value, 0)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number")
+    if not 0 <= number <= 255:
+        raise argparse.ArgumentTypeError(f"{value!r} does not fit in a byte")
+    return f"{kind}:{number:#04x}", number
+
+
+def find_nodes(ctrl):
+    """The three input nodes of the pad `ctrl` is talking to.
+
+    Filtered to that one physical device rather than to the vendor id: two Apex
+    5s share a vendor, a product and all three node names, so on a desk with two
+    of them every other filter matches both and the probe would watch one pad
+    while writing to the other.
+    """
+    root = evdev.usb_device_of_hidraw(ctrl.path)
+    found = {}
+    for label, filters in NODES:
+        path, name = evdev.find_device(vendor=device.VID, usb_root=root,
+                                       **filters)
+        if path is not None:
+            found[label] = (path, name)
+    return found
+
+
+class Watch:
+    """Every node open at once, reporting which key codes arrived on each.
+
+    Codes rather than counts: the whole reading is *where* an event turned up
+    and *what* it was, and a press and its release are one answer, not two.
+    """
+
+    def __init__(self, nodes):
+        self.nodes = nodes
+        self.readers = {}
+        self.refused = {}
+
+    def __enter__(self):
+        for label, (path, _name) in self.nodes.items():
+            try:
+                self.readers[label] = evdev.Reader(path)
+            except OSError as exc:
+                self.refused[label] = exc
+                print(f"  cannot open the {label} node ({path}): {exc}")
+        return self
+
+    def __exit__(self, *exc):
+        for reader in self.readers.values():
+            reader.close()
+
+    def drain(self):
+        """Throw away whatever is already queued, so a window starts empty."""
+        for reader in self.readers.values():
+            while select.select([reader], [], [], 0)[0]:
+                reader.read()
+            reader.keys.clear()
+
+    def collect(self, seconds):
+        """Watch for `seconds`. Returns {node: {code, ...}}."""
+        seen = {label: set() for label in self.readers}
+        deadline = time.time() + seconds
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            ready = select.select(list(self.readers.values()), [], [],
+                                  min(0.2, remaining))[0]
+            for reader in ready:
+                reader.read()
+            for label, reader in self.readers.items():
+                seen[label] |= set(reader.keys)
+        return seen
+
+
+def window(watch, title, prompt, key, seconds):
+    """One press, watched on every node."""
+    print(f"\n-- {title}")
+    print(f"   {prompt}")
+    watch.drain()
+    print(f"   watching for {seconds:.0f}s -- PRESS AND RELEASE {key.upper()} "
+          "a few times NOW")
+    seen = watch.collect(seconds)
+    for label in ("gamepad", "keyboard", "mouse"):
+        if label not in seen:
+            continue
+        codes = sorted(seen[label])
+        if codes:
+            print(f"   {label:9s} {', '.join(name_of(c) for c in codes)}")
+        else:
+            print(f"   {label:9s} (silent)")
+    return seen
+
+
+def poke(config, key, target, second=0, third=0):
+    """Write a key-table entry by hand, spare bytes and all.
+
+    Not `set_mapping`: that is the code under suspicion. It writes zeros into
+    bytes 1 and 2 whatever the target, which is precisely the behaviour this
+    probe has to get round to ask its question -- a probe that went through it
+    could never write a candidate code, and would be testing the library rather
+    than the pad.
+    """
+    offset, _key_id = config._entry(key)
+    config.blob[offset : offset + mapping.KEY_ENTRY] = bytes(
+        [target, second, third])
+
+
+def entry_of(config, key):
+    """The three raw bytes of one key's entry, as stored."""
+    offset, _key_id = config._entry(key)
+    return bytes(config.blob[offset : offset + mapping.KEY_ENTRY])
+
+
+def apply(ctrl, cfg_id, edited, previous):
+    """Put an edited profile into working memory. Never saved."""
+    mapping.write_config(ctrl, cfg_id, edited, old=previous)
+    mapping.apply_config(ctrl, cfg_id)
+
+
+def restore(ctrl, cfg_id, original, edited):
+    """Put the profile back, and check that it went back.
+
+    Read back rather than announced, for the reason `trigger-stroke-probe`
+    gives: a write that reports packets sent is not a write the pad kept, and
+    this probe's whole subject is that an ACK is not evidence. Only the key
+    table is compared, because that is all this probe touches.
+    """
+    sent = mapping.write_config(ctrl, cfg_id, original, old=edited)
+    mapping.apply_config(ctrl, cfg_id)
+    try:
+        back = mapping.read_config(ctrl, cfg_id)
+    except mapping.ProtocolError as exc:
+        print(f"\nrestored profile {cfg_id + 1} ({sent} packets) but could not "
+              f"read it back to check: {exc}")
+        return
+    wrong = [key for key in PROBE_KEYS
+             if entry_of(back, key) != entry_of(original, key)]
+    if not wrong:
+        print(f"\nrestored profile {cfg_id + 1} ({sent} packets), key table "
+              "read back and verified")
+        return
+    print(f"\nWARNING: profile {cfg_id + 1} did NOT go back. "
+          + "; ".join(f"{key} still holds {entry_of(back, key).hex(' ')}"
+                      for key in wrong)
+          + ". Nothing was saved, so a sleep clears it -- but do not treat this "
+            "profile as untouched in the next run.")
+
+
+def verdict(control, bare, nonsense, nonsense_target):
+    """What the A windows mean, read together.
+
+    Three windows and not two, because the second one on its own cannot carry
+    the reading. `nonsense` is A pointed at a target byte that is not a key id
+    and not a sentinel; it is what separates a firmware that understands 254
+    from one that merely refuses to resolve anything it does not recognise.
+    """
+    print("\n" + "=" * 72)
+    gamepad_before = 304 in control.get("gamepad", set())
+    gamepad_after = 304 in bare.get("gamepad", set())
+    gamepad_nonsense = 304 in nonsense.get("gamepad", set())
+    typed = bool(bare.get("keyboard")) or bool(bare.get("mouse"))
+
+    if not gamepad_before:
+        print("INCONCLUSIVE: A never reported as BTN_SOUTH even in the control "
+              "window, so the two windows cannot be compared. Either A was not "
+              "pressed, or something else is holding the pad -- third-party "
+              "control switches the report this node is built from off.")
+        return
+    if typed:
+        print("SETTLED: the pad typed. Something arrived on its own keyboard or "
+              "mouse node with nothing running on this host but a profile "
+              "write, so keyboard bindings are firmware, not host injection. "
+              "The bytes that chose the character are worth chasing next; see "
+              "--code.")
+        return
+    if gamepad_before and not gamepad_after:
+        if gamepad_nonsense:
+            print(f"254 IS UNDERSTOOD, SPECIFICALLY: A went quiet under 254 and "
+                  f"went on reporting under {nonsense_target}, which is just as "
+                  "undefined. So this is not a firmware dropping targets it "
+                  "cannot resolve -- it recognises the keyboard sentinel and "
+                  "suppresses the gamepad button for it alone. That is a "
+                  "keystroke with no key loaded, and the code has to reach the "
+                  "pad somehow. Try --code with candidate encodings.")
+        else:
+            print(f"UNDECIDED, AND NOT IN 254'S FAVOUR: A went quiet under 254, "
+                  f"but it also went quiet under {nonsense_target}, which is a "
+                  "meaningless target byte. So the firmware sends nothing for "
+                  "anything it cannot resolve to a key, and 254 was never "
+                  "shown to be special. The suppression is not evidence of a "
+                  "keyboard path; it is evidence of an unknown-target path.")
+        return
+    print("254 IS INERT ON THE PAD: A went on reporting as BTN_SOUTH with its "
+          "target byte set to 254, so the firmware ignores the sentinel "
+          "entirely and the typing can only ever have been host-side. This is "
+          "what flydigi/mapping.py has always claimed, now measured rather than "
+          "inherited from a decompile.")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="What the pad does with a key bound to keyboard (254)")
+    parser.add_argument("--seconds", type=float, default=6.0,
+                        help="how long each window watches (default 6)")
+    parser.add_argument("--code", action="append", type=parse_code, default=[],
+                        metavar="KIND:VALUE",
+                        help="a candidate key code to write beside the "
+                             "sentinel, as hid:0x04, vk:0x41 or padkey:a. "
+                             "Repeatable; each one costs two windows on M1, "
+                             "one per spare byte")
+    parser.add_argument("--nonsense", type=int, default=200, metavar="N",
+                        help="the undefined target byte used as the control "
+                             "for the 254 window (default 200; anything in "
+                             "33..253 is undefined in the key table)")
+    parser.add_argument("--control-only", action="store_true",
+                        help="the baseline window and nothing else -- writes "
+                             "no profile at all")
+    parser.add_argument("--device", help="pad to use, as flydigi-devices names them")
+    args = parser.parse_args()
+
+    ctrl = device.Controller(args.device) if args.device else device.Controller()
+    # A mock pad has no place on the bus, so `usb_device_of_hidraw` gives it no
+    # USB root and the node search falls back to matching by vendor id alone --
+    # which finds the *real* pad's nodes if one is attached. That combination is
+    # worse than either failure on its own: the profile write would go to the
+    # fake while the windows watched the hardware, and every window would read
+    # as "the pad ignored it". Refused rather than warned about.
+    if type(ctrl).__module__.startswith("flydigi.mock"):
+        sys.exit("error: this probe measures firmware behaviour and a mock pad "
+                 "has none. Unset FLYDIGI_MOCK_BUS.")
+    try:
+        identity.require(ctrl)
+    except identity.WrongDevice as exc:
+        sys.exit(f"error: {exc}")
+
+    nodes = find_nodes(ctrl)
+    print("input nodes on this pad:")
+    for label, _filters in NODES:
+        if label in nodes:
+            path, name = nodes[label]
+            print(f"  {label:9s} {path}  {name}")
+        else:
+            print(f"  {label:9s} NOT PRESENT")
+    if "gamepad" not in nodes:
+        sys.exit("no gamepad node -- press a button to wake the pad")
+    if "keyboard" not in nodes:
+        print("\nNOTE: this pad is not publishing a keyboard node right now, so "
+              "the interesting outcome cannot be observed. That is itself worth "
+              "recording -- the composite has been seen on this hardware before.")
+
+    status = mapping.read_status(ctrl)
+    if status is None:
+        sys.exit("the pad did not answer -- press a button to wake it")
+    cfg_id = status["active"]
+    original = mapping.read_config(ctrl, cfg_id)
+
+    for key in PROBE_KEYS:
+        target, mode, frequency = original.mapping(key)
+        print(f"profile {cfg_id + 1}: {key} currently reads "
+              f"{entry_of(original, key).hex(' ')} -> {target}, mode {mode}, "
+              f"turbo {frequency}")
+        if target in ("macro", "keyboard"):
+            sys.exit(f"error: {key} is already bound to {target} on this "
+                     "profile. Pick a clean profile, or clear it first -- this "
+                     "probe cannot tell its own write from what was there.")
+
+    with Watch(nodes) as watch:
+        # The keyboard node is the instrument, not a nicety: without it the run
+        # can still separate "the pad acts on 254" from "254 is inert", but the
+        # outcome worth the session -- the pad actually typing -- is invisible.
+        # systemd's uaccess rules give the seat user an ACL on a joystick node
+        # and deliberately not on a keyboard one, so this is expected rather
+        # than broken, and sudo is the right answer for a probe. A udev rule
+        # would hand the desktop session standing read access to a keyboard,
+        # which is not a trade worth making for one measurement.
+        if "keyboard" in watch.refused:
+            sys.exit("\nerror: the keyboard node cannot be read, so the one "
+                     "outcome this probe exists for could not be seen.\n"
+                     "  Re-run it as root:  sudo python3 tools/keyboard-target-probe\n"
+                     "  (Nothing here needs a udev rule -- do not add one for a "
+                     "keyboard node.)")
+
+        control = window(
+            watch, "control -- nothing written yet",
+            "A is itself and M1 is a paddle with no XInput id.",
+            "A, then M1", args.seconds)
+        if 304 not in control.get("gamepad", set()):
+            print("\n   A did not report as BTN_SOUTH. Everything below rests "
+                  "on this window, so press A during it.")
+        if control.get("keyboard"):
+            print("\n   NOTE: the keyboard node is already producing events "
+                  "with nothing written. Whatever it is, it is not this probe, "
+                  "and it will confuse every window below.")
+
+        if args.control_only:
+            print("\nControl only -- no profile was written.")
+            return 0
+
+        edited = original.copy()
+        previous = original
+        try:
+            poke(edited, "a", mapping.TARGET_KEYBOARD)
+            apply(ctrl, cfg_id, edited, previous)
+            previous = edited.copy()
+            bare = window(
+                watch, "A -> keyboard (254), spare bytes zero",
+                f"a's entry is now {entry_of(edited, 'a').hex(' ')}.",
+                "A", args.seconds)
+
+            # **The control that decides what the window above is worth.**
+            # A going quiet under 254 reads as "the firmware knows this key is
+            # meant to be a keystroke" -- but it reads exactly the same if the
+            # firmware simply sends nothing for any target byte it cannot
+            # resolve, and 33..253 are all undefined in the key table. So write
+            # one of them. If A survives this and not 254, the sentinel is
+            # understood; if it goes quiet here too, "the pad acts on 254" was
+            # a sentence about invalid targets and nothing else.
+            poke(edited, "a", args.nonsense)
+            apply(ctrl, cfg_id, edited, previous)
+            previous = edited.copy()
+            nonsense = window(
+                watch,
+                f"A -> {args.nonsense} (an undefined target, not a key id)",
+                f"a's entry is now {entry_of(edited, 'a').hex(' ')}. This is "
+                "the control for the window above.",
+                "A", args.seconds)
+            poke(edited, "a", mapping.TARGET_KEYBOARD)
+
+            for label, value in args.code:
+                for position in (1, 2):
+                    spare = [0, 0]
+                    spare[position - 1] = value
+                    poke(edited, "m1", mapping.TARGET_KEYBOARD, *spare)
+                    apply(ctrl, cfg_id, edited, previous)
+                    previous = edited.copy()
+                    window(
+                        watch,
+                        f"M1 -> keyboard (254), {label} in byte {position}",
+                        f"m1's entry is now {entry_of(edited, 'm1').hex(' ')}.",
+                        "M1", args.seconds)
+        finally:
+            restore(ctrl, cfg_id, original, previous)
+
+    verdict(control, bare, nonsense, args.nonsense)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

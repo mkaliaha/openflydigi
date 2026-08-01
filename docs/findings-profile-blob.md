@@ -552,6 +552,20 @@ The repeat interval byte is `0xFF` where a slot has never been written — `MACR
 carried through as "unset" rather than reported as 2550 ms — and the settable range is
 `MACRO_INTERVAL_MAX = 2540` ms.
 
+**The interval belongs to the slot and the macro does not, which is a bug waiting for an editor.**
+`set_macros` writes each macro's interval by list position and treats `None` as "leave this slot's
+byte alone", which is right for a slot nobody has set — a factory 30 ms survives it — and wrong for
+one a macro has just vacated. `clear_macro` shortens the list and shifts every later macro down a
+slot, leaving the tail holding a number that belonged to a macro that is gone. Traced on the factory
+blob: `set_macro("m1", interval=100)`, `set_macro("m2", interval=2000)`, `clear_macro("m1")` leaves
+`[200, 200, 3, 3, 3]`, and a following `set_macro("m3", steps)` with no interval reports **2000 ms
+nobody set**. Nothing reached it while the app could only record and delete one macro at a time; a
+step editor makes it reachable on every delete. `set_macros` now blanks the slots past the end of
+the list to `MACRO_INTERVAL_UNSET`, which is the one place here that deliberately does not reproduce
+what Flydigi's writer emits — the alternative being a byte that is provably wrong about the macro
+reading it. The 0xFF fill that *is* byte-for-byte parity is the macro page at 230; this is the cycle
+block at 820 and a different question.
+
 `MacroEnableType` is `None=0, Once=1, Press=2, Click=3` — 2 repeats while the key is held and 3
 toggles, which `mapping.MACRO_WHILE_HELD` and `MACRO_TOGGLE` name by behaviour. `MacroActionEvent`
 is `Release=0, Press=1, LeftJoystick=2, RightJoystick=3, Hold=5` — the enum **skips 4**, and
@@ -602,9 +616,31 @@ control off, for the same reason the measurements above did.
 On the CLI, `macro-set` takes steps as `press:<key>`, `release:<key>` or `wait:<ms>`; both it and
 `macro-record` take `--type {held,once,toggle}`, `--interval MS` and `--save`, and `macro-record`
 also takes `--seconds` (default 10). In the app, `MacrosPage.qml` records a sequence off the pad,
-sets its type and repeat gap, and deletes it, where Space Station also edits a recorded macro's
-steps — output key, duration, interval — and builds one from nothing without recording at all.
-`set_macro()` takes arbitrary steps already.
+sets its type and repeat gap, edits every step, builds a macro from nothing, and deletes it.
+
+**Where the editor parts company with Space Station**, since the two were compared closely enough
+that the differences are choices rather than gaps:
+
+  * **Theirs is key-centric and this one is macro-centric.** `mapping_config_key_map_type_macro` sits
+    beside Click, Turbo and Special as one of a key's *mapping types*, and their editor is scoped to
+    a key — 正在为 {{keyName}} 键设置宏, "Macro is being set for {{keyName}}". So they have no notion
+    of rebinding a macro: moving one is setting a macro on the other button. This app lists macros
+    instead, which is what makes the shared step budget visible, and the Buttons page names a key
+    that runs one.
+  * **Their action is a press/release pair; these are the raw steps.** `macro_edit_output_key` /
+    `macro_edit_duration` / `macro_edit_interval_time` — output key, how long it is held, and the gap
+    after — which their encoder expands into the two events the wire actually stores. Editing the
+    events directly is what lets a macro hold one key across another, which a list of pairs cannot
+    express. "Add a tap" inserts a balanced pair, so the common case costs the same one action.
+  * **They refuse an unbalanced macro and this warns about one.** 该宏中缺少某按键的抬起或按下,
+    "this macro is missing a press or release for some key, cannot be applied". Refusing on save
+    would make building one a step at a time impossible — every half-finished macro is unbalanced —
+    and would cost the user the macro rather than the mistake. The pad only sees it on Apply.
+  * **Neither offers reorder**, and theirs has no Hold either: `MacroActionEvent`'s hold and the two
+    stick pseudo-events never reach the wire from their editor.
+
+`set_macro()` took arbitrary steps before any of this, so the whole editor is GUI work. The one
+backend change it forced was a bug of its own — see the repeat interval below.
 
 ## Protocol versions, and what a v3.2 profile is
 

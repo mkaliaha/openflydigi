@@ -148,9 +148,7 @@ the settings block" in [docs/device-settings.md](docs/device-settings.md).
     into `effects.rumble()`, which is what `tools/stick-feel` already does from the sticks — and it
     makes the Vibration page self-checking. Their tooltip has a second form for pads that also
     buzz the trigger itself, which is the Vader's hardware, not this one's.
-  * **Macro editing.** The app records and deletes. Space Station also edits a recorded macro's
-    steps — output key, duration, interval — and builds one without recording at all. `set_macro()`
-    already takes arbitrary steps, so this is GUI-only too.
+  * ~~**Macro editing.**~~ Built — see [What's done](#whats-done).
   * **Restart the controller** — command **29**, no argument. Built as `settings.restart` and
     `tools/flydigi-settings restart`; never sent to hardware, and not in the app until it has been.
 
@@ -197,6 +195,7 @@ All command factories are decompiled under `decompiled/Flydigi.ControllerSdk/`.
 | **A factory profile per model** | inside 164/165 | `flydigi/factory_config.py`, `tools/mapping_bean.py`, `tools/gen-factory-config` — the Apex 5's read off the pad, the Vader 5's translated from the file Space Station ships, and the translator proved against the first before it emitted the second: 828 of 840 bytes, with the other twelve explained. `identity.CAPABILITIES` now answers `factory_profile` for both — [detail](docs/findings-profile-blob.md) |
 | **The Switch bank, and restoring a slot** | save-to-slot 171, reset 175 | `flydigi/mapping.py` (`save_switch_config`, `reset_config`, `normalise_for_switch`), `tools/flydigi-mapping to-switch`/`reset` — **both measured on the pad**. The pad stores *eight* profiles: 0..3 XInput, 4..7 Switch. 171 is 166 with a destination, and 175 restores a whole slot including its name — [detail](docs/device-settings.md) |
 | Macros, played by the pad | the profile's macro page at 230, plus 162 to make one live | `flydigi/mapping.py`, `flydigi/macros.py` (the recorder), GUI — [detail](docs/findings-profile-blob.md) |
+| **Editing a macro's steps, and building one without recording** | inside the same page | `gui/models/profile.py` (`MacroStepsModel`), `gui/qml/components/MacroStepRow.qml`, the Macros page — each step's output key, press-or-release and the gap before it, plus insert and delete; **Build a macro** makes one from nothing, which is the only way to write a sequence no hand can play. A step's key is `XINPUT_TARGETS` because a macro step is a `ControllerKey` and nothing else fits in the byte |
 | Live trigger effects, all six | 81, 82 | `flydigi/effects.py` — [PROTOCOL.md](PROTOCOL.md) §3a |
 | Device settings | read 3, write 19 by sub-id, 20/21/22/23, restart 29 | `flydigi/settings.py`, `tools/flydigi-settings`, GUI — [detail](docs/device-settings.md) |
 | RGB lighting | read 167, write 168/169 | `flydigi/lighting.py`, GUI — including the vibration light effect at LED-blob byte 9 |
@@ -392,8 +391,8 @@ distrobox exists. Setup, the package list and the symbol detail are in
 | Devices | every pad and dock attached, with its model, node, uid, firmware and battery; which one the window is showing, and a note when any of them is a mock. The picker in the sidebar header is the same selection |
 | Controller | Device (connection, battery level, reload from the pad); Profiles (the four slots — opening one is how you switch the running profile); Selected profile (rename the open profile, back up / restore it to file); Other software (let Steam and similar take the pad over, and who currently holds it) |
 | Device | the pad's own settings, not a profile's: switching profile from the pad with `FN + A/B/X/Y`, sleep time, the mapping switch (sub-id 4, undocumented in every locale Flydigi ships), stick debounce, auto-calibration, the rebound filter, stick resolution and centre sensitivity — plus the polling rate, shown and not offered |
-| Buttons | remap, turbo + hold/toggle, reset all to default |
-| Macros | record a sequence off the pad and bind it to any key, pick once / while held / toggle, set the repeat gap, see every step, delete. The slot count, step budget and interval floor come off the open profile's protocol version — five and 128 on an Apex 5, ten and 256 on a v3.2 pad, where the page also warns that the store behind it is untested |
+| Buttons | remap, turbo + hold/toggle, reset all to default. A key that runs a macro or sends a keystroke says which — it used to show "(default)", which was a claim that the key did what the shell says about a key running a macro |
+| Macros | record a sequence off the pad and bind it to any key, or **build one with no recording at all**; pick once / while held / toggle, set the repeat gap, **edit every step** — its output key, whether it presses or releases, and the gap before it — insert, delete, and delete the macro. A macro that ends with a key still held is named on the card and in the editor, with one button to release what is held; a macro written by other software is shown and marked unwritable rather than being offered an edit that would be refused. The slot count, step budget and interval floor come off the open profile's protocol version — five and 128 on an Apex 5, ten and 256 on a v3.2 pad, where the page also warns that the store behind it is untested and offers each macro a name |
 | Sticks | dead zone, outer dead zone, sensitivity curve presets, circular range |
 | Gyro | map the gyro onto either stick, the button that turns it on and how, sensitivity and the dead-zone offset — plus the motion mode, shown and not offered, because Flydigi derives it from the stick |
 | Vibration | master switch, per-grip enable, min/max window, strength |
@@ -492,6 +491,15 @@ the test files are re-export shims and the tests import them by the old names.
   * **The pad publishes keyboard, mouse and gamepad evdev nodes under one vendor/product id, and the
     keyboard sorts first.** Resolve with `axes=True` (non-empty abs capabilities) or a relay binds a
     node that never sends a gamepad event.
+  * **A key bound to "keyboard" is not inert on the pad — it is a keystroke with no key.** Measured
+    with `tools/keyboard-target-probe`: writing 254 into A's target byte stops A arriving as
+    `BTN_SOUTH` anywhere, so the firmware recognises the sentinel and suppresses its own gamepad
+    output for it. It types nothing, and could not: the key code is discarded by Flydigi's own
+    serialiser on the branch that writes 254, and candidate codes poked into the entry's two spare
+    bytes — HID usage, Windows virtual key, the pad's own key id, either position — produced no
+    keystroke. On Windows a pair of kernel filter drivers supplies the other half. **What the pad's
+    own keyboard and mouse interfaces are for is still unknown**, and Flydigi's software never opens
+    them. → [docs/findings-steam.md](docs/findings-steam.md)
   * **Never match a game process by cmdline alone** — Steam/Proton wrappers (`reaper`, `bwrap`,
     `pv-adverb`, `steam.exe`) all carry the game's path. Require the PE to be mapped.
   * **A sleeping Apex 5 leaves the USB bus.** It does not go quiet on HID — it disconnects, wired
@@ -880,6 +888,7 @@ do.
 | `tools/ds5-channel-probe` | Plays a tone into one DualSense audio channel at a time, to map channel index to actuator or speaker (needs `pactl` and `paplay`) |
 | `tools/gyro-probe` | Vendor-stream IMU check — gyro and accel, live |
 | `tools/trigger-stroke-probe` | Which trigger-travel bytes the pad plays: a degenerate window on one trigger, the other left as an in-run control |
+| `tools/keyboard-target-probe` | What the pad does with a key bound to keyboard (target 254): whether it suppresses its own gamepad output, whether anything reaches its keyboard and mouse nodes, and whether candidate key codes in the entry's two spare bytes do anything. Needs root, because systemd gives the seat user an ACL on a joystick node and deliberately not on a keyboard one |
 | `tools/haptics-inspect`, `tools/haptics-simulate`, `tools/joystick-curve-probe`, `tools/stick-feel` | The remaining bench probes: per-channel haptic energy (needs `pactl` and `parec`), synthetic haptic playback (`paplay` or `pw-play`), stick-curve capture, stick feel |
 | `tools/generate-qmltypes` | Regenerates the `Apex5` module's qmltypes from the live `QMetaObject`s (needs `qmltyperegistrar`) |
 | `tools/flydigi_cmd.py` | Manual command tool — `info`, `listen`, all six effects (`normal`, `race`, `sniper`, `recoil`, `lock`, `vibrate`), `bind`, `rumble`, `game`, `raw`, plus `k6*` for the trigger family belonging to an Apex 6, which has not shipped ([device codes](docs/findings-other-devices.md)) |

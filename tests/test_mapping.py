@@ -1700,6 +1700,40 @@ def test_the_interval_belongs_to_the_slot_not_the_macro():
           config.macros()[0]["interval"] is None)
 
 
+def test_a_vacated_slot_does_not_lend_its_interval_to_the_next_macro():
+    """Deleting a macro must not leave its repeat gap behind for a stranger.
+
+    The interval is indexed by slot and `clear_macro` shortens the list, so
+    every delete shifts the macros after it down one and leaves the last slot
+    holding a number that belonged to a macro that is gone. Before this was
+    fixed the sequence below left the bytes at `[200, 200, 3, 3, 3]` and the
+    newly built macro reported a 2000 ms gap nobody had set.
+    """
+    config = mapping.MappingConfig(blank_blob())
+    config.set_macro("m1", TAP_A, interval=100)
+    config.set_macro("m2", TAP_A, interval=2000)
+    cycle = mapping.OFF_MACRO_CYCLE
+    check("each macro's gap lands in its own slot",
+          list(config.blob[cycle : cycle + 2]) == [10, 200],
+          str(list(config.blob[cycle : cycle + 2])))
+
+    config.clear_macro("m1")
+    check("the survivor keeps its own gap after shifting down",
+          config.macro("m2")["interval"] == 2000,
+          str(config.macro("m2")["interval"]))
+    check("and the slot it vacated is blank rather than stale",
+          config.blob[cycle + 1] == mapping.MACRO_INTERVAL_UNSET,
+          str(config.blob[cycle + 1]))
+
+    config.set_macro("m3", TAP_A)
+    check("a macro built with no gap does not inherit one",
+          config.macro("m3")["interval"] is None,
+          str(config.macro("m3")["interval"]))
+    check("and the one beside it is untouched",
+          config.macro("m2")["interval"] == 2000,
+          str(config.macro("m2")["interval"]))
+
+
 def test_editing_macros_does_not_disturb_its_neighbours():
     config = mapping.MappingConfig(blank_blob())
     before = bytes(config.blob)
@@ -1711,8 +1745,14 @@ def test_editing_macros_does_not_disturb_its_neighbours():
                        mapping.OFF_MACROS + mapping.MACRO_REGION))
     key_entry = mapping.OFF_KEY_TABLE + mapping.KEY_IDS["m1"] * mapping.KEY_ENTRY
     inside |= {key_entry}
-    check("only the page and the bound key move", changed <= inside,
-          str(sorted(changed - inside)))
+    # The repeat intervals are the macro page's other half -- five bytes away at
+    # 820, one per slot -- so they are territory this write owns rather than a
+    # neighbour it disturbed. Writing one macro leaves four slots holding
+    # nothing, and those four are blanked; see `set_macros`.
+    inside |= set(range(mapping.OFF_MACRO_CYCLE,
+                        mapping.OFF_MACRO_CYCLE + mapping.MACRO_SLOTS))
+    check("only the page, its intervals and the bound key move",
+          changed <= inside, str(sorted(changed - inside)))
     check("the data version is untouched",
           before[mapping.OFF_DATA_VERSION:mapping.OFF_DATA_VERSION + 2]
           == after[mapping.OFF_DATA_VERSION:mapping.OFF_DATA_VERSION + 2])
@@ -1923,6 +1963,7 @@ def main():
                  test_macros_are_read_permissively,
                  test_a_count_outside_the_page_reads_as_nothing,
                  test_the_interval_belongs_to_the_slot_not_the_macro,
+                 test_a_vacated_slot_does_not_lend_its_interval_to_the_next_macro,
                  test_editing_macros_does_not_disturb_its_neighbours,
                  test_a_newer_protocol_keeps_its_macros_elsewhere,
                  test_the_macro_limits_move_with_the_protocol_version,
