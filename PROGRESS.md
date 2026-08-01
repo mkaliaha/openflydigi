@@ -76,7 +76,7 @@ keeping on a pad with no adaptive triggers at all.
 
 Anyone debugging a Vader should doubt `identity.CAPABILITIES` before doubting the transport.
 
-**Left to build:** a trigger-motor editor for the Vader, and the smaller pieces under What's next.
+**Left to build:** a trigger-motor editor for the Vader -- which may also be the whole of trigger feedback in DS mode on that pad, see What's next -- and the smaller pieces there.
 Supporting an older pad is [ruled out](#ruled-out).
 
 | Tier | Mechanism | Games | State |
@@ -103,6 +103,47 @@ true — `gui/` may import `flydigi/` and never the reverse, and nothing Flydigi
 (`tools/fetch-configs` restores it). Verify with `reuse lint` inside `apex-dev`.
 
 ## What's next
+
+**A trigger-motor editor for the Vader, which may be worth more than an editor.** The stored block
+is already read and written -- `MappingConfig.trigger_motor`, blob offset 154 -- so the missing
+piece is a page: an enable, an amplitude window, a strength and a threshold, laid out like the
+Vibration page and shown only where `identity.CAPABILITIES` says `trigger_motors`. Four controls,
+and three traps in them:
+
+  * **The enable is one byte for both triggers**, at 154 rather than in either side's block, so a
+    page drawing one switch per trigger offers a state the pad cannot hold.
+  * **The other four are per side and Space Station writes both the same**, its tooltip saying
+    adjusting one syncs the other -- so whether the firmware reads the right side's copy at all is
+    untested, and a page offering them separately is offering something unmeasured.
+  * **`min`/`max` are 0..255 in the blob and percent in their UI**, floored on the way in and
+    ceiled on the way out (`SaveTriggerVibrationConfig`).
+
+**And the test button for it is a rumble change, not a trigger-effect one.** `effects.rumble()`
+writes only the grip levels at `[5]`/`[6]`, so as it stands nothing here can drive those motors:
+they are `[7]`/`[8]` of the same command 18, under the same length byte, selected by
+`VibrationType` ([PROTOCOL.md](PROTOCOL.md) §3a). Two more bytes and a side argument.
+
+**The part worth measuring first, because it may make the DualSense relay work on a Vader for
+free.** The stored block reads as a pad-side rule -- threshold, scale, amplitude window -- routing
+*grip* rumble into the trigger motors, the same shape as the Apex 5's `SyncWithGrip` bind. If that
+is what it is, then nothing in `flydigi/relay.py` needs a line: a game writes rumble to the virtual
+DualSense, the relay forwards it as command 18 grip levels exactly as it does today, and the pad's
+own rule buzzes the triggers off the back of it. Haptic audio would arrive the same way, since
+`flydigi/haptics.py` ends in the same rumble call. That would make a Vader's only trigger feedback
+work in DS mode with the editor above as the *entire* implementation -- the page would not be an
+editor so much as the switch that turns the feature on.
+
+**Two things have to be true for that, and one of them could go the other way.** The first is that
+the rule acts on commanded rumble at all rather than on some internal game-rumble path. The second
+is the risk: `effects.rumble()` leaves `[7]`/`[8]` at zero, and if those bytes are direct level
+writes rather than an override the firmware ignores, the relay would be *actively holding the
+trigger motors off* every time it forwards rumble. Flydigi's own `VibrationType.Grip` command has
+the same shape, which is mild evidence for the harmless reading, but their app only sends it from a
+test slider. So the first measurement on a Vader is: enable the stored block, pull rumble through
+the relay, and see whether the triggers buzz -- and if they do not, resend with `[7]`/`[8]` carrying
+the grip levels and see whether that is the difference. `PadLink.has_triggers` stays right either
+way: a DS5's *adaptive* trigger effects still cannot be reproduced on a pad with no resistance, and
+only the rumble half is in question.
 
 **Single commands, each verifiable on the hardware here.** The write-ups are under "Commands beyond
 the settings block" in [docs/device-settings.md](docs/device-settings.md).
