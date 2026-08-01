@@ -86,6 +86,16 @@ PACK_BYTES = 50
 LED_COUNT = 162
 ROW_LENGTHS = (14, 15, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3)
 
+# The frame count is one byte in the header `serialise` writes, so this is the
+# wire's ceiling and not a policy. Space Station never sends more than 200 --
+# see `SAFE_FRAMES` -- and what the firmware does between the two is unmeasured.
+MAX_FRAMES = 255
+
+# What Space Station's own DIY page will not exceed: its GIF trim range is
+# capped at 200 frames. Nothing in the protocol says 200, and the wire allows
+# 255, but 200 is the largest animation the dock is known to have been given.
+SAFE_FRAMES = 200
+
 BRIGHTNESS_MIN = 1
 BRIGHTNESS_MAX = 100
 
@@ -597,7 +607,25 @@ def read_led_config(dock, wait=0.5):
 
 
 def serialise(config):
-    """`ConfigParser.ParseFrameLedConfigToArray`, byte for byte."""
+    """`ConfigParser.ParseFrameLedConfigToArray`, byte for byte.
+
+    The two length checks are this module's, not Flydigi's. Every field here is
+    one byte, so a 256th frame or a 161-LED frame would wrap silently through
+    `& 0xFF` into a header that disagrees with the payload -- and
+    `write_led_config` records what the dock does with that: it walks its own
+    frame memory at offsets that are not multiples of three and plays noise.
+    A caller that builds frames from an image is exactly the caller that can
+    get the count wrong, so the wrapping is refused rather than uploaded.
+    """
+    if len(config.frames) > MAX_FRAMES:
+        raise ProtocolError(
+            f"{len(config.frames)} frames, and the frame count is one byte -- "
+            f"at most {MAX_FRAMES} can be uploaded")
+    for index, frame in enumerate(config.frames):
+        if len(frame) != LED_COUNT:
+            raise ProtocolError(
+                f"frame {index} has {len(frame)} colours and the dock has "
+                f"{LED_COUNT} LEDs")
     out = bytearray((len(config.frames) & 0xFF, config.period & 0xFF,
                      config.brightness & 0xFF, config.mode & 0xFF,
                      config.direction & 0xFF, config.colour_count & 0xFF))
@@ -687,8 +715,15 @@ _PITCH_X = _VIEW_W / 20.0
 _PITCH_Y = _PITCH_X * math.sqrt(3) / 2.0
 
 
-def _round(value):
-    """JavaScript's Math.round: halves go up. Every input here is >= 0."""
+def js_round(value):
+    """JavaScript's `Math.round`: halves go **up**, where Python's go to even.
+
+    Public because the desktop app needs it too. Every number this project sends
+    the dock was computed by Space Station with `Math.round`, and Python's
+    banker's rounding disagrees with it on every exact half -- `round(4.5)` is 4
+    where `Math.round(4.5)` is 5. On a frame interval of 45 ms that is a period
+    of 4 against their 5, and the animation runs a fifth fast.
+    """
     return int(math.floor(value + 0.5))
 
 
@@ -718,9 +753,9 @@ def _hsl(hue, saturation, lightness):
         return low
     high = lightness + saturation - lightness * saturation
     low = 2 * lightness - high
-    return (_round(channel(low, high, hue + 1 / 3) * 255),
-            _round(channel(low, high, hue) * 255),
-            _round(channel(low, high, hue - 1 / 3) * 255))
+    return (js_round(channel(low, high, hue + 1 / 3) * 255),
+            js_round(channel(low, high, hue) * 255),
+            js_round(channel(low, high, hue - 1 / 3) * 255))
 
 
 def _fade(current, target, step):
@@ -826,7 +861,7 @@ def wave_gradient_frames(config):
                     across = 1 - across
                 level = (math.sin(phase + ripple * 0.3) + 1) / 2
                 frame[index] = tuple(
-                    _round((a + (b - a) * across) * level)
+                    js_round((a + (b - a) * across) * level)
                     for a, b in zip(first, second))
                 index += 1
         frames.append(frame)
@@ -845,7 +880,7 @@ def diagonal_flow_frames(config):
             angle = math.atan2(y - _CENTRE_Y, x - _CENTRE_X) + phase
             turn = ((angle + math.pi) / (math.pi * 2)) % 1
             across = turn * 2 if turn < 0.5 else 2 - turn * 2
-            frame[index] = tuple(_round(a + (b - a) * across)
+            frame[index] = tuple(js_round(a + (b - a) * across)
                                  for a, b in zip(first, second))
         frames.append(frame)
     return frames
@@ -863,7 +898,7 @@ def pulse_frames(config):
         for index, x, y in lattice:
             reach = math.hypot(x - _CENTRE_X, y - _CENTRE_Y) / furthest * 10
             level = (math.sin(phase - reach) + 1) / 2
-            frame[index] = tuple(_round(c * level) for c in first)
+            frame[index] = tuple(js_round(c * level) for c in first)
         frames.append(frame)
     return frames
 
@@ -909,3 +944,200 @@ def generate(config):
 def apply(dock, config, wait=1.0):
     """Generate the frames for a config and upload the whole thing."""
     return write_led_config(dock, generate(config), wait=wait)
+
+
+# --------------------------------------------------------------------------
+# A picture, sampled onto the wedge
+# --------------------------------------------------------------------------
+#
+# The `custom` mode's frames. Space Station's DIY page crops a picture onto a
+# 334x304 canvas and reads **one pixel per LED** out of it -- nearest pixel, no
+# averaging, no gamma, alpha never read:
+#
+#     const a = e.getContext("2d").getImageData(0, 0, e.width, e.height)
+#     for (let n = 0; n < xe.length; n++) {
+#       const f = xe[n].x, h = xe[n].y * a.width * 4 + f * 4
+#       r.push(create(Color, {red: a.data[h], green: a.data[h+1],
+#                             blue: a.data[h+2]}))
+#     }
+#
+# `xe` is a literal of 162 integer pixel coordinates, and `LED_PIXELS` below is
+# that literal transcribed. Decoding the picture is not done here: this module
+# has no dependencies and a PNG/GIF decoder is not something to write, so the
+# caller hands over a 334x304 RGB888 buffer and gets colours back. The desktop
+# app's `gui/models/dock.py` is the caller that has Qt.
+
+CROP_WIDTH = 334
+CROP_HEIGHT = 304
+
+# **Transcribed, not computed, and it must stay that way.** The table looks
+# like a lattice and is not one: the column pitch is 18 with a 20 slipped in
+# every fifth step, the rows sit on 167 or 168 rather than on one centre, and
+# **fifteen of the sixteen rows are not even symmetric about their own ends** --
+# in row 2, 66 sits 102px left of the centre while 268 sits 100px right of it.
+# The errors are small, never more than 2px, and no pitch reproduces them; every
+# rounding of a 9.2 or 18.4 lattice misses somewhere. Whether the panel really
+# is that irregular or Flydigi typed the numbers by hand does not matter,
+# because reproducing their sampler is the whole point. A future tidy-up that
+# "corrects" this into a formula moves part of the picture by a pixel.
+#
+# Row-major from the top row, left to right -- the order the generators above
+# already fill, and the order the preview's circles are drawn in.
+LED_PIXELS = (
+    # row 0, 14
+    (48, 32), (66, 32), (84, 32), (104, 32), (122, 32), (140, 32), (158, 32),
+    (176, 32), (196, 32), (214, 32), (232, 32), (250, 32), (268, 32), (288, 32),
+    # row 1, 15
+    (38, 46), (58, 46), (76, 46), (94, 46), (112, 46), (130, 46), (150, 46),
+    (168, 46), (186, 46), (204, 46), (222, 46), (242, 46), (260, 46), (278, 46),
+    (296, 46),
+    # row 2, 16
+    (30, 62), (48, 62), (66, 62), (84, 62), (104, 62), (122, 62), (140, 62),
+    (158, 62), (176, 62), (196, 62), (214, 62), (232, 62), (250, 62), (268, 62),
+    (288, 62), (306, 62),
+    # row 3, 15
+    (38, 78), (58, 78), (76, 78), (94, 78), (112, 78), (130, 78), (150, 78),
+    (168, 78), (186, 78), (204, 78), (222, 78), (242, 78), (260, 78), (278, 78),
+    (296, 78),
+    # row 4, 14
+    (48, 94), (66, 94), (84, 94), (104, 94), (122, 94), (140, 94), (158, 94),
+    (176, 94), (196, 94), (214, 94), (232, 94), (250, 94), (268, 94), (288, 94),
+    # row 5, 13
+    (58, 110), (76, 110), (94, 110), (112, 110), (130, 110), (150, 110),
+    (168, 110), (186, 110), (204, 110), (222, 110), (242, 110), (260, 110),
+    (278, 110),
+    # row 6, 12
+    (66, 126), (84, 126), (104, 126), (122, 126), (140, 126), (158, 126),
+    (176, 126), (196, 126), (214, 126), (232, 126), (250, 126), (268, 126),
+    # row 7, 11
+    (76, 142), (94, 142), (112, 142), (130, 142), (150, 142), (168, 142),
+    (186, 142), (204, 142), (222, 142), (242, 142), (260, 142),
+    # row 8, 10
+    (84, 158), (104, 158), (122, 158), (140, 158), (158, 158), (176, 158),
+    (196, 158), (214, 158), (232, 158), (250, 158),
+    # row 9, 9
+    (94, 174), (112, 174), (130, 174), (150, 174), (168, 174), (186, 174),
+    (204, 174), (222, 174), (242, 174),
+    # row 10, 8
+    (104, 190), (122, 190), (140, 190), (158, 190), (176, 190), (196, 190),
+    (214, 190), (232, 190),
+    # row 11, 7
+    (112, 206), (130, 206), (150, 206), (168, 206), (186, 206), (204, 206),
+    (222, 206),
+    # row 12, 6
+    (122, 222), (140, 222), (158, 222), (176, 222), (196, 222), (214, 222),
+    # row 13, 5
+    (130, 238), (150, 238), (168, 238), (186, 238), (204, 238),
+    # row 14, 4
+    (140, 254), (158, 254), (176, 254), (196, 254),
+    # row 15, 3
+    (150, 270), (168, 270), (186, 270),
+)
+
+
+# The preview wedge, which is a *different* grid from the sampler's.
+#
+# Space Station draws the dock as an SVG in a 450x420 box: one outline path and
+# 162 circles of radius 7.5, in the same row-major order as everything else.
+# Unlike `LED_PIXELS` this one is a clean lattice: every centre in their file is
+# reproduced exactly by the three constants below, checked once at the time of
+# writing. It is computed rather than transcribed for that reason. No test can
+# re-check it, because `asar/` is gitignored and is not there on a fresh
+# checkout -- what `tests/test_charger.py` asserts is that this grid and the
+# sampler's still describe the same 162-LED wedge. `WEDGE_OUTLINE` is a
+# transcribed string with nothing checking it at all.
+#
+# The two grids share topology and not margins: the wedge fills 73.3% x 67.9%
+# of its box where the sampler fills 82.6% x 78.3% of its canvas. That costs
+# nothing while the preview is driven by sampled colours, and would matter only
+# if a crop rectangle were ever drawn over the source image -- that overlay is
+# `LED_PIXELS`' business, never this one's.
+WEDGE_VIEW = (450, 420)
+WEDGE_RADIUS = 7.5
+_WEDGE_TOP, _WEDGE_ROW_PITCH = 60, 19
+_WEDGE_CENTRE_X, _WEDGE_COL_PITCH = 225, 22
+
+# Path 2 of their SVG -- the wedge the LEDs sit in. Paths 0 and 1 are a
+# drop-shadow pair behind it, referring to a filter with no `<defs>` anywhere in
+# the bundle, so they draw nothing anyone sees.
+WEDGE_OUTLINE = (
+    "M274.78 356.907C251.909 394.467 197.76 394.668 174.677 357.239C151.446 "
+    "319.57 124.535 275.392 103.773 239.748C82.8096 203.758 57.3861 158.047 "
+    "35.934 118.974C14.8564 80.5825 41.4546 33.7818 85.2258 32.3413C130.137 "
+    "30.8633 182.959 29.5 225 29.5C266.782 29.5 319.212 30.8466 363.942 "
+    "32.314C407.917 33.7566 434.505 80.9474 413.108 119.396C391.514 158.197 "
+    "366.066 203.469 345.226 239.248C324.478 274.868 297.783 319.13 274.78 "
+    "356.907Z"
+)
+
+
+def wedge_centres():
+    """(x, y) per LED in the 450x420 preview box, row-major like everything."""
+    out = []
+    for row, length in enumerate(ROW_LENGTHS):
+        y = _WEDGE_TOP + _WEDGE_ROW_PITCH * row
+        for column in range(length):
+            out.append((_WEDGE_CENTRE_X
+                        + _WEDGE_COL_PITCH * (column - (length - 1) / 2.0), y))
+    return out
+
+
+def sample_frame(rgb, width=CROP_WIDTH, height=CROP_HEIGHT):
+    """One 334x304 RGB888 buffer -> one frame of `LED_COUNT` colours.
+
+    `rgb` is row-major, three bytes a pixel, with **no row padding**. Qt pads
+    every scanline to four bytes and 334 * 3 is 1002, so a caller passing
+    `QImage.constBits()` straight through hands over rows that drift two bytes
+    further out of step each time -- an image sheared diagonally, and every LED
+    reading a colour from somewhere else.
+    """
+    if len(rgb) != width * height * 3:
+        raise ValueError(
+            f"expected {width}x{height} RGB888, {width * height * 3} bytes, "
+            f"and got {len(rgb)} -- rows must be unpadded")
+    out = []
+    for x, y in LED_PIXELS:
+        index = (y * width + x) * 3
+        out.append((rgb[index], rgb[index + 1], rgb[index + 2]))
+    return out
+
+
+def pack_frames(frames):
+    """Frames -> one flat `bytes`. The form that crosses a thread boundary.
+
+    A queued Qt signal marshals a `bytes` as a QByteArray and copies it once;
+    the same animation as nested lists is up to 124,000 Python ints going
+    through the same queue.
+    """
+    out = bytearray()
+    for frame in frames:
+        for colour in frame:
+            out += bytes(int(c) & 0xFF for c in colour)
+    return bytes(out)
+
+
+def unpack_frames(blob):
+    """The other half of `pack_frames`."""
+    stride = LED_COUNT * 3
+    if len(blob) % stride:
+        raise ValueError(
+            f"{len(blob)} bytes is not a whole number of {LED_COUNT}-LED frames")
+    return [[(blob[base + i * 3], blob[base + i * 3 + 1], blob[base + i * 3 + 2])
+             for i in range(LED_COUNT)]
+            for base in range(0, len(blob), stride)]
+
+
+def image_config(frames, period=1, brightness=100):
+    """The config Space Station's DIY page uploads, with `frames` in it.
+
+    Their still-picture path sends `period: 1` and their animation path
+    `Math.round(interval_ms / 10)`; both send `brightness: 100`, no palette and
+    `useColorCount: 0`, with no control over any of it on the page. Everything
+    here is theirs except the arithmetic behind `period`, which is the caller's
+    -- and `gui/models/dock.py` divides by 20 rather than 10, because **one
+    period unit is 20 ms on this dock, measured.** Their own preview says 20 and
+    their writer says 10; the hardware agrees with the preview.
+    """
+    return LedConfig(mode=MODE_CUSTOM, brightness=brightness, period=period,
+                     direction=DIR_NONE, colours=[], frames=list(frames),
+                     use_colour_count=0)

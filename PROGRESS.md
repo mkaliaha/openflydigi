@@ -16,9 +16,10 @@ remapping, macros, sticks, the gyro mapped to a stick, vibration, per-profile tr
 pad's own device settings, lighting, the screen, the game list and its own setup. The daemon detects
 a running game and applies its route unattended.
 
-The **CD2 charging dock** is driven too, as a device of its own: its four switches and all eight
-of its computable lighting effects, from `tools/flydigi-charger` and from the app's Dock page.
-No custom images or animations yet.
+The **CD2 charging dock** is driven too, as a device of its own: its four switches, all eight of its
+computable lighting effects, and **a picture or a GIF sampled onto its 162 LEDs** — the effects from
+`tools/flydigi-charger` and from the app's Dock page, the picture from the app, where Qt does the
+decoding.
 
 **More than one device is handled properly**, which used to be the largest hole in all of this.
 Every pad and dock on the bus is enumerated and named, a device is chosen by uid, nickname or node
@@ -28,8 +29,8 @@ takes one while every other route acts on the pad the picker chose. There is one
 on this desk, so `FLYDIGI_MOCK_BUS` serves the rest — see
 [Mock devices](#mock-devices-for-the-ones-nobody-owns).
 
-**Left to build:** the dock's image/animation path, an interactive crop for the Screen page, and
-the smaller pieces under What's next. Supporting an older pad is [ruled out](#ruled-out).
+**Left to build:** an interactive crop for the Screen page, and the smaller pieces under What's
+next. Supporting an older pad is [ruled out](#ruled-out).
 
 | Tier | Mechanism | Games | State |
 |---|---|---|---|
@@ -58,16 +59,11 @@ true — `gui/` may import `flydigi/` and never the reverse, and nothing Flydigi
 
 Roughly in order of value.
 
- 1. **The dock's custom images.** The page and the eight computable effects are done; what is left
-    is the image/GIF path — one pixel sampled per LED onto the 162-LED wedge, one frame per GIF
-    frame. That decoding cannot live in the zero-dependency backend, so it belongs in `gui/`,
-    where Qt already reads both formats, with `flydigi/` taking colour arrays. The dock's
-    `default` mode stays out of reach until someone copies
-    `Configs/Charger/cd2/default/default_mapping_0.dat` off a Windows install: Space Station does
-    not compute that one either, it uploads that file.
-    → [docs/findings-other-devices.md](docs/findings-other-devices.md)
- 2. **An interactive crop for the Screen page.** Everything else there is done.
- 3. **Third-party mode: optional polish.** Command 17 here is byte-identical to Space Station's.
+ 1. **An interactive crop for the Screen page.** The Dock page has one now — a 640×320 stage, a
+    draggable picture and a zoom — and the Screen page still offers three fit modes and no framing.
+    What is there is `gui/qml/pages/DockPage.qml`'s `dockCropStage` plus the framing arithmetic in
+    `gui/models/dock.py`, and neither is shaped as a shared component yet.
+ 2. **Third-party mode: optional polish.** Command 17 here is byte-identical to Space Station's.
     After a reconnect with the flag already on, Steam stops *labelling* the pad Apex 5 while
     everything keeps working — cosmetic, plus a bindings-storage nuisance. The optional workaround,
     which neither app does, is to re-assert the flag off then on once SDL has enumerated; the real
@@ -138,6 +134,7 @@ All command factories are decompiled under `decompiled/Flydigi.ControllerSdk/`.
 | Virtual DualSense over USB (tier 4b) | — | `flydigi/usbip.py`, `tools/flydigi-ds5-usbip` — adds haptic audio |
 | DualSense mode as one switch for the whole system, not a per-game route | — | `flydigi/dsmode.py`, the app's DualSense page |
 | The CD2 charging dock | heartbeat 1, nickname 2/24, uid 4, switches 17/18/19/25, LED read 20, LED write 97/98, RGB write 22/23 | `flydigi/charger.py`, `tools/flydigi-charger`, the app's Dock page — **measured on the dock**: firmware 0.0.3.9, the reply checksum position predicted correctly on all five reads (the command-97 ack is the one exception, a slot later), and its eight computable effects reproduced closely enough that Space Station's own Breath and this port's were indistinguishable side by side — [detail](docs/findings-other-devices.md) |
+| **A picture on the dock** | the same 97/98, mode `custom` | `charger.LED_PIXELS` and `sample_frame` (the sampler, transcribed from Space Station's own pixel table), `charger.wedge_centres` and `WEDGE_OUTLINE` (the preview's geometry, which is a *different* grid), `gui/models/dock.py` (Qt decodes, frames the picture and samples it), `gui/qml/components/LedWedge.qml` and the Dock page's Picture section. **One period unit is 20 ms, measured on the dock** — Space Station writes it as 10 and their animations play at half speed. Corrected and run against Space Station's own output on the same GIF, where the two looked about the same — the side-by-side that Breath was held to, and the one comparison that covers the sampler, the LED order and the pace together — [detail](docs/findings-other-devices.md) |
 
 **The vibration bind is live state, and is re-applied when the pad comes back.** It is command 82
 with no blob write, so `tools/flydigid` watches for the pad leaving the bus mid-game and re-applies
@@ -234,7 +231,7 @@ distrobox exists. Setup, the package list and the symbol detail are in
 | Triggers | stored effect — all six of Flydigi's, each with its own controls, engaged on the pad as well as stored — plus the travel window, Flydigi's "Stroke Setting", as a start/end pair |
 | Lighting | effect, up to 5 colours, brightness, cycle time, react-to-rumble |
 | Screen | pick a picture or GIF, choose how it fits, preview the encoded frame, and send it over the serial link — with the frame count and a time estimate before you start; plus the always-on display and the status bar |
-| Dock | whichever dock is selected: its identity and uid, the four switches (written as they move, read back afterwards), and its lighting — eight effects with colours, brightness, frame interval and direction, computed here and uploaded with a progress bar. Says which switch wins when Sleep-while-docked is on beside the other two |
+| Dock | whichever dock is selected: its identity and uid, the four switches (written as they move, read back afterwards), and its lighting — eight effects with colours, brightness, frame interval and direction, computed here and uploaded with a progress bar. Says which switch wins when Sleep-while-docked is on beside the other two. **“Picture” is the ninth effect**: choose a picture or a GIF, drag and zoom it under the 334×304 window the LEDs are read from, trim which GIF frames to send, and watch the result play on a wedge of 162 dots before spending the packets |
 | Games | all 94 games, searchable, filtered by route; **Update list** refetches the gamelist from Flydigi's public API; vibration presets load onto the pad from here; per-game **Auto** toggle, a route picker where a game really has a choice, and a DualSense marker on the 23 games Flydigi lists as DS5-aware |
 | DualSense | the tier-4b switch: vhci-hcd's state, haptic audio to the motors, what the relay is doing, and the launch option to copy |
 | Setup | the daemon's unit, "running now" and "start at login" as separate switches, the application-menu entry, and the udev rules behind one authentication prompt |
@@ -576,7 +573,7 @@ do.
 |---|---|
 | `PROTOCOL.md` | Full wire protocol + hardware verification results |
 | `flydigi/` | Library — `device.py` (transport), `identity.py` (the command-1 device-type guard), `blobs.py` (packetised config transfer), `effects.py` (live trigger commands), `mapping.py` (profiles, remapping, macros, vibration, stored triggers), `macros.py` (recording one off the pad's evdev node), `lighting.py` (RGB), `screen.py` (160x80 screen: LVGL image format, settings, and the HID upload that puts no picture on this pad), `screen_ota.py` (the serial upload that works), `settings.py` (the pad's own settings: command 3 and the small writes behind it), `games.py`, `forza.py`, `evdev.py` (the xpad evdev reader every relay's input comes from), `ds5.py` (DualSense report codec), `dsx.py` (DSX UDP protocol), `monitor.py` (process-memory engine), `motion.py` (battery, gyro/accel and the third-party toggle), `relay.py` (Apex 5 → DualSense translation, and `PadLink`: holding a pad that leaves the bus every time it sleeps) |
-| `gui/` | PySide6/QML desktop app (GPL-3.0-or-later) — `app.py` (the object graph), `main.py` (entry point), `worker.py` (all device I/O, on its own thread), `i18n.py` (the `i18n*()` shim the engine needs; without it every Kirigami form delegate throws `ReferenceError: i18ndc is not defined`, so `main.py` installs it unconditionally), `models/` (view-agnostic state; `screen.py` is the one that touches QtGui, for image decoding), `qml/` (`Main.qml`, `pages/`, `components/`) |
+| `gui/` | PySide6/QML desktop app (GPL-3.0-or-later) — `app.py` (the object graph), `main.py` (entry point), `worker.py` (all device I/O, on its own thread), `i18n.py` (the `i18n*()` shim the engine needs; without it every Kirigami form delegate throws `ReferenceError: i18ndc is not defined`, so `main.py` installs it unconditionally), `models/` (view-agnostic state; `screen.py`, `dock.py` and `imaging.py` are the ones that touch QtGui, for image decoding), `qml/` (`Main.qml`, `pages/`, `components/`) |
 | `tools/flydigi-devices` | Every device attached — `list`, `show`, and `name` to write a nickname (unproven; it asks first). The `--device` selector every other tool takes is defined here |
 | `tools/flydigi-mapping` | CLI for profiles — list/show/set/clear/rename/apply/backup/restore, plus `macros`, `macro-record`, `macro-set`, `macro-clear`, `gyro` |
 | `tools/gyro-map-probe` | What the pad does with the motion block at 137: five windows answering whether it plays it, whether each enable key gates it, whether Click toggles, and whether the curve at 830 is read. Transitions counted out on the motors, in `stick-feel`'s grammar |

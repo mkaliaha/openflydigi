@@ -276,9 +276,20 @@ class DeviceWorker(QObject):
             period=int(wanted.get("period", 1)),
             direction=int(wanted.get("direction", charger.DIR_NONE)),
             colours=[tuple(c) for c in wanted.get("colours") or ()])
+        # A picture arrives already sampled, as one flat `bytes` -- the model
+        # holds the decoded source images and `charger.generate` leaves a custom
+        # config's frames exactly as it finds them.
+        blob = wanted.get("frames")
         self.status.emit("Computing the dock's frames…")
 
         def work(dock):
+            # Unpacked in here rather than above, so that a blob of the wrong
+            # length is a failure `_with_dock` reports and finishes -- outside,
+            # it would raise past `dock_finished` and leave the page busy for
+            # the rest of the session.
+            if blob:
+                config.frames = charger.unpack_frames(bytes(blob))
+                config.use_colour_count = 0
             charger.generate(config)
             self.status.emit(f"Uploading {len(config.frames)} frame(s) to the dock…")
             return charger.write_led_config(

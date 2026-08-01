@@ -23,6 +23,7 @@ import QtQuick.Dialogs as Dialogs
 import org.kde.kirigami as Kirigami
 import org.kde.kirigamiaddons.formcard as FormCard
 import Apex5
+import "../components"
 
 Kirigami.ScrollablePage {
     id: page
@@ -31,6 +32,28 @@ Kirigami.ScrollablePage {
 
     // Which swatch the colour dialog is editing.
     property int editingColour: -1
+
+    // The wedge plays a chosen animation at the interval the dock will play it,
+    // because a still frame of one says almost nothing and the upload is far
+    // too long to be how you find out what you picked. Each tick samples one
+    // frame and remembers it, so a second time round the loop costs nothing.
+    Timer {
+        objectName: "dockPreviewTimer"
+        running: App.dock.isPicture && App.dock.animated && page.visible
+        // Floored, because the spin box goes below what a QML timer honours.
+        interval: Math.max(20, App.dock.intervalMs)
+        repeat: true
+        onTriggered: App.dock.previewFrame = App.dock.previewFrame + 1
+    }
+
+    Dialogs.FileDialog {
+        id: pictureDialog
+        objectName: "dockPictureDialog"
+        title: "Choose a picture for the dock"
+        nameFilters: ["Images and animations (*.png *.jpg *.jpeg *.gif *.bmp *.webp)",
+                      "All files (*)"]
+        onAccepted: App.dock.openImage(selectedFile)
+    }
 
     ColumnLayout {
         spacing: Kirigami.Units.largeSpacing
@@ -212,7 +235,9 @@ Kirigami.ScrollablePage {
                 onActivated: (index) => App.dock.modeIndex = index
             }
 
-            FormCard.FormDelegateSeparator {}
+            FormCard.FormDelegateSeparator {
+                visible: !App.dock.isPicture
+            }
 
             FormCard.AbstractFormDelegate {
                 objectName: "dockColourRow"
@@ -275,6 +300,10 @@ Kirigami.ScrollablePage {
                 objectName: "dockBrightnessRow"
                 background: null
                 hoverEnabled: false
+                // A picture goes up at full brightness with no control over it,
+                // which is what Space Station does too. A slider that did
+                // nothing would be worse than none.
+                visible: !App.dock.isPicture
 
                 contentItem: RowLayout {
                     spacing: Kirigami.Units.largeSpacing
@@ -352,13 +381,94 @@ Kirigami.ScrollablePage {
                 onActivated: (index) => App.dock.directionIndex = index
             }
 
+            FormCard.FormDelegateSeparator {
+                visible: !App.dock.isPicture
+            }
+
+            // Applying a computed effect is the end of this card, so the button
+            // belongs here. A picture is not: it has a whole card of its own
+            // below, and its copy of this row sits at the bottom of that.
+            DockApplyRow {
+                objectName: "dockApplyRow"
+                visible: !App.dock.isPicture
+                hint: "The dock has no effect generator: applying computes "
+                    + "every frame here and uploads the lot, which takes a few "
+                    + "seconds."
+            }
+        }
+
+        // -- the picture ---------------------------------------------------
+        //
+        // Only while “Picture” is the chosen effect. It is a section of the
+        // Lighting card's business rather than a page of its own: what it
+        // produces is the frames that card's Apply button sends, and a separate
+        // page with its own Apply would have two buttons writing one config.
+
+        FormCard.FormHeader {
+            Layout.fillWidth: true
+            visible: App.dock.present && App.dock.isPicture
+            title: "Picture"
+        }
+
+        FormCard.FormCard {
+            Layout.fillWidth: true
+            visible: App.dock.present && App.dock.isPicture
+
+            // What the dock will show, on the panel it will show it on. One
+            // pixel per LED is a drastic resampling — a photograph becomes 162
+            // dots — so this is not a nicety: it is the only way to find out
+            // whether a picture survives the trip before spending half a
+            // minute of packets discovering that it does not.
+            FormCard.AbstractFormDelegate {
+                objectName: "dockWedgeRow"
+                background: null
+                hoverEnabled: false
+
+                contentItem: ColumnLayout {
+                    spacing: Kirigami.Units.largeSpacing
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: Kirigami.Units.gridUnit * 24
+                        Layout.alignment: Qt.AlignHCenter
+                        implicitWidth: Kirigami.Units.gridUnit * 18
+                        implicitHeight: width * App.dock.wedgeViewHeight
+                                              / App.dock.wedgeViewWidth
+                        color: "#1b1c1e"
+                        radius: Kirigami.Units.smallSpacing
+
+                        LedWedge {
+                            objectName: "dockWedge"
+                            anchors.fill: parent
+                            anchors.margins: Kirigami.Units.smallSpacing
+                            centres: App.dock.wedgeCentres
+                            outline: App.dock.wedgeOutline
+                            viewWidth: App.dock.wedgeViewWidth
+                            viewHeight: App.dock.wedgeViewHeight
+                            ledRadius: App.dock.wedgeRadius
+                            colours: App.dock.frameColours
+                        }
+                    }
+
+                    Controls.Label {
+                        objectName: "dockWedgeCaption"
+                        Layout.alignment: Qt.AlignHCenter
+                        font: Kirigami.Theme.smallFont
+                        color: Kirigami.Theme.disabledTextColor
+                        text: App.dock.hasImage
+                            ? (App.dock.animated
+                               ? "frame " + (App.dock.previewFrame + 1) + " of "
+                                 + App.dock.frameCount
+                               : "162 LEDs, one pixel each")
+                            : "No picture chosen"
+                    }
+                }
+            }
+
             FormCard.FormDelegateSeparator {}
 
-            // In the card rather than in a page footer, because it applies this
-            // card and nothing else. A footer button on a page whose other half
-            // writes immediately would be claiming to apply the switches too.
             FormCard.AbstractFormDelegate {
-                objectName: "dockApplyRow"
+                objectName: "dockPictureFileRow"
                 background: null
                 hoverEnabled: false
 
@@ -366,37 +476,434 @@ Kirigami.ScrollablePage {
                     spacing: Kirigami.Units.largeSpacing
 
                     Controls.Label {
-                        objectName: "dockHint"
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 0
+                        elide: Text.ElideMiddle
+                        text: App.dock.hasImage ? App.dock.imageName
+                                                : "PNG, JPEG or an animated GIF"
+                        color: App.dock.hasImage ? Kirigami.Theme.textColor
+                                                 : Kirigami.Theme.disabledTextColor
+                    }
+
+                    Controls.Button {
+                        objectName: "dockChoosePictureButton"
+                        text: "Choose picture…"
+                        icon.name: "document-open"
+                        onClicked: pictureDialog.open()
+                    }
+
+                    Controls.Button {
+                        objectName: "dockClearPictureButton"
+                        text: "Clear"
+                        icon.name: "edit-clear"
+                        enabled: App.dock.hasImage
+                        onClicked: App.dock.clearImage()
+                    }
+                }
+            }
+
+            FormCard.FormDelegateSeparator {
+                visible: App.dock.imageMessage !== ""
+            }
+
+            FormCard.FormTextDelegate {
+                objectName: "dockPictureMessage"
+                visible: App.dock.imageMessage !== ""
+                text: App.dock.imageMessage
+            }
+
+            FormCard.FormDelegateSeparator {
+                visible: App.dock.hasImage
+            }
+
+            // The crop stage. The window in the middle is the 334x304 canvas
+            // the LEDs are read out of, at Space Station's own size, and the
+            // picture is dragged under it rather than the window over it.
+            FormCard.AbstractFormDelegate {
+                objectName: "dockCropRow"
+                background: null
+                hoverEnabled: false
+                visible: App.dock.hasImage
+
+                contentItem: ColumnLayout {
+                    spacing: Kirigami.Units.largeSpacing
+
+                    Rectangle {
+                        id: stage
+                        objectName: "dockCropStage"
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: App.dock.stageWidth
+                        Layout.alignment: Qt.AlignHCenter
+                        implicitWidth: App.dock.stageWidth
+                        implicitHeight: width * App.dock.stageHeight
+                                              / App.dock.stageWidth
+                        color: "black"
+                        radius: Kirigami.Units.smallSpacing
+                        clip: true
+
+                        // One stage unit in screen pixels. Every position below
+                        // is in the model's own 640x320 coordinates, so a
+                        // narrow window scales the whole thing and changes no
+                        // arithmetic anywhere.
+                        readonly property real unit: width / App.dock.stageWidth
+
+                        // An AnimatedImage even for a still, which it handles
+                        // as a one-frame animation: an animation being framed
+                        // has to show the frame the wedge above is showing, or
+                        // the two disagree about what is being cropped. Space
+                        // Station's own stage plays the whole GIF *ignoring*
+                        // the crop and zoom while the export honours both,
+                        // which is worth not reproducing.
+                        AnimatedImage {
+                            objectName: "dockCropImage"
+                            source: App.dock.imageSource
+                            // The same bound the model decodes at, and no
+                            // frame cache. This item loads the file a second
+                            // time, through QMovie, and the preview timer walks
+                            // the whole animation — so by default it quietly
+                            // builds a second full-resolution copy of every
+                            // frame beside the model's. Measured on a
+                            // 200-frame 1080p GIF, two full loops:
+                            //
+                            //   as written                945 MB, 4 ms/frame
+                            //   + sourceSize              345 MB, 4 ms/frame
+                            //   + cache: false              5 MB, 8 ms/frame
+                            //
+                            // Four milliseconds against a timer that fires
+                            // every hundred, for two thirds of a gigabyte.
+                            sourceSize: Qt.size(App.dock.sourceWidth,
+                                                App.dock.sourceHeight)
+                            cache: false
+                            paused: true
+                            // Clamped: a source that decoded fewer frames than
+                            // the trim believes would otherwise be asked for a
+                            // frame it does not have.
+                            currentFrame: Math.min(
+                                App.dock.sourceFrameCount - 1,
+                                App.dock.trimMin + App.dock.previewFrame)
+                            // Paired with `QImageReader.setAutoTransform` in the
+                            // model. Without both, a photo carrying an EXIF
+                            // rotation is framed one way up and sampled the
+                            // other.
+                            autoTransform: true
+                            x: App.dock.imageX * stage.unit
+                            y: App.dock.imageY * stage.unit
+                            width: App.dock.imageDrawWidth * stage.unit
+                            height: App.dock.imageDrawHeight * stage.unit
+                            // The model has already decided the aspect: “Fit
+                            // inside” and “Fill” both hand over a box the
+                            // picture's own shape, and “Stretch” hands over one
+                            // that is deliberately not.
+                            fillMode: Image.Stretch
+                            smooth: true
+                            asynchronous: false
+                        }
+
+                        // Everything outside the window, dimmed. Four
+                        // rectangles rather than one shape with a hole in it,
+                        // which QML has no primitive for.
+                        Repeater {
+                            model: [
+                                {x: 0, y: 0, w: App.dock.stageWidth, h: App.dock.holeY},
+                                {x: 0, y: App.dock.holeY + App.dock.holeHeight,
+                                 w: App.dock.stageWidth,
+                                 h: App.dock.stageHeight - App.dock.holeY - App.dock.holeHeight},
+                                {x: 0, y: App.dock.holeY,
+                                 w: App.dock.holeX, h: App.dock.holeHeight},
+                                {x: App.dock.holeX + App.dock.holeWidth,
+                                 y: App.dock.holeY,
+                                 w: App.dock.stageWidth - App.dock.holeX - App.dock.holeWidth,
+                                 h: App.dock.holeHeight}
+                            ]
+
+                            delegate: Rectangle {
+                                id: shade
+                                required property var modelData
+
+                                x: shade.modelData.x * stage.unit
+                                y: shade.modelData.y * stage.unit
+                                width: shade.modelData.w * stage.unit
+                                height: shade.modelData.h * stage.unit
+                                color: "#000000"
+                                opacity: 0.6
+                            }
+                        }
+
+                        Rectangle {
+                            objectName: "dockCropWindow"
+                            x: App.dock.holeX * stage.unit
+                            y: App.dock.holeY * stage.unit
+                            width: App.dock.holeWidth * stage.unit
+                            height: App.dock.holeHeight * stage.unit
+                            color: "transparent"
+                            border.width: 1
+                            border.color: Kirigami.Theme.highlightColor
+                        }
+
+                        // The whole stage drags, not only the window. Space
+                        // Station's own overlays swallow the press outside it,
+                        // so a drag there does nothing at all — an accident of
+                        // their stacking rather than a decision, and not one
+                        // worth reproducing.
+                        MouseArea {
+                            id: dragger
+                            objectName: "dockCropDrag"
+                            anchors.fill: parent
+                            enabled: App.dock.canPan
+                            cursorShape: App.dock.canPan
+                                ? (pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor)
+                                : Qt.ArrowCursor
+
+                            property real lastX: 0
+                            property real lastY: 0
+
+                            onPressed: (mouse) => {
+                                dragger.lastX = mouse.x;
+                                dragger.lastY = mouse.y;
+                            }
+                            // Incremental, against the last event rather than
+                            // against the press: the model clamps every move,
+                            // so a delta measured from the press would keep
+                            // accumulating travel the picture never made and
+                            // the drag would come unstuck from the pointer.
+                            onPositionChanged: (mouse) => {
+                                App.dock.panBy((mouse.x - dragger.lastX) / stage.unit,
+                                               (mouse.y - dragger.lastY) / stage.unit);
+                                dragger.lastX = mouse.x;
+                                dragger.lastY = mouse.y;
+                            }
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Kirigami.Units.largeSpacing
+
+                        Controls.Label {
+                            text: "Zoom"
+                            Layout.minimumWidth: Kirigami.Units.gridUnit * 5
+                        }
+
+                        Controls.Slider {
+                            objectName: "dockZoom"
+                            Layout.fillWidth: true
+                            from: App.dock.zoomMin
+                            to: App.dock.zoomMax
+                            stepSize: 1
+                            snapMode: Controls.Slider.SnapAlways
+                            value: App.dock.zoom
+                            onMoved: App.dock.zoom = value
+                        }
+
+                        Controls.Label {
+                            objectName: "dockZoomLabel"
+                            text: App.dock.zoomLabel
+                            Layout.minimumWidth: Kirigami.Units.gridUnit * 3
+                        }
+                    }
+                }
+            }
+
+            FormCard.FormDelegateSeparator {
+                visible: App.dock.hasImage
+            }
+
+            FormCard.FormComboBoxDelegate {
+                objectName: "dockFitBox"
+                visible: App.dock.hasImage
+                text: "Fit"
+                description: "how the picture starts out in the window — "
+                           + "Space Station offers no choice here and always "
+                           + "fills"
+                model: App.dock.imageFitModes
+                currentIndex: App.dock.imageFitMode
+                onActivated: (index) => App.dock.imageFitMode = index
+            }
+
+            FormCard.FormDelegateSeparator {
+                visible: App.dock.hasImage && App.dock.sourceFrameCount > 1
+            }
+
+            // The trim bar. Both ends are inclusive frame indices, as Space
+            // Station's are, and the range will not go below one frame or above
+            // the two hundred their own bar stops at.
+            FormCard.AbstractFormDelegate {
+                objectName: "dockTrimRow"
+                background: null
+                hoverEnabled: false
+                visible: App.dock.hasImage && App.dock.sourceFrameCount > 1
+
+                contentItem: ColumnLayout {
+                    spacing: Kirigami.Units.smallSpacing
+
+                    Controls.Label {
+                        text: "Frames"
+                        Layout.fillWidth: true
+                    }
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: Kirigami.Units.gridUnit * 2.5
+                        color: "black"
+                        radius: Kirigami.Units.smallSpacing
+                        clip: true
+
+                        Image {
+                            objectName: "dockFilmstrip"
+                            anchors.fill: parent
+                            source: App.dock.filmstripSource
+                            fillMode: Image.Stretch
+                            smooth: true
+                            cache: true
+                        }
+
+                        // The frames that will not be sent, greyed where they
+                        // sit rather than only implied by two handles below.
+                        Repeater {
+                            model: [
+                                {a: 0, b: App.dock.trimMin},
+                                {a: App.dock.trimMax + 1, b: App.dock.sourceFrameCount}
+                            ]
+
+                            delegate: Rectangle {
+                                id: dropped
+                                required property var modelData
+
+                                readonly property real step:
+                                    parent.width / Math.max(1, App.dock.sourceFrameCount)
+                                x: dropped.modelData.a * dropped.step
+                                width: Math.max(0, (dropped.modelData.b - dropped.modelData.a)
+                                                   * dropped.step)
+                                height: parent.height
+                                color: "#000000"
+                                opacity: 0.65
+                            }
+                        }
+                    }
+
+                    Controls.RangeSlider {
+                        id: trimSlider
+                        objectName: "dockTrim"
+                        Layout.fillWidth: true
+                        from: 0
+                        to: Math.max(1, App.dock.sourceFrameCount - 1)
+                        stepSize: 1
+                        snapMode: Controls.RangeSlider.SnapAlways
+
+                        // Set rather than bound. Dragging a handle assigns to
+                        // its own `value`, which destroys any binding that was
+                        // there — so the model pushes both ends back on every
+                        // change instead, and a range the model refuses visibly
+                        // springs back.
+                        // Each end clamps against the other as it is written,
+                        // so a pair that moves wholesale one way or the other
+                        // needs the first end written again once the second has
+                        // made room. Cheaper than deciding which order applies.
+                        function showTrim() {
+                            trimSlider.first.value = App.dock.trimMin;
+                            trimSlider.second.value = App.dock.trimMax;
+                            trimSlider.first.value = App.dock.trimMin;
+                        }
+
+                        Component.onCompleted: trimSlider.showTrim()
+
+                        Connections {
+                            target: App.dock
+                            function onImageChanged() { trimSlider.showTrim(); }
+                        }
+
+                        first.onMoved: App.dock.setTrim(trimSlider.first.value,
+                                                        trimSlider.second.value)
+                        second.onMoved: App.dock.setTrim(trimSlider.first.value,
+                                                         trimSlider.second.value)
+                    }
+
+                    Controls.Label {
+                        objectName: "dockTrimLabel"
+                        Layout.fillWidth: true
+                        font: Kirigami.Theme.smallFont
+                        color: Kirigami.Theme.disabledTextColor
+                        text: "frames " + (App.dock.trimMin + 1) + " to "
+                            + (App.dock.trimMax + 1) + " of "
+                            + App.dock.sourceFrameCount
+                    }
+                }
+            }
+
+            FormCard.FormDelegateSeparator {
+                visible: App.dock.animated
+            }
+
+            FormCard.AbstractFormDelegate {
+                objectName: "dockIntervalPictureRow"
+                background: null
+                hoverEnabled: false
+                visible: App.dock.animated
+
+                contentItem: RowLayout {
+                    spacing: Kirigami.Units.largeSpacing
+
+                    Controls.Label {
+                        text: "Frame time"
+                        Layout.minimumWidth: Kirigami.Units.gridUnit * 7
+                    }
+
+                    Controls.SpinBox {
+                        objectName: "dockPictureInterval"
+                        from: App.dock.intervalMin
+                        to: App.dock.intervalMax
+                        // One unit of what the dock stores, so every step of
+                        // the box is a step the hardware can actually take.
+                        stepSize: App.dock.intervalStep
+                        value: App.dock.intervalMs
+                        editable: true
+                        onValueModified: App.dock.intervalMs = value
+                    }
+
+                    Controls.Label {
                         Layout.fillWidth: true
                         Layout.preferredWidth: 0
                         wrapMode: Text.WordWrap
                         font: Kirigami.Theme.smallFont
                         color: Kirigami.Theme.disabledTextColor
-                        text: App.dock.busy
-                            ? "Uploading — the dock plays frames, so this is "
-                              + "about 24 kB going over in packets."
-                            : "The dock has no effect generator: applying "
-                              + "computes every frame here and uploads the lot, "
-                              + "which takes a few seconds."
-                    }
-
-                    Controls.ProgressBar {
-                        objectName: "dockProgress"
-                        visible: App.dock.busy
-                        from: 0
-                        to: 1
-                        value: App.dock.progress
-                        Layout.preferredWidth: Kirigami.Units.gridUnit * 8
-                    }
-
-                    Controls.Button {
-                        objectName: "dockApplyButton"
-                        text: "Apply lighting"
-                        icon.name: "dialog-ok-apply"
-                        enabled: !App.dock.busy
-                        onClicked: App.dock.apply()
+                        // Said because the wire is coarser than the box, and
+                        // because the number is measured rather than assumed:
+                        // Space Station writes it as though a unit were 10 ms
+                        // and their animations play at half speed on the dock.
+                        text: "ms per frame — the GIF's own average to start "
+                            + "with. The dock stores this in units of "
+                            + App.dock.intervalStep + " ms, so that is what it "
+                            + "rounds to."
                     }
                 }
+            }
+
+            FormCard.FormDelegateSeparator {
+                visible: App.dock.hasImage
+            }
+
+            FormCard.FormTextDelegate {
+                objectName: "dockPictureCost"
+                visible: App.dock.hasImage
+                text: App.dock.frameCount === 1
+                      ? "One frame" : App.dock.frameCount + " frames"
+                description: App.dock.imageEstimate
+            }
+
+            FormCard.FormDelegateSeparator {}
+
+            // The bottom of everything it applies. The Lighting card's copy is
+            // hidden while a picture is the effect, so there is one of these on
+            // screen and it is always below the work.
+            DockApplyRow {
+                objectName: "dockPictureApplyRow"
+                hint: App.dock.hasImage
+                    ? "The dock plays frames rather than generating them, so "
+                      + "this sends every frame of the picture as it is framed "
+                      + "above."
+                    : "Choose a picture first — a custom effect with no frames "
+                      + "would leave the dock playing whatever is still in its "
+                      + "frame memory."
             }
         }
 
@@ -406,11 +913,10 @@ Kirigami.ScrollablePage {
 
             FormCard.FormTextDelegate {
                 objectName: "dockDefaultNote"
-                text: "Two of Flydigi's effects are missing"
+                text: "One of Flydigi's effects is missing"
                 description: "“Default” is not computed by Space Station either "
                            + "— it uploads a file its installer ships, which "
-                           + "this project does not have. “Custom” needs frames "
-                           + "from an image, which is not built yet."
+                           + "this project does not have."
             }
         }
     }

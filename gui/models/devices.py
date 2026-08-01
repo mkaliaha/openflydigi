@@ -196,6 +196,39 @@ class DevicesModel(QAbstractListModel):
         if row < 0:
             row = 0 if self._entries else -1
         self._set_current(row, remember=False)
+        self._adopt_dock()
+
+    def _adopt_dock(self):
+        """Point the dock pages at a dock nobody has explicitly chosen.
+
+        `_remember` is the only thing that fills `_dock` in, and it runs on a
+        person picking a device in the picker -- so until somebody did, the Dock
+        page sat waiting on a read that was never asked for. A pad does not have
+        this problem because `_pad` comes out of the preferences file, and the
+        dock has no equivalent there: the daemon has no use for one, so there is
+        nothing to persist.
+
+        The visible failure was narrow and reachable: with a dock attached and
+        no pad -- which is every time the pad is asleep, since it leaves the USB
+        bus entirely -- the window opens on the dock's own pages and the Dock
+        page reads "Reading the dock…" until you open the picker and choose the
+        dock that is already selected.
+
+        Adopting rather than re-emitting, because this runs on every enumeration
+        poll: once `_dock` names something on the bus this returns immediately,
+        so a dock is read once and not every few seconds.
+        """
+        if self._dock and self._row_for(self._dock) >= 0:
+            return
+        row = self._row_for_kind(registry.KIND_DOCK)
+        if row < 0:
+            return
+        selector = registry.key(self._entries[row])
+        if not selector or selector == self._dock:
+            return
+        self._dock = selector
+        self.dockChanged.emit()
+        self.dockSelected.emit(selector)
 
     def _row_for(self, selector):
         if not selector:

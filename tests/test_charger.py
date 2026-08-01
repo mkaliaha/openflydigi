@@ -328,6 +328,132 @@ def test_the_advertised_pack_count_is_the_one_actually_sent():
     check("and the blob still reassembles", dock.led_blob == blob)
 
 
+def test_a_frame_of_the_wrong_length_is_refused_before_it_reaches_the_dock():
+    """Both header fields are one byte, and a wrap is corruption on hardware.
+
+    `write_led_config` records what a header disagreeing with its payload does:
+    the dock walks its own frame memory at offsets that are not multiples of
+    three and plays noise. A sampler that produced 161 colours would do exactly
+    that, silently, so `serialise` refuses instead of masking."""
+    short = charger.LedConfig(mode=charger.MODE_CUSTOM,
+                              frames=[[(1, 2, 3)] * (charger.LED_COUNT - 1)])
+    try:
+        charger.serialise(short)
+        check("a short frame is refused", False)
+    except charger.ProtocolError as exc:
+        check("a short frame is refused", True)
+        check("and says how many LEDs the dock has", "162" in str(exc), str(exc))
+
+    too_many = charger.LedConfig(
+        mode=charger.MODE_CUSTOM,
+        frames=[[(0, 0, 0)] * charger.LED_COUNT] * (charger.MAX_FRAMES + 1))
+    try:
+        charger.serialise(too_many)
+        check("a 256th frame is refused", False)
+    except charger.ProtocolError as exc:
+        check("a 256th frame is refused", True)
+        check("and says the count is one byte", "one byte" in str(exc), str(exc))
+
+    ceiling = charger.LedConfig(
+        mode=charger.MODE_CUSTOM,
+        frames=[[(0, 0, 0)] * charger.LED_COUNT] * charger.MAX_FRAMES)
+    check("and 255 is not", len(charger.serialise(ceiling)) == 6 + 255 * 486)
+
+
+def test_the_sampler_reads_the_pixel_space_station_reads():
+    """One pixel per LED, at Flydigi's own coordinates, in row-major order.
+
+    Each pixel of the synthetic canvas carries its own position, so a sample
+    that came from the wrong place says where it came from instead of merely
+    failing."""
+    width, height = charger.CROP_WIDTH, charger.CROP_HEIGHT
+    canvas = bytearray(width * height * 3)
+    for y in range(height):
+        for x in range(width):
+            index = (y * width + x) * 3
+            # Neither coordinate fits in a byte, so each keeps its high bits in
+            # a channel of its own and the two low bits share the third.
+            canvas[index] = x >> 1
+            canvas[index + 1] = y >> 1
+            canvas[index + 2] = (x & 1) << 1 | (y & 1)
+
+    frame = charger.sample_frame(bytes(canvas))
+    check("one colour per LED", len(frame) == charger.LED_COUNT, len(frame))
+    decoded = [(r * 2 + (b >> 1), g * 2 + (b & 1)) for r, g, b in frame]
+    check("every LED read its own pixel", decoded == list(charger.LED_PIXELS),
+          str(decoded[:3]))
+    check("the first LED is theirs", charger.LED_PIXELS[0] == (48, 32))
+    check("and the last", charger.LED_PIXELS[-1] == (186, 270))
+
+    try:
+        charger.sample_frame(bytes(canvas)[:-3])
+        check("a buffer of the wrong size is refused", False)
+    except ValueError as exc:
+        check("a buffer of the wrong size is refused", True)
+        check("and warns about row padding", "unpadded" in str(exc), str(exc))
+
+
+def test_the_two_grids_are_the_panel_the_dock_has():
+    """The sampler's pixels and the preview's circles describe one wedge.
+
+    They are unrelated tables from unrelated files -- a hand-typed pixel list
+    and an SVG -- and the only thing tying them together is that both are this
+    panel. If they ever stop agreeing about how many LEDs sit in each row, one
+    of them was transcribed wrong."""
+    for name, points in (("sampler", charger.LED_PIXELS),
+                         ("preview", charger.wedge_centres())):
+        check(f"{name}: one point per LED",
+              len(points) == charger.LED_COUNT, len(points))
+        rows = {}
+        for _x, y in points:
+            rows[y] = rows.get(y, 0) + 1
+        check(f"{name}: 16 rows", len(rows) == len(charger.ROW_LENGTHS), len(rows))
+        counts = tuple(rows[y] for y in sorted(rows))
+        check(f"{name}: rows taper as the dock's do",
+              counts == charger.ROW_LENGTHS, counts)
+        check(f"{name}: in row-major order",
+              points == tuple(sorted(points, key=lambda p: (p[1], p[0])))
+              if isinstance(points, tuple)
+              else points == sorted(points, key=lambda p: (p[1], p[0])))
+
+    # The sampler's table is transcribed, and the point of transcribing it is
+    # that it is *not* a lattice. Said out loud so a future tidy-up that
+    # replaces it with a formula fails here rather than on the dock.
+    pitches = {b[0] - a[0] for a, b in zip(charger.LED_PIXELS, charger.LED_PIXELS[1:])
+               if a[1] == b[1]}
+    check("the sampler's column pitch is irregular", pitches == {18, 20}, pitches)
+
+
+def test_a_picture_becomes_the_config_space_station_sends():
+    frames = [[(9, 8, 7)] * charger.LED_COUNT for _ in range(3)]
+    packed = charger.pack_frames(frames)
+    check("packing is three bytes a colour",
+          len(packed) == 3 * charger.LED_COUNT * 3, len(packed))
+    check("and unpacking gives them back", charger.unpack_frames(packed) == frames)
+    try:
+        charger.unpack_frames(packed[:-1])
+        check("a partial frame is refused", False)
+    except ValueError:
+        check("a partial frame is refused", True)
+
+    config = charger.image_config(frames, period=12)
+    check("the mode is custom", config.mode == charger.MODE_CUSTOM)
+    check("full brightness, as theirs sends", config.brightness == 100)
+    check("no palette", config.colours == [])
+    check("and a colour count of zero", config.colour_count == 0)
+    check("no direction", config.direction == charger.DIR_NONE)
+    check("the period is the caller's", config.period == 12)
+
+    dock = FakeDock()
+    charger.write_led_config(dock, config)
+    check("the dock got the frames unchanged", dock.frames == frames)
+    check("and the count it was told", dock.frame_count == 3, dock.frame_count)
+    # `generate` must leave a custom config alone rather than overwrite it with
+    # a computed effect, which is what every other mode gets.
+    check("generating a custom config keeps the picture",
+          charger.generate(config).frames == frames)
+
+
 def test_a_short_final_pack_is_sent_short_rather_than_padded():
     dock = FakeDock()
     config = charger.LedConfig(mode=charger.MODE_CLOSE)
@@ -518,6 +644,10 @@ def main():
                  test_custom_keeps_the_frames_it_was_given,
                  test_a_write_arrives_whole_and_parses_back,
                  test_the_advertised_pack_count_is_the_one_actually_sent,
+                 test_a_frame_of_the_wrong_length_is_refused_before_it_reaches_the_dock,
+                 test_the_sampler_reads_the_pixel_space_station_reads,
+                 test_the_two_grids_are_the_panel_the_dock_has,
+                 test_a_picture_becomes_the_config_space_station_sends,
                  test_a_short_final_pack_is_sent_short_rather_than_padded,
                  test_a_write_is_held_for_the_whole_stream,
                  test_a_dock_that_stops_acking_mid_stream_says_so,

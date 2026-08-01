@@ -90,7 +90,7 @@ icon.
     worker.py         device access, on its own thread
     i18n.py           the i18n*() shim the engine needs -- PySide6 has no KLocalizedContext
     models/           view-agnostic state -- no QtWidgets, no QtQuick
-    qml/              Main.qml, pages/ (thirteen), components/ (six)
+    qml/              Main.qml, pages/ (fifteen), components/ (seven)
     requirements.txt  what the runtime must provide -- documentation, not a pip file
 
 QML constructs `App`, so opening the device is a separate `start()`, and
@@ -204,11 +204,12 @@ same, `tests/qml_harness.py` included.
 |---|---|---|
 | `device.py` | `DeviceModel` | connection, battery, and the transient status and error line, for the selected pad |
 | `devices.py` | `DevicesModel` | every Flydigi device attached, and which pad and dock the window is showing. Two selections behind one picker — see below |
-| `dock.py` | `DockModel` | the selected charging dock: its four switches, its lighting, and what is sitting in it |
+| `dock.py` | `DockModel` | the selected charging dock: its four switches, its lighting, what is sitting in it, and the picture half — a source image framed on the 334x304 window the LEDs are read from, and the 162 colours that come out of it |
 | `dsmode.py` | `DsModeModel` | the DualSense switch's state |
 | `games.py` | `GameListModel`, `GameFilterModel` | one row per game with its route resolved; the search text and route filter |
 | `lighting.py` | `LightingModel`, `ColourListModel` | one lighting config, edited in memory until written; the up-to-five colours an effect cycles through |
 | `profile.py` | `ProfileModel`, `ProfileListModel`, `KeyMapModel`, `MacroModel`, `StickModel`, `StickSideModel`, `TriggerModel`, `TriggerSideModel`, `VibrationModel`, `VibrationSideModel` | the open profile and the edits held against it; the four slots and what was read from each; one row per key, with what it sends and its turbo; the stored macros; and per side, a stick's response curve, a trigger's stored effect and travel window, and a grip motor's window |
+| `imaging.py` | — | not a model: the one Qt chore `dock.py` and `screen.py` share, which is getting RGB888 out of a QImage without its row padding |
 | `screen.py` | `ScreenModel` | the picture queued for upload, and the idle display setting |
 | `settings.py` | `SettingsModel` | the command-3 block |
 | `setup.py` | `SetupModel`, `SetupChecksModel` | the Setup page; one row per requirement, in the order a person would fix them |
@@ -219,9 +220,12 @@ Rules for these:
     `constant=True` where it cannot change. camelCase names, as QML expects.
   * `roleNames()` returns **bytes** keys.
   * No `QtWidgets` and no `QtQuick` anywhere under `models/`;
-    `tests/test_models.py` asserts it. `models/screen.py` is the one model that
-    imports a Qt GUI module — `QImage`, `QImageReader`, `QPainter`, for image
-    decoding — which the rule allows.
+    `tests/test_models.py` asserts it. `models/screen.py`, `models/dock.py` and
+    `models/imaging.py` are the ones that import a Qt GUI module — `QImage`,
+    `QImageReader`, `QPainter`, for image decoding — which the rule allows.
+    That is also why the dock's LED preview is a QML `Repeater` fed a list of
+    colour strings rather than a `QQuickPaintedItem`: the painting has to live
+    in the view, and the model may not reach it.
   * Dirty tracking lives here, not in the view. `ProfileModel.dirty` is a byte
     comparison, `bytes(self._edited.blob) != self._slots.stored(self._cfg_id)`.
     `canSaveToFlash` is a separate gate, because command 166 carries no slot id

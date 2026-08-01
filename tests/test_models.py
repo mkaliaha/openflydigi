@@ -1527,6 +1527,54 @@ def test_choosing_a_pad_tells_the_daemon_and_choosing_a_dock_does_not():
     check("and names it", model.currentLabel == "Shelf", model.currentLabel)
 
 
+def test_a_dock_nobody_picked_is_still_read():
+    """A dock on the bus has to be pointed at without being chosen first.
+
+    `_remember` runs when a person picks a device, and it is the only thing
+    that fills the dock selector in — a pad's comes out of the preferences file
+    and a dock has no equivalent there. So until this existed, the Dock page sat
+    on "Reading the dock…" until you opened the picker and chose the dock that
+    was already selected. Reachable without trying: the pad leaves the USB bus
+    whenever it sleeps, and a bus with only a dock on it opens on the dock's own
+    pages.
+    """
+    model, _settings = devices_model()
+    docks = []
+    model.dockSelected.connect(docks.append)
+
+    model.devicesReceived([dock_entry(6, "Shelf")])
+    check("the dock is adopted without being picked",
+          docks == ["uid:" + "06" * 13], str(docks))
+    check("and the selector is set", model.dock == "uid:" + "06" * 13, model.dock)
+
+    # The enumeration poll runs every few seconds, and re-reading the dock on
+    # each one would be far worse than not reading it at all.
+    model.devicesReceived([dock_entry(6, "Shelf")])
+    model.devicesReceived([dock_entry(6, "Shelf")])
+    check("and it is not asked for again on the next poll", len(docks) == 1,
+          str(docks))
+
+    # A pad alongside changes which pages are shown and not which dock is meant.
+    model, _settings = devices_model()
+    docks = []
+    model.dockSelected.connect(docks.append)
+    model.devicesReceived([pad_entry(2, "Desk"), dock_entry(6, "Shelf")])
+    check("a dock behind a pad is adopted too",
+          docks == ["uid:" + "06" * 13], str(docks))
+    check("while the window still opens on the pad", not model.currentIsDock)
+
+    # And an explicit choice still wins: adoption takes the first dock, so a
+    # second one must not be taken back off the user on the next poll.
+    model, _settings = devices_model()
+    model.devicesReceived([dock_entry(6, "Shelf"), dock_entry(8, "Desk")])
+    model.select(1)
+    check("picking the second dock moves the selector",
+          model.dock == "uid:" + "08" * 13, model.dock)
+    model.devicesReceived([dock_entry(6, "Shelf"), dock_entry(8, "Desk")])
+    check("and a poll does not drag it back to the first",
+          model.dock == "uid:" + "08" * 13, model.dock)
+
+
 def test_the_selection_survives_a_pad_moving_to_another_node():
     """The reason a selection is a uid and not a row.
 
@@ -1657,6 +1705,331 @@ def test_a_dock_effect_takes_its_own_defaults():
     check("with the mode chosen", wanted[0][1]["mode"] == 5, str(wanted))
     model.writeFinished(True)
     check("and stops being busy when it is done", not model.busy)
+
+
+# -- the dock's picture ---------------------------------------------------
+
+
+def dock_model_with(picture="still"):
+    """A DockModel holding a picture, loaded from a real file.
+
+    Through the file reader rather than a back door, as the screen fixture is
+    and for the same reason: decoding is most of what this half of the model
+    does, and it is where an EXIF rotation or a transparent background would go
+    wrong.
+    """
+    from PySide6.QtCore import QUrl
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    model = models.DockModel()
+    model.setSelector("uid:aa")
+    model.modeIndex = models.MODE_NAMES.index("Picture")
+    if picture == "gif":
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "qml", "four-frames.gif")
+    else:
+        path = os.path.join(tempfile.mkdtemp(), "still.png")
+        # Deliberately not a flat colour and deliberately wider than the crop
+        # window's 334x304: a solid image samples identically however it is
+        # framed, so it could not tell filling from fitting from a pan.
+        image = QImage(600, 400, QImage.Format_RGB888)
+        painter = QPainter(image)
+        for x in range(600):
+            painter.fillRect(x, 0, 1, 400,
+                             QColor(int(255 * x / 599), 40, 255 - int(255 * x / 599)))
+        painter.fillRect(20, 20, 80, 80, QColor("white"))
+        painter.end()
+        image.save(path, "PNG")
+    loaded = model.openImage(QUrl.fromLocalFile(path))
+    return model, loaded
+
+
+def test_a_picture_is_framed_on_the_window_the_leds_are_read_from():
+    """Filling, fitting and the zoom, in the stage's own coordinates."""
+    model, loaded = dock_model_with("still")
+    check("the picture loaded", loaded)
+    check("the page knows it", model.hasImage)
+    check("one frame", model.frameCount == 1, model.frameCount)
+    check("so it is not an animation", not model.animated)
+
+    # 600x400 filled onto 334x304 covers by height: 304/400 * 600 = 456 wide.
+    width, height = model.renderedSize
+    check("filling covers the window", (round(width), round(height)) == (456, 304),
+          (width, height))
+    check("and is centred in it", round(model.imageX) == 92 and model.imageY == 8,
+          (model.imageX, model.imageY))
+    check("which leaves it draggable", model.canPan)
+
+    model.imageFitMode = models.dock.FIT_INSIDE
+    width, height = model.renderedSize
+    check("fitting inside letterboxes instead",
+          (round(width), round(height)) == (334, 223), (width, height))
+
+    model.imageFitMode = models.dock.FIT_STRETCH
+    check("stretching takes the window's own shape",
+          [round(v) for v in model.renderedSize] == [334, 304], model.renderedSize)
+
+    model.imageFitMode = models.dock.FIT_FILL
+    model.zoom = model.zoomMax
+    check("the zoom tops out at 1.95x", model.zoomLabel == "1.95×", model.zoomLabel)
+    check("and it scales the fitted size",
+          round(model.renderedSize[0]) == round(456 * 1.95), model.renderedSize)
+    check("a zoom re-centres, as Space Station's does",
+          round(model.imageX) == round(153 + (334 - 456 * 1.95) / 2),
+          model.imageX)
+
+
+def test_the_picture_cannot_be_dragged_off_the_window():
+    """A pan stops when an edge arrives, because past it is black LEDs."""
+    model, _loaded = dock_model_with("still")
+    width, _height = model.renderedSize
+
+    model.panBy(10000, 0)
+    check("dragging right stops at the picture's left edge",
+          model.imageX == 153, model.imageX)
+    model.panBy(-10000, 0)
+    check("and dragging left stops at its right edge",
+          round(model.imageX) == round(153 + 334 - width), model.imageX)
+    check("the picture is not tall enough to pan vertically",
+          model.imageY == 8, model.imageY)
+
+    # Fitting inside makes it smaller than the window on both axes, and there
+    # is no valid range left to clamp into.
+    model.imageFitMode = models.dock.FIT_INSIDE
+    check("a picture smaller than the window stops being draggable",
+          not model.canPan)
+    before = model.imageX
+    model.panBy(50, 50)
+    check("and stays centred when dragged anyway", model.imageX == before,
+          (before, model.imageX))
+
+
+def test_moving_the_picture_changes_the_leds():
+    """The preview is sampled from the framing, not from the file."""
+    model, _loaded = dock_model_with("still")
+    check("162 colours, one per LED", len(model.frameColours) == 162,
+          len(model.frameColours))
+    check("and every one is a colour",
+          all(c.startswith("#") and len(c) == 7 for c in model.frameColours))
+
+    framed = list(model.frameColours)
+    model.panBy(-60, 0)
+    check("panning re-samples", model.frameColours != framed)
+
+    panned = list(model.frameColours)
+    model.zoom = 12
+    check("and so does zooming", model.frameColours != panned)
+
+    zoomed = list(model.frameColours)
+    model.imageFitMode = models.dock.FIT_STRETCH
+    check("and so does the fit", model.frameColours != zoomed)
+
+    model.clearImage()
+    check("clearing puts the panel back to unlit", model.frameColours == [])
+    check("and forgets the file", not model.hasImage and model.imageName == "")
+
+
+def test_an_animation_is_trimmed_the_way_space_stations_bar_trims():
+    model, loaded = dock_model_with("gif")
+    check("the animation loaded", loaded)
+    check("every source frame was read", model.sourceFrameCount == 4,
+          model.sourceFrameCount)
+    check("and all of them start selected",
+          (model.trimMin, model.trimMax) == (0, 3),
+          (model.trimMin, model.trimMax))
+    check("so four would be sent", model.frameCount == 4, model.frameCount)
+    check("which makes it an animation", model.animated)
+    check("a filmstrip was written",
+          model.filmstripSource.startswith("file:"), model.filmstripSource)
+    check("the frame time came off the GIF", model.intervalMs > 0, model.intervalMs)
+
+    model.setTrim(1, 2)
+    check("both ends are inclusive", model.frameCount == 2, model.frameCount)
+    model.setTrim(3, 1)
+    check("a range given backwards is put the right way round",
+          (model.trimMin, model.trimMax) == (1, 3), (model.trimMin, model.trimMax))
+    model.setTrim(2, 2)
+    check("one frame is allowed", model.frameCount == 1, model.frameCount)
+    check("and one frame is not an animation", not model.animated)
+    model.setTrim(-5, 99)
+    check("and a range outside the file is clamped to it",
+          (model.trimMin, model.trimMax) == (0, 3),
+          (model.trimMin, model.trimMax))
+
+
+def test_the_preview_walks_the_trimmed_frames_and_wraps():
+    """The index is into the selection, not into the file.
+
+    A preview counting through the whole GIF while the trim bar says otherwise
+    would be showing frames that are not going to be sent.
+    """
+    model, _loaded = dock_model_with("gif")
+    model.setTrim(1, 2)
+    model.previewFrame = 0
+    check("it starts on the first selected frame", model.previewFrame == 0)
+    model.previewFrame = 1
+    check("and steps", model.previewFrame == 1)
+    model.previewFrame = 2
+    check("and wraps at the end of the selection", model.previewFrame == 0,
+          model.previewFrame)
+
+    model.setTrim(0, 3)
+    model.previewFrame = 3
+    check("a wider selection reaches further", model.previewFrame == 3)
+    model.setTrim(0, 1)
+    check("and narrowing it does not leave the index past the end",
+          model.previewFrame < model.frameCount,
+          (model.previewFrame, model.frameCount))
+
+
+def test_a_picture_is_applied_as_frames_rather_than_as_a_mode():
+    """What crosses to the worker, and why it crosses as bytes.
+
+    Two hundred frames as nested lists is ninety-seven thousand Python integers
+    through a queued signal; as `bytes` it is one QByteArray.
+    """
+    from flydigi import charger
+
+    model, _loaded = dock_model_with("gif")
+    model.setTrim(0, 2)
+    model.intervalMs = 120
+
+    wanted = []
+    model.lightingRequested.connect(lambda sel, cfg: wanted.append((sel, cfg)))
+    model.apply()
+    check("it asked for this dock", wanted and wanted[0][0] == "uid:aa", str(wanted))
+    sent = wanted[0][1]
+    check("the mode is custom", sent["mode"] == charger.MODE_CUSTOM, sent["mode"])
+    check("the frames are one flat bytes", isinstance(sent["frames"], bytes),
+          type(sent["frames"]).__name__)
+    check("three frames of 162 colours", len(sent["frames"]) == 3 * 162 * 3,
+          len(sent["frames"]))
+    check("and they unpack into what the dock takes",
+          len(charger.unpack_frames(sent["frames"])) == 3)
+    check("full brightness, as Space Station sends", sent["brightness"] == 100,
+          sent["brightness"])
+    check("the period is the frame time in the dock's own 20 ms units",
+          sent["period"] == 6, sent["period"])
+    check("and no palette goes with it", sent["colours"] == [], sent["colours"])
+    check("nor a direction", sent["direction"] == charger.DIR_NONE,
+          sent["direction"])
+
+    # Space Station rounds with `Math.round`, which sends halves up; Python's
+    # own `round` sends them to even. 50 ms is half a unit, a period of 3 their
+    # way and 2 with Python's rounding -- a third too fast on the dock. And 50
+    # needs no typing: a two-frame GIF at 40 and 60 ms averages to it.
+    model.writeFinished(True)
+    wanted.clear()
+    model.intervalMs = 50
+    model.apply()
+    check("a half-unit frame time rounds up, as theirs does",
+          wanted[0][1]["period"] == 3, wanted[0][1]["period"])
+    model.writeFinished(True)
+
+    # A still gets Space Station's own period of 1 rather than an interval.
+    still, _ = dock_model_with("still")
+    wanted.clear()
+    still.lightingRequested.connect(lambda sel, cfg: wanted.append((sel, cfg)))
+    still.apply()
+    check("a still goes up with period 1", wanted[0][1]["period"] == 1,
+          wanted[0][1]["period"])
+    check("as a single frame", len(wanted[0][1]["frames"]) == 162 * 3,
+          len(wanted[0][1]["frames"]))
+
+
+def test_a_picture_that_is_not_there_is_not_uploaded():
+    """The mode alone is not enough, and the frame count must not be zero.
+
+    A custom config with no frames is the state that left the dock cycling its
+    own frame memory -- fragments, then noise, then flat white.
+    """
+    model = models.DockModel()
+    model.setSelector("uid:aa")
+    model.modeIndex = models.MODE_NAMES.index("Picture")
+    check("with no picture there is nothing to apply", not model.canApplyImage)
+
+    wanted = []
+    model.lightingRequested.connect(lambda sel, cfg: wanted.append((sel, cfg)))
+    model.apply()
+    check("so applying asks for nothing", not wanted, str(wanted))
+    check("and the page does not go busy", not model.busy)
+
+    check("a picture is not an effect with a colour", model.coloursUsed == 0)
+    check("nor one with a direction", not model.usesDirection)
+    check("and the page knows to hide the rest", model.isPicture)
+
+
+def test_a_huge_picture_is_not_kept_at_a_size_nothing_can_show():
+    """162 dots do not need 1080p, and 255 frames of it is a gigabyte and a half.
+
+    The bound is what the window can actually sample at full zoom, so the
+    limit has to stay comfortably above 334x304 rather than merely below the
+    source.
+    """
+    from PySide6.QtCore import QUrl
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    limit = models.dock.decode_limit(1920, 1080)
+    check("a 1080p frame is cut down", limit[0] < 1920, limit)
+    check("but stays wider than the window it fills",
+          limit[0] > 334 and limit[1] > 304, limit)
+    check("keeping its shape", abs(limit[0] / limit[1] - 1920 / 1080) < 0.01, limit)
+    check("a picture already smaller than that is left alone",
+          models.dock.decode_limit(300, 200) == (300, 200))
+    check("and nothing divides by zero", models.dock.decode_limit(0, 0) == (0, 0))
+
+    path = os.path.join(tempfile.mkdtemp(), "big.png")
+    image = QImage(1920, 1080, QImage.Format_RGB888)
+    painter = QPainter(image)
+    for band in range(12):
+        painter.fillRect(band * 160, 0, 160, 1080,
+                         QColor.fromHsv(band * 29, 220, 240))
+    painter.end()
+    image.save(path, "PNG")
+
+    model = models.DockModel()
+    model.setSelector("uid:aa")
+    model.modeIndex = models.MODE_NAMES.index("Picture")
+    check("the big picture loaded", model.openImage(QUrl.fromLocalFile(path)))
+    check("and was decoded at the smaller size",
+          model._images[0].width() == limit[0], model._images[0].width())
+    check("and still samples 162 LEDs", len(model.frameColours) == 162)
+
+
+def test_the_playback_cursor_does_not_churn_the_framing():
+    """Two signals, because one of them ticks ten times a second.
+
+    On a single signal every framing property would re-evaluate per frame, and
+    the trim slider -- which has to be assigned to rather than bound, since
+    dragging a handle destroys any binding on it -- would be written to
+    underneath the user's own drag.
+    """
+    model, _loaded = dock_model_with("gif")
+    framing, preview = [], []
+    model.imageChanged.connect(lambda: framing.append(1))
+    model.previewChanged.connect(lambda: preview.append(1))
+
+    model.previewFrame = 1
+    check("stepping the preview says so", len(preview) == 1, len(preview))
+    check("and says nothing about the framing", not framing, len(framing))
+
+    model.panBy(-20, 0)
+    check("panning moves the framing", len(framing) == 1, len(framing))
+    check("and the preview too, since the LEDs changed", len(preview) == 2,
+          len(preview))
+
+
+def test_a_file_qt_cannot_read_says_so_rather_than_half_loading():
+    model = models.DockModel()
+    path = os.path.join(tempfile.mkdtemp(), "not-a-picture.png")
+    with open(path, "wb") as handle:
+        handle.write(b"nothing of the sort")
+    from PySide6.QtCore import QUrl
+    check("loading fails", not model.openImage(QUrl.fromLocalFile(path)))
+    check("it says which file", "not-a-picture.png" in model.imageMessage,
+          model.imageMessage)
+    check("and nothing is left half loaded", not model.hasImage)
+    check("with no frames to send", model.frameCount == 0)
 
 
 def test_models_pull_in_no_view_code():
@@ -2080,12 +2453,23 @@ def main():
                  test_an_unsupported_feature_is_reported_as_such_not_as_off,
                  test_the_device_list_shows_what_each_device_is,
                  test_choosing_a_pad_tells_the_daemon_and_choosing_a_dock_does_not,
+                 test_a_dock_nobody_picked_is_still_read,
                  test_the_selection_survives_a_pad_moving_to_another_node,
                  test_a_pad_that_goes_away_is_not_forgotten,
                  test_an_empty_bus_still_shows_the_pad_pages,
                  test_a_dock_switch_moves_at_once_and_asks_the_worker,
                  test_a_reply_for_a_dock_nobody_is_looking_at_is_dropped,
                  test_a_dock_effect_takes_its_own_defaults,
+                 test_a_picture_is_framed_on_the_window_the_leds_are_read_from,
+                 test_the_picture_cannot_be_dragged_off_the_window,
+                 test_moving_the_picture_changes_the_leds,
+                 test_an_animation_is_trimmed_the_way_space_stations_bar_trims,
+                 test_the_preview_walks_the_trimmed_frames_and_wraps,
+                 test_a_picture_is_applied_as_frames_rather_than_as_a_mode,
+                 test_a_picture_that_is_not_there_is_not_uploaded,
+                 test_a_huge_picture_is_not_kept_at_a_size_nothing_can_show,
+                 test_the_playback_cursor_does_not_churn_the_framing,
+                 test_a_file_qt_cannot_read_says_so_rather_than_half_loading,
                  test_models_pull_in_no_view_code):
         test()
     total = len(PASSED) + len(FAILED)

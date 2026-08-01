@@ -511,10 +511,13 @@ Direction is read by **rainbow and wave-gradient only**, and they do not even di
 way: rainbow uses row ÷ row-count and column ÷ row-length, wave-gradient uses the same two minus
 one.
 
-**Pulse and diagonal-flow do not use the LED positions the image sampler uses.** They build their
-own lattice around whichever preview circle sits nearest the middle of a 450x420 box — that is
+**Pulse and diagonal-flow do not use the LED positions anything else uses.** They build their own
+lattice around whichever preview circle sits nearest the middle of a 450x420 box — that is
 `point_115`, index 114, at 47.56% / 50.48%, i.e. (214.02, 212.016) — with a horizontal pitch of
-width/20 and a vertical pitch of that times √3/2. Transcribed rather than reasoned about.
+width/20 and a vertical pitch of that times √3/2. Transcribed rather than reasoned about. So there
+are *three* sets of LED positions in play and `charger._lattice` is the one that belongs to nobody:
+`charger.LED_PIXELS` is where a picture is sampled from, `charger.wedge_centres` is where the
+preview draws its circles, and this is a synthetic grid these two effects were written against.
 
 **`Default` cannot be computed and is refused rather than approximated.** Space Station does not
 compute it either: `read_default_config` reads
@@ -527,17 +530,97 @@ Windows install is all it would take: the field numbers are `ChargerMappingConfi
 `ChargerLedConfig {mode 1, period 2, brightness 3, color[] 4, useColorCount 5, direction 6,
 frames[] 7}`, `FramedLedColor {brightness 1, colors[] 2}`, `Color {red 1, green 2, blue 3}`.
 
-### The images path, which is not built here
+### A picture on the dock
 
-The DIY page accepts png/jpeg/gif, crops on a 334x304 canvas and samples **one pixel per LED**
-— nearest pixel, no averaging, no gamma, alpha discarded — into a `FramedLedColor` per GIF
-frame, capped at 200 frames, then sends an ordinary `UpdateConfig`. `period` there is the frame
-interval in centiseconds (`Math.round(frameInterval / 10)`); the preview animator disagrees with
-itself and plays at `20 * period` ms.
+Built: `charger.LED_PIXELS` and `charger.sample_frame` in the backend, the framing and the
+decoding in `gui/models/dock.py`, and the Dock page's **Picture** section on top of them. It uses
+**no `SwitchUsb`, no firmware console and no command 31** — mode `custom` down the ordinary config
+path, which is why nothing about it is dangerous.
 
-It uses **no `SwitchUsb`, no firmware console and no command 31** — the ordinary config path.
-That decoding cannot live in a zero-dependency backend, which is why it is scoped to `gui/` where
-Qt already reads both formats. → [PROGRESS.md](../PROGRESS.md#whats-next)
+The split is the one [PROGRESS.md](../PROGRESS.md) asks for: `flydigi/` takes colour arrays and has
+no idea what a GIF is, `gui/` decodes with Qt and hands over 334x304 of RGB888.
+
+**The sampler is a hard-coded table of 162 pixel coordinates, not a formula.** Space Station's
+`$e` reads `data[y * width * 4 + x * 4]` out of the 334x304 crop canvas for each entry of a
+`useState([{x: 48, y: 32}, …])` literal — nearest pixel, no averaging, no gamma, and `data[h+3]`
+is never touched, so alpha is dropped and a transparent pixel is whatever was under it. That table
+is transcribed into `charger.LED_PIXELS` rather than generated, because it is not a lattice: the
+column pitch alternates 18/20, the rows are centred alternately on 167 and 168, and row 2 is 2px
+off mirror-symmetric. It is also inset — only the middle 276x238 of the canvas is ever read, so
+about the outer 9% of what the user framed reaches no LED at all.
+
+**The preview wedge is a second, unrelated grid**, and the two must not be confused.
+`useLedEffectRenderer`'s SVG is a 450x420 box holding one outline path and 162 circles of radius
+7.5, and *that* one is a clean lattice — `cy = 60 + 19·row`, `cx = 225 + 22·(col − (n−1)/2)`
+reproduces every centre in their file exactly, which is why `charger.wedge_centres` computes it
+and a test checks the computation against the file. The two grids agree about topology and order
+and disagree about margins: the wedge fills 73.3% x 67.9% of its box where the sampler fills
+82.6% x 78.3% of its canvas. Deriving one from the other would move every sample inward by about
+9% of the width.
+
+Two things a prior reading of this file got wrong, both corrected against the bundle:
+
+  * **There is no 200-frame decode cap.** The line is
+    `var p = Math.min(n.tracks[0].frameCount, f); p = n.tracks[0].frameCount;` — `var`, not
+    `const`, so the cap is silently overwritten on the next statement and every frame is decoded.
+    200 bounds the *trim bar* only: the initial selection, its maximum width, and the toast. The
+    wire's own ceiling is 255, the frame count being one byte, and `charger.MAX_FRAMES` and
+    `charger.SAFE_FRAMES` are those two numbers kept apart.
+  * **The 20x preview claim was about a different animator.** The in-modal GIF preview ticks at
+    `setInterval(fn, Y)` — the authored interval. The *on-page wireframe* preview, in
+    `useLedEffectRenderer`, ticks at `20 * period`. Since the page writes
+    `period = round(interval_ms / 10)`, their two previews of one animation run at 1x and 2x the
+    same speed.
+
+**One period unit is 20 ms, and Space Station's writer is wrong about it.** Their two numbers
+disagreed — the DIY page writes `Math.round(interval_ms / 10)` while the wireframe preview replays
+at `20 × period` — so one of them had to be wrong about the firmware, and the dock says it is the
+writer. **Measured here, in two halves.** An animation authored at 100 ms a frame and uploaded their
+way played at about 200 on the dock, running at half the speed the app was previewing beside it —
+which is what identified the factor. Then `gui/models/dock.py` was made to divide by **20**
+(`PERIOD_MS`) and the whole path was run on a long real animation — the Bad Apple silhouettes — and
+compared against what Space Station makes of the same file. The two looked about the same. The app's
+frame-time box steps in 20s and says so, and its ceiling is 255 × 20 = 5100 ms rather than an
+assumed 2550.
+
+**That comparison is what validates the picture path, and it is the only kind that can.** The panel
+is 162 LEDs on a staggered wedge whose rows run 16 down to 3, so nothing recognisable survives it by
+construction and "is the picture legible" answers nothing. What a side-by-side does answer is
+everything at once: a permuted LED order, a mistranscribed pixel in `LED_PIXELS`, a crop that framed
+differently or a pace that drifted would each show as a visible difference against the reference,
+and none did. Same bar as Breath, and for the same reason.
+
+Two things this does *not* touch. A still still goes up with their `period: 1`, which is what it
+is for. And the eight computed effects are unaffected: their periods are Space Station's own slider
+values uploaded unaltered, so whatever the dock does with a `period` of 3 is what their Breath does
+too — this changes the arithmetic that turns a *wanted* frame time into that byte, which only the
+picture path performs.
+
+**The crop stage.** A 640x320 stage with the 334x304 window cut out of its middle at (153, 8);
+the picture is positioned in stage coordinates and dragged under the window; a zoom slider of 1..20
+whole steps scaling by `0.95 + 0.05·value`, so 1.00x to 1.95x, and a zoom re-centres rather than
+keeping the pan, which is theirs.
+
+Their initial fit branches on `width < height` — width to 334 for a portrait, height to 304 for
+everything else — so any landscape between square and 334:304 ≈ 1.0987 comes out *narrower* than
+the window, a square photo at 304px in a 334px hole. **That looks like a bug and reaches nothing.**
+The bare margin is at most 15px a side and the sampler's own columns run 30..306, so no LED lands
+in it at any aspect ratio. `gui/models/dock.py` fills instead, which is their branch with the gap
+closed, and offers "Fit inside" and "Stretch" beside it — not to fix anything, but because
+letterboxing is a reasonable thing to want and their UI has no way to ask for it.
+
+Their trim bar is a hand-rolled pair of handles over a 590x36 filmstrip with both ends inclusive,
+a minimum of one frame and a maximum of 200; this uses a `RangeSlider` over a filmstrip drawn as
+one image, with the same bounds. Their frame interval is
+`round((last.timestamp + last.duration) / (frames × 1000))` off the decoded track, which is the
+mean whenever a GIF's frames run back to back; `_mean_delay` takes the mean of
+`QImageReader.nextImageDelay()`, which is the same number by a different route, and deliberately
+not the *longest* delay — a GIF that holds its final frame would otherwise play the whole
+animation at the speed of its pause.
+
+Not tried on the dock yet. What is checked is that the sampler reads the pixels Space Station
+reads, that both grids describe a 162-LED wedge with the dock's own row lengths, and that a
+picture becomes the config their page sends — `tests/test_charger.py` and `tests/test_models.py`.
 
 ### The four switches, and what the dock says on its own
 

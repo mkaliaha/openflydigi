@@ -14,14 +14,26 @@ here and uploads about 24 kB in 487 packets, which takes a few seconds. That is
 why writing has a busy state and a progress signal, where the pad's lighting
 needs neither. `flydigi/charger.py` owns the arithmetic.
 
-Two of Flydigi's ten modes are missing on purpose. `default` needs a file their
-installer ships and this repository does not have, and `custom` needs frames
-from an image, which is the other half of the dock work and not built yet.
+`custom` is the mode with a picture behind it, and most of this file is that
+half: a source image framed on a 334x304 canvas, one pixel per LED out of it,
+and the result played back on the wedge before any of it goes to the dock.
+`flydigi/charger.py` owns the sampler and the geometry; Qt does the decoding,
+because a zero-dependency backend has no business reading a GIF.
+
+One of Flydigi's ten modes is still missing, and stays missing: `default` needs
+a file their installer ships and this repository does not have.
 """
-from PySide6.QtCore import Property, QObject, Signal, Slot
+import math
+import os
+
+from PySide6.QtCore import (Property, QObject, QRectF, QSize, QStandardPaths, Qt,
+                            QUrl, Signal, Slot)
+from PySide6.QtGui import QImage, QImageReader, QPainter
 from PySide6.QtQml import QmlElement
 
 from flydigi import charger
+
+from .imaging import rgb_bytes
 
 # See gui/models/device.py for what these two names do.
 QML_IMPORT_NAME = "Apex5"
@@ -39,6 +51,7 @@ MODES = [
     ("Wave gradient", charger.MODE_WAVE_GRADIENT),
     ("Rainbow", charger.MODE_RAINBOW),
     ("Pulse", charger.MODE_PULSE),
+    ("Picture", charger.MODE_CUSTOM),
 ]
 MODE_NAMES = [name for name, _id in MODES]
 
@@ -78,6 +91,152 @@ DIMMED_BY_SLEEP = ("led_sync", "show_animation_when_charging")
 SWITCH_LABELS = {name: label for name, label, _note in SWITCHES}
 
 
+# -- framing a picture -----------------------------------------------------
+#
+# Space Station's DIY page lays the source image out on a 640x320 stage with the
+# 334x304 crop window cut out of the middle of it, and lets you drag the image
+# under that window and zoom it. Every number here is theirs.
+
+STAGE_WIDTH, STAGE_HEIGHT = 640, 320
+HOLE_X = (STAGE_WIDTH - charger.CROP_WIDTH) // 2        # 153
+HOLE_Y = (STAGE_HEIGHT - charger.CROP_HEIGHT) // 2      # 8
+
+# Their zoom slider is 1..20 in whole steps and the factor it produces is
+# `0.95 + 0.05 * value`, so the range is 1.00x to 1.95x and the bottom of the
+# slider is exactly the fitted size.
+ZOOM_MIN, ZOOM_MAX = 1, 20
+
+# **This page has a fit control and Space Station has none.** Theirs fits width
+# for a portrait image and height for everything else, which is filling for most
+# pictures and under-covers slightly for any landscape between square and
+# 334:304 -- a square photo lands 304px wide in a 334px window. That gap turns
+# out to reach nothing: the sampler's own columns run 30..306, the bare margin is
+# at most 15px a side, and no LED has ever been in it at any aspect ratio. So
+# filling here is their branch with a harmless gap closed, and the two other
+# modes are offered because letterboxing is a reasonable thing to want rather
+# than because anything was broken.
+FIT_FILL, FIT_INSIDE, FIT_STRETCH = 0, 1, 2
+IMAGE_FIT_MODES = ["Fill the panel", "Fit inside", "Stretch"]
+
+# **One period unit is 20 ms, measured on the dock.** This is the number Space
+# Station gets wrong: their writer sends `round(ms / 10)` while their own
+# on-page preview replays at `20 x period`, so one of the two had to be wrong
+# about the firmware and it is the writer. An animation authored at 100 ms a
+# frame and uploaded their way plays at 200 on the hardware here -- observed
+# directly, the dock running at half the speed this page was previewing.
+#
+# So this divides by 20 where they divide by 10, and the preview and the dock
+# then agree. A still still goes up with their `period: 1`, which is what it is
+# for. Nothing about the *computed* effects changes: their periods are Space
+# Station's own slider values, uploaded unaltered, and they already play at
+# whatever the dock does with them.
+PERIOD_MS = 20
+DEFAULT_INTERVAL_MS = 100
+INTERVAL_MIN_MS = PERIOD_MS                  # one unit
+INTERVAL_MAX_MS = 255 * PERIOD_MS            # `period` is one byte
+
+# The trim bar's filmstrip, drawn at twice Space Station's 590x36 so it stays
+# sharp. One image rather than a thumbnail per frame: 200 files to draw a strip
+# 3px per frame wide would be absurd.
+FILMSTRIP_WIDTH, FILMSTRIP_HEIGHT = 1180, 72
+
+
+def zoom_factor(zoom):
+    """Their slider value -> the scale it means. 1 is the fitted size."""
+    return 0.95 + 0.05 * max(ZOOM_MIN, min(ZOOM_MAX, int(zoom)))
+
+
+def fitted_size(natural_width, natural_height, mode):
+    """How big the source image is drawn on the stage at zoom 1."""
+    if not natural_width or not natural_height:
+        return (0.0, 0.0)
+    if mode == FIT_STRETCH:
+        return (float(charger.CROP_WIDTH), float(charger.CROP_HEIGHT))
+    pick = min if mode == FIT_INSIDE else max
+    scale = pick(charger.CROP_WIDTH / natural_width,
+                 charger.CROP_HEIGHT / natural_height)
+    return (natural_width * scale, natural_height * scale)
+
+
+def clamp_pan(value, rendered, origin, extent):
+    """Keep the crop window inside the picture, on one axis.
+
+    An image at least as big as the window may be dragged until an edge meets
+    the window's edge and no further. One smaller than the window -- which only
+    "Fit inside" produces -- has no valid range at all, so it is centred and
+    stops being draggable rather than being clamped to a nonsense endpoint.
+    """
+    if rendered <= extent:
+        return origin + (extent - rendered) / 2.0
+    return min(float(origin), max(origin + extent - rendered, float(value)))
+
+
+def decode_limit(width, height):
+    """The biggest a source frame is ever drawn, so nothing larger is kept.
+
+    A GIF is decoded whole, and a two-hundred-frame screen recording at 1080p
+    is a great deal of QImage for a panel that is 162 dots. The window reads
+    334x304 and the zoom tops out at 1.95x, so at full zoom the window covers
+    334 source pixels exactly -- anything finer than that is resolution the
+    sampler cannot reach at any pan position, and anything coarser loses detail
+    that it can.
+
+    Deliberately conservative about orientation: the limit is taken against the
+    picture's *shorter* side, so a frame that `setAutoTransform` is about to
+    turn on its side is still large enough afterwards.
+
+    It bounds rather than solves. Measured: a 200-frame 1080p GIF opens in 1.5
+    seconds and holds 585 MB at 1158x651 a frame, because every one of those
+    frames really is pannable at that resolution. What it stops is the same
+    picture costing several times that.
+    Bounding it harder would mean deciding that 162 dots do not deserve a 1:1
+    sample, which is a different argument from this one.
+
+    Two things it does *not* do. It is not a peak-memory bound:
+    `QImageReader.supportsOption(ScaledSize)` is false for Qt's GIF and PNG
+    handlers, so those decode each frame at full size and scale it afterwards.
+    And it says nothing about the copy QML loads for the crop stage -- that one
+    is bounded on the page, by `sourceSize` and `cache: false`.
+    """
+    if width <= 0 or height <= 0:
+        return (width, height)
+    scale = (max(charger.CROP_WIDTH, charger.CROP_HEIGHT)
+             / min(width, height)) * zoom_factor(ZOOM_MAX)
+    if scale >= 1.0:
+        return (width, height)
+    return (max(1, round(width * scale)), max(1, round(height * scale)))
+
+
+def _mean_delay(delays):
+    """One frame interval for the whole animation, as Space Station takes it.
+
+    The wire has a single period for an animation, so per-frame timing is
+    thrown away by both applications. Theirs divides the last frame's end
+    timestamp by the frame count, which is the mean whenever a GIF's frames run
+    back to back -- and taking the mean rather than the longest delay matters
+    for the ordinary GIF that holds its final frame: that one would otherwise
+    play the whole thing at the speed of its pause.
+    """
+    usable = [d for d in delays if d > 0]
+    if not usable:
+        return DEFAULT_INTERVAL_MS
+    mean = charger.js_round(sum(usable) / len(usable))
+    return max(INTERVAL_MIN_MS, min(INTERVAL_MAX_MS, mean))
+
+
+def _load_note(total, read):
+    """What to say about a file with more frames than can be used."""
+    if total > read:
+        return (f"{total} frames in the file and {read} read — the frame count "
+                f"is one byte on the wire, so {charger.MAX_FRAMES} is the "
+                f"ceiling. The bar starts on the first {charger.SAFE_FRAMES}.")
+    if read > charger.SAFE_FRAMES:
+        return (f"{read} frames, and the bar starts on the first "
+                f"{charger.SAFE_FRAMES} — as many as Space Station will send "
+                f"at once, and the most this dock has been given.")
+    return ""
+
+
 def to_hex(colour):
     return "#{:02x}{:02x}{:02x}".format(*colour)
 
@@ -99,6 +258,14 @@ class DockModel(QObject):
     changed = Signal()
     lightingChanged = Signal()
     busyChanged = Signal()
+    # The picture half. Kept apart from `lightingChanged` because it fires on
+    # every pan event and the effect controls have no reason to re-evaluate.
+    imageChanged = Signal()
+    # And the preview cursor is kept apart from *that*, because it ticks ten
+    # times a second while an animation plays. On one signal, every framing
+    # property would re-evaluate per tick -- and the trim slider, which has to
+    # be written to rather than bound, would be written to underneath a drag.
+    previewChanged = Signal()
     # Requests out. The selector rides along on every one of them: the page
     # binds to whichever dock is chosen, and a write must not land on the dock
     # that happened to be selected when the worker last looked.
@@ -123,6 +290,24 @@ class DockModel(QObject):
         self._busy = False
         self._progress = 0.0
         self._error = ""
+        # -- the picture
+        self._source = ""              # the file it came from
+        self._images = []              # every decoded source frame
+        self._natural = (0, 0)
+        self._fit = FIT_FILL
+        self._zoom = ZOOM_MIN
+        self._pan = (float(HOLE_X), float(HOLE_Y))
+        self._trim = (0, 0)            # inclusive, into `_images`
+        self._interval = DEFAULT_INTERVAL_MS
+        self._preview_frame = 0
+        # Sampling one frame costs about half a millisecond, so frames are
+        # taken on demand and remembered rather than all recomputed whenever
+        # the picture moves under the window. Dragging re-samples the one frame
+        # on screen; playing an animation fills this in as it goes round.
+        self._sampled = {}
+        self._filmstrip = ""
+        self._filmstrip_serial = 0
+        self._image_message = ""
 
     # -- which dock --------------------------------------------------------
 
@@ -384,6 +569,17 @@ class DockModel(QObject):
         return charger.MODE_PERIOD_RANGE.get(
             self._mode, charger.PERIOD_RANGE_FALLBACK)[1]
 
+    @Property(bool, notify=lightingChanged)
+    def isPicture(self):
+        """Whether the chosen effect is a picture rather than a calculation.
+
+        The page hides most of the lighting card in that state, brightness
+        included: Space Station's picture path sends 100 with no control over
+        it, and a slider that silently did nothing would be worse than no
+        slider.
+        """
+        return self._mode == charger.MODE_CUSTOM
+
     @Property(int, notify=lightingChanged)
     def coloursUsed(self):
         """How many colours this mode's generator reads. Zero means it ignores them."""
@@ -432,23 +628,525 @@ class DockModel(QObject):
     def progress(self):
         return self._progress
 
+    # -- a picture ---------------------------------------------------------
+    #
+    # The source image sits on a 640x320 stage with the 334x304 crop window cut
+    # out of the middle. What this model holds is where the image sits on that
+    # stage and how big it is drawn; the page shows exactly that and reports
+    # drags back. Everything else -- the crop, the 162 samples, the frames that
+    # go on the wire -- falls out of those two numbers, so there is one place
+    # where framing is decided and the preview cannot disagree with the upload.
+
+    @Slot(QUrl, result=bool)
+    def openImage(self, url):
+        """Load a picture or an animation. False, with a message, if Qt can't.
+
+        Every frame is decoded now, because the trim bar needs a filmstrip and
+        the page needs an honest frame count before anyone starts a two-minute
+        upload. Sampling is *not* done now -- that waits for a frame to be
+        wanted, since the framing is about to be changed anyway.
+        """
+        path = url.toLocalFile() if isinstance(url, QUrl) else str(url)
+        if not path:
+            return False
+        reader = QImageReader(path)
+        # Matches `autoTransform: true` on the page's own Image. Without the
+        # pair, a photo with an EXIF rotation is framed upright and sampled
+        # sideways.
+        reader.setAutoTransform(True)
+        # What is *kept* is bounded, which is the part that matters for a long
+        # animation. Not the peak: `QImageReader.supportsOption(ScaledSize)` is
+        # false for Qt's GIF and PNG handlers, so those decode each frame at
+        # full size and scale it afterwards -- one frame's worth of peak, and a
+        # 200-frame 1080p GIF still takes a noticeable second to open.
+        stated = reader.size()
+        limit = decode_limit(stated.width(), stated.height())
+        if limit != (stated.width(), stated.height()):
+            reader.setScaledSize(QSize(*limit))
+        frames, delays = [], []
+        while len(frames) < charger.MAX_FRAMES:
+            image = reader.read()
+            if image.isNull():
+                break
+            frames.append(image)
+            delays.append(reader.nextImageDelay())
+            if not reader.supportsAnimation():
+                break
+        if not frames:
+            self.clearImage()
+            self._image_message = f"Qt could not read {os.path.basename(path)}"
+            self.imageChanged.emit()
+            return False
+
+        total = max(reader.imageCount(), len(frames))
+        self._source = path
+        self._images = frames
+        self._natural = (frames[0].width(), frames[0].height())
+        self._fit = FIT_FILL
+        self._zoom = ZOOM_MIN
+        self._interval = _mean_delay(delays)
+        # Space Station's own opening trim, and the reason it is not simply
+        # every frame: their bar will not select more than 200 at a time.
+        self._trim = (0, min(len(frames), charger.SAFE_FRAMES) - 1)
+        self._preview_frame = 0
+        self._image_message = _load_note(total, len(frames))
+        self._recentre()
+        self._write_filmstrip()
+        self.imageChanged.emit()
+        self.previewChanged.emit()
+        self.lightingChanged.emit()
+        return True
+
+    @Slot()
+    def clearImage(self):
+        self._source = ""
+        self._images = []
+        self._natural = (0, 0)
+        self._sampled = {}
+        self._trim = (0, 0)
+        self._preview_frame = 0
+        self._image_message = ""
+        self._clear_filmstrip()
+        self.imageChanged.emit()
+        self.previewChanged.emit()
+        self.lightingChanged.emit()
+
+    def _recentre(self):
+        """Put the picture in the middle of the window. Where a load starts.
+
+        Also where a zoom lands, which is Space Station's behaviour: their
+        slider throws the pan away and re-centres. Keeping the pan would be
+        defensible, but zooming about a corner that is off-screen is worse than
+        both, and matching them costs nothing.
+        """
+        width, height = self.renderedSize
+        self._pan = (HOLE_X + (charger.CROP_WIDTH - width) / 2.0,
+                     HOLE_Y + (charger.CROP_HEIGHT - height) / 2.0)
+        self._sampled = {}
+
+    def _reframe(self):
+        """The picture moved under the window: nothing sampled is still true."""
+        width, height = self.renderedSize
+        self._pan = (clamp_pan(self._pan[0], width, HOLE_X, charger.CROP_WIDTH),
+                     clamp_pan(self._pan[1], height, HOLE_Y, charger.CROP_HEIGHT))
+        self._sampled = {}
+        self.imageChanged.emit()
+        self.previewChanged.emit()
+
+    def _render(self, index):
+        """One source frame, framed onto the 334x304 crop canvas.
+
+        Black underneath, always, so anything outside the picture -- which
+        only "Fit inside" and a letterbox produce -- samples as an unlit LED
+        rather than as whatever was in the buffer.
+
+        Translucency is one place this deliberately does not match Space
+        Station. Theirs reads the canvas's un-premultiplied RGB and never looks
+        at the alpha byte, so a 50% red PNG samples as full red; here it is
+        composited onto the black first and samples as half red, which is what
+        the picture looks like. Only reachable through a PNG -- a GIF's
+        transparency is all or nothing, and both agree there.
+        """
+        canvas = QImage(charger.CROP_WIDTH, charger.CROP_HEIGHT,
+                        QImage.Format_RGB888)
+        canvas.fill(Qt.black)
+        if 0 <= index < len(self._images):
+            width, height = self.renderedSize
+            painter = QPainter(canvas)
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            # In the window's own coordinates, so the parts of the picture that
+            # fall outside it are clipped by the canvas rather than by
+            # arithmetic that has to get the source rectangle right.
+            painter.drawImage(
+                QRectF(self._pan[0] - HOLE_X, self._pan[1] - HOLE_Y,
+                       width, height), self._images[index])
+            painter.end()
+        return canvas
+
+    def _sample(self, index):
+        """One frame's 162 colours, computed once per framing."""
+        if index not in self._sampled:
+            self._sampled[index] = charger.sample_frame(
+                rgb_bytes(self._render(index)))
+        return self._sampled[index]
+
+    def _write_filmstrip(self):
+        """Every source frame in one strip, for the trim bar to sit on.
+
+        One file rather than a thumbnail apiece: at two hundred frames the strip
+        gives each of them three pixels, and writing two hundred files to draw
+        that would be silly.
+        """
+        self._clear_filmstrip()
+        if not self._images:
+            return
+        folder = QStandardPaths.writableLocation(QStandardPaths.CacheLocation)
+        os.makedirs(folder, exist_ok=True)
+        strip = QImage(FILMSTRIP_WIDTH, FILMSTRIP_HEIGHT, QImage.Format_RGB888)
+        strip.fill(Qt.black)
+        painter = QPainter(strip)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        step = FILMSTRIP_WIDTH / len(self._images)
+        for index, image in enumerate(self._images):
+            painter.drawImage(QRectF(index * step, 0, step, FILMSTRIP_HEIGHT),
+                              image)
+        painter.end()
+        # The serial is in the name, not a query string: Qt caches an Image by
+        # its URL, and a new picture must not show the last one's strip.
+        self._filmstrip_serial += 1
+        path = os.path.join(folder, f"dock-filmstrip-{self._filmstrip_serial}.png")
+        self._filmstrip = path if strip.save(path, "PNG") else ""
+
+    def _clear_filmstrip(self):
+        if self._filmstrip:
+            try:
+                os.unlink(self._filmstrip)
+            except OSError:
+                pass
+        self._filmstrip = ""
+
+    # what the page binds to
+
+    @Property(bool, notify=imageChanged)
+    def hasImage(self):
+        return bool(self._images)
+
+    @Property(str, notify=imageChanged)
+    def imageName(self):
+        return os.path.basename(self._source) if self._source else ""
+
+    @Property(str, notify=imageChanged)
+    def imageSource(self):
+        """The file itself, for the page to draw on the stage."""
+        return QUrl.fromLocalFile(self._source).toString() if self._source else ""
+
+    # The size the page must ask Qt to decode the same file at. **Not
+    # cosmetic**: the crop stage loads the picture a second time through QML,
+    # and `decode_limit` bounds only this model's copy. See the comment on
+    # `sourceSize` in `gui/qml/pages/DockPage.qml` for what that costs.
+
+    @Property(int, notify=imageChanged)
+    def sourceWidth(self):
+        return self._images[0].width() if self._images else 0
+
+    @Property(int, notify=imageChanged)
+    def sourceHeight(self):
+        return self._images[0].height() if self._images else 0
+
+    @Property(str, notify=imageChanged)
+    def imageMessage(self):
+        return self._image_message
+
+    @Property(str, notify=imageChanged)
+    def filmstripSource(self):
+        return QUrl.fromLocalFile(self._filmstrip).toString() if self._filmstrip else ""
+
+    # the stage, in the coordinates the page lays it out in
+
+    @Property(int, constant=True)
+    def stageWidth(self):
+        return STAGE_WIDTH
+
+    @Property(int, constant=True)
+    def stageHeight(self):
+        return STAGE_HEIGHT
+
+    @Property(int, constant=True)
+    def holeX(self):
+        return HOLE_X
+
+    @Property(int, constant=True)
+    def holeY(self):
+        return HOLE_Y
+
+    @Property(int, constant=True)
+    def holeWidth(self):
+        return charger.CROP_WIDTH
+
+    @Property(int, constant=True)
+    def holeHeight(self):
+        return charger.CROP_HEIGHT
+
+    @Property("QVariantList", notify=imageChanged)
+    def renderedSize(self):
+        """How big the picture is drawn on the stage, at this fit and zoom."""
+        width, height = fitted_size(self._natural[0], self._natural[1], self._fit)
+        factor = zoom_factor(self._zoom)
+        return [width * factor, height * factor]
+
+    @Property(float, notify=imageChanged)
+    def imageX(self):
+        return self._pan[0]
+
+    @Property(float, notify=imageChanged)
+    def imageY(self):
+        return self._pan[1]
+
+    @Property(float, notify=imageChanged)
+    def imageDrawWidth(self):
+        return self.renderedSize[0]
+
+    @Property(float, notify=imageChanged)
+    def imageDrawHeight(self):
+        return self.renderedSize[1]
+
+    @Property(bool, notify=imageChanged)
+    def canPan(self):
+        """False when the picture is smaller than the window on both axes."""
+        width, height = self.renderedSize
+        return bool(self._images) and (width > charger.CROP_WIDTH
+                                       or height > charger.CROP_HEIGHT)
+
+    @Slot(float, float)
+    def panBy(self, dx, dy):
+        if not self._images:
+            return
+        self._pan = (self._pan[0] + float(dx), self._pan[1] + float(dy))
+        self._reframe()
+
+    @Property(int, notify=imageChanged)
+    def zoom(self):
+        return self._zoom
+
+    @zoom.setter
+    def zoom(self, value):
+        value = max(ZOOM_MIN, min(ZOOM_MAX, int(value)))
+        if value != self._zoom:
+            self._zoom = value
+            self._recentre()
+            self.imageChanged.emit()
+            self.previewChanged.emit()
+
+    @Property(int, constant=True)
+    def zoomMin(self):
+        return ZOOM_MIN
+
+    @Property(int, constant=True)
+    def zoomMax(self):
+        return ZOOM_MAX
+
+    @Property(str, notify=imageChanged)
+    def zoomLabel(self):
+        return f"{zoom_factor(self._zoom):.2f}×"
+
+    @Property(int, notify=imageChanged)
+    def imageFitMode(self):
+        return self._fit
+
+    @imageFitMode.setter
+    def imageFitMode(self, index):
+        index = max(0, min(len(IMAGE_FIT_MODES) - 1, int(index)))
+        if index != self._fit:
+            self._fit = index
+            self._recentre()
+            self.imageChanged.emit()
+            self.previewChanged.emit()
+
+    @Property(list, constant=True)
+    def imageFitModes(self):
+        return IMAGE_FIT_MODES
+
+    # the trim range, inclusive at both ends like Space Station's
+
+    @Property(int, notify=imageChanged)
+    def sourceFrameCount(self):
+        return len(self._images)
+
+    @Property(int, notify=imageChanged)
+    def trimMin(self):
+        return self._trim[0]
+
+    @Property(int, notify=imageChanged)
+    def trimMax(self):
+        return self._trim[1]
+
+    @Slot(int, int)
+    def setTrim(self, low, high):
+        """Both ends at once, so a drag cannot cross itself mid-update.
+
+        Bounded at one frame and at `charger.SAFE_FRAMES`, which is Space
+        Station's own ceiling. When the span has to give it is the end that did
+        *not* move that gives, so the handle under the pointer stays under it.
+        """
+        if not self._images:
+            return
+        last = len(self._images) - 1
+        low = max(0, min(last, int(low)))
+        high = max(0, min(last, int(high)))
+        if high < low:
+            low, high = high, low
+        if high - low + 1 > charger.SAFE_FRAMES:
+            if low != self._trim[0]:
+                high = low + charger.SAFE_FRAMES - 1
+            else:
+                low = high - charger.SAFE_FRAMES + 1
+        if (low, high) != self._trim:
+            self._trim = (low, high)
+            if not 0 <= self._preview_frame < high - low + 1:
+                self._preview_frame = 0
+            self.imageChanged.emit()
+            # The first selected frame may be a different frame now, so what the
+            # wedge is showing has changed even though the cursor has not.
+            self.previewChanged.emit()
+
+    @Property(int, notify=imageChanged)
+    def frameCount(self):
+        """How many frames the dock would be sent."""
+        if not self._images:
+            return 0
+        return self._trim[1] - self._trim[0] + 1
+
+    @Property(bool, notify=imageChanged)
+    def animated(self):
+        return self.frameCount > 1
+
+    @Property(int, notify=imageChanged)
+    def intervalMs(self):
+        return self._interval
+
+    @intervalMs.setter
+    def intervalMs(self, value):
+        value = max(INTERVAL_MIN_MS, min(INTERVAL_MAX_MS, int(value)))
+        if value != self._interval:
+            self._interval = value
+            self.imageChanged.emit()
+
+    @Property(int, constant=True)
+    def intervalMin(self):
+        return INTERVAL_MIN_MS
+
+    @Property(int, constant=True)
+    def intervalMax(self):
+        return INTERVAL_MAX_MS
+
+    @Property(int, constant=True)
+    def intervalStep(self):
+        """One unit of what the dock stores, in ms. Measured, not assumed."""
+        return PERIOD_MS
+
+    # the preview
+
+    @Property(int, notify=previewChanged)
+    def previewFrame(self):
+        """Which trimmed frame the wedge is showing. Not a source index."""
+        return self._preview_frame
+
+    @previewFrame.setter
+    def previewFrame(self, index):
+        index = int(index)
+        if self.frameCount:
+            index %= self.frameCount
+        else:
+            index = 0
+        if index != self._preview_frame:
+            self._preview_frame = index
+            self.previewChanged.emit()
+
+    @Property(list, notify=previewChanged)
+    def frameColours(self):
+        """The 162 colours on the wedge right now. Empty for a dark panel."""
+        if not self._images or not self.frameCount:
+            return []
+        return [to_hex(c)
+                for c in self._sample(self._trim[0] + self._preview_frame)]
+
+    @Property(list, constant=True)
+    def wedgeCentres(self):
+        """[x0, y0, x1, y1, …] for the preview, flat so nothing is unpacked."""
+        flat = []
+        for x, y in charger.wedge_centres():
+            flat += [x, y]
+        return flat
+
+    @Property(str, constant=True)
+    def wedgeOutline(self):
+        return charger.WEDGE_OUTLINE
+
+    @Property(int, constant=True)
+    def wedgeViewWidth(self):
+        return charger.WEDGE_VIEW[0]
+
+    @Property(int, constant=True)
+    def wedgeViewHeight(self):
+        return charger.WEDGE_VIEW[1]
+
+    @Property(float, constant=True)
+    def wedgeRadius(self):
+        return charger.WEDGE_RADIUS
+
+    # what it will cost
+
+    @Property(int, notify=imageChanged)
+    def imagePackets(self):
+        """Packets, counted the way `charger.write_led_config` counts them."""
+        if not self.frameCount:
+            return 0
+        blob = 6 + self.frameCount * charger.LED_COUNT * 3
+        return math.ceil(blob / charger.PACK_BYTES)
+
+    @Property(str, notify=imageChanged)
+    def imageEstimate(self):
+        """The upload's size in words, before anyone commits to waiting for it.
+
+        Measured on this dock: about a hundred packets a second, each one
+        waiting for its own ack. Fifty frames is the five seconds an effect
+        already takes and two hundred is about twenty -- long enough to want
+        saying beforehand rather than discovering.
+        """
+        packets = self.imagePackets
+        if not packets:
+            return ""
+        seconds = packets / 100.0
+        if seconds < 1.5:
+            return f"{packets} packets, about a second"
+        if seconds < 90:
+            return f"{packets} packets, about {round(seconds)} seconds"
+        return f"{packets} packets, about {seconds / 60.0:.0f} minutes"
+
+    @Property(bool, notify=imageChanged)
+    def canApplyImage(self):
+        return bool(self._images) and self.frameCount > 0
+
     @Slot()
     def apply(self):
         """Compute the frames and send them. Several seconds of packets.
 
-        The frames are generated on the worker thread, not here: fifty frames
-        of 162 LEDs is a real amount of arithmetic and the UI thread is the one
-        place it must not happen.
+        The effects' frames are generated on the worker thread, not here: fifty
+        frames of 162 LEDs is a real amount of arithmetic and the UI thread is
+        the one place it must not happen. A picture's frames are the exception
+        and are sampled here, because the source images live in this model and
+        two hundred of them take about a tenth of a second.
+
+        They cross as one flat `bytes`. As nested lists the same animation is
+        ninety-seven thousand Python integers through a queued signal, and a
+        value Qt cannot marshal makes a cross-thread call vanish with no error
+        at all.
         """
         if self._busy or not self._selector:
             return
-        self._busy = True
-        self._progress = 0.0
-        self.busyChanged.emit()
-        self.lightingRequested.emit(self._selector, {
+        wanted = {
             "mode": self._mode,
             "brightness": self._brightness,
             "period": self._period,
             "direction": self._direction,
             "colours": [list(c) for c in self._colours[:max(1, self.coloursUsed)]],
-        })
+        }
+        if self._mode == charger.MODE_CUSTOM:
+            if not self.canApplyImage:
+                return
+            frames = [self._sample(self._trim[0] + offset)
+                      for offset in range(self.frameCount)]
+            wanted["frames"] = charger.pack_frames(frames)
+            # Flydigi's own numbers for a picture, and there is no control for
+            # either on their page: full brightness, and a period in
+            # centiseconds -- 1 for a still.
+            wanted["brightness"] = 100
+            wanted["period"] = (
+                1 if len(frames) == 1
+                else max(1, charger.js_round(self._interval / PERIOD_MS)))
+            wanted["direction"] = charger.DIR_NONE
+            wanted["colours"] = []
+        self._busy = True
+        self._progress = 0.0
+        self.busyChanged.emit()
+        self.lightingRequested.emit(self._selector, wanted)

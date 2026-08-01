@@ -25,6 +25,8 @@ from PySide6.QtQml import QmlElement
 
 from flydigi import screen, screen_ota
 
+from .imaging import rgb_bytes
+
 # See gui/models/device.py for what these two names do.
 QML_IMPORT_NAME = "Apex5"
 QML_IMPORT_MAJOR_VERSION = 1
@@ -41,23 +43,6 @@ MAX_FRAMES = 255
 SECONDS_PER_FRAME = 25.0
 
 DEFAULT_INTERVAL_MS = 100
-
-
-def rgb_bytes(image):
-    """RGB888 for a QImage, with Qt's row padding removed.
-
-    Qt aligns every row to four bytes. At 160 wide that is already a multiple of
-    four so nothing is added, but a caller that assumed it would be is one
-    resolution change away from an image sheared diagonally, which is a
-    memorable afternoon.
-    """
-    image = image.convertToFormat(QImage.Format_RGB888)
-    stride = image.bytesPerLine()
-    wanted = image.width() * 3
-    raw = bytes(image.constBits())
-    if stride == wanted:
-        return raw
-    return b"".join(raw[y * stride:y * stride + wanted] for y in range(image.height()))
 
 
 def fit_image(image, mode):
