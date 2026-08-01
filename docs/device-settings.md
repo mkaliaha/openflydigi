@@ -434,10 +434,53 @@ re-renders past the latch.
 | 3 | `PermanentSaveSwitchMappingConfig` | **171** | `[ver_lo, ver_hi, cfgId]`, 10 s timeout, a fresh random data version |
 | 4 | `SaveConfig` → `PermanentSaveMappingConfig` | **166** | 250 ms later, a *second* new data version |
 
-**171 is not implemented here** — `flydigi/mapping.py` has only 166. Both ACK on hardware; 171's
-builder has the same self-contradiction as command 242, with a length byte of 4 implying a checksum
-at offset 7 while `cfgId` sits there and the crc goes at 8 over a range that excludes it. The pad
-answers the literal bytes, so their placement wins over their length byte.
+171's builder has the same self-contradiction as command 242: a length byte of 4 implies a checksum
+at offset 7, while `cfgId` sits there and the crc goes at 8 over a range that excludes it. The pad
+answers the literal bytes, so their placement wins over their length byte, and
+`mapping._build_save_switch` reproduces them rather than correcting them.
+
+**What 171 is, which that table gets wrong.** Its only caller anywhere in `SpaceStationService` is
+`SaveSwitchConfig` — not the lighting path, whose two write flows both end in `SaveConfig`, and
+`SaveConfig` discards the cfgId it is handed and sends plain 166. So step 3 above is a Switch save
+observed on the wire during a lighting change, not part of one. Anyone rebuilding the lighting
+sequence from that row should check it again.
+
+## The Switch bank: four more profiles the host can write and never read
+
+**The pad stores eight profiles, not four.** 0..3 are the XInput ones every other command here
+addresses; 4..7 are the Nintendo Switch ones, which it plays in Switch mode. Flydigi's
+`ApplySwitchConfigAsync` refuses any id outside `> 3 && < 8`, their `SaveConfig` accepts a live slot
+anywhere in 0..7, and `GenerateControllerApex5` sets `IsSupportNs` — so this is an Apex 5 feature.
+All of the following is **measured on the pad here**.
+
+  * **Command 171 is command 166 with a destination.** 166 commits the running profile into the slot
+    it came from; 171 commits it into the slot named in the packet. The source is whatever is
+    running either way, which is why a caller has to read the profile it means first.
+  * **Reads alias; only writes are addressed.** `read_config` for slot 4 returns slot 0 byte for
+    byte, and slot 5 returns slot 1 — same sha, same title, same tag. The firmware masks the high
+    bit on the read path, so `mapping.read_status`'s long-standing comment that "the second bank
+    reports 4..7 for the same profiles" is right about what a *reader* sees.
+  * **In Switch mode the pad is not a Flydigi device at all.** It enumerates as `057e:2009`,
+    Nintendo's own Switch Pro Controller, with no `37d7` and no `06 a0 ff` vendor collection.
+    `find_device` cannot match it and neither can Space Station, whose transport is hidapi and
+    nothing else. So the Switch bank is **write-only from any host**: configured in XInput mode,
+    observable only on a Switch. That is why their UI offers "apply to Switch configuration" rather
+    than an editor for those profiles — there is no way to fetch one.
+  * **171 verified, with its control in the same run.** Profile 3 was read, given `m1 → start` and
+    `y → select` in working memory, written back unsaved, and committed to slot 6. Since 171 is a
+    flash write, an aliasing implementation would have changed profile 3's stored copy; it did not —
+    the slot paged back in from flash as `m1 → m1, y → y`, tag unchanged at 43586. In Switch mode
+    the pad then sent **Minus for Y and Plus for M1**. So the bank is real, distinct, and plays what
+    171 puts in it.
+  * **The paddles work in Switch mode**, which is the part worth having. A Pro Controller has no
+    paddles at all, and M1 fired its remap regardless — so M1..M6 are four buttons a Switch cannot
+    otherwise offer. An unmapped M1 sends nothing in either mode, which is what made it a clean
+    probe once a second one on a button the Pro Controller really has removed the ambiguity.
+
+`mapping.normalise_for_switch` copies what Flydigi do to a config before writing one: keyboard-bound
+keys go back to sending themselves and both sticks are forced to be sticks, since a Switch runs
+neither. Nothing made here can produce either, but the profile being copied is whatever the pad is
+running, which may have come from theirs.
 
 **`OldLedConfig` is mapping-profile bytes 3..13**, ten bytes `flydigi/mapping.py` skips entirely —
 it goes from offset 2 straight to the key table at 13. On the pad here it reads

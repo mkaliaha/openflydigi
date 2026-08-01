@@ -90,9 +90,6 @@ true — `gui/` may import `flydigi/` and never the reverse, and nothing Flydigi
 **Single commands, each verifiable on the hardware here.** The write-ups are under "Commands beyond
 the settings block" in [docs/device-settings.md](docs/device-settings.md).
 
-  * **Restore a profile slot to factory** — `ResetMappingConfigByCfgId`, command **175**. The
-    Buttons page's "reset all" only clears key mappings in the in-memory blob; Space Station's
-    resets the whole slot on the pad.
   * **The cooperative lock** — `AcquireController`, command **28**, with a 20-byte ASCII tag. The
     read half is built as `motion.read_transport`; the write half is not.
   * **Custom stick curves.** The page offers presets and a Custom label; Space Station drags the two
@@ -151,6 +148,7 @@ All command factories are decompiled under `decompiled/Flydigi.ControllerSdk/`.
 | **Devices that are not there** | — | `flydigi/mock/` behind `FLYDIGI_MOCK_BUS` — the fakes moved out of `tests/` so the app, the tools and the daemon can all run against a bus with several pads and docks on it. Off unless the variable is set |
 | Buttons, sticks, vibration, stored triggers | inside the 840-byte profile blob | same module — [detail](docs/findings-profile-blob.md) |
 | Gyro mapped to a stick | the profile's motion block at 137 | `flydigi/mapping.py` (`motion`/`set_motion`), `tools/flydigi-mapping gyro`, GUI — **measured on the pad** with `tools/gyro-map-probe`: it plays the block, both enable keys gate it, Click toggles, and the response curve at 830 is inert — [detail](docs/findings-profile-blob.md) J2 |
+| **The Switch bank, and restoring a slot** | save-to-slot 171, reset 175 | `flydigi/mapping.py` (`save_switch_config`, `reset_config`, `normalise_for_switch`), `tools/flydigi-mapping to-switch`/`reset` — **both measured on the pad**. The pad stores *eight* profiles: 0..3 XInput, 4..7 Switch. 171 is 166 with a destination, and 175 restores a whole slot including its name — [detail](docs/device-settings.md) |
 | Macros, played by the pad | the profile's macro page at 230, plus 162 to make one live | `flydigi/mapping.py`, `flydigi/macros.py` (the recorder), GUI — [detail](docs/findings-profile-blob.md) |
 | Live trigger effects, all six | 81, 82 | `flydigi/effects.py` — [PROTOCOL.md](PROTOCOL.md) §3a |
 | Device settings | read 3, write 19 by sub-id, 20/21/22/23, restart 29 | `flydigi/settings.py`, `tools/flydigi-settings`, GUI — [detail](docs/device-settings.md) |
@@ -550,6 +548,15 @@ the test files are re-export shims and the tests import them by the old names.
     The macro page and the key table are read independently and **both** fire, so removing the body
     at 230 is part of remapping a key; `set_mapping` does it, as Flydigi's own repository does.
     → [docs/findings-profile-blob.md](docs/findings-profile-blob.md) J6
+  * **The pad has four more profiles than it appears to, and a Switch is the only thing that can
+    read them.** Slots 4..7 are the Switch bank; command 171 commits the running profile into one of
+    them, and reads of 4..7 alias onto 0..3 so nothing on a host can fetch one back. In Switch mode
+    the pad enumerates as `057e:2009` — Nintendo's own Pro Controller, no `37d7`, no vendor
+    collection — so neither this project nor Space Station can address it at all. Verified with the
+    control in the same run: a Switch copy carrying `m1 → start` and `y → select` left XInput
+    profile 3 untouched in flash and then sent **Plus and Minus** on the Switch. **The paddles work
+    there**, which a Pro Controller has none of, so M1..M6 are four buttons a Switch cannot
+    otherwise offer. → [docs/device-settings.md](docs/device-settings.md)
   * **Reading a mapping config switches the pad to it** — the firmware pages it in as the live one,
     audibly re-seating the trigger motors. The desktop app leans on this rather than fighting it:
     opening a profile is how you switch to it, as Space Station does, so the profile on screen is
