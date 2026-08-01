@@ -296,6 +296,14 @@ class PadLink:
         self.ctrl = None
         self.name = None
         self.motion_on = False
+        # Whether this pad has force triggers, from the identify read that
+        # `_open_ctrl` takes anyway. False on a Vader, which has none: its
+        # trigger-effect commands would be acknowledged and do nothing, which
+        # is the state this project keeps mistaking for success. Everything
+        # else the relay does -- input, rumble, haptic audio to the motors,
+        # motion -- is the same on both pads, so the trigger half is skipped
+        # rather than the whole relay refused.
+        self.has_triggers = False
         # Bumped every time a node is newly opened, so a caller can tell "the
         # same pad I had last iteration" from "a pad that has just arrived and
         # remembers nothing" -- the pad drops live trigger effects when it
@@ -423,20 +431,24 @@ class PadLink:
             # unwritten.
             return None, (f"vendor interface not usable ({exc}); effects will "
                           f"not be applied -- tools/apex5-setup install-rules")
-        # This handle is written to for the length of a play session -- trigger
-        # effects on every change and rumble on every report -- and an unpinned
+        # This handle is written to for the length of a play session -- rumble
+        # on every report, trigger effects on every change -- and an unpinned
         # relay takes whichever Flydigi pad answered first. Not fatal, for the
         # same reason a permission failure is not: input still reaches the game
         # through evdev, and only the physical pad's own motors and triggers go
         # unwritten.
+        #
+        # `require`, not `require_capability`: both pads relay usefully, since
+        # input, rumble, haptic audio to the motors and motion are the same on
+        # each. What the capability decides is whether the *trigger* half runs,
+        # and that is `has_triggers` and the caller's business -- the caller is
+        # what turns a DualSense effect into a Flydigi one.
         try:
-            # The capability, not just the model: this streams trigger
-            # effects for a whole session, and a Vader has no force triggers
-            # to play them on.
-            identity.require_capability(ctrl, "adaptive_triggers")
+            found = identity.require(ctrl)
         except identity.WrongDevice as exc:
             ctrl.close()
             return None, f"{exc} Effects will not be applied."
+        self.has_triggers = identity.can(found["code"], "adaptive_triggers")
         return ctrl, None
 
     # -- reading ------------------------------------------------------------
@@ -582,8 +594,9 @@ class PadLink:
                     effects.rumble(self.ctrl, 0, 0, wait=0.0)
                 except OSError:
                     pass
-                try:
-                    effects.clear_all(self.ctrl)
-                except OSError:
-                    pass
+                if self.has_triggers:
+                    try:
+                        effects.clear_all(self.ctrl)
+                    except OSError:
+                        pass
             self._close_nodes()

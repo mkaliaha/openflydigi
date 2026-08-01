@@ -47,17 +47,28 @@ def open_ctrl_tests(results):
             os.unlink(path)
 
     def a_pad_we_drive():
-        ctrl, error = relay.PadLink()._open_ctrl()
+        link = relay.PadLink()
+        ctrl, error = link._open_ctrl()
         results.append(check("an Apex 5 opens for the relay",
                              ctrl is not None and error is None, str(error)))
+        results.append(check("and its force triggers are driven",
+                             link.has_triggers))
         if ctrl is not None:
             ctrl.close()
 
     def a_pad_we_do_not():
-        ctrl, error = relay.PadLink()._open_ctrl()
-        results.append(check("a Vader 5 does not", ctrl is None, "got a handle"))
-        results.append(check("and the relay is told why, not left guessing",
-                             bool(error) and "Vader 5" in error, str(error)))
+        # A Vader relays perfectly well -- input, rumble, haptic audio to the
+        # motors and the gyro are the same on both pads. What it has not got is
+        # force triggers, so it is the trigger half that is switched off and
+        # not the session, which is what `has_triggers` is for.
+        link = relay.PadLink()
+        ctrl, error = link._open_ctrl()
+        results.append(check("a Vader opens for the relay too",
+                             ctrl is not None and error is None, str(error)))
+        results.append(check("but its trigger half is off",
+                             not link.has_triggers))
+        if ctrl is not None:
+            ctrl.close()
 
     with_bus([{"kind": "pad", "code": "k5", "nickname": "Desk"}], a_pad_we_drive)
     with_bus([{"kind": "pad", "code": "f5", "nickname": "Vader"}], a_pad_we_do_not)
@@ -148,6 +159,10 @@ class FakeLink(relay.PadLink):
     def _open_ctrl(self):
         if not (self.bus.present and self.bus.ctrl_present):
             return None, "no vendor node"
+        # The real one sets this from the identify read. Modelled as an Apex 5,
+        # since that is what every test below is about; leaving it False would
+        # quietly exercise the Vader path in tests that are not about it.
+        self.has_triggers = True
         return FakeNode(self.bus, "/dev/hidraw7", 31), None
 
     def _node_present(self):

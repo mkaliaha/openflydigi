@@ -79,8 +79,12 @@ Kirigami.ApplicationWindow {
         // into a controller and choose that game's route.
         {name: "Games", icon: "applications-games", url: "pages/GamesPage.qml",
          kinds: ["pad"], needs: "adaptive_triggers"},
+        // Not gated on the triggers, unlike Games: input, rumble, haptic audio
+        // to the motors and the gyro are the same on both pads, so a Vader
+        // relays usefully -- it simply gets no adaptive triggers out of it.
+        // `PadLink.has_triggers` is what skips that half.
         {name: "DualSense", icon: "input-gaming-symbolic", url: "pages/DualSensePage.qml",
-         kinds: ["pad"], needs: "adaptive_triggers"},
+         kinds: ["pad"]},
         // The charging dock's own pages. `kinds` is what keeps them and the pad's
         // apart: a sidebar offering Buttons and Macros while a dock is
         // selected would be offering to edit something that is not on screen.

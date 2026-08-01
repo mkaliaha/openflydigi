@@ -423,8 +423,9 @@ def main():
                         # Send the triggers again: this pad remembers nothing.
                         # Rumble needs no help -- the worker notices the new
                         # generation and rewrites the level it is holding.
-                        for payload in last_effect.values():
-                            effect_q.put(payload)
+                        if pad.has_triggers:
+                            for payload in last_effect.values():
+                                effect_q.put(payload)
                         rumble_wake.set()
                     else:
                         # Let go of everything, or a pad that vanished
@@ -539,7 +540,13 @@ def main():
                         # input report every 4 ms.
                         rumble_src["hid"] = (rumble[0], rumble[1])
                         rumble_wake.set()
-                    for effect in parsed["effects"]:
+                    # A Vader has no force triggers: translating an effect for
+                    # it would produce a command the pad acknowledges and does
+                    # nothing with, which is the state this project keeps
+                    # mistaking for success. Everything else in this relay --
+                    # input, rumble, haptic audio, motion -- works on both pads,
+                    # so it is this loop that is skipped and not the session.
+                    for effect in (parsed["effects"] if pad.has_triggers else ()):
                         if applied.get(effect.side) == effect.key():
                             continue
                         applied[effect.side] = effect.key()

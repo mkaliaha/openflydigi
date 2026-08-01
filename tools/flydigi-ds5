@@ -211,7 +211,10 @@ def main():
                                                wait=0.0)
                             except OSError:
                                 pad.broken = True
-                    for effect in parsed["effects"]:
+                    # See tools/flydigi-ds5-usbip: a pad with no force triggers
+                    # would acknowledge these and do nothing. Input, rumble and
+                    # motion are the same on both pads and keep running.
+                    for effect in (parsed["effects"] if pad.has_triggers else ()):
                         if applied.get(effect.side) == effect.key():
                             continue
                         applied[effect.side] = effect.key()

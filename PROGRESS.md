@@ -39,11 +39,15 @@ the whole of it.
 protocol -- same vendor id, same frame, same 840-byte blob -- so profiles, buttons, macros, sticks,
 the gyro, vibration, lighting and the pad's own settings are the paths already measured here. What
 it does *not* have is stated rather than discovered: no force triggers and no screen, so the
-Triggers, Screen, Games and DualSense pages are hidden on it, `identity.require_capability` refuses
+Triggers, Screen and Games pages are hidden on it, `identity.require_capability` refuses
 every command that needs hardware it lacks, and the daemon's tier-1 bind skips it. Its two extra
 buttons, C and Z, are in its key list. What it has and the Apex 5 does not is a motor in each
 trigger; `MappingConfig.trigger_motor` reads and writes that block and **no page offers it yet**.
-Anyone debugging a Vader should doubt `identity.CAPABILITIES` before doubting the transport.
+**DualSense mode stays available on it**, because only the trigger half of that relay is
+Apex-specific: input, rumble, haptic audio to the motors and the gyro are the same on both pads, so
+a Vader relays usefully and `PadLink.has_triggers` skips the effect translation rather than the
+session. Anyone debugging a Vader should doubt `identity.CAPABILITIES` before doubting the
+transport.
 
 **Left to build:** a trigger-motor editor for the Vader, and the smaller pieces under What's next.
 Supporting an older pad is [ruled out](#ruled-out).
