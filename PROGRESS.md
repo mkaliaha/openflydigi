@@ -76,7 +76,9 @@ keeping on a pad with no adaptive triggers at all.
 
 Anyone debugging a Vader should doubt `identity.CAPABILITIES` before doubting the transport.
 
-**Left to build:** a trigger-motor page for the Vader, and the smaller pieces under What's next. Driving those motors *live* is [ruled out](#ruled-out) for want of a Vader to test on.
+**Left to build:** a trigger-motor page for the Vader, and the smaller pieces under
+[What's next](#whats-next). Driving those motors *live* is [ruled out](#ruled-out) for want
+of a Vader to test on.
 Supporting an older pad is [ruled out](#ruled-out).
 
 | Tier | Mechanism | Games | State |
@@ -692,8 +694,9 @@ the test files are re-export shims and the tests import them by the old names.
 ## Ruled out
 
   * **Driving a Vader's trigger motors *live*, and whether the DualSense relay already does.**
-    The stored rule above is documented by Flydigi's own code; the live side is not, and it cannot
-    be settled without the pad. Two questions, one of which may be worth a great deal.
+    The stored rule -- the block a config page would edit, under
+    [What's next](#whats-next) -- is documented by Flydigi's own code. The live side is not, and it
+    cannot be settled without the pad. Two questions, one of which may be worth a great deal.
 
     The rule reads as a pad-side mapping -- threshold, scale, amplitude window -- from *grip* rumble
     into the trigger motors, the same shape as the Apex 5's `SyncWithGrip` bind. **If that is what
