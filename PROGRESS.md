@@ -96,6 +96,16 @@ the settings block" in [docs/device-settings.md](docs/device-settings.md).
   * **Restart the controller** — command **29**, no argument. Built as `settings.restart` and
     `tools/flydigi-settings restart`; never sent to hardware, and not in the app until it has been.
 
+**A stray argument can trigger the vibration route, and the fix is a judgement call.** The daemon
+acts on a confidence-0 name match — the game's name merely appearing in some process's argument
+list — and `candidate_names` takes the basename of every argument, against a list with names as
+short as `wrc` and `ds2`. Twelve of those are vibration-tier and so auto-on with no configuration,
+which makes an ordinary process with `/opt/tools/wrc` in its command line enough to write command 82
+over whatever trigger effect was set. Demonstrated with a sleeping `python3` and nothing else.
+Unfixed because requiring more confidence overrides a documented decision and trades a false
+positive nobody has hit for a false negative on the one route that currently always fires.
+→ [docs/findings-games.md](docs/findings-games.md)
+
 **Unsettled by measurement.** Whether the firmware accepts 164/165 aimed at a slot it is not
 running. What the **Xbox home button** toggle does (19 sub 2): the command is built and gated behind
 `--i-know`, so `tools/flydigi-settings xbox-home off --i-know` and one evdev capture settle it.

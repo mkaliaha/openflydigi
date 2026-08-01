@@ -64,6 +64,46 @@ characters — Dark Souls: Remastered appears as `DarkSoulsRemast` — so only a
 possible. Anything below confidence 2 is re-examined every poll, since a process can be in `/proc`
 before Wine has mapped the PE.
 
+### Confidence 0 is a name in an argument list, and the vibration route acts on it
+
+**Unfixed, and written down rather than fixed because the fix overrides a deliberate decision.**
+`candidate()` returns the best-ranked game at *any* confidence; only the **pid** is gated at `>= 2`.
+The vibration route needs no pid, so it acts on a confidence-0 match — and `_match`'s own docstring
+calls that survivable, on the reasoning that a preset written once does not care which process
+asked for it.
+
+What makes it reachable is the other end: `candidate_names` takes the basename of **every** cmdline
+argument, lowercased and `.exe`-stripped, and Flydigi's list contains names as short as two
+characters. Demonstrated with an ordinary sleeping process and nothing else:
+
+```
+python3 -c "import time; time.sleep(25)" --config /etc/myapp/ds   -> DEATH STRANDING DIRECTORS CUT
+python3 -c "import time; time.sleep(25)" /opt/tools/wrc           -> EA WRC
+```
+
+Both matched at confidence 0 and both were returned by `candidate()`.
+
+**Only some of those cost anything, and the difference is the tier.** `ds`, `u4`, `gow` and `cod`
+are `monitor`, `bespoke` and `unknown`, and `prefs.AUTO_BY_DEFAULT` is `("vibration",)` — so the
+daemon logs "auto mode off, leaving it alone" and stops. The twelve that are vibration-tier are
+auto-on with no user configuration at all, and for those `apply_for` writes **command 82 to every
+drivable pad**, over whatever trigger effect was set, plus `clear_all` when the decoy exits:
+
+`bf6` · `ds2` · `nfs14` · `re9` · `tll` · `wrc` · `wrc7` · `wrc8` · `wrc9` · `wrc10` · `wwm` · `yysls`
+
+`wrc` and `ds2` are the plausible ones. A directory or a script called `wrc` is not exotic.
+
+**Why it is still here.** Requiring `>= 1` to act is the obvious fix and it is not free: at launch,
+before Wine has mapped the PE, only the wrapper chain is up and every match is confidence 0, so the
+bind would wait for the game's own process instead of firing immediately. A game whose `comm` never
+matches its name *and* whose PE never maps would stop being bound at all — close to impossible, but
+it is the risk being taken, and it trades a false positive nobody has hit for a false negative on a
+route that currently always fires. The narrower alternative is to keep confidence 0 but ignore
+index keys below some length when they matched only via an argument's basename.
+
+Nothing was false-matching on the development machine when this was written, so it is latent rather
+than active.
+
 *When* to start a driver depends on the route. `flydigi-monitor` gives up if the PE is not mapped
 yet and an exited driver is not restarted, so starting it while only the launcher chain is up would
 abandon a game that was still loading. Only the `monitor` route waits for a process that has really
