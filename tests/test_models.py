@@ -379,6 +379,75 @@ def test_reset_all_clears_every_remap():
     check("reset marks the profile dirty", profile.dirty)
 
 
+def test_the_key_table_follows_the_pad_it_is_editing():
+    """An Apex 5 has no C and no Z; every Vader declares both.
+
+    Everything that walks "every key" -- the remap table, the gyro's enable-key
+    picker, the macro binder, reset-all -- has to walk *that pad's* keys. The
+    one that bites is reset-all: iterating a hardcoded list would leave two
+    buttons remapped on a Vader and report success, which is the shape of bug
+    nobody reports because the app says it worked.
+
+    The properties behind those views used to be `constant`, which QML caches
+    for the life of the window, so this also asserts they now move.
+    """
+    profile = models.ProfileModel()
+    profile.setSlotCount(4)
+    profile.select(0)
+    profile.profileLoaded(0, bytes(blank_blob()), "Profile 1")
+
+    check("it starts on the pad this project drives", profile.modelCode == "k5")
+    apex_rows = profile.keys.count
+    check("and shows that pad's keys", apex_rows == len(mapping.APEX5_KEYS),
+          str(apex_rows))
+    check("with no C or Z among them",
+          not {"c", "z"} & set(profile.padKeys), str(profile.padKeys))
+
+    moved = []
+    profile.keysChanged.connect(lambda: moved.append(True))
+    profile.modelCode = "f5"
+
+    check("switching model is announced", moved == [True], str(moved))
+    check("the remap table gains the two extra buttons",
+          profile.keys.count == apex_rows + 2, str(profile.keys.count))
+    check("the gyro's enable-key picker gains them too",
+          len(profile.motion.keyNames) == apex_rows + 3,   # +1 for "(none)"
+          str(len(profile.motion.keyNames)))
+    check("and so does the macro binder",
+          len(profile.macros.triggerKeys) == apex_rows + 2,
+          str(len(profile.macros.triggerKeys)))
+
+    # The bug this is really for.
+    seeded = mapping.MappingConfig(blank_blob())
+    seeded.set_mapping("c", "a")
+    seeded.set_mapping("m3", "x")
+    profile.profileLoaded(0, bytes(seeded.blob), "Profile 1")
+    check("a Vader-only key can be remapped at all",
+          profile.config.remapped(profile.padKeys).get("c") == ("a", 0, 0),
+          str(profile.config.remapped(profile.padKeys)))
+    profile.resetAll()
+    check("and reset-all reaches it rather than reporting success without it",
+          profile.config.remapped(profile.padKeys) == {},
+          str(profile.config.remapped(profile.padKeys)))
+    # The default really is Apex-5-only, which is why the call above passes the
+    # pad's keys and why `remapped` says so. Asserted rather than assumed: it
+    # is the difference between a UI that marks C and one that never mentions it.
+    seeded_again = mapping.MappingConfig(blank_blob())
+    seeded_again.set_mapping("c", "a")
+    check("and the unqualified call cannot see it",
+          seeded_again.remapped() == {}, str(seeded_again.remapped()))
+
+    # Back again, because a two-pad desk switches both ways.
+    profile.modelCode = "k5"
+    check("choosing the Apex 5 again drops the extra keys",
+          profile.keys.count == apex_rows, str(profile.keys.count))
+
+    same = []
+    profile.keysChanged.connect(lambda: same.append(True))
+    profile.modelCode = "k5"
+    check("and re-selecting the same model rebuilds nothing", not same)
+
+
 def test_rename_reaches_the_config():
     profile, _ = make_profile()
     profile.title = "Racing"
@@ -3655,6 +3724,7 @@ def main():
                  test_selecting_an_unread_profile_clears_the_title,
                  test_lighting_applying_without_saving_still_offers_a_save,
                  test_reset_all_clears_every_remap,
+                 test_the_key_table_follows_the_pad_it_is_editing,
                  test_rename_reaches_the_config,
                  test_a_title_is_capped_at_what_the_pad_stores,
                  test_vibration_writes_through_to_the_blob,

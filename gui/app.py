@@ -447,6 +447,12 @@ class App(QObject):
         to another would be the app inventing an intention.
         """
         self._device.connected = False
+        # Before the read, not after: which buttons the pad has decides how the
+        # remap table, the gyro's enable-key picker and the macro binder are
+        # built, and rebuilding them under a profile that has already landed
+        # would show the new pad's keys against the old pad's mappings for a
+        # frame. An Apex 5 has no C and no Z; every Vader declares both.
+        self._profile.modelCode = self._devices.currentCode
         self.requestInfo.emit()
         self._read_the_rest(keep_edits=False)
 

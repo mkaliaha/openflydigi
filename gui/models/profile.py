@@ -570,7 +570,17 @@ MOTION_ENABLE_TYPES = [("Press to toggle", mapping.MOTION_CLICK),
 # an enable key is read by the pad itself and never sent anywhere, so the
 # paddles -- which XInput cannot carry -- are the best keys for it.
 MOTION_NO_KEY = "(none)"
-MOTION_KEYS = [MOTION_NO_KEY] + mapping.APEX5_KEYS
+
+
+def motion_keys(profile):
+    """The enable-key picker's entries, for the pad on screen.
+
+    A function rather than the module constant it used to be: which buttons
+    exist is the pad's business, and an index into this list is what the picker
+    stores, so a stale list would write the wrong key rather than merely show
+    one that is not there.
+    """
+    return [MOTION_NO_KEY] + list(profile.padKeys)
 
 
 @QmlElement
@@ -720,6 +730,10 @@ class MotionModel(QObject):
     """
 
     changed = Signal()
+    # Separate from `changed`, which every slider move emits: the key list only
+    # moves when the pad does, and rebuilding a combo box on each drag would be
+    # the Repeater defect this project already paid for once.
+    keyNamesChanged = Signal()
 
     def __init__(self, profile):
         super().__init__(profile)
@@ -759,9 +773,9 @@ class MotionModel(QObject):
     def enableTypeNames(self):
         return [label for label, _value in MOTION_ENABLE_TYPES]
 
-    @Property("QStringList", constant=True)
+    @Property("QStringList", notify=keyNamesChanged)
     def keyNames(self):
-        return [MOTION_NO_KEY] + [key_label(key) for key in mapping.APEX5_KEYS]
+        return [MOTION_NO_KEY] + [key_label(key) for key in self._profile.padKeys]
 
     @Property(int, constant=True)
     def maximum(self):
@@ -807,11 +821,13 @@ class MotionModel(QObject):
 
     def _key_index(self, which):
         key = self._motion()["keys"][which]
-        return MOTION_KEYS.index(key) if key in MOTION_KEYS else 0
+        keys = motion_keys(self._profile)
+        return keys.index(key) if key in keys else 0
 
     def _set_key(self, which, value):
-        index = max(0, min(len(MOTION_KEYS) - 1, int(value)))
-        chosen = None if index == 0 else MOTION_KEYS[index]
+        keys = motion_keys(self._profile)
+        index = max(0, min(len(keys) - 1, int(value)))
+        chosen = None if index == 0 else keys[index]
         keys = list(self._motion()["keys"])
         keys[which] = chosen
         self._set(keys=tuple(keys))
@@ -906,10 +922,27 @@ class KeyMapModel(QAbstractListModel):
     EditableRole = Qt.UserRole + 8
     ClusterRole = Qt.UserRole + 9
 
+    # Not `constant`: the row count is the number of buttons the pad has, and
+    # that is not the same on every pad. A constant property would be cached by
+    # QML for the life of the window and go on reporting the first pad's count.
+    modelChangedSignal = Signal()
+
     def __init__(self, profile):
         super().__init__(profile)
         self._profile = profile
         self._decoded = Decodes(profile)
+
+    def modelChanged(self):
+        """The pad on screen is a different model, so every row may have moved.
+
+        A full reset rather than a dataChanged: rows are being added or removed,
+        and a view told only that its contents changed would keep delegates for
+        keys the new pad does not have.
+        """
+        self.beginResetModel()
+        self._decoded.clear()
+        self.endResetModel()
+        self.modelChangedSignal.emit()
 
     def roleNames(self):
         return {
@@ -925,11 +958,11 @@ class KeyMapModel(QAbstractListModel):
         }
 
     def rowCount(self, parent=QModelIndex()):
-        return 0 if parent.isValid() else len(mapping.APEX5_KEYS)
+        return 0 if parent.isValid() else len(self._profile.padKeys)
 
-    @Property(int, constant=True)
+    @Property(int, notify=modelChangedSignal)
     def count(self):
-        return len(mapping.APEX5_KEYS)
+        return len(self._profile.padKeys)
 
     @Property("QStringList", constant=True)
     def targets(self):
@@ -950,27 +983,27 @@ class KeyMapModel(QAbstractListModel):
         def decode():
             if config is None:
                 return [(key, key, mapping.TURBO_OFF, 0)
-                        for key in mapping.APEX5_KEYS]
+                        for key in self._profile.padKeys]
             return [(key,) + tuple(config.mapping(key))
-                    for key in mapping.APEX5_KEYS]
+                    for key in self._profile.padKeys]
 
         return self._decoded("table", decode)
 
     def _row(self, row):
         """(key, target, mode, frequency) for a row, or None if out of range."""
-        if not 0 <= row < len(mapping.APEX5_KEYS):
+        if not 0 <= row < len(self._profile.padKeys):
             return None
         return self._table()[row]
 
     def data(self, index, role=Qt.DisplayRole):
         row = index.row()
-        if not 0 <= row < len(mapping.APEX5_KEYS):
+        if not 0 <= row < len(self._profile.padKeys):
             return None
         # The three roles that need only the key name are answered before the
         # table is touched. A view sweeping 23 rows across 9 roles asked for the
         # key table 207 times to fill in 23 rows' worth of labels; a third of
         # those questions never needed the profile at all.
-        key = mapping.APEX5_KEYS[row]
+        key = self._profile.padKeys[row]
         if role == self.KeyRole:
             return key
         if role in (self.LabelRole, Qt.DisplayRole):
@@ -1062,7 +1095,7 @@ class KeyMapModel(QAbstractListModel):
     @Slot(str, result=int)
     def rowForKey(self, key):
         try:
-            return mapping.APEX5_KEYS.index(key)
+            return self._profile.padKeys.index(key)
         except ValueError:
             return -1
 
@@ -1106,6 +1139,9 @@ class MacroModel(QAbstractListModel):
 
     countChanged = Signal()
     recordingChanged = Signal()
+    # Not `constant`: which keys can run a macro is the pad's business, and a
+    # constant property would be cached for the life of the window.
+    keyLabelsChanged = Signal()
     refused = Signal(str)
     recordRequested = Signal(float)      # matches the worker's slot
 
@@ -1118,6 +1154,16 @@ class MacroModel(QAbstractListModel):
         # What the view is currently showing, so `refresh` can tell a profile
         # whose macros differ from one whose macros are the same.
         self._shown = []
+
+    def modelChanged(self):
+        """The pad on screen is a different model.
+
+        The macro list is keyed by key *name* rather than by index, so the rows
+        themselves survive -- but `keyLabels` and the index `record` takes are
+        both drawn from the pad's key list, so the binder has to be rebuilt.
+        """
+        self._decoded.clear()
+        self.keyLabelsChanged.emit()
 
     def roleNames(self):
         return {
@@ -1173,7 +1219,7 @@ class MacroModel(QAbstractListModel):
     def typeNames(self):
         return [label for label, _value in MACRO_TYPES]
 
-    @Property("QStringList", constant=True)
+    @Property("QStringList", notify=keyLabelsChanged)
     def triggerKeys(self):
         """Every key that can run a macro, as the shell labels them.
 
@@ -1182,7 +1228,7 @@ class MacroModel(QAbstractListModel):
         keys a macro may *press* are the smaller set, and the backend refuses
         the rest.
         """
-        return [key_label(key) for key in mapping.APEX5_KEYS]
+        return [key_label(key) for key in self._profile.padKeys]
 
     @Property(int, constant=True)
     def intervalMax(self):
@@ -1291,9 +1337,9 @@ class MacroModel(QAbstractListModel):
         """Start recording, for the key at `key_index` in `triggerKeys`."""
         if self._recording or self._profile.config is None:
             return
-        if not 0 <= key_index < len(mapping.APEX5_KEYS):
+        if not 0 <= key_index < len(self._profile.padKeys):
             return
-        self._record_key = mapping.APEX5_KEYS[key_index]
+        self._record_key = self._profile.padKeys[key_index]
         self._recording = True
         self.recordingChanged.emit()
         self.recordRequested.emit(RECORD_SECONDS)
@@ -1508,6 +1554,10 @@ class ProfileModel(QObject):
         self._saved = True
         self._generation = 0
         self._dirty = False
+        # Which pad's buttons these pages are editing. The Apex 5 until told
+        # otherwise, because that is the only model this project drives and a
+        # window with no device chosen yet still has to draw something.
+        self._model_code = "k5"
         self._slots = ProfileListModel(self)
         self._keys = KeyMapModel(self)
         self._macros = MacroModel(self)
@@ -1515,6 +1565,55 @@ class ProfileModel(QObject):
         self._triggers = TriggerModel(self)
         self._sticks = StickModel(self)
         self._motion = MotionModel(self)
+
+    # -- which pad's buttons ------------------------------------------------
+    #
+    # A key list is a property of the model on the other end, not a constant:
+    # the Apex 5 has no C and no Z, and every Vader declares both. Anything
+    # that walks "every key" -- the remap table, the gyro's enable-key picker,
+    # the macro binder, reset-all -- has to walk that pad's keys or it reports
+    # success over buttons it never touched.
+    #
+    # Held here rather than in each sub-model because they all already have a
+    # reference to this one, and because one source of truth is what keeps the
+    # table, the picker and the reset in step with each other.
+
+    keysChanged = Signal()
+
+    @property
+    def padKeys(self):
+        """The physical keys of the pad on screen, as backend key names.
+
+        Not `keys`: that name is already the Q_PROPERTY handing QML the
+        KeyMapModel, and shadowing it made every row count ask a list model for
+        its length. Python-side only -- QML gets `keyLabels`.
+        """
+        return mapping.keys_for(self._model_code)
+
+    @Property(str, notify=keysChanged)
+    def modelCode(self):
+        return self._model_code
+
+    @modelCode.setter
+    def modelCode(self, code):
+        """Set from the device picker's selection. See `App._pad_selected`.
+
+        Nothing happens when the code has not moved, since every key-facing
+        view rebuilds on this and switching between two Apex 5s must not.
+        """
+        code = code or "k5"
+        if code == self._model_code:
+            return
+        self._model_code = code
+        self._keys.modelChanged()
+        self._macros.modelChanged()
+        self._motion.keyNamesChanged.emit()
+        self.keysChanged.emit()
+
+    @Property("QStringList", notify=keysChanged)
+    def keyLabels(self):
+        """Every key of this pad, labelled, in the order a UI should show them."""
+        return [key_label(key) for key in self.padKeys]
 
     # `config` is a plain attribute, not a Q_PROPERTY: MappingConfig is not a
     # QObject and has no business crossing into QML. The sub-models reach it
@@ -1784,7 +1883,7 @@ class ProfileModel(QObject):
         config = self.edited()
         if config is None:
             return
-        for key in mapping.APEX5_KEYS:
+        for key in self.padKeys:
             config.set_mapping(key, None)
         self._keys.refresh()
         self.markChanged()

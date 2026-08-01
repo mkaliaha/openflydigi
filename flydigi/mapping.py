@@ -288,14 +288,50 @@ APEX5_KEYS = [
     "m5", "m6",
 ]
 
-# What a key may be remapped *to*. Deliberately smaller than APEX5_KEYS: the
-# extra buttons -- the M1-M4 paddles on the back and the M5/M6 shoulder pair --
-# have no XInput equivalent, so a host cannot receive them. They are sources:
-# you map a paddle onto a real button, which is what the pad ships doing.
-# Offering them as targets would let someone map A to something nothing can
-# see, which reads as "A stopped working".
-EXTRA_KEYS = ["m1", "m2", "m3", "m4", "m5", "m6"]
+# A Vader's keys are an Apex 5's plus the two it has and this pad does not: C
+# and Z, which the Vader3/4/5 factories declare and `GenerateControllerApex5`
+# does not. They go after Rb because that is where they sit in the SDK's own
+# declaration order, which is what a UI should follow.
+#
+# **The order is presentation only.** A key's place in the blob comes from
+# `KEY_IDS[name]` -- C is 16 and Z is 17, in the key table all along, since the
+# table has 32 slots and most models leave most of them unpopulated. So adding
+# two names to a list moves no offsets and cannot disturb an Apex 5.
+VADER5_KEYS = (APEX5_KEYS[:APEX5_KEYS.index("rb") + 1] + ["c", "z"]
+               + APEX5_KEYS[APEX5_KEYS.index("rb") + 1:])
+
+# Which physical keys a model has, by DeviceCode. Only `k5` is a pad this
+# project drives; `f5` is here for the same reason `identity.CAPABILITIES`
+# carries it, and because a key list keyed by model is the only thing that
+# makes "reset every key to default" mean what it says on a pad that is not
+# this one.
+MODEL_KEYS = {"k5": APEX5_KEYS, "f5": VADER5_KEYS}
+
+# What a key may be remapped *to*. Deliberately smaller than the key list: the
+# extra buttons -- the M1-M4 paddles on the back and the M5/M6 shoulder pair,
+# and a Vader's C and Z -- have no XInput equivalent, so a host cannot receive
+# them. They are sources: you map a paddle onto a real button, which is what the
+# pad ships doing. Offering them as targets would let someone map A to something
+# nothing can see, which reads as "A stopped working".
+EXTRA_KEYS = ["m1", "m2", "m3", "m4", "m5", "m6", "c", "z"]
 XINPUT_TARGETS = [key for key in APEX5_KEYS if key not in EXTRA_KEYS]
+
+
+def keys_for(code):
+    """The physical keys of a model, by DeviceCode.
+
+    Falls back to the Apex 5's list for an unknown code, which is the pad this
+    was measured on and the only one anything here has ever written to. Not a
+    guess about other hardware: a caller that reaches this with something else
+    has already passed `identity.require`, which does not let an unknown model
+    through.
+    """
+    return MODEL_KEYS.get(code, APEX5_KEYS)
+
+
+def targets_for(code):
+    """What a key on this model may be remapped to. See EXTRA_KEYS."""
+    return [key for key in keys_for(code) if key not in EXTRA_KEYS]
 
 # -- the gyro mapped to a stick, at 137 ---------------------------------------
 #
@@ -660,7 +696,15 @@ class MappingConfig:
         return {key: self.mapping(key) for key in (keys or APEX5_KEYS)}
 
     def remapped(self, keys=None):
-        """Only the keys that differ from the default -- what a UI should mark."""
+        """Only the keys that differ from the default -- what a UI should mark.
+
+        **Pass the pad's own keys.** A blob has no idea which model it came off,
+        and the default here is the Apex 5's list, so a caller that leaves it
+        out on any other pad silently reports nothing about the buttons that
+        model has and this one does not -- a Vader's C and Z. Use
+        `keys_for(code)`, where `code` is what `identity.require` already
+        returned to whoever opened the pad.
+        """
         out = {}
         for key in keys or APEX5_KEYS:
             target, mode, frequency = self.mapping(key)

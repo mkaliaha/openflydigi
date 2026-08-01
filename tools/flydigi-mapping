@@ -60,10 +60,13 @@ def open_pad(selector=None):
     except device.DeviceNotFound as exc:
         sys.exit(f"error: {exc}")
     try:
-        identity.require(ctrl)
+        found = identity.require(ctrl)
     except identity.WrongDevice as exc:
         ctrl.close()
         sys.exit(f"error: {exc}")
+    # Kept rather than discarded: which buttons the pad has decides what
+    # "remapped" can even mean, and this read is the only thing that knows.
+    ctrl.device_code = found["code"]
     return ctrl
 
 
@@ -74,8 +77,8 @@ def read(ctrl, cfg_id):
         sys.exit(f"error: {exc}")
 
 
-def describe(config):
-    remapped = config.remapped()
+def describe(config, code=None):
+    remapped = config.remapped(mapping.keys_for(code))
     if not remapped:
         return "default"
     parts = []
@@ -273,7 +276,8 @@ def main():
             except mapping.ProtocolError as exc:
                 print(f"{cfg_id}: unreadable ({exc})")
                 continue
-            print(f"{cfg_id}: {config.title!r:20} {describe(config)}")
+            print(f"{cfg_id}: {config.title!r:20} "
+                  f"{describe(config, ctrl.device_code)}")
         return
 
     if args.cmd == "apply":

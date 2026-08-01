@@ -125,6 +125,43 @@ def test_apply_and_save():
     check("save captures every slot", len(pad.saved) == 4)
 
 
+def test_a_models_keys_are_its_own():
+    """Which buttons exist is a property of the pad, not a constant.
+
+    The Apex 5 has no C and no Z; every Vader declares both. Getting this wrong
+    is not cosmetic -- anything that iterates "every key" to reset or report
+    them would silently skip two on a Vader and call it done.
+    """
+    check("the Apex 5 keeps exactly the keys it had",
+          mapping.keys_for("k5") == mapping.APEX5_KEYS,
+          str(mapping.keys_for("k5")))
+    check("a Vader adds C and Z and nothing else",
+          set(mapping.keys_for("f5")) - set(mapping.APEX5_KEYS) == {"c", "z"},
+          str(mapping.keys_for("f5")))
+    check("and loses none of them",
+          not set(mapping.APEX5_KEYS) - set(mapping.keys_for("f5")))
+    check("an unknown model falls back rather than reporting no keys",
+          mapping.keys_for("k9") == mapping.APEX5_KEYS)
+
+    # Sources, not targets: C and Z have no XInput equivalent, exactly like the
+    # M paddles, so a remap may come *from* them and never point *at* them.
+    check("C and Z are not remap targets",
+          not {"c", "z"} & set(mapping.targets_for("f5")),
+          str(mapping.targets_for("f5")))
+    check("the Apex 5's target list is the one it always had",
+          mapping.targets_for("k5") == mapping.XINPUT_TARGETS)
+
+    # The trap avoided: the list is presentation order, and an offset comes
+    # from KEY_IDS. If these ever diverge, every key on the pad moves.
+    config = mapping.MappingConfig(blank_blob())
+    for key in mapping.keys_for("f5"):
+        offset, key_id = config._entry(key)
+        check(f"{key} sits where its id says, not where the list does",
+              key_id == mapping.KEY_IDS[key]
+              and offset == mapping.OFF_KEY_TABLE + key_id * mapping.KEY_ENTRY,
+              f"{key}: {offset}/{key_id}")
+
+
 def test_a_save_carries_the_version_it_is_given():
     """Command 166 writes its argument into the slot's version tag.
 
@@ -1481,6 +1518,7 @@ def main():
                  test_a_newer_protocol_keeps_its_macros_elsewhere,
                  test_lighting_round_trip, test_lighting_brightness_is_clamped,
                  test_lighting_effects_write_frames, test_cycle_time_is_a_duration,
+                 test_a_models_keys_are_its_own,
                  test_a_save_carries_the_version_it_is_given,
                  test_nothing_saves_a_profile_without_its_version,
                  test_effects_by_id_and_colours, test_suggested_colours_differ):

@@ -94,6 +94,7 @@ class DevicesModel(QAbstractListModel):
     ModelRole = Qt.UserRole + 13
     UidRole = Qt.UserRole + 14
     ErrorRole = Qt.UserRole + 15
+    CodeRole = Qt.UserRole + 16
 
     # Which roles each field of a probe entry feeds, so a poll that found one
     # number different can say which number rather than replacing the row. The
@@ -104,7 +105,8 @@ class DevicesModel(QAbstractListModel):
     # that a field this table has never heard of is distinguishable from one it
     # has decided about -- see `_moved_roles`, which treats the unknown as
     # every role. `family` and `device_type` are identity the label never
-    # shows, `code` feeds `model` upstream in `flydigi/registry.py`, `info` is
+    # shows, `code` feeds `model` upstream in `flydigi/registry.py` and its own
+# role here, since a pad's key list depends on it, `info` is
     # the raw reply the entry was built from, and `connect_type` is read from
     # the pad's own model rather than from here.
     FIELD_ROLES = {
@@ -123,7 +125,7 @@ class DevicesModel(QAbstractListModel):
         "firmware": (FirmwareRole,),
         "family": (),
         "device_type": (),
-        "code": (),
+        "code": (CodeRole,),
         "connect_type": (),
         "info": (),
     }
@@ -191,6 +193,7 @@ class DevicesModel(QAbstractListModel):
             self.ModelRole: entry.get("model") or entry.get("product") or "",
             self.UidRole: entry.get("uid") or "",
             self.ErrorRole: entry.get("error") or "",
+            self.CodeRole: entry.get("code") or "",
         }
 
     def _set_entries(self, entries):
@@ -471,6 +474,21 @@ class DevicesModel(QAbstractListModel):
     @Property(bool, notify=currentChanged)
     def currentIsDock(self):
         return self.currentKind == registry.KIND_DOCK
+
+    @Property(str, notify=currentChanged)
+    def currentCode(self):
+        """The DeviceCode of the pad on screen, or "" when none is.
+
+        What the profile pages need in order to know which buttons the pad in
+        front of them has -- an Apex 5 has no C and no Z, and every Vader
+        declares both. Deliberately the *pad* rather than `_current`, which
+        follows a dock too: choosing a dock must not blank the key list of the
+        pad whose pages are still built.
+        """
+        row = self._row_for_kind(registry.KIND_PAD)
+        if not 0 <= row < len(self._rows):
+            return ""
+        return self._rows[row][self.CodeRole]
 
     @Property(str, notify=currentChanged)
     def currentLabel(self):
