@@ -892,6 +892,9 @@ class MacroModel(QAbstractListModel):
         self._profile = profile
         self._recording = False
         self._record_key = ""
+        # What the view is currently showing, so `refresh` can tell a profile
+        # whose macros differ from one whose macros are the same.
+        self._shown = []
 
     def roleNames(self):
         return {
@@ -1081,7 +1084,30 @@ class MacroModel(QAbstractListModel):
         self._profile.markChanged()
 
     def refresh(self):
+        """Say what actually moved, rather than rebuilding the page every time.
+
+        `ProfileModel._open` calls this for every profile read, and a reset
+        destroys and rebuilds every delegate attached -- the same defect
+        `DevicesModel` had against the sidebar picker, where it cost the whole
+        window its frame rate twice a minute. Most reads do not change the
+        macros at all: opening the profile the pad is already running, or
+        re-reading after a write that touched the key table, both leave this
+        region byte-identical.
+
+        So: nothing when nothing moved, `dataChanged` when the same rows hold
+        different values -- which updates delegates in place -- and a reset only
+        when the number of rows really has changed, which is the one case a view
+        cannot absorb any other way.
+        """
+        macros = self._macros()
+        if macros == self._shown:
+            return
+        if len(macros) == len(self._shown):
+            self._shown = list(macros)
+            self.dataChanged.emit(self.index(0, 0), self.index(len(macros) - 1, 0))
+            return
         self.beginResetModel()
+        self._shown = list(macros)
         self.endResetModel()
         self.countChanged.emit()
 

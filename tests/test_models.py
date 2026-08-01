@@ -1369,6 +1369,64 @@ def test_device_folds_in_an_info_reply():
           device.summary)
 
 
+def test_an_info_reply_notifies_once_per_thing_that_moved():
+    """One reply is one commit, not one invalidation wave per field.
+
+    Assigning through the setters emitted a signal apiece, so a single reply
+    invalidated every binding on this model five separate times -- and the
+    change guards that make that cheap on a steady poll all pass on a cold
+    start and on Reload, which is exactly when the most is on screen. The
+    fields are written first and the notifications go out afterwards.
+    """
+    device = models.DeviceModel()
+    counts = {}
+    for name in ("connectedChanged", "batteryChanged", "chargingChanged",
+                 "connectionTypeChanged", "errorChanged"):
+        counts[name] = 0
+
+        def bump(_n=name):
+            counts[_n] += 1
+
+        getattr(device, name).connect(bump)
+
+    device.infoReceived({"battery_level": 5, "charging": False,
+                         "connect_type": "wired"})
+    check("everything that moved is announced exactly once",
+          all(counts[n] == 1 for n in ("connectedChanged", "batteryChanged",
+                                       "connectionTypeChanged")), str(counts))
+    check("and what did not move is not announced at all",
+          counts["chargingChanged"] == 0, str(counts))
+
+    before = dict(counts)
+    device.infoReceived({"battery_level": 5, "charging": False,
+                         "connect_type": "wired"})
+    moved = {n: counts[n] - before[n] for n in counts}
+    # `summary` reads off connection type as well as connectedness, so that one
+    # is nudged whatever happens; nothing else may be.
+    check("an identical reply changes nothing but the summary nudge",
+          all(v == 0 for n, v in moved.items() if n != "connectedChanged"),
+          str(moved))
+
+
+def test_a_profile_read_does_not_rebuild_macros_that_did_not_change():
+    """A reset destroys and rebuilds every delegate attached to the model.
+
+    `ProfileModel._open` refreshes the macro list on every profile read, and
+    most reads leave that region byte-identical -- opening the profile the pad
+    is already running, or re-reading after a write that touched only the key
+    table. `DevicesModel` had the same defect against the sidebar picker.
+    """
+    profile, _ = make_profile()
+    macros = profile.macros
+    resets = []
+    macros.modelAboutToBeReset.connect(lambda: resets.append(1))
+
+    macros.refresh()
+    macros.refresh()
+    check("re-reading an unchanged profile rebuilds nothing", resets == [],
+          str(len(resets)))
+
+
 def test_the_third_party_gate_follows_firmware():
     """Space Station hides this below 7.0.3.0 on a k5, so we do too."""
     device = models.DeviceModel()
@@ -2542,6 +2600,8 @@ def main():
                  test_setup_asks_for_root_only_when_something_needs_it,
                  test_setup_keeps_running_and_starting_at_login_apart,
                  test_device_folds_in_an_info_reply,
+                 test_an_info_reply_notifies_once_per_thing_that_moved,
+                 test_a_profile_read_does_not_rebuild_macros_that_did_not_change,
                  test_the_third_party_gate_follows_firmware,
                  test_the_holder_is_reported_separately_from_the_switch,
                  test_flipping_the_switch_asks_the_worker,

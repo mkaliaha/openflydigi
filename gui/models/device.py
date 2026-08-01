@@ -221,16 +221,45 @@ class DeviceModel(QObject):
 
     @Slot(dict)
     def infoReceived(self, info):
-        """Fold one `motion.read_info` reply into the reported state."""
-        self.connected = True
-        self.error = ""
+        """Fold one `motion.read_info` reply into the reported state, at once.
+
+        **One commit, not five.** Assigning through the setters emitted a signal
+        apiece, so a single reply was five separate invalidation waves through
+        every binding on this model -- and the change guards that make that
+        cheap on a steady poll all pass on a cold start and on Reload, which is
+        precisely when the most is on screen to invalidate. The fields are
+        written first and the notifications go out afterwards, once each.
+        """
+        self._commit(
+            (("_connected", True, self.connectedChanged),
+             ("_error", "", self.errorChanged),
+             ("_battery", max(0, min(BATTERY_STEPS, int(info.get("battery_level", 0)))),
+              self.batteryChanged),
+             ("_charging", bool(info.get("charging")), self.chargingChanged),
+             ("_connection_type", str(info.get("connect_type", "") or ""),
+              self.connectionTypeChanged)),
+            # `summary` reads off connection type as well as connectedness, so
+            # it needs a nudge whenever either moves.
+            always=self.connectedChanged)
         self._last_failure = None
-        self.battery = info.get("battery_level", 0)
-        self.charging = bool(info.get("charging"))
-        self.connectionType = info.get("connect_type", "")
-        # `summary` reads off connection type as well as connectedness, so it
-        # needs a nudge whenever either moves.
-        self.connectedChanged.emit()
+
+    def _commit(self, fields, always=None):
+        """Write every field, then notify -- once per signal, in order.
+
+        Takes `(attribute, value, signal)` triples. A signal named twice fires
+        once, which is the whole point: the callers here set several fields that
+        share one notification.
+        """
+        fire = []
+        for attr, value, signal in fields:
+            if getattr(self, attr) != value:
+                setattr(self, attr, value)
+                if signal not in fire:
+                    fire.append(signal)
+        if always is not None and always not in fire:
+            fire.append(always)
+        for signal in fire:
+            signal.emit()
 
     @Slot(str)
     def failed(self, message):
@@ -249,8 +278,8 @@ class DeviceModel(QObject):
         what `was` covers.
         """
         was = self._connected
-        self.connected = False
+        fields = [("_connected", False, self.connectedChanged)]
         if was or message != self._last_failure:
-            self.error = message
+            fields.append(("_error", message, self.errorChanged))
+        self._commit(fields, always=self.connectedChanged)
         self._last_failure = message
-        self.connectedChanged.emit()
