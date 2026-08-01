@@ -14,9 +14,20 @@ page, and `tests/test_screen.py` + `tests/test_screen_ota.py`, whose `FakeScreen
 
 An upload runs at ~19 exchanges a second, ~25 s a frame. PROTOCOL.md §8d has the full timings, the
 base address and the hardware runs; §8a has the 25604-byte LVGL frame that
-`tools/flydigi-screen check` round-trips against Flydigi's own files. An upload is **wired only** —
-Space Station's UI refuses a wireless one before the request reaches the device, which is a
-constraint of their app rather than a measured property of the pad.
+`tools/flydigi-screen check` round-trips against Flydigi's own files. An upload is **wired only**, and that is
+the pad's own behaviour rather than a house rule of Space Station's — theirs refuses a wireless one
+before the request reaches the device, and **measured here, the reason they do is real**: on the
+dongle the pad accepts command 31 and switches its screen chip into upgrade mode, and nothing
+appears on the PC at all. The dongle does not relay the bootloader's USB CDC device and has no
+notion that there is one, so the tty the upload waits for cannot arrive. What is left is a pad in
+upgrade mode, a timeout for a diagnosis, and its own power switch for a fix.
+
+So the refusal has to come **before** command 31, and it does, in three places: `canUpload` and
+`upload()` in `gui/models/screen.py`, the connection re-read in `worker.upload_screen` — which also
+catches a cable pulled between pressing the button and the command going out — and
+`tools/flydigi-screen`, where `--i-know` sends it regardless. This was a real bug: every one of
+those gates was missing, and sending a picture on the dongle was a supported-looking way to strand
+the pad.
 
 ### The command line
 

@@ -16,6 +16,7 @@ import QtQuick.Dialogs as Dialogs
 import org.kde.kirigami as Kirigami
 import org.kde.kirigamiaddons.formcard as FormCard
 import Apex5
+import "../components"
 
 Kirigami.ScrollablePage {
     id: page
@@ -149,6 +150,33 @@ Kirigami.ScrollablePage {
                 }
             }
 
+            FormCard.FormDelegateSeparator {
+                visible: App.screen.frameCount > 0
+            }
+
+            // Where the picture sits under the panel. Above the fit picker
+            // rather than below it because the fit is where a framing starts
+            // and the drag is what finishes it — and Space Station has neither,
+            // so there is no precedent to follow on the order.
+            FormCard.AbstractFormDelegate {
+                objectName: "screenCropRow"
+                background: null
+                hoverEnabled: false
+                visible: App.screen.frameCount > 0
+
+                contentItem: CropStage {
+                    prefix: "screen"
+                    frame: App.screen
+                    currentFrame: page.previewFrame
+                    // 320x160 model units drawn at 640 real pixels: two pixels
+                    // per unit. What is on the stage is the source picture
+                    // rather than the encoded frame, so the extra resolution is
+                    // real — the preview above is the one that must not be
+                    // smoothed past what the panel can hold.
+                    maxWidth: 640
+                }
+            }
+
             FormCard.FormDelegateSeparator {}
 
             FormCard.FormComboBoxDelegate {
@@ -259,10 +287,16 @@ Kirigami.ScrollablePage {
                                + " — leave the pad plugged in.";
                     if (App.screen.frameCount === 0)
                         return "Choose a picture to send.";
+                    // Before the generic line, because it is the one reason the
+                    // button is off that the rest of the page does not show.
+                    if (App.screen.uploadBlocked !== "")
+                        return App.screen.uploadBlocked;
                     return "Sends over the pad's own upgrade link; it restarts "
                            + "itself when done.";
                 }
-                elide: Text.ElideRight
+                // Wraps rather than elides: the reason an upload is refused is
+                // an instruction, and half of one is no use.
+                wrapMode: Text.WordWrap
                 Layout.fillWidth: true
                 Layout.preferredWidth: 0
             }

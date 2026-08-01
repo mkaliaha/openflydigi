@@ -578,6 +578,20 @@ class DeviceWorker(QObject):
         try:
             port = screen_ota.find_port()
             if port is None:
+                # Asked again here, and not left to the model. Command 31 is
+                # the irreversible half of this: measured on the dongle, the
+                # pad takes it, switches its screen chip over and then reaches
+                # the PC not at all, because the dongle does not relay the
+                # bootloader's serial device. It stays in upgrade mode until it
+                # is power-cycled. One exchange against six minutes of upload,
+                # and it also covers a cable pulled between the button and here.
+                info = motion.read_info(self._controller())
+                if (info or {}).get("connect_type") != "wired":
+                    raise screen_ota.OtaError(
+                        "the pad is not on a cable. On the dongle it takes "
+                        "command 31, switches to upgrade mode and then nothing "
+                        "reaches the PC, which strands it until it is "
+                        "power-cycled at its own switch.")
                 screen_ota.enter_upgrade_mode(self._controller())
                 # The pad keeps its HID nodes but the handle is no longer worth
                 # holding across a reboot it is about to do.

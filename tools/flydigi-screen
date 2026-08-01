@@ -47,7 +47,7 @@ import time
 
 sys.path.insert(0, __file__.rsplit("/", 2)[0])
 
-from flydigi import device, registry, screen, screen_ota
+from flydigi import device, motion, registry, screen, screen_ota
 
 
 def open_pad(args):
@@ -307,10 +307,30 @@ def upload_over_serial(args, frames, interval):
         if port:
             print(f"the pad is already in upgrade mode on {port}")
     if port is None:
+        pad = open_pad(args)
+        # The one check worth an exchange before a six-minute upload. Measured
+        # on the dongle: the pad takes command 31 and switches over, and
+        # nothing appears on the PC -- the dongle does not relay the
+        # bootloader's CDC device and has no idea there is one. What is left is
+        # a pad in upgrade mode, a timeout for a diagnosis, and the power
+        # switch for a fix.
+        if not args.i_know:
+            info = motion.read_info(pad)
+            if info is None:
+                sys.exit("error: the pad did not answer a device-info request, "
+                         "so whether it is wired could not be established. "
+                         "Pass --i-know to send command 31 anyway.")
+            if info.get("connect_type") != "wired":
+                sys.exit("error: the pad is on the dongle. It will take command "
+                         "31 and switch its screen chip into upgrade mode, and "
+                         "then nothing reaches the PC -- the dongle does not "
+                         "relay the bootloader's serial device. That strands "
+                         "the pad until you power-cycle it at its own switch. "
+                         "Plug it in, or pass --i-know to do it anyway.")
         print("switching the screen chip into upgrade mode (command 31) -- the "
               "pad will leave the HID bus and come back as a serial device")
         try:
-            screen_ota.enter_upgrade_mode(open_pad(args))
+            screen_ota.enter_upgrade_mode(pad)
         except device.DeviceNotFound as exc:
             sys.exit(f"error: {exc}")
         time.sleep(screen_ota.SWITCH_SETTLE)
@@ -372,6 +392,11 @@ def main():
                               "that works on an Apex 5; hid is for other pads")
     sending.add_argument("--port", help="skip the mode switch; the pad is already "
                                         "in upgrade mode on this tty")
+    sending.add_argument("--i-know", action="store_true",
+                         help="send command 31 without checking for a cable. "
+                              "Measured on the dongle: the pad switches to "
+                              "upgrade mode and nothing reaches the PC, so this "
+                              "strands it until it is power-cycled")
     sending.add_argument("--restore-default", action="store_true",
                          help="tell the screen chip this is the factory image")
     sending.add_argument("--dialect", choices=sorted(screen.DIALECTS),

@@ -177,6 +177,10 @@ class App(QObject):
 
         # -- replies in -----------------------------------------------------
         worker.info_changed.connect(self._device.infoReceived)
+        # The Screen page needs the same reply for `connect_type`: an upload is
+        # wired-only, and it is the one page where the connection is a
+        # precondition rather than something the header mentions.
+        worker.info_changed.connect(self._screen.infoReceived)
         worker.failed.connect(self._device.failed)
         worker.status.connect(self._status)
         worker.active_changed.connect(self._profile.setActive)

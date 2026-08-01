@@ -29,8 +29,14 @@ takes one while every other route acts on the pad the picker chose. There is one
 on this desk, so `FLYDIGI_MOCK_BUS` serves the rest — see
 [Mock devices](#mock-devices-for-the-ones-nobody-owns).
 
-**Left to build:** an interactive crop for the Screen page, and the smaller pieces under What's
-next. Supporting an older pad is [ruled out](#ruled-out).
+**Both picture pages frame the same way.** The Dock page's stage — a window cut out of a black
+stage, the picture dragged under it and zoomed — is `gui/qml/components/CropStage.qml` and
+`imaging.CropFrame`, and the Screen page drives one against the panel's 160×80 window. Space
+Station has no framing there at all: their screen page takes the middle of the picture and that is
+the whole of it.
+
+**Left to build:** the smaller pieces under What's next. Supporting an older pad is
+[ruled out](#ruled-out).
 
 | Tier | Mechanism | Games | State |
 |---|---|---|---|
@@ -59,11 +65,7 @@ true — `gui/` may import `flydigi/` and never the reverse, and nothing Flydigi
 
 Roughly in order of value.
 
- 1. **An interactive crop for the Screen page.** The Dock page has one now — a 640×320 stage, a
-    draggable picture and a zoom — and the Screen page still offers three fit modes and no framing.
-    What is there is `gui/qml/pages/DockPage.qml`'s `dockCropStage` plus the framing arithmetic in
-    `gui/models/dock.py`, and neither is shaped as a shared component yet.
- 2. **Third-party mode: optional polish.** Command 17 here is byte-identical to Space Station's.
+ 1. **Third-party mode: optional polish.** Command 17 here is byte-identical to Space Station's.
     After a reconnect with the flag already on, Steam stops *labelling* the pad Apex 5 while
     everything keeps working — cosmetic, plus a bindings-storage nuisance. The optional workaround,
     which neither app does, is to re-assert the flag off then on once SDL has enumerated; the real
@@ -230,7 +232,7 @@ distrobox exists. Setup, the package list and the symbol detail are in
 | Vibration | master switch, per-grip enable, min/max window, strength |
 | Triggers | stored effect — all six of Flydigi's, each with its own controls, engaged on the pad as well as stored — plus the travel window, Flydigi's "Stroke Setting", as a start/end pair |
 | Lighting | effect, up to 5 colours, brightness, cycle time, react-to-rumble |
-| Screen | pick a picture or GIF, choose how it fits, preview the encoded frame, and send it over the serial link — with the frame count and a time estimate before you start; plus the always-on display and the status bar |
+| Screen | pick a picture or GIF, choose how it fits, **drag and zoom it under the 160×80 window**, preview the encoded frame, and send it over the serial link — with the frame count and a time estimate before you start; plus the always-on display and the status bar |
 | Dock | whichever dock is selected: its identity and uid, the four switches (written as they move, read back afterwards), and its lighting — eight effects with colours, brightness, frame interval and direction, computed here and uploaded with a progress bar. Says which switch wins when Sleep-while-docked is on beside the other two. **“Picture” is the ninth effect**: choose a picture or a GIF, drag and zoom it under the 334×304 window the LEDs are read from, trim which GIF frames to send, and watch the result play on a wedge of 162 dots before spending the packets |
 | Games | all 94 games, searchable, filtered by route; **Update list** refetches the gamelist from Flydigi's public API; vibration presets load onto the pad from here; per-game **Auto** toggle, a route picker where a game really has a choice, and a DualSense marker on the 23 games Flydigi lists as DS5-aware |
 | DualSense | the tier-4b switch: vhci-hcd's state, haptic audio to the motors, what the relay is doing, and the launch option to copy |
@@ -385,6 +387,15 @@ the test files are re-export shims and the tests import them by the old names.
     → [docs/findings-steam.md](docs/findings-steam.md)
   * **`effects.rumble()` must use `wait=0`** when driven continuously, or the 100 ms ACK wait puts
     the motors far behind.
+  * **A screen upload on the dongle strands the pad in upgrade mode, and nothing on the PC says
+    so.** Measured: the pad accepts command 31 over the dongle and switches its screen chip over,
+    and no serial device appears — the dongle does not relay the bootloader's USB CDC device and has
+    no notion that there is one. The upload waits for a tty that cannot arrive, reports a timeout,
+    and the pad stays in upgrade mode until its own power switch is used. So the wired test comes
+    before the command, not after it: `canUpload`/`upload()` on the Screen page, a re-read in
+    `worker.upload_screen` that also catches a cable pulled mid-press, and `--i-know` on
+    `tools/flydigi-screen`. Space Station refuses a wireless upload too, and this is why.
+    → [docs/findings-screen.md](docs/findings-screen.md)
   * **A command answering is not a command working.** The screen's picture family (208..211) parses
     every packet on an Apex 5 and echoes the fields back, and no picture reaches the panel — though
     211 still commits, so a 208/211 pair with no frame between them destroys a stored custom image;
@@ -397,6 +408,13 @@ the test files are re-export shims and the tests import them by the old names.
   * **Qt reads animated GIFs and cannot write them.** No `gif` in
     `QImageWriter.supportedImageFormats()` at all, and multi-page tiff and webp both write happily
     and then read back as a single frame. An animation for a test has to be committed, not generated.
+  * **The two picture pages share a stage and reframe at different moments.** Sampling the dock's
+    162 LEDs is about half a millisecond, so its wedge follows the pointer all the way through a
+    drag. The pad's panel is an encode plus a preview file *per frame* — 12,800 pixels of pure
+    Python each — so a 255-frame animation would be seconds of work per pointer event. Both stages
+    track the pointer for free either way, since that only moves an item already on the scene
+    graph; the Screen page re-encodes on `framingSettled`, which the drag and the zoom slider each
+    call when they end, and `DockModel.framingSettled` is deliberately empty.
   * **Do not send anything slow through the worker's `_attempt`.** It retries once, which is right
     for a sulking pad and wrong for a screen upload: that runs for minutes and has already switched
     the pad into upgrade mode.
@@ -573,7 +591,7 @@ do.
 |---|---|
 | `PROTOCOL.md` | Full wire protocol + hardware verification results |
 | `flydigi/` | Library — `device.py` (transport), `identity.py` (the command-1 device-type guard), `blobs.py` (packetised config transfer), `effects.py` (live trigger commands), `mapping.py` (profiles, remapping, macros, vibration, stored triggers), `macros.py` (recording one off the pad's evdev node), `lighting.py` (RGB), `screen.py` (160x80 screen: LVGL image format, settings, and the HID upload that puts no picture on this pad), `screen_ota.py` (the serial upload that works), `settings.py` (the pad's own settings: command 3 and the small writes behind it), `games.py`, `forza.py`, `evdev.py` (the xpad evdev reader every relay's input comes from), `ds5.py` (DualSense report codec), `dsx.py` (DSX UDP protocol), `monitor.py` (process-memory engine), `motion.py` (battery, gyro/accel and the third-party toggle), `relay.py` (Apex 5 → DualSense translation, and `PadLink`: holding a pad that leaves the bus every time it sleeps) |
-| `gui/` | PySide6/QML desktop app (GPL-3.0-or-later) — `app.py` (the object graph), `main.py` (entry point), `worker.py` (all device I/O, on its own thread), `i18n.py` (the `i18n*()` shim the engine needs; without it every Kirigami form delegate throws `ReferenceError: i18ndc is not defined`, so `main.py` installs it unconditionally), `models/` (view-agnostic state; `screen.py`, `dock.py` and `imaging.py` are the ones that touch QtGui, for image decoding), `qml/` (`Main.qml`, `pages/`, `components/`) |
+| `gui/` | PySide6/QML desktop app (GPL-3.0-or-later) — `app.py` (the object graph), `main.py` (entry point), `worker.py` (all device I/O, on its own thread), `i18n.py` (the `i18n*()` shim the engine needs; without it every Kirigami form delegate throws `ReferenceError: i18ndc is not defined`, so `main.py` installs it unconditionally), `models/` (view-agnostic state; `screen.py`, `dock.py` and `imaging.py` are the ones that touch QtGui, for image decoding and for `CropFrame`, the framing both picture pages share), `qml/` (`Main.qml`, `pages/`, `components/`) |
 | `tools/flydigi-devices` | Every device attached — `list`, `show`, and `name` to write a nickname (unproven; it asks first). The `--device` selector every other tool takes is defined here |
 | `tools/flydigi-mapping` | CLI for profiles — list/show/set/clear/rename/apply/backup/restore, plus `macros`, `macro-record`, `macro-set`, `macro-clear`, `gyro` |
 | `tools/gyro-map-probe` | What the pad does with the motion block at 137: five windows answering whether it plays it, whether each enable key gates it, whether Click toggles, and whether the curve at 830 is read. Transitions counted out on the motors, in `stick-feel`'s grammar |

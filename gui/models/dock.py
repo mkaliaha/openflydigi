@@ -33,7 +33,11 @@ from PySide6.QtQml import QmlElement
 
 from flydigi import charger
 
-from .imaging import rgb_bytes
+from . import imaging
+# The three fit modes are imported rather than referred to through `imaging`
+# because `IMAGE_FIT_MODES` below is a list indexed by them.
+from .imaging import (FIT_FILL, FIT_INSIDE, FIT_STRETCH,  # noqa: F401
+                      ZOOM_MAX, ZOOM_MIN, CropFrame, rgb_bytes)
 
 # See gui/models/device.py for what these two names do.
 QML_IMPORT_NAME = "Apex5"
@@ -95,16 +99,10 @@ SWITCH_LABELS = {name: label for name, label, _note in SWITCHES}
 #
 # Space Station's DIY page lays the source image out on a 640x320 stage with the
 # 334x304 crop window cut out of the middle of it, and lets you drag the image
-# under that window and zoom it. Every number here is theirs.
+# under that window and zoom it. Every number here is theirs; the gesture itself
+# is `imaging.CropFrame`, which the Screen page drives against its own window.
 
 STAGE_WIDTH, STAGE_HEIGHT = 640, 320
-HOLE_X = (STAGE_WIDTH - charger.CROP_WIDTH) // 2        # 153
-HOLE_Y = (STAGE_HEIGHT - charger.CROP_HEIGHT) // 2      # 8
-
-# Their zoom slider is 1..20 in whole steps and the factor it produces is
-# `0.95 + 0.05 * value`, so the range is 1.00x to 1.95x and the bottom of the
-# slider is exactly the fitted size.
-ZOOM_MIN, ZOOM_MAX = 1, 20
 
 # **This page has a fit control and Space Station has none.** Theirs fits width
 # for a portrait image and height for everything else, which is filling for most
@@ -115,7 +113,6 @@ ZOOM_MIN, ZOOM_MAX = 1, 20
 # filling here is their branch with a harmless gap closed, and the two other
 # modes are offered because letterboxing is a reasonable thing to want rather
 # than because anything was broken.
-FIT_FILL, FIT_INSIDE, FIT_STRETCH = 0, 1, 2
 IMAGE_FIT_MODES = ["Fill the panel", "Fit inside", "Stretch"]
 
 # **One period unit is 20 ms, measured on the dock.** This is the number Space
@@ -141,70 +138,10 @@ INTERVAL_MAX_MS = 255 * PERIOD_MS            # `period` is one byte
 FILMSTRIP_WIDTH, FILMSTRIP_HEIGHT = 1180, 72
 
 
-def zoom_factor(zoom):
-    """Their slider value -> the scale it means. 1 is the fitted size."""
-    return 0.95 + 0.05 * max(ZOOM_MIN, min(ZOOM_MAX, int(zoom)))
-
-
-def fitted_size(natural_width, natural_height, mode):
-    """How big the source image is drawn on the stage at zoom 1."""
-    if not natural_width or not natural_height:
-        return (0.0, 0.0)
-    if mode == FIT_STRETCH:
-        return (float(charger.CROP_WIDTH), float(charger.CROP_HEIGHT))
-    pick = min if mode == FIT_INSIDE else max
-    scale = pick(charger.CROP_WIDTH / natural_width,
-                 charger.CROP_HEIGHT / natural_height)
-    return (natural_width * scale, natural_height * scale)
-
-
-def clamp_pan(value, rendered, origin, extent):
-    """Keep the crop window inside the picture, on one axis.
-
-    An image at least as big as the window may be dragged until an edge meets
-    the window's edge and no further. One smaller than the window -- which only
-    "Fit inside" produces -- has no valid range at all, so it is centred and
-    stops being draggable rather than being clamped to a nonsense endpoint.
-    """
-    if rendered <= extent:
-        return origin + (extent - rendered) / 2.0
-    return min(float(origin), max(origin + extent - rendered, float(value)))
-
-
 def decode_limit(width, height):
-    """The biggest a source frame is ever drawn, so nothing larger is kept.
-
-    A GIF is decoded whole, and a two-hundred-frame screen recording at 1080p
-    is a great deal of QImage for a panel that is 162 dots. The window reads
-    334x304 and the zoom tops out at 1.95x, so at full zoom the window covers
-    334 source pixels exactly -- anything finer than that is resolution the
-    sampler cannot reach at any pan position, and anything coarser loses detail
-    that it can.
-
-    Deliberately conservative about orientation: the limit is taken against the
-    picture's *shorter* side, so a frame that `setAutoTransform` is about to
-    turn on its side is still large enough afterwards.
-
-    It bounds rather than solves. Measured: a 200-frame 1080p GIF opens in 1.5
-    seconds and holds 585 MB at 1158x651 a frame, because every one of those
-    frames really is pannable at that resolution. What it stops is the same
-    picture costing several times that.
-    Bounding it harder would mean deciding that 162 dots do not deserve a 1:1
-    sample, which is a different argument from this one.
-
-    Two things it does *not* do. It is not a peak-memory bound:
-    `QImageReader.supportsOption(ScaledSize)` is false for Qt's GIF and PNG
-    handlers, so those decode each frame at full size and scale it afterwards.
-    And it says nothing about the copy QML loads for the crop stage -- that one
-    is bounded on the page, by `sourceSize` and `cache: false`.
-    """
-    if width <= 0 or height <= 0:
-        return (width, height)
-    scale = (max(charger.CROP_WIDTH, charger.CROP_HEIGHT)
-             / min(width, height)) * zoom_factor(ZOOM_MAX)
-    if scale >= 1.0:
-        return (width, height)
-    return (max(1, round(width * scale)), max(1, round(height * scale)))
+    """`imaging.decode_limit` against this window. See it for the reasoning."""
+    return imaging.decode_limit(charger.CROP_WIDTH, charger.CROP_HEIGHT,
+                                width, height)
 
 
 def _mean_delay(delays):
@@ -293,10 +230,8 @@ class DockModel(QObject):
         # -- the picture
         self._source = ""              # the file it came from
         self._images = []              # every decoded source frame
-        self._natural = (0, 0)
-        self._fit = FIT_FILL
-        self._zoom = ZOOM_MIN
-        self._pan = (float(HOLE_X), float(HOLE_Y))
+        self._frame = CropFrame(charger.CROP_WIDTH, charger.CROP_HEIGHT,
+                                STAGE_WIDTH, STAGE_HEIGHT)
         self._trim = (0, 0)            # inclusive, into `_images`
         self._interval = DEFAULT_INTERVAL_MS
         self._preview_frame = 0
@@ -681,16 +616,14 @@ class DockModel(QObject):
         total = max(reader.imageCount(), len(frames))
         self._source = path
         self._images = frames
-        self._natural = (frames[0].width(), frames[0].height())
-        self._fit = FIT_FILL
-        self._zoom = ZOOM_MIN
+        self._frame.set_natural(frames[0].width(), frames[0].height())
         self._interval = _mean_delay(delays)
         # Space Station's own opening trim, and the reason it is not simply
         # every frame: their bar will not select more than 200 at a time.
         self._trim = (0, min(len(frames), charger.SAFE_FRAMES) - 1)
         self._preview_frame = 0
         self._image_message = _load_note(total, len(frames))
-        self._recentre()
+        self._sampled = {}
         self._write_filmstrip()
         self.imageChanged.emit()
         self.previewChanged.emit()
@@ -701,7 +634,7 @@ class DockModel(QObject):
     def clearImage(self):
         self._source = ""
         self._images = []
-        self._natural = (0, 0)
+        self._frame.set_natural(0, 0)
         self._sampled = {}
         self._trim = (0, 0)
         self._preview_frame = 0
@@ -711,57 +644,17 @@ class DockModel(QObject):
         self.previewChanged.emit()
         self.lightingChanged.emit()
 
-    def _recentre(self):
-        """Put the picture in the middle of the window. Where a load starts.
-
-        Also where a zoom lands, which is Space Station's behaviour: their
-        slider throws the pan away and re-centres. Keeping the pan would be
-        defensible, but zooming about a corner that is off-screen is worse than
-        both, and matching them costs nothing.
-        """
-        width, height = self.renderedSize
-        self._pan = (HOLE_X + (charger.CROP_WIDTH - width) / 2.0,
-                     HOLE_Y + (charger.CROP_HEIGHT - height) / 2.0)
-        self._sampled = {}
-
-    def _reframe(self):
+    def _reframed(self):
         """The picture moved under the window: nothing sampled is still true."""
-        width, height = self.renderedSize
-        self._pan = (clamp_pan(self._pan[0], width, HOLE_X, charger.CROP_WIDTH),
-                     clamp_pan(self._pan[1], height, HOLE_Y, charger.CROP_HEIGHT))
         self._sampled = {}
         self.imageChanged.emit()
         self.previewChanged.emit()
 
     def _render(self, index):
-        """One source frame, framed onto the 334x304 crop canvas.
-
-        Black underneath, always, so anything outside the picture -- which
-        only "Fit inside" and a letterbox produce -- samples as an unlit LED
-        rather than as whatever was in the buffer.
-
-        Translucency is one place this deliberately does not match Space
-        Station. Theirs reads the canvas's un-premultiplied RGB and never looks
-        at the alpha byte, so a 50% red PNG samples as full red; here it is
-        composited onto the black first and samples as half red, which is what
-        the picture looks like. Only reachable through a PNG -- a GIF's
-        transparency is all or nothing, and both agree there.
-        """
-        canvas = QImage(charger.CROP_WIDTH, charger.CROP_HEIGHT,
-                        QImage.Format_RGB888)
-        canvas.fill(Qt.black)
-        if 0 <= index < len(self._images):
-            width, height = self.renderedSize
-            painter = QPainter(canvas)
-            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
-            # In the window's own coordinates, so the parts of the picture that
-            # fall outside it are clipped by the canvas rather than by
-            # arithmetic that has to get the source rectangle right.
-            painter.drawImage(
-                QRectF(self._pan[0] - HOLE_X, self._pan[1] - HOLE_Y,
-                       width, height), self._images[index])
-            painter.end()
-        return canvas
+        """One source frame, framed onto the 334x304 crop canvas."""
+        if not 0 <= index < len(self._images):
+            return self._frame.render(None)
+        return self._frame.render(self._images[index])
 
     def _sample(self, index):
         """One frame's 162 colours, computed once per framing."""
@@ -853,11 +746,11 @@ class DockModel(QObject):
 
     @Property(int, constant=True)
     def holeX(self):
-        return HOLE_X
+        return self._frame.hole_x
 
     @Property(int, constant=True)
     def holeY(self):
-        return HOLE_Y
+        return self._frame.hole_y
 
     @Property(int, constant=True)
     def holeWidth(self):
@@ -870,52 +763,50 @@ class DockModel(QObject):
     @Property("QVariantList", notify=imageChanged)
     def renderedSize(self):
         """How big the picture is drawn on the stage, at this fit and zoom."""
-        width, height = fitted_size(self._natural[0], self._natural[1], self._fit)
-        factor = zoom_factor(self._zoom)
-        return [width * factor, height * factor]
+        return list(self._frame.rendered_size())
 
     @Property(float, notify=imageChanged)
     def imageX(self):
-        return self._pan[0]
+        return self._frame.pan[0]
 
     @Property(float, notify=imageChanged)
     def imageY(self):
-        return self._pan[1]
+        return self._frame.pan[1]
 
     @Property(float, notify=imageChanged)
     def imageDrawWidth(self):
-        return self.renderedSize[0]
+        return self._frame.rendered_size()[0]
 
     @Property(float, notify=imageChanged)
     def imageDrawHeight(self):
-        return self.renderedSize[1]
+        return self._frame.rendered_size()[1]
 
     @Property(bool, notify=imageChanged)
     def canPan(self):
         """False when the picture is smaller than the window on both axes."""
-        width, height = self.renderedSize
-        return bool(self._images) and (width > charger.CROP_WIDTH
-                                       or height > charger.CROP_HEIGHT)
+        return bool(self._images) and self._frame.can_pan()
 
     @Slot(float, float)
     def panBy(self, dx, dy):
         if not self._images:
             return
-        self._pan = (self._pan[0] + float(dx), self._pan[1] + float(dy))
-        self._reframe()
+        self._frame.pan_by(dx, dy)
+        self._reframed()
+
+    @Slot()
+    def framingSettled(self):
+        """A drag ended. Nothing owed here: sampling one frame is half a
+        millisecond, so the wedge has been keeping up the whole way down.
+        The Screen page's is not free and this is the hook it needs."""
 
     @Property(int, notify=imageChanged)
     def zoom(self):
-        return self._zoom
+        return self._frame.zoom
 
     @zoom.setter
     def zoom(self, value):
-        value = max(ZOOM_MIN, min(ZOOM_MAX, int(value)))
-        if value != self._zoom:
-            self._zoom = value
-            self._recentre()
-            self.imageChanged.emit()
-            self.previewChanged.emit()
+        if self._frame.set_zoom(value):
+            self._reframed()
 
     @Property(int, constant=True)
     def zoomMin(self):
@@ -927,20 +818,16 @@ class DockModel(QObject):
 
     @Property(str, notify=imageChanged)
     def zoomLabel(self):
-        return f"{zoom_factor(self._zoom):.2f}×"
+        return self._frame.zoom_label()
 
     @Property(int, notify=imageChanged)
     def imageFitMode(self):
-        return self._fit
+        return self._frame.fit
 
     @imageFitMode.setter
     def imageFitMode(self, index):
-        index = max(0, min(len(IMAGE_FIT_MODES) - 1, int(index)))
-        if index != self._fit:
-            self._fit = index
-            self._recentre()
-            self.imageChanged.emit()
-            self.previewChanged.emit()
+        if self._frame.set_fit(index):
+            self._reframed()
 
     @Property(list, constant=True)
     def imageFitModes(self):

@@ -2074,6 +2074,9 @@ def screen_model_with(frames=1):
         painter.end()
         image.save(path, "PNG")
     loaded = model.open(QUrl.fromLocalFile(path))
+    # An upload is wired-only, so every test that sends one has to say the pad
+    # is on a cable. `test_an_upload_needs_a_cable` is the one that does not.
+    model.infoReceived({"connect_type": "wired"})
     return model, loaded
 
 
@@ -2173,6 +2176,111 @@ def test_changing_the_fit_changes_the_pixels():
     check("fit leaves a black corner", rgb[:3] == b"\x00\x00\x00", rgb[:3].hex())
     _w, _h, filled = screen.decode_frame(encoded[0])
     check("fill does not", filled[:3] != b"\x00\x00\x00", filled[:3].hex())
+
+
+def test_an_upload_needs_a_cable():
+    """On the dongle, starting one strands the pad in upgrade mode.
+
+    **Measured on the hardware here.** The pad takes command 31 over the dongle
+    and switches its screen chip into upgrade mode; nothing then appears on the
+    PC, because the dongle does not relay the bootloader's USB CDC device and
+    has no notion that there is one. So the upload times out waiting for a tty
+    that cannot arrive, and the pad sits in upgrade mode until it is
+    power-cycled at its own switch. Nothing about that is recoverable from the
+    application, which is why the refusal has to come before the command.
+    """
+    model, _ = screen_model_with(1)
+    check("a wired pad may upload", model.canUpload)
+    check("and is not nagged about it", model.uploadBlocked == "")
+
+    model.infoReceived({"connect_type": "dongle"})
+    check("the same picture on the dongle may not", not model.canUpload)
+    check("and the page is told why", "cable" in model.uploadBlocked,
+          model.uploadBlocked)
+
+    started = []
+    model.uploadRequested.connect(lambda *a: started.append(a))
+    model.upload()
+    check("calling upload() anyway sends nothing", started == [])
+    check("and it does not leave the page stuck busy", not model.busy)
+
+    # An unanswered info poll is not evidence of a cable either.
+    model.infoReceived({})
+    check("an unknown connection counts as not wired", not model.canUpload)
+
+    model.infoReceived({"connect_type": "wired"})
+    model.upload()
+    check("plugging it in lets it through", len(started) == 1)
+
+
+def test_the_screen_picture_can_be_dragged_under_the_panel():
+    """The Dock page's stage, against the panel's 160x80 window.
+
+    Space Station has no framing here at all -- their screen page takes the
+    middle of the picture and that is the whole of it -- so every number below
+    is this project's own, and the arithmetic is `imaging.CropFrame`'s.
+    """
+    model, _ = screen_model_with(1)
+
+    # 90x70 filled onto 160x80 covers by width: 160/90 * 70 = 124.4 tall. The
+    # stage is 320x160, so the window's corner is at (80, 40).
+    check("filling covers the window",
+          (round(model.imageDrawWidth), round(model.imageDrawHeight)) == (160, 124),
+          (model.imageDrawWidth, model.imageDrawHeight))
+    check("and is centred in it",
+          model.imageX == 80 and round(model.imageY, 1) == 17.8,
+          (model.imageX, model.imageY))
+    check("a picture taller than the window is draggable", model.canPan)
+
+    model.panBy(0, 10000)
+    check("dragging down stops at the picture's top edge",
+          model.imageY == 40, model.imageY)
+    model.panBy(0, -10000)
+    check("and dragging up stops at its bottom edge",
+          round(model.imageY, 1) == -4.4, model.imageY)
+    check("it is exactly as wide as the window, so it does not slide sideways",
+          model.imageX == 80, model.imageX)
+
+    model.fitMode = 1
+    check("fitting inside letterboxes instead",
+          (round(model.imageDrawWidth), round(model.imageDrawHeight)) == (103, 80),
+          (model.imageDrawWidth, model.imageDrawHeight))
+    check("and leaves nothing to drag", not model.canPan)
+
+    model.fitMode = 0
+    model.zoom = model.zoomMax
+    check("the zoom tops out at 1.95x", model.zoomLabel == "1.95×", model.zoomLabel)
+    check("and it scales the fitted size",
+          round(model.imageDrawWidth) == round(160 * 1.95), model.imageDrawWidth)
+    check("a zoom re-centres, as the dock's does",
+          round(model.imageX) == round(80 + (160 - 160 * 1.95) / 2), model.imageX)
+
+
+def test_a_screen_drag_re_encodes_when_it_ends_and_not_before():
+    """The one thing this page cannot copy from the Dock page.
+
+    Sampling 162 LEDs is half a millisecond, so the dock recomputes on every
+    mouse move. Here a reframe is an encode plus a preview file per frame, so a
+    255-frame animation would be seconds of work per pointer event. The stage
+    follows the pointer for free either way -- it is only moving an item that is
+    already on the scene graph -- and the encoded preview waits for the release.
+    """
+    model, _ = screen_model_with(1)
+    sent = []
+    model.uploadRequested.connect(lambda frames, _i, _r: sent.append(frames[0]))
+
+    def encoded_now():
+        model.upload()
+        model.uploadFinished(True)
+        return sent[-1]
+
+    before = encoded_now()
+    model.panBy(0, -40)
+    check("the stage moved", round(model.imageY, 1) == -4.4, model.imageY)
+    check("but nothing was re-encoded", encoded_now() == before)
+
+    model.framingSettled()
+    check("the release is what pays for it", encoded_now() != before)
 
 
 def test_every_frame_gets_a_preview_so_the_page_can_play_it():
@@ -2443,6 +2551,9 @@ def main():
                  test_the_frames_handed_over_are_ones_the_pad_would_accept,
                  test_an_upload_in_flight_locks_everything_that_would_disturb_it,
                  test_changing_the_fit_changes_the_pixels,
+                 test_an_upload_needs_a_cable,
+                 test_the_screen_picture_can_be_dragged_under_the_panel,
+                 test_a_screen_drag_re_encodes_when_it_ends_and_not_before,
                  test_every_frame_gets_a_preview_so_the_page_can_play_it,
                  test_the_screen_state_is_read_rather_than_assumed,
                  test_the_two_switches_are_different_sub_commands,
