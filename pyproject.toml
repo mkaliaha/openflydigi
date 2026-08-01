@@ -14,7 +14,7 @@
 [project]
 name = "Apex5"
 version = "1.0"
-description = "Desktop app for the Flydigi Apex 5 on Linux"
+description = "Desktop app for Flydigi controllers on Linux"
 requires-python = ">=3.9"
 
 [tool.pyside6-project]

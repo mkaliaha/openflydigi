@@ -59,10 +59,10 @@ def main():
     QQuickStyle.setStyle("org.kde.desktop")
 
     qt_app = QGuiApplication(sys.argv)
-    qt_app.setApplicationName("flydigi-apex5")
-    qt_app.setApplicationDisplayName("Flydigi Apex 5")
-    qt_app.setOrganizationName("flydigi-apex5")
-    qt_app.setDesktopFileName("flydigi-apex5")
+    qt_app.setApplicationName("openflydigi")
+    qt_app.setApplicationDisplayName("OpenFlydigi")
+    qt_app.setOrganizationName("openflydigi")
+    qt_app.setDesktopFileName("openflydigi")
     qt_app.setWindowIcon(QIcon.fromTheme("input-gaming"))
 
     # Before the engine, so that loading the window is watched too. Creates

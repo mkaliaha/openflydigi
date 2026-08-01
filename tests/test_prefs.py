@@ -13,6 +13,7 @@ against real entries, but writes preferences to a temporary file.
 """
 import json
 import os
+import re
 import sys
 import tempfile
 
@@ -260,8 +261,17 @@ def main():
             setup.DESKTOP_PATH = real
 
     entry = setup.desktop_text()
+    # Against `gui/main.py` itself rather than against a literal: the two names
+    # have to agree or the window is not associated with its launcher, and a
+    # test that spells the answer out passes happily while they drift apart.
+    # Read as text, because this file is one of the ones that must not import Qt.
+    with open(os.path.join(setup.ROOT, "gui", "main.py")) as fh:
+        declared = re.search(r'setDesktopFileName\("([^"]+)"\)', fh.read())
     results.append(check("the entry is named to match setDesktopFileName",
-                         setup.DESKTOP_NAME == "flydigi-apex5.desktop"))
+                         declared is not None
+                         and setup.DESKTOP_NAME == declared.group(1) + ".desktop"))
+    results.append(check("the entry it replaces is not the one it installs",
+                         setup.STALE_DESKTOP != setup.DESKTOP_PATH))
     results.append(check("the entry declares itself an application",
                          "Type=Application" in entry))
     results.append(check("the entry does not open a terminal",

@@ -28,7 +28,7 @@ Kirigami.ApplicationWindow {
     id: root
     objectName: "mainWindow"
 
-    title: "Flydigi Apex 5"
+    title: "OpenFlydigi"
     width: Kirigami.Units.gridUnit * 48
     height: Kirigami.Units.gridUnit * 38
     minimumWidth: Kirigami.Units.gridUnit * 30

@@ -114,8 +114,11 @@ variable any module under `gui/` reads is the stall watchdog's, below.
 `tests/qml_harness.py` repeats the same list.
 
 The application identifies itself as application and organisation
-`flydigi-apex5`, display name "Flydigi Apex 5", desktop file `flydigi-apex5`,
-window icon from the theme name `input-gaming`.
+`openflydigi`, display name "OpenFlydigi", desktop file `openflydigi`, window
+icon from the theme name `input-gaming`. It shipped as `flydigi-apex5` before
+the project took the repository's own name, so `flydigi.setup.STALE_DESKTOP` is
+the old menu entry and installing removes it — otherwise an upgraded checkout
+leaves two entries that start the same window.
 
 `flydigi.setup` refuses to write the application-menu entry from the host when
 the host's `python3` cannot import PySide6, since the launcher would point at an

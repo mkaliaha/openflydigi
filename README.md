@@ -1,8 +1,12 @@
-# Flydigi Apex 5 on Linux
+# OpenFlydigi
 
 Native Linux support for the Flydigi Apex 5: **ForceAdapt adaptive triggers**, profiles and
 button remapping, macros, sticks, vibration, lighting, the pad's device settings and its
-160x80 screen — without Flydigi's Windows-only Space Station app.
+160x80 screen — without Flydigi's Windows-only Space Station app. The CD2 charging dock is
+driven too, as a device of its own.
+
+The Apex 5 is the pad this was built and measured on; the name is the project's, not the
+model's.
 
 `flydigi/` is pure Python with **no dependencies**; only the desktop app needs Qt, and every tool
 that talks to the pad runs on a machine without it.
@@ -184,7 +188,7 @@ tools/apex5-setup install-rules         # the one subcommand that needs root
 
 | Tool | What it does |
 |---|---|
-| `tools/apex5-setup` | `check` (default), `install-unit`/`remove-unit` (a `flydigid.service` user unit in `~/.config/systemd/user`), `enable`/`disable`/`start`/`stop`, `install-desktop`/`remove-desktop` (`flydigi-apex5.desktop`), `install-rules` — the same functions the app's Setup page drives in-process |
+| `tools/apex5-setup` | `check` (default), `install-unit`/`remove-unit` (a `flydigid.service` user unit in `~/.config/systemd/user`), `enable`/`disable`/`start`/`stop`, `install-desktop`/`remove-desktop` (`openflydigi.desktop`, and it removes the older `flydigi-apex5.desktop`), `install-rules` — the same functions the app's Setup page drives in-process |
 | `tools/fetch-configs` | Flydigi's game list, the Forza rule config, the monitor configs, the mod archives |
 | `tools/flydigi_cmd.py` | one-off vendor commands: device info, trigger effects, rumble |
 | `tools/flydigi-auto` | which games the daemon may act on by itself, and which route it takes |
