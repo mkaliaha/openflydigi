@@ -1265,6 +1265,42 @@ def test_restoring_one_profile_writes_the_factory_bytes_instead():
           mapping.read_config(pad, 0).title)
 
 
+def test_the_force_trigger_family_is_gated_on_the_hardware():
+    """81 and 82 are for force triggers, and a Vader has none.
+
+    The reference gates the whole send rather than the effect:
+    `SetForceTriggerConfigImpl` opens with `if (!controller.IsSupportForceTrigger)
+    return;`, and the replay `engage_stored` copies sits behind the same test at
+    `ControllerBusinessService:1599`. A Vader 5 declares it false, so Space
+    Station never sends either command to one.
+
+    **Its trigger motors are a different feature on a different command** --
+    `VibrationCommandFactory` writes two more level bytes at `array[7]`/`[8]`
+    beside the grips', under the same length byte -- so "the Vader's version of
+    SyncWithGrip" is not what 82 is, and gating it loses the pad nothing.
+    """
+    apex, vader = FakePad(), FakePad(device_type=130)
+    config = mapping.read_config(apex, 0)
+    config.set_trigger_effect("left", effects.MODE_LOCK, [60])
+    config.set_trigger_effect("right", effects.MODE_LOCK, [60])
+
+    check("an Apex 5 is sent the stored effect",
+          len(effects.engage_stored(apex, config, "k5", wait=0)) == 2)
+    check("and the pad has it live", len(apex.live_effects) == 2,
+          str(apex.live_effects))
+
+    check("a Vader is not", effects.engage_stored(vader, config, "f5", wait=0) == [])
+    check("and nothing reached it at all", not vader.live_effects and not vader.live_binds,
+          f"{vader.live_effects} {vader.live_binds}")
+
+    # An unknown model is not silently trusted either, and a caller that passes
+    # nothing still sends -- which is the bench script's escape hatch.
+    check("an unknown model is refused", effects.engage_stored(
+        FakePad(device_type=149), config, "k6", wait=0) == [])
+    check("and no code at all still sends",
+          len(effects.engage_stored(FakePad(), config, wait=0)) == 2)
+
+
 def test_a_restore_writes_this_model_s_profile_and_not_the_other_s():
     """The dangerous half of shipping factory bytes.
 
@@ -1902,6 +1938,7 @@ def main():
                  test_command_175_resets_every_profile_not_the_one_it_is_given,
                  test_restoring_one_profile_writes_the_factory_bytes_instead,
                  test_the_factory_blob_is_one_blob_and_a_digit,
+                 test_the_force_trigger_family_is_gated_on_the_hardware,
                  test_a_restore_writes_this_model_s_profile_and_not_the_other_s,
                  test_a_model_with_no_factory_profile_is_refused_the_per_slot_restore,
                  test_a_switch_save_is_aimed_at_the_second_bank,

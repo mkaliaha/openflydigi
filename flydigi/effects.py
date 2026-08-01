@@ -21,7 +21,7 @@ the live command cannot drift apart.
 import collections
 import time
 
-from . import device
+from . import device, identity
 from .device import (
     CMD_RUMBLE,
     CMD_SET_FORCE_TRIGGER,
@@ -388,8 +388,28 @@ def rumble(ctrl, low, high, wait=0.1):
     return ctrl.send(buf, wait=wait)
 
 
-def engage_stored(ctrl, config, wait=0.5):
+def engage_stored(ctrl, config, code=None, wait=0.5):
     """Send a profile's stored trigger effects to the pad as live commands.
+
+    **`code` is the pad's DeviceCode, and passing it is how a pad without force
+    triggers is skipped.** Commands 81 and 82 are the force-trigger family and
+    the reference gates the whole send on the capability, not on the effect:
+    `ControllerSdk.SetForceTriggerConfigImpl` opens with
+    `if (!controller.IsSupportForceTrigger) return;`, and the replay this
+    function copies is itself behind `if (controller.IsSupportForceTrigger &&
+    ...)` at `ControllerBusinessService:1599`. A Vader 5 declares
+    `IsSupportForceTrigger = false`, so Space Station never sends either command
+    to one -- and neither should this.
+
+    Its trigger motors are **not** reached this way, which is the thing worth
+    knowing before assuming 82 is the Vader's version of the same feature. They
+    are two more level bytes on the ordinary rumble command: `VibrationCommandFactory`
+    writes `array[7]`/`array[8]` beside the grips' `array[5]`/`array[6]` when
+    `IsSupportTriggerVibration`, under the same length byte of 6. See `rumble`.
+
+    `None` sends regardless, which is for a caller that genuinely does not know
+    what it is talking to -- a bench script. Anything holding a pad for a user
+    knows: `identity.require` returns the code, once per connection.
 
     **A stored effect does nothing until this runs.** Writing the block into the
     profile and applying the config stores it and engages nothing: measured by
@@ -413,6 +433,8 @@ def engage_stored(ctrl, config, wait=0.5):
 
     Returns [(side_name, ok), ...].
     """
+    if code is not None and not identity.can(code, "adaptive_triggers"):
+        return []
     if wait:
         time.sleep(wait)
     results = []

@@ -237,6 +237,15 @@ classifies it as bespoke.)
 **The live bind survives a config apply.** Applying a config does not restore it, so anything that
 alters the bind leaves it altered until something sets it back.
 
+**Both commands are gated on the hardware, and the gate is on the send rather than on the effect.**
+`ControllerSdk.SetForceTriggerConfigImpl` opens with `if (!controller.IsSupportForceTrigger) return;`,
+and the store-and-replay above sits behind the same test again at `ControllerBusinessService:1599`.
+A Vader 5 declares `IsSupportForceTrigger = false` and `IsSupportTriggerVibration = true`, so **Space
+Station never sends 81 or 82 to one** — not for a game bind, not for a stored effect, not from the
+picker. Its trigger motors are the command-18 path above, which is a different feature and not
+this one under another name. `effects.engage_stored` takes the DeviceCode and skips a pad without
+force triggers for exactly this reason.
+
 ### 3b. `K6Trigger*` — low-level / waveform, gated to `k6` in the SDK
 
 **Nothing in this section is hardware-verified — the layouts are transcribed from the SDK.** It

@@ -63,6 +63,11 @@ class DeviceWorker(QObject):
     def __init__(self):
         super().__init__()
         self._ctrl = None
+        # The open pad's DeviceCode, learned by the identify read `_controller`
+        # already pays for and cleared with the handle. What it gates is the
+        # force-trigger family: 81 and 82 are for hardware a Vader has none of,
+        # and Space Station's own send returns early on the same capability.
+        self._code = None
         # Which pad to open, as a selector -- see `flydigi/registry.py`. None
         # is "whichever the bus offers first", which is what one pad means and
         # what this did before there could be two.
@@ -109,7 +114,10 @@ class DeviceWorker(QObject):
         if self._ctrl is None:
             ctrl = registry.open_pad(self._selector)
             try:
-                identity.require(ctrl)
+                # Kept, not discarded: the model decides which commands may go
+                # out at all, and this is the one place that learns it without
+                # spending an exchange of its own.
+                self._code = identity.require(ctrl)["code"]
             except identity.WrongDevice:
                 ctrl.close()
                 raise
@@ -117,6 +125,7 @@ class DeviceWorker(QObject):
         return self._ctrl
 
     def _drop(self):
+        self._code = None
         if self._ctrl is not None:
             try:
                 self._ctrl.close()
@@ -367,7 +376,7 @@ class DeviceWorker(QObject):
             # running has trigger effects stored in it, and they do not start on
             # their own. Opening a profile therefore engages its effects, which
             # is what makes the Triggers page describe something real.
-            effects.engage_stored(ctrl, config)
+            effects.engage_stored(ctrl, config, self._code)
             return config
 
         config = self._attempt(work, f"reading profile {cfg_id + 1}")
@@ -392,7 +401,7 @@ class DeviceWorker(QObject):
         def work(ctrl):
             with ctrl.claim():
                 restored, saved = mapping.reset_config(ctrl, cfg_id)
-                effects.engage_stored(ctrl, restored)
+                effects.engage_stored(ctrl, restored, self._code)
                 return restored, saved
 
         result = self._attempt(work, f"restoring profile {cfg_id + 1}")
@@ -426,7 +435,7 @@ class DeviceWorker(QObject):
                 status = mapping.read_status(ctrl)
                 active = status["active"] if status else 0
                 config = mapping.read_config(ctrl, active)
-                effects.engage_stored(ctrl, config)
+                effects.engage_stored(ctrl, config, self._code)
                 return active, config
 
         result = self._attempt(work, "restoring every profile")
@@ -477,7 +486,7 @@ class DeviceWorker(QObject):
                     # re-seat of the trigger motors.
                     mapping.write_config(ctrl, cfg_id, original, old=config)
                     config = original
-                effects.engage_stored(ctrl, config)
+                effects.engage_stored(ctrl, config, self._code)
                 return ok, stripped, config
 
         result = self._attempt(work, f"copying profile {cfg_id + 1} to Switch")
@@ -575,7 +584,7 @@ class DeviceWorker(QObject):
                 # theirs: live effect state survives a config apply, so "the
                 # trigger bytes did not change" does not mean the pad is
                 # running them.
-                effects.engage_stored(ctrl, new)
+                effects.engage_stored(ctrl, new, self._code)
             return sent, saved
 
         result = self._attempt(work, f"writing profile {cfg_id + 1}")

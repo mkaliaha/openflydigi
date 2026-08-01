@@ -181,8 +181,16 @@ def commit(ctrl, cfg_id, new, old, save):
     # Storing a trigger effect does not start it. Space Station replays the
     # stored block as a live command 81 per side after every applied-config
     # read; without that the triggers stay loose whatever the profile says.
-    engaged = ", ".join(name for name, ok in effects.engage_stored(ctrl, new) if ok)
-    print(f"engaged the stored trigger effect on: {engaged or 'neither trigger'}")
+    code = getattr(ctrl, "device_code", None)
+    if not identity.can(code, "adaptive_triggers"):
+        # Not silence: the profile still carries a stored effect, and saying
+        # nothing here would look like the replay had happened.
+        print("no force triggers on this model, so nothing was engaged -- the "
+              "stored effect is in the profile and this pad cannot play it")
+    else:
+        engaged = ", ".join(
+            name for name, ok in effects.engage_stored(ctrl, new, code) if ok)
+        print(f"engaged the stored trigger effect on: {engaged or 'neither trigger'}")
 
 
 def main():
@@ -309,9 +317,15 @@ def main():
         # stores -- they need a live command 81 each. Reading the slot back is
         # what supplies the bytes to build those from; it is already the active
         # one, so the read costs a round trip and switches nothing.
+        code = getattr(ctrl, "device_code", None)
+        if not identity.can(code, "adaptive_triggers"):
+            sys.exit("error: this model has no force triggers, so there is no "
+                     "stored effect to engage. Its trigger motors are a "
+                     "different feature and ride the rumble command.")
         engaged = ", ".join(
             name for name, ok
-            in effects.engage_stored(ctrl, mapping.read_config(ctrl, args.cfg))
+            in effects.engage_stored(ctrl, mapping.read_config(ctrl, args.cfg),
+                                     code)
             if ok)
         print(f"engaged the stored trigger effect on: {engaged or 'neither trigger'}")
         return

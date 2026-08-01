@@ -515,6 +515,17 @@ the test files are re-export shims and the tests import them by the old names.
   * **A config apply does not restore live trigger state.** Bind and effect state set by 81/82
     survive `apply_config`, so re-applying a profile does not undo an experiment. Set it back
     explicitly, with `bindType 2`.
+  * **81 and 82 never go to a Vader, and the gate is Flydigi's own.**
+    `SetForceTriggerConfigImpl` returns early on `!IsSupportForceTrigger` and the stored-effect
+    replay is behind the same test, so Space Station sends neither command to a pad that declares
+    itself without force triggers -- which a Vader 5 does. The tempting reading is that
+    `SyncWithGrip` is the Vader's version of the same feature, driving its trigger motors instead of
+    the resistance; it is not. Those motors are **command 18**, the ordinary rumble, with two more
+    level bytes at `[7]`/`[8]` beside the grips' `[5]`/`[6]` under the same length byte
+    ([PROTOCOL.md](PROTOCOL.md) §3a) -- so `effects.rumble()` as written can never reach them, and a
+    trigger-motor editor is a rumble change rather than a trigger-effect one.
+    `effects.engage_stored` takes the DeviceCode and skips a pad without force triggers; the worker
+    caches it off the identify read it already pays for.
   * **Stored trigger type 5 is *not* a Vader feature, unlike the control sitting next to it.**
     Space Station's trigger-mode picker emits all six modes with no `deviceCode` test, gated only on
     `supportAdaptTrigger`. The Vader-only block in the same panel is `vibrationTriggerConfigParam` —
