@@ -10,7 +10,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flydigi import device, effects, lighting, mapping
+from flydigi import (device, effects, factory_config, identity, lighting,
+                     mapping)
 from tests.fake_pad import BLOB_LEN, FakePad, blank_blob
 
 PASSED = []
@@ -1212,23 +1213,91 @@ def test_lighting_effects_write_frames():
           str(config.loop))
 
 
-def test_resetting_a_slot_takes_its_name_with_it():
-    """175 restores the whole slot, and the title is part of the slot.
+def test_command_175_resets_every_profile_not_the_one_it_is_given():
+    """Measured on the pad, and the reason there are two reset paths at all.
 
-    Worth asserting rather than assuming, because it is the half a UI has to
-    warn about: "restore defaults" reads as settings, and the name goes too.
+    The slots were named A1/B2/C3/D4 and saved, 175 was sent with `cfgId = 2`,
+    and all four came back at factory with their tags at 0xFFFF. Flydigi name
+    the factory `ResetMappingConfigByCfgId` and gate it on
+    `ResetAllMappingUsable`; only the second is true.
+    """
+    pad = FakePad()
+    for cfg in range(4):
+        config = mapping.read_config(pad, cfg)
+        config.title = f"Mine {cfg}"
+        mapping.write_config(pad, cfg, config, old=None)
+
+    check("reset-all is acknowledged", mapping.reset_all_configs(pad) is True)
+    for cfg in range(4):
+        check(f"slot {cfg} went back to factory",
+              mapping.read_config(pad, cfg).title == f"Profile {cfg + 1}",
+              mapping.read_config(pad, cfg).title)
+
+
+def test_restoring_one_profile_writes_the_factory_bytes_instead():
+    """A single slot is restored by writing, not by 175.
+
+    Which is what Space Station does -- `ControllerRepository.ResetMappingConfig`
+    with a slot id writes a bundled `default_mapping_<DeviceType>` blob into it
+    and commits -- and the only thing that *can* be done, since the firmware
+    command has no per-slot form.
     """
     pad = FakePad()
     config = mapping.read_config(pad, 1)
     config.title = "Racing"
+    config.set_mapping("a", "b")
     mapping.write_config(pad, 1, config, old=None)
-    check("the rename landed first", mapping.read_config(pad, 1).title == "Racing")
+    check("the edit landed first", mapping.read_config(pad, 1).title == "Racing")
 
-    check("reset is acknowledged", mapping.reset_config(pad, 1) is True)
-    check("the slot was reset", pad.reset_slots == [1], str(pad.reset_slots))
-    check("and the name went back to factory",
-          mapping.read_config(pad, 1).title == "Profile 2",
-          mapping.read_config(pad, 1).title)
+    restored, saved = mapping.reset_config(pad, 1)
+    check("it is saved to flash", saved is True)
+    check("the restored profile carries the factory title",
+          restored.title == mapping.MappingConfig(
+              factory_config.for_slot(1), 1).title, restored.title)
+    check("the remap is gone", restored.mapping("a")[0] == "a",
+          str(restored.mapping("a")))
+    check("and it went under a fresh tag, not the old one",
+          restored.data_version != config.data_version,
+          f"{restored.data_version} vs {config.data_version}")
+
+    check("the other slots are untouched",
+          mapping.read_config(pad, 0).title == "Profile 1",
+          mapping.read_config(pad, 0).title)
+
+
+def test_a_model_with_no_dumped_profile_is_refused_the_per_slot_restore():
+    """The dangerous half of shipping factory bytes.
+
+    Restoring one slot means writing a config, so it needs *this model's*
+    config. An Apex 5's key table written to a Vader would leave C and Z mapped
+    to nothing and call the result factory. The firmware's own reset has no such
+    problem and stays available -- it just takes all four with it.
+    """
+    vader = FakePad(device_type=130)
+    try:
+        mapping.reset_config(vader, 0)
+    except identity.WrongDevice as exc:
+        check("the refusal names the model", "Vader 5" in str(exc), str(exc))
+    else:
+        check("a Vader should not accept an Apex 5's factory profile", False)
+
+    check("but the firmware's own reset still works on it",
+          mapping.reset_all_configs(vader) is True)
+
+
+def test_the_factory_blob_is_one_blob_and_a_digit():
+    """Four slots, one profile, one differing byte -- and it is the title.
+
+    `tools/gen-factory-config` refuses to regenerate if that stops being true,
+    so this is the assertion that would notice a firmware change first.
+    """
+    blobs = [factory_config.for_slot(cfg) for cfg in range(4)]
+    differing = sorted({i for other in blobs[1:]
+                        for i in range(len(blobs[0])) if blobs[0][i] != other[i]})
+    check("exactly one byte differs across the four",
+          differing == [mapping.OFF_TITLE + 4], str(differing))
+    titles = [mapping.MappingConfig(blob, i).title for i, blob in enumerate(blobs)]
+    check("and it is the digit in the title", len(set(titles)) == 4, str(titles))
 
 
 def test_a_switch_save_is_aimed_at_the_second_bank():
@@ -1636,7 +1705,10 @@ def main():
                  test_a_models_keys_are_its_own,
                  test_a_save_carries_the_version_it_is_given,
                  test_nothing_saves_a_profile_without_its_version,
-                 test_resetting_a_slot_takes_its_name_with_it,
+                 test_command_175_resets_every_profile_not_the_one_it_is_given,
+                 test_restoring_one_profile_writes_the_factory_bytes_instead,
+                 test_the_factory_blob_is_one_blob_and_a_digit,
+                 test_a_model_with_no_dumped_profile_is_refused_the_per_slot_restore,
                  test_a_switch_save_is_aimed_at_the_second_bank,
                  test_a_switch_save_commits_the_running_profile_under_a_new_tag,
                  test_the_switch_save_frame_is_flydigis_own_odd_one,

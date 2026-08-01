@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Regenerate `flydigi/factory_config.py` from a pad sitting at factory.
+
+What a factory profile actually contains cannot be derived -- this project's
+own `blank_blob()` reconstruction differs from the real thing in 93 of 840
+bytes, across the header, the grip-vibration block and the whole trigger
+region. So the bytes are read off hardware, the way `tools/gen_ds5_usb.py`
+reads a real DualSense.
+
+Getting a pad into that state means command 175, which resets **all four**
+profiles and cannot be undone. This tool therefore only reads: put the pad
+there yourself with `flydigi-mapping reset`, then run this.
+
+    tools/flydigi-mapping reset        # destroys every profile
+    tools/gen-factory-config > flydigi/factory_config.py
+
+The four slots turn out to be one blob: they differ at exactly one byte, 774,
+which is the digit in the factory title 配置1..4. So one blob and a digit is
+the whole of it.
+"""
+import argparse
+import os
+import sys
+import textwrap
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from flydigi import identity, mapping, registry
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    registry.add_device_argument(parser)
+    parser.add_argument("--i-know", action="store_true",
+                        help="read even if the slots are not all at factory")
+    args = parser.parse_args()
+
+    ctrl = registry.open_pad(args.device)
+    with ctrl:
+        identity.require(ctrl, "k5")
+        status = mapping.read_status(ctrl)
+        if status is None:
+            sys.exit("error: the pad did not answer command 161")
+        untouched = all(v == 0xFFFF for v in status["versions"])
+        if not untouched and not args.i_know:
+            sys.exit(f"error: tags are {status['versions']}, so at least one "
+                     f"slot has been written since it left the factory. Reset "
+                     f"the pad first, or pass --i-know to read it anyway.")
+        blobs = [bytes(mapping.read_config(ctrl, cfg).blob) for cfg in range(4)]
+
+    base = blobs[0]
+    differing = sorted({i for other in blobs[1:]
+                        for i in range(len(base)) if base[i] != other[i]})
+    if differing != [mapping.OFF_TITLE + 4]:
+        sys.exit(f"error: the four slots differ at {differing}, not just the "
+                 f"title digit at {mapping.OFF_TITLE + 4}. The one-blob "
+                 f"assumption below no longer holds; look before regenerating.")
+
+    digits = [blob[mapping.OFF_TITLE + 4] for blob in blobs]
+    body = "\n".join(f'    "{line}"' for line in textwrap.wrap(base.hex(), 72))
+    print(HEADER.format(digits=digits, offset=mapping.OFF_TITLE + 4,
+                        hexdump=body))
+    return 0
+
+
+HEADER = '''\
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+"""The Apex 5's factory profile, read off the pad. Generated -- see below.
+
+Regenerate with `tools/gen-factory-config`, which needs a pad whose four slots
+have all been reset. Do not hand-edit.
+
+**Why this is bytes rather than code.** A factory profile is not "every field at
+its default": this project's own reconstruction in `flydigi/mock/pad.py` differs
+from the real thing in 93 of 840 bytes -- the header at 2..12 including the
+`OldLedConfig` mirror nothing here decodes, the grip-vibration block, and the
+whole trigger region from 153 to 224. Writing that reconstruction to a pad and
+calling it "factory" would be a guess with a confident label on it.
+
+**Why one blob covers four slots.** The four factory profiles are byte-identical
+apart from a single byte at {offset}, the digit in their titles -- measured, and
+`gen-factory-config` refuses to regenerate if that stops being true.
+
+**What this is for.** A per-profile restore. Command 175 resets all four slots
+and ignores the slot it is given, so restoring one means writing the factory
+bytes into it and saving -- which is exactly what Space Station does, from a
+`default_mapping_<DeviceType>` file it ships. This is that file, obtained from
+the hardware instead.
+"""
+
+# One byte per slot, at offset {offset}: the digit in the factory title.
+TITLE_DIGITS = {digits}
+
+FACTORY_BLOB = bytes.fromhex(
+{hexdump}
+)
+
+
+def for_slot(cfg_id):
+    """The factory profile for one slot, as a fresh bytearray."""
+    if not 0 <= cfg_id < len(TITLE_DIGITS):
+        raise ValueError(f"no profile slot {{cfg_id}}")
+    blob = bytearray(FACTORY_BLOB)
+    blob[{offset}] = TITLE_DIGITS[cfg_id]
+    return blob
+'''
+
+
+if __name__ == "__main__":
+    sys.exit(main())

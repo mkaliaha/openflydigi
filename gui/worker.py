@@ -47,6 +47,7 @@ class DeviceWorker(QObject):
     lighting_written = Signal(int, bool)
     macro_recorded = Signal(list)        # steps; empty means nothing was played
     active_changed = Signal(int)
+    profiles_reset = Signal()            # all four slots are factory again
     devices_changed = Signal(list)       # every device attached, probed
     pad_selected = Signal(str)           # a different pad is now the open one
     dock_state = Signal(dict)            # one dock's whole state
@@ -375,30 +376,64 @@ class DeviceWorker(QObject):
 
     @Slot(int)
     def reset_profile(self, cfg_id):
-        """Command 175: put one slot back to factory and re-read it.
+        """Restore one profile by writing the factory bytes into it.
 
-        The read afterwards is not a nicety. The slot is a different profile
-        now, so everything the app is holding for it is stale -- and the read is
-        also what puts the pad on the restored profile, which is the state the
-        rest of this class assumes.
+        Not the firmware's reset -- command 175 ignores the slot it is given and
+        resets all four, which is `reset_all_profiles` below. A single slot is
+        restored the way Space Station does it, by writing a factory config and
+        committing, and that needs this model's factory bytes: refused on a pad
+        whose profile nobody has dumped.
         """
         self.status.emit(f"Restoring profile {cfg_id + 1} to factory…")
 
         def work(ctrl):
             with ctrl.claim():
-                if not mapping.reset_config(ctrl, cfg_id):
-                    return None
-                config = mapping.read_config(ctrl, cfg_id)
-                effects.engage_stored(ctrl, config)
-                return config
+                restored, saved = mapping.reset_config(ctrl, cfg_id)
+                effects.engage_stored(ctrl, restored)
+                return restored, saved
 
-        config = self._attempt(work, f"restoring profile {cfg_id + 1}")
-        if config is None:
+        result = self._attempt(work, f"restoring profile {cfg_id + 1}")
+        if result is None:
             return
+        config, saved = result
         self.profile_loaded.emit(cfg_id, bytes(config.blob), config.title)
         self.active_changed.emit(cfg_id)
-        self.status.emit(f"Profile {cfg_id + 1} restored to factory "
-                         f"— it is called {config.title!r} again")
+        self.status.emit(
+            f"Profile {cfg_id + 1} restored to factory — it is called "
+            f"{config.title!r} again"
+            + ("" if saved else ", but the save was not acknowledged"))
+
+    @Slot()
+    def reset_all_profiles(self):
+        """Command 175: every profile back to factory. All four, always.
+
+        The slot argument is inert -- measured, with the four slots named and
+        175 sent at one of them, and all four coming back factory. So there is
+        nothing to aim it at and nothing to say about scope except the truth.
+
+        Everything the app holds for every slot is stale afterwards, which is
+        why this emits `profiles_reset` rather than one `profile_loaded`.
+        """
+        self.status.emit("Restoring every profile to factory…")
+
+        def work(ctrl):
+            with ctrl.claim():
+                if not mapping.reset_all_configs(ctrl):
+                    return None
+                status = mapping.read_status(ctrl)
+                active = status["active"] if status else 0
+                config = mapping.read_config(ctrl, active)
+                effects.engage_stored(ctrl, config)
+                return active, config
+
+        result = self._attempt(work, "restoring every profile")
+        if result is None:
+            return
+        active, config = result
+        self.profiles_reset.emit()
+        self.profile_loaded.emit(active, bytes(config.blob), config.title)
+        self.active_changed.emit(active)
+        self.status.emit("Every profile restored to factory")
 
     @Slot(int)
     def copy_to_switch(self, cfg_id):

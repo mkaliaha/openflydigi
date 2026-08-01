@@ -1544,7 +1544,8 @@ class ProfileModel(QObject):
     # straight connect with no adapter in between.
     writeRequested = Signal(int, bytes, bytes, bool)   # cfg_id, blob, previous, save
     loadRequested = Signal(int)
-    resetRequested = Signal(int)         # cfg_id -- command 175
+    resetRequested = Signal(int)         # cfg_id -- write the factory blob
+    resetAllRequested = Signal()         # command 175, which hits all four
     switchCopyRequested = Signal(int)    # cfg_id -- command 171
     restoreFailed = Signal(str)
     saveRefused = Signal(str)
@@ -1938,6 +1939,17 @@ class ProfileModel(QObject):
         if self._cfg_id < 0 or self._edited is None:
             return
         self.resetRequested.emit(self._cfg_id)
+
+    @Slot()
+    def resetAllProfiles(self):
+        """Ask the firmware to restore all four -- command 175.
+
+        No slot argument, because the command has none that works: it ignores
+        the id it is given and resets everything. Offering a per-slot choice
+        here would be repeating Flydigi's own mistake, whose UI has a
+        per-profile item wired to this and loses the other three.
+        """
+        self.resetAllRequested.emit()
 
     @Slot()
     def copyToSwitch(self):

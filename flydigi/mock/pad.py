@@ -610,19 +610,22 @@ class FakePad:
         return [self._ack(mapping.CMD_SAVE)]
 
     def _reset(self, payload):
-        """Command 175: put one slot back to factory, name included.
+        """Command 175: put **every** slot back to factory, names included.
 
-        The name matters and is the whole reason this is modelled rather than
-        stubbed: the title lives in the blob, so a reset restores it along with
-        everything else, and a UI that says "restore defaults" without saying
-        the name goes with them is lying to whoever presses it.
+        The slot byte is accepted and ignored, which is what the pad does --
+        measured, with the four slots named A1/B2/C3/D4 and saved, 175 sent with
+        `cfgId = 2`, and all four coming back as the factory titles with their
+        tags at 0xFFFF. Flydigi call the factory `ResetMappingConfigByCfgId` and
+        gate it on `ResetAllMappingUsable`; only the second name is true.
+
+        Modelling the argument as inert is the point of having it here. A fake
+        that reset the slot it was told to would let a per-slot reset ship, and
+        the first person to press it would lose the other three profiles.
         """
-        cfg_id = payload[0]
-        if cfg_id not in self.blobs:
-            return []
-        self.blobs[cfg_id] = blank_blob(f"Profile {cfg_id + 1}")
-        self.saved[cfg_id] = bytes(self.blobs[cfg_id])
-        self.reset_slots.append(cfg_id)
+        self.reset_slots.append(payload[0] if payload else None)
+        for cfg_id in self.blobs:
+            self.blobs[cfg_id] = blank_blob(f"Profile {cfg_id + 1}")
+            self.saved[cfg_id] = bytes(self.blobs[cfg_id])
         return [self._ack(mapping.CMD_RESET)]
 
     def _save_switch(self, payload):

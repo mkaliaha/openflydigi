@@ -216,6 +216,12 @@ Kirigami.ScrollablePage {
             FormCard.FormButtonDelegate {
                 objectName: "resetButton"
                 text: "Restore this profile to factory…"
+                // Hidden rather than disabled on a model whose factory profile
+                // this project has not got. Restoring one slot means *writing*
+                // factory bytes -- the firmware's own reset has no per-slot
+                // form -- so it needs the real bytes for the real model, and a
+                // greyed-out button would invite the question with no answer.
+                visible: App.devices.capabilities.factory_profile === true
                 // The name is the part nobody expects to lose, so it is in the
                 // description rather than only in the dialog: the title lives
                 // in the profile blob, so a factory restore brings the factory
@@ -245,6 +251,24 @@ Kirigami.ScrollablePage {
                 icon.name: "document-open"
                 enabled: App.profile.loaded
                 onClicked: restoreDialog.open()
+            }
+        }
+
+        FormCard.FormCard {
+            Layout.topMargin: Kirigami.Units.largeSpacing
+
+            FormCard.FormButtonDelegate {
+                objectName: "resetAllButton"
+                text: "Restore all four profiles to factory…"
+                // Its own card under the list rather than beside one profile's
+                // name, because that is its scope. Flydigi put a per-profile
+                // "restore default" on this command in their own UI and it
+                // wipes the other three: 175 ignores the slot it is given.
+                description: "The pad's own reset. It cannot be aimed at one "
+                             + "profile — every slot goes back, names included."
+                icon.name: "edit-clear-all"
+                enabled: App.device.connected
+                onClicked: resetAllDialog.open()
             }
         }
 
@@ -331,6 +355,31 @@ Kirigami.ScrollablePage {
                 onTriggered: {
                     App.profile.resetToFactory();
                     resetDialog.close();
+                }
+            }
+        ]
+    }
+
+    // A separate dialog from the per-profile one, with a separate warning,
+    // because the scope is the whole difference between them and a shared
+    // dialog would have to hedge about which.
+    Kirigami.PromptDialog {
+        id: resetAllDialog
+        objectName: "resetAllDialog"
+        title: "Restore all four profiles?"
+        subtitle: "This is the pad's own reset and it cannot be aimed at one "
+                  + "profile — Flydigi's command takes a slot number and "
+                  + "ignores it. All four go back to how they left the "
+                  + "factory, names included, in flash, with no undo.\n\n"
+                  + "To restore just one, use the button under its name."
+        standardButtons: Kirigami.Dialog.Cancel
+        customFooterActions: [
+            Kirigami.Action {
+                text: "Restore all four"
+                icon.name: "edit-clear-all"
+                onTriggered: {
+                    App.profile.resetAllProfiles();
+                    resetAllDialog.close();
                 }
             }
         ]

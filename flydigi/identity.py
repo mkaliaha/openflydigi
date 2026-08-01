@@ -155,9 +155,21 @@ SUPPORTED = ("k5", "f5")
 #   trigger_motors    -- a motor per trigger, blob offset 154.
 #                        `IsSupportTriggerVibration`.
 #   screen            -- the 160x80 panel and its upload.
+#   factory_profile   -- the odd one out: not hardware, but whether this project
+#                        holds that model's factory profile bytes. Restoring a
+#                        single slot means *writing* a factory config, since the
+#                        firmware's reset resets all four and ignores the slot it
+#                        is given -- so it needs the real bytes for the real
+#                        model. `flydigi/factory_config.py` has an Apex 5's, read
+#                        off the pad here. Writing those to a Vader would install
+#                        an Apex 5's key table on a pad that has C and Z, so a
+#                        model whose profile nobody has dumped must answer no.
+#                        `tools/gen-factory-config` is how another one gets added.
 CAPABILITIES = {
-    "k5": {"adaptive_triggers": True, "trigger_motors": False, "screen": True},
-    "f5": {"adaptive_triggers": False, "trigger_motors": True, "screen": False},
+    "k5": {"adaptive_triggers": True, "trigger_motors": False, "screen": True,
+           "factory_profile": True},
+    "f5": {"adaptive_triggers": False, "trigger_motors": True, "screen": False,
+           "factory_profile": False},
 }
 
 

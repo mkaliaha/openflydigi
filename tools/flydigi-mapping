@@ -211,10 +211,15 @@ def main():
     p.add_argument("key")
     p.add_argument("--save", action="store_true")
 
-    p = sub.add_parser("reset", help="restore a profile to factory, name included")
+    p = sub.add_parser("reset", help="restore one profile to factory")
     p.add_argument("cfg", type=int)
     p.add_argument("--yes", action="store_true",
                    help="do not ask; the slot is overwritten in flash")
+
+    p = sub.add_parser("reset-all",
+                       help="restore EVERY profile to factory (command 175)")
+    p.add_argument("--yes", action="store_true",
+                   help="do not ask; all four slots are overwritten in flash")
 
     p = sub.add_parser("to-switch",
                        help="copy a profile into the matching Switch slot")
@@ -312,18 +317,37 @@ def main():
         return
 
     if args.cmd == "reset":
-        # Asked about rather than just done, and the prompt names the casualty
-        # nobody expects: the title lives in the blob, so factory settings come
-        # back with the factory *name*, which on this pad is Chinese. There is
-        # no undo -- 175 is a flash write.
+        # One slot, by writing the factory profile into it -- the firmware's own
+        # reset has no per-slot form (see reset-all). Asked about anyway: it is a
+        # flash write with no undo, and the casualty nobody predicts is the name,
+        # which lives in the blob and comes back as the factory one.
         if not args.yes:
             print(f"Profile {args.cfg} goes back to factory: every mapping, the "
                   f"sticks, the triggers, the macros -- and its name.")
             if input("Type yes to continue: ").strip().lower() != "yes":
                 print("nothing sent")
                 return
-        if mapping.reset_config(ctrl, args.cfg):
-            print(f"profile {args.cfg} restored to factory")
+        try:
+            restored, saved = mapping.reset_config(ctrl, args.cfg)
+        except identity.WrongDevice as exc:
+            sys.exit(f"error: {exc}")
+        print(f"profile {args.cfg} restored to {restored.title!r}"
+              + ("" if saved else " -- but the save was not acknowledged, so it "
+                                 "will not survive a power cycle"))
+        return
+
+    if args.cmd == "reset-all":
+        # Command 175, which ignores the slot it is given. Measured: named the
+        # four slots and sent it with cfgId 2, and all four came back factory.
+        if not args.yes:
+            print("EVERY profile goes back to factory -- all four, whatever "
+                  "you name. Their names go too, back to the Chinese ones the "
+                  "pad shipped with. This cannot be undone.")
+            if input("Type yes to continue: ").strip().lower() != "yes":
+                print("nothing sent")
+                return
+        if mapping.reset_all_configs(ctrl):
+            print("every profile restored to factory")
         else:
             print("no reply -- the pad may be asleep")
         return

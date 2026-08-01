@@ -46,7 +46,7 @@ writing a config back cannot disturb settings it does not understand.
 import random
 import struct
 
-from . import blobs, device
+from . import blobs, device, factory_config, identity
 from .blobs import PKG_SIZE, ProtocolError, build   # re-exported for callers
 
 CMD_STATUS = 161
@@ -617,21 +617,60 @@ def switch_cfg_id(cfg_id):
     return cfg_id + SWITCH_BANK
 
 
-def reset_config(ctrl, cfg_id, wait=10.0):
-    """Restore one slot to the pad's factory profile. Slow -- a flash write.
+def reset_config(ctrl, cfg_id, wait=0.5):
+    """Restore **one** profile to factory. Returns (config, saved_to_flash).
 
-    Command 175, `ResetMappingConfigByCfgIdCommandFactory`, which Flydigi give a
-    10 second timeout where almost everything else gets 500 ms. This is the
-    stock app's "Restore default", and it resets the *whole* slot -- the key
-    table, the sticks, the trigger blocks, the macro page and **the profile's
-    name**, since the name is a field of the blob at OFF_TITLE like any other.
-    Observed through Space Station on the pad here: a slot renamed out of its
-    factory name came back carrying that name again.
+    Not command 175, which ignores the slot it is given and resets all four --
+    see `reset_all_configs`. Space Station restores a single slot by writing a
+    factory profile into it and committing, from a `default_mapping_<DeviceType>`
+    file they ship; this does the same from `flydigi/factory_config.py`, which
+    is the same bytes read off the hardware.
 
-    Destructive and not undoable. Anything offering it has to say that the name
-    goes too, because "restore defaults" does not describe losing it.
+    The slot has to be the running one, because command 166 commits whichever
+    profile the pad is playing -- so this reads it first, and reading is what
+    makes it live. The pad is left on the restored profile.
+
+    Refused on any model whose factory profile this project has not got. That is
+    a data gate rather than a hardware one, and it is the dangerous kind to skip:
+    an Apex 5's key table written to a Vader would map C and Z to nothing and
+    call it factory. `tools/gen-factory-config` is how a model gets added.
     """
-    for body in blobs.replies(ctrl, build(CMD_RESET, bytes([cfg_id])), wait,
+    # Asked of the pad rather than read off the handle: `device_code` is an
+    # attribute one CLI happens to set, so a gate on it would pass by accident
+    # there and refuse by accident everywhere else. One command-1 exchange, and
+    # the refusal names the model.
+    identity.require_capability(ctrl, "factory_profile")
+    current = read_config(ctrl, cfg_id, wait=max(wait, 1.5))
+    factory = MappingConfig(factory_config.for_slot(cfg_id), cfg_id)
+    write_config(ctrl, cfg_id, factory, old=current, wait=wait)
+    version = next_data_version(current.data_version)
+    saved = save_config(ctrl, version)
+    if saved:
+        factory.data_version = version
+    return factory, saved
+
+
+def reset_all_configs(ctrl, wait=10.0):
+    """Restore **every** profile to factory. Slow -- a flash write, and no undo.
+
+    Command 175. Flydigi call the factory `ResetMappingConfigByCfgId` and give
+    it a slot argument, and the argument does nothing: **measured on the pad**,
+    the four slots were named A1/B2/C3/D4 and saved, 175 was sent with
+    `cfgId = 2`, and all four came back as the factory `配置1..4` with their
+    tags at 0xFFFF. The honest name is the capability flag Flydigi gate it on,
+    `ResetAllMappingUsable`.
+
+    So Space Station's per-profile "restore default" -- which sends `cfgId` as
+    the slot index plus one -- resets the whole pad as well. Anything offering
+    this has to say so, and has to say that the **names** go too: the title is a
+    field of the blob at OFF_TITLE, so factory settings come back with factory
+    names, which on this pad are Chinese.
+
+    The slot byte is sent as 0, matching the one path in their app that is
+    honest about the scope -- their settings-page reset passes no id at all, and
+    their service turns that into 0.
+    """
+    for body in blobs.replies(ctrl, build(CMD_RESET, bytes([0])), wait,
                               blobs.answers(CMD_RESET)):
         if body[2] == CMD_RESET:
             return True
