@@ -92,6 +92,21 @@ the settings block" in [docs/device-settings.md](docs/device-settings.md).
 
   * **The cooperative lock** — `AcquireController`, command **28**, with a 20-byte ASCII tag. The
     read half is built as `motion.read_transport`; the write half is not.
+  * **A factory profile for the Vader 5**, so its per-slot restore works. The button is hidden on
+    any model without one — `factory_profile` in `identity.CAPABILITIES`. Flydigi ship a
+    `default_mapping_<DeviceType>.dat` for every model including `f5`; translating one into the wire
+    blob is the job, and the Apex 5's committed blob is the test that proves the translator before
+    the Vader's is emitted. Schema, the 21 real differences and the provenance question are in
+    [docs/findings-profile-blob.md](docs/findings-profile-blob.md).
+  * **Macro limits are version-dependent and this project hardcodes v3.1's.** `MACRO_SLOTS = 5`,
+    `MACRO_STEP_BUDGET` and the 10 ms interval floor are right for an Apex 5 and wrong for a
+    Vader 5, which gets 10 macros, 256 actions and a 1 ms floor from protocol v3.2. The Macros page
+    would offer a Vader half the slots it has. Branch on `ProtoVersion`, as Flydigi do.
+  * **Show every profile's name without reading it.** Nothing returns a title but a config read, and
+    a config read switches the pad — which is why Space Station keeps a per-device cache file and
+    re-reads only the slots whose version tag has moved (`PrepareMappingConfigs`). The same is now
+    open to this app, since saves finally roll a fresh tag: cache titles against `uid + slot + tag`
+    and the profile list costs no device traffic at all.
   * **Custom stick curves.** The page offers presets and a Custom label; Space Station drags the two
     interior breakpoints. `set_stick()` already takes `point1`/`point2`, so this is GUI-only work.
   * **Stick diagnostics** — "Test circularity" with an average-error readout, and a centre-offset

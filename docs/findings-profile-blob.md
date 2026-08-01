@@ -605,3 +605,85 @@ also takes `--seconds` (default 10). In the app, `MacrosPage.qml` records a sequ
 sets its type and repeat gap, and deletes it, where Space Station also edits a recorded macro's
 steps — output key, duration, interval — and builds one from nothing without recording at all.
 `set_macro()` takes arbitrary steps already.
+
+## Protocol versions, and what a v3.2 profile is
+
+`ProtoVersion` at blob offset 0 is Flydigi's own *profile format* version, not protobuf's. An
+Apex 5 reports **769 = v3.1**; a Vader 5's factory profile is **770 = v3.2**. This matters because
+restoring a single slot means writing a factory profile, and that means writing the right shape.
+
+**The blob is built in layers**, `MappingConfigParser.cs:866`:
+
+```csharp
+int num = config.ProtoVersion & 0xF;
+int num2 = (num >= 2) ? 84 : ((num < 1) ? 79 : 84);   // packets of 10 bytes
+MappingConfigParserV30.ParseConfigToArray(config, array);
+if (num >= 1) MappingConfigParserV31.ParseConfigToArray(config, array);
+if (num >= 2) MappingConfigParserV32.ParseConfigToArray(config, array);
+```
+
+  * **84 packets of 10 bytes is the 840 this project reads**, and 79 is the 790 recorded from the
+    Vader 4 in [findings-other-devices.md](findings-other-devices.md). v3.1 and v3.2 are both 840,
+    so a Vader 5 profile is the same size as an Apex 5 one.
+  * **`MappingConfigParserV32` is empty** -- both `ParseDataToConfig` and `ParseConfigToArray` are
+    no-op bodies. So v3.2 *adds* nothing to the blob.
+  * **V31 is what writes 790, 820 and 830**, and its 820 write is gated on `ProtoVersion < 770`. So
+    the only layout difference at v3.2 is that the macro-cycle block at 820 is absent.
+
+**What v3.2 really changes is macro capability, not layout** (`:780`):
+
+| | v3.1 | v3.2 |
+|---|---|---|
+| `GetMaxMacroCount` | 5 | **10** |
+| `GetMaxMacroActionCount` | 128 | **256** |
+| `GetMinMacroInterval` | 10 ms | **1 ms** |
+
+and the bodies move out of the blob into commands 172/173/174, which nothing here implements.
+`MappingConfig.macros_in_blob` already refuses to write 230..768 from 3.2 on.
+
+**`mapping.MACRO_SLOTS`, `MACRO_STEP_BUDGET` and the 10 ms interval floor are the v3.1 numbers,
+hardcoded** -- correct for an Apex 5 and wrong for a Vader 5. The Macros page would offer a Vader
+five slots where it has ten, and a 10 ms floor where it can do 1 ms. Version them off
+`ProtoVersion` rather than off the model, since that is what Flydigi branch on.
+
+## The bean behind the blob, for translating a factory profile
+
+Space Station's per-slot restore writes a bundled `Configs/Controller/<code>/default/
+default_mapping_<DeviceType>.dat`, which is a protobuf `ControllerMappingConfigBeans` -- four
+`ControllerMappingConfigBean`s under repeated field 1. Translating one into the wire blob is how a
+model nobody owns gets a factory profile: the files ship for every model, `f5` included.
+
+Top-level field numbers (`Flydigi.SharedResources.decompiled.cs:7882`) against the blob regions
+this document already measures:
+
+| # | field | where it lands |
+|---|---|---|
+| 1 | `CfgId` | not in the blob |
+| 2, 3, 4, 5 | `ProtoVersion`, `PackageCount`, `DataVersion`, `Title` | 0, 2, 225, 770 |
+| 6 | `JoystickConfigBean` | 109..123, and 790..820 via V31 |
+| 7 | `KeyConfigBeans` | 13..109 |
+| 8 | `VibrationConfigBean` | 145..154 |
+| 9 | `TriggerConfigBean` | 123..137, 154..183, 185..225 |
+| 10 | `MotionConfigBean` | 137..145, and 830 via V31 |
+| 11 | `LedConfigBean` | **not in the blob** -- it goes out over 168/169 |
+| 12 | `MacroConfigBean` | 230..768, and 820 via V31, v3.1 only |
+| 13 | `OldLedConfig` | 3..13, the ten bytes this project skips |
+| 14 | `Lunpan` | 183..185, the wheel block |
+
+**The k5 file is the test, and it is committed.** `flydigi/factory_config.py` holds the Apex 5's
+factory blob as read off the pad, so a translator can be checked by running it over
+`default_mapping_128.dat` and comparing: every field mapped wrongly shows up as a byte mismatch,
+so it cannot be quietly wrong. Only once that matches is `default_mapping_130.dat` worth emitting.
+
+**How far apart the two models actually are.** Comparing the k5 and f5 beans field by field: 494
+leaf fields, of which 336 are inside `LedConfigBean` and irrelevant, and **21 differ** among the
+rest -- a different factory stick bank (`2d 3a 47 54 ...` against the Apex's `4b 57 64 70 ...`),
+different trigger values (51/114 against 30/80), an extra key-table entry at index 20, the
+`ProtoVersion` and `DataVersion`, and the macro-cycle block replaced by a single field, which is
+the 3.2 move showing up in the bean.
+
+**Provenance is the open question.** The k5 blob came off the hardware and is committed on the same
+footing as `flydigi/ds5_usb.py`. An f5 blob would be derived from a file Flydigi ship, which the
+rule in [PROGRESS.md](../PROGRESS.md) keeps out of the repository -- so either the generator grows a
+mode that reads an installed Space Station into a gitignored file, or the derived bytes are
+accepted as device state. Undecided.
