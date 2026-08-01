@@ -20,7 +20,7 @@ from PySide6.QtGui import QGuiApplication, QIcon
 from PySide6.QtQml import QQmlApplicationEngine, qmlTypeId
 from PySide6.QtQuickControls2 import QQuickStyle
 
-from . import i18n
+from . import i18n, watchdog
 from .app import App  # noqa: F401  -- registers the Apex5 QML module
 
 QML_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qml")
@@ -64,6 +64,10 @@ def main():
     qt_app.setOrganizationName("flydigi-apex5")
     qt_app.setDesktopFileName("flydigi-apex5")
     qt_app.setWindowIcon(QIcon.fromTheme("input-gaming"))
+
+    # Before the engine, so that loading the window is watched too. Creates
+    # nothing and starts nothing unless FLYDIGI_STALL_WATCHDOG is set.
+    watchdog.arm()
 
     engine = build_engine()
     engine.load(QUrl.fromLocalFile(os.path.join(QML_DIR, "Main.qml")))

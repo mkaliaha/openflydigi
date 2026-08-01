@@ -179,7 +179,7 @@ Kirigami.ScrollablePage {
 
             FormCard.FormDelegateSeparator {}
 
-            FormCard.FormComboBoxDelegate {
+            FormComboBox {
                 objectName: "screenFitMode"
                 text: "How it fits"
                 description: "The panel is 160x80 — twice as wide as it is tall, "
@@ -192,7 +192,7 @@ Kirigami.ScrollablePage {
 
             FormCard.FormDelegateSeparator {}
 
-            FormCard.FormSpinBoxDelegate {
+            FormSpinBox {
                 objectName: "screenInterval"
                 label: "Milliseconds per frame"
                 from: 10

@@ -79,8 +79,30 @@ ColumnLayout {
             //   + sourceSize              345 MB, 4 ms/frame
             //   + cache: false              5 MB, 8 ms/frame
             //
-            // Four milliseconds against a timer that fires every hundred, for
-            // two thirds of a gigabyte.
+            // **The bottom row is not four milliseconds cheaper than nothing,
+            // and this used to read as if it were.** Eight milliseconds is a
+            // decode the GUI thread does inside one frame, and a frame on the
+            // panel this was measured on is 6.06 ms, so a preview tick costs a
+            // frame outright. The timer's period says how often that is paid,
+            // not whether it can be afforded — and the period is the interval
+            // the picture will play at, `Math.max(20, …)` on both pages, so as
+            // little as 20 ms rather than the 100 this compared itself against.
+            //
+            // It stays regardless, because the row above it is a third of a
+            // gigabyte for a preview, and `sourceSize` is already the smallest
+            // decode the stage can be given: `decode_limit` is the size the
+            // window covers at full zoom, so anything smaller is detail the
+            // user can pan onto and not get back. Moving the decode off this
+            // thread is the fix, and it is not one this file can make.
+            //
+            // **`asynchronous: false` used to sit below and has gone rather
+            // than been turned on, because it does nothing here either way.**
+            // AnimatedImage replaces the base class's load path and builds its
+            // QMovie inline for any local file without consulting the flag:
+            // checked on Qt 6.11, the item comes back Ready — frame count and
+            // natural size already known — the instant it is created, set
+            // either way. It was written to record that this decodes on the GUI
+            // thread, which is true and is `cache`'s doing, not that flag's.
             sourceSize: Qt.size(root.frame.sourceWidth, root.frame.sourceHeight)
             cache: false
             paused: true
@@ -98,7 +120,6 @@ ColumnLayout {
             // over one that is deliberately not.
             fillMode: Image.Stretch
             smooth: true
-            asynchronous: false
         }
 
         // Everything outside the window, dimmed. Four rectangles rather than

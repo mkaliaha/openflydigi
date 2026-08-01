@@ -23,7 +23,8 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    from PySide6.QtCore import QCoreApplication, QModelIndex
+    from PySide6.QtCore import (QCoreApplication, QEventLoop, QModelIndex,
+                                QTimer)
 except ImportError:
     print("PySide6 not installed -- skipping model tests")
     sys.exit(0)
@@ -456,6 +457,22 @@ def test_trigger_fields_are_independent():
     check("editing a trigger marks dirty", profile.dirty)
 
 
+def effect_rows(model):
+    """The knob rows a Repeater would draw, read the way a delegate reads them.
+
+    `effectParams` is a list model rather than a list -- see `EffectParamsModel`
+    for what a list did to the knobs -- so anything that wants to look at every
+    row has to go through the roles.
+    """
+    roles = {"key": model.KeyRole, "label": model.LabelRole,
+             "description": model.DescriptionRole,
+             "minimum": model.MinimumRole, "maximum": model.MaximumRole,
+             "kind": model.KindRole, "value": model.ValueRole}
+    return [{name: model.data(model.index(row, 0), role)
+             for name, role in roles.items()}
+            for row in range(model.rowCount())]
+
+
 def test_each_effect_offers_its_own_controls():
     """The knobs are not the same from one effect to the next, so the page
     asks the model what to draw rather than drawing a fixed pair."""
@@ -465,18 +482,20 @@ def test_each_effect_offers_its_own_controls():
     check("all six effects are offered", len(profile.triggers.effectNames) == 6,
           str(profile.triggers.effectNames))
     check("General offers no controls at all",
-          right.effect == 0 and right.effectParams == [], str(right.effectParams))
+          right.effect == 0 and effect_rows(right.effectParams) == [],
+          str(effect_rows(right.effectParams)))
 
     for index, (label, mode) in enumerate(models.TRIGGER_MODES):
         right.effect = index
-        keys = [row["key"] for row in right.effectParams]
+        rows = effect_rows(right.effectParams)
+        keys = [row["key"] for row in rows]
         check(f"{label}: the controls are the effect's own",
               keys == [p.key for p in effects.effect(mode).params], str(keys))
         check(f"{label}: every control is inside its own range",
-              all(row["from"] <= row["value"] <= row["to"]
-                  for row in right.effectParams), str(right.effectParams))
+              all(row["minimum"] <= row["value"] <= row["maximum"]
+                  for row in rows), str(rows))
         check(f"{label}: a switch is drawn as one",
-              all(row["kind"] in ("number", "switch") for row in right.effectParams))
+              all(row["kind"] in ("number", "switch") for row in rows))
 
 
 def test_an_effect_remembers_its_numbers_across_a_switch():
@@ -488,10 +507,10 @@ def test_an_effect_remembers_its_numbers_across_a_switch():
     right.setEffectParam("start", 77)
 
     right.effect = 4                                    # trigger lock
-    check("the lock has its own position",
-          right.effectParams[0]["key"] == "start", str(right.effectParams))
+    rows = effect_rows(right.effectParams)
+    check("the lock has its own position", rows[0]["key"] == "start", str(rows))
     right.effect = 1
-    values = {row["key"]: row["value"] for row in right.effectParams}
+    values = {row["key"]: row["value"] for row in effect_rows(right.effectParams)}
     check("racing kept the start it was given", values["start"] == 77,
           str(values))
 
@@ -1282,6 +1301,72 @@ def test_dsmode_says_so_when_the_relay_goes_by_itself():
         model.wait(2000)
 
 
+def spin(msecs):
+    """Let timers actually fire for a while.
+
+    `processEvents` will not do: it returns as soon as the queue is empty,
+    which is before a timer a few milliseconds out has come due.
+    """
+    loop = QEventLoop()
+    QTimer.singleShot(msecs, loop.quit)
+    loop.exec()
+
+
+def test_dsmode_polls_only_while_it_is_asked_to():
+    """The /proc scan has a lifetime now, and it does not begin on its own.
+
+    It used to be armed from a page's `Component.onCompleted` and stopped only
+    at shutdown, so one visit to the DualSense page cost a walk of the process
+    table every two seconds until the app quit -- on every other page as well,
+    since Kirigami keeps a replaced page alive.
+    """
+    live = {"available": True, "loaded": True, "running": False, "pids": [],
+            "relay": "x"}
+    reads = []
+    model = make_dsmode(live)
+    # Installed over the fixture's own stand-in, and *before* anything the count
+    # is asserted about. Installing it after building the model would make the
+    # first check below true whatever the constructor did.
+    ds_backend.state = lambda: (reads.append(None) or dict(live))
+    built = len(reads)
+    edges = []
+    model.pollingChanged.connect(lambda: edges.append(model.polling))
+    try:
+        check("a new model is not scanning /proc", model.polling is False)
+        # It does take one reading as it is built, which is deliberate: the
+        # window shows DS mode's state before any page has asked for it. What it
+        # must not do is keep taking them.
+        spin(60)
+        check("and takes no further reading until it is asked",
+              len(reads) == built, str(len(reads) - built))
+
+        # Two seconds is the app's interval, not a test's patience.
+        model._poll.setInterval(5)
+        model.polling = True
+        check("turning the poll on takes a reading at once",
+              len(reads) == built + 1, str(len(reads) - built))
+        spin(60)
+        check("and goes on taking them", len(reads) > 1, str(len(reads)))
+
+        model.polling = False
+        settled = len(reads)
+        spin(60)
+        check("turning it off stops them", len(reads) == settled,
+              f"{settled} then {len(reads)}")
+        check("and both edges are announced", edges == [True, False],
+              str(edges))
+
+        # The QML calls refresh() and nothing else, so it has to keep meaning
+        # what it meant: read now, and keep reading.
+        model.refresh()
+        check("refresh still arms the poll", model.polling is True)
+        check("reading exactly once as it does", len(reads) == settled + 1,
+              str(len(reads) - settled))
+        model.polling = False
+    finally:
+        model.wait(100)
+
+
 def test_dsmode_reports_a_cancelled_authentication():
     live = {"available": True, "loaded": True, "running": False, "pids": [],
             "relay": "x"}
@@ -2055,26 +2140,35 @@ def test_a_huge_picture_is_not_kept_at_a_size_nothing_can_show():
 
 
 def test_the_playback_cursor_does_not_churn_the_framing():
-    """Two signals, because one of them ticks ten times a second.
+    """Three signals, because they move on entirely different occasions.
 
-    On a single signal every framing property would re-evaluate per frame, and
-    the trim slider -- which has to be assigned to rather than bound, since
-    dragging a handle destroys any binding on it -- would be written to
-    underneath the user's own drag.
+    The preview cursor ticks ten times a second while an animation plays, and
+    the framing moves on every pointer event of a drag. On one signal, every
+    property of both halves re-evaluates for either -- and the trim slider,
+    which has to be assigned to rather than bound since dragging a handle
+    destroys any binding on it, would be written to underneath the user's own
+    drag on the stage.
     """
     model, _loaded = dock_model_with("gif")
-    framing, preview = [], []
-    model.imageChanged.connect(lambda: framing.append(1))
+    picture, framing, preview = [], [], []
+    model.imageChanged.connect(lambda: picture.append(1))
+    model.framingChanged.connect(lambda: framing.append(1))
     model.previewChanged.connect(lambda: preview.append(1))
 
     model.previewFrame = 1
     check("stepping the preview says so", len(preview) == 1, len(preview))
-    check("and says nothing about the framing", not framing, len(framing))
+    check("and says nothing about the framing or the file",
+          not framing and not picture, f"{len(framing)}/{len(picture)}")
 
     model.panBy(-20, 0)
     check("panning moves the framing", len(framing) == 1, len(framing))
-    check("and the preview too, since the LEDs changed", len(preview) == 2,
-          len(preview))
+    check("and leaves the file, the trim and the cost alone",
+          not picture, len(picture))
+
+    model.setTrim(1, 2)
+    check("trimming is the file's half", len(picture) == 1, len(picture))
+    check("and does not claim the picture was moved", len(framing) == 1,
+          len(framing))
 
 
 def test_a_file_qt_cannot_read_says_so_rather_than_half_loading():
@@ -2100,6 +2194,24 @@ def test_models_pull_in_no_view_code():
 
 
 # -- screen ---------------------------------------------------------------
+
+
+def screen_settled(model, msecs=5000):
+    """Wait for the encode worker to hand its frames back.
+
+    Framing a picture happens on a short-lived thread now, so `open`, a fit
+    change and `framingSettled` all return before there are any frames to see.
+    Every screen case below that looks at frames, previews or `canUpload` goes
+    through here first -- and so does every one that does not, because a case
+    that returns while a worker is still running drops the last reference to a
+    live QThread, which Qt turns into a qFatal.
+    """
+    for _ in range(0, msecs, 10):
+        if not model.encoding:
+            break
+        spin(10)
+    spin(10)          # let `finished` land too, so nothing is still running
+    check("the encode finished", not model.encoding)
 
 
 def screen_model_with(frames=1):
@@ -2135,6 +2247,8 @@ def screen_model_with(frames=1):
     # An upload is wired-only, so every test that sends one has to say the pad
     # is on a cable. `test_an_upload_needs_a_cable` is the one that does not.
     model.infoReceived({"connect_type": "wired"})
+    if loaded:
+        screen_settled(model)
     return model, loaded
 
 
@@ -2224,6 +2338,9 @@ def test_changing_the_fit_changes_the_pixels():
     for index in range(3):
         model.fitMode = index
         check(f"fit mode {index} took", model.fitMode == index)
+        # The fit moves at once; the pixels it implies arrive off the thread
+        # that encodes them, and it is the pixels this case is about.
+        screen_settled(model)
         model.upload()
         model.uploadFinished(True)
 
@@ -2312,6 +2429,10 @@ def test_the_screen_picture_can_be_dragged_under_the_panel():
           round(model.imageDrawWidth) == round(160 * 1.95), model.imageDrawWidth)
     check("a zoom re-centres, as the dock's does",
           round(model.imageX) == round(80 + (160 - 160 * 1.95) / 2), model.imageX)
+    # Nothing above waits on an encode -- the stage is arithmetic and answers
+    # at once, which is the whole reason a drag can be smooth. The wait is so
+    # the two fit changes above do not outlive the case.
+    screen_settled(model)
 
 
 def test_a_screen_drag_re_encodes_when_it_ends_and_not_before():
@@ -2338,6 +2459,7 @@ def test_a_screen_drag_re_encodes_when_it_ends_and_not_before():
     check("but nothing was re-encoded", encoded_now() == before)
 
     model.framingSettled()
+    screen_settled(model)
     check("the release is what pays for it", encoded_now() != before)
 
 
@@ -2362,6 +2484,7 @@ def test_every_frame_gets_a_preview_so_the_page_can_play_it():
     # so the names carry a serial rather than the paths being reused.
     old = list(model.previewFrames)
     model.fitMode = 2
+    screen_settled(model)
     check("a re-encode renames them", set(model.previewFrames).isdisjoint(old),
           str(model.previewFrames[:1]))
     check("and cleans the old ones up",
@@ -2530,6 +2653,782 @@ def test_an_unsupported_feature_is_reported_as_such_not_as_off():
           describe_setting("precision", state))
 
 
+# -- state kept in fields rather than derived per read ----------------------
+
+def test_lighting_dirty_comes_back_down_as_well_as_up():
+    """`dirty` is a field now, so the way it fails is by latching.
+
+    Every other lighting test asserts an edit turns it on, which a flag that
+    is only ever set would pass. This walks a byte out and back instead: the
+    blob ends identical to what the pad gave us, so anything but clean means
+    the field stopped tracking the bytes.
+    """
+    model = make_lighting()
+    check("a freshly read config is clean", not model.dirty)
+
+    model.gripSync = False
+    check("an edit is dirty", model.dirty)
+    model.gripSync = True
+    check("putting the byte back reads clean again", not model.dirty)
+
+    # Through a different mutator, because each one reaches `_mark` on its own.
+    model.brightness = 0 if model.brightness else 1
+    check("another field dirties it too", model.dirty)
+    model.confirmWritten(True)
+    check("confirming makes the edit the reference copy", not model.dirty)
+    check("and there is nothing left to save", not model.saveNeeded)
+
+    # A second read of the same pad: `configLoaded` replaces both blobs, and
+    # a flag left over from the profile before it would show as a page that
+    # thinks it has unsaved changes it cannot name.
+    model.effect = models.EFFECT_NAMES.index("Static")
+    check("choosing an effect is dirty", model.dirty)
+    model.configLoaded(bytes(FakePad().led_blob))
+    check("re-reading from the pad is clean again", not model.dirty)
+
+
+def test_a_second_setup_reading_replaces_the_checklist():
+    """The check states are indexed by id, and an index is a thing to go stale.
+
+    `setChecks` is the only writer and rebuilds it outright, which is what a
+    requirement that has just been fixed -- or just broken -- depends on.
+    Every other setup test builds a fresh model, so none of them would notice
+    an index that merged rather than replaced.
+    """
+    model = make_setup(ok("hidraw"), ok("uhid"), ok("input"), ok("rules"),
+                       ok("unit"))
+    check("all green reads as ready", model.ready)
+
+    model._checks.setChecks([failing("unit")])
+    check("the later reading is the one that counts", not model.ready)
+    check("a check the reading no longer mentions is unknown, not what it was",
+          model._checks.state("hidraw") == system_setup.UNKNOWN,
+          model._checks.state("hidraw"))
+
+    model._checks.setChecks([ok("unit"), ok("hidraw"), ok("uhid"),
+                             ok("input"), ok("rules")])
+    check("and a fixed requirement goes green", model.ready)
+
+
+def test_the_launcher_command_is_worked_out_once():
+    """It opens /run/.containerenv and walks PATH -- not a getter's job.
+
+    Asserted against `flydigi.setup` rather than against itself, because the
+    way a held answer goes wrong is by being something other than what would
+    actually be installed.
+    """
+    calls = []
+    real = system_setup.desktop_exec
+    system_setup.desktop_exec = lambda: (calls.append(None) or real())
+    try:
+        model = models.SetupModel()
+        first = model.desktopCommand
+        # A reading arriving re-emits `changed`, which re-runs the binding.
+        model._finished("refresh", [ok("unit")], "")
+        second = model.desktopCommand
+    finally:
+        system_setup.desktop_exec = real
+
+    check("it is the command the entry would be given", first == real(), first)
+    check("a reading does not change it", second == first, second)
+    check("and the filesystem was asked once", len(calls) == 1, str(len(calls)))
+
+
+def test_a_reported_setup_worker_is_still_there_to_be_waited_on():
+    """`busy` falls when `done` arrives, which is before the thread has gone.
+
+    `done` is the last statement of `run()`, so the handle has to outlive the
+    slot that hears it: shutdown calls `wait`, and a window closed inside that
+    gap used to find nothing to wait on. Releasing it is `_run`'s job, which
+    is also what stops a page taken twice from leaving two threads behind.
+    """
+    model = models.SetupModel()
+    real = system_setup.checks
+    system_setup.checks = lambda: [ok("unit")]
+    try:
+        model.refresh()
+        check("it is busy while the thread runs", model.busy)
+        for _ in range(200):
+            if not model.busy:
+                break
+            spin(10)
+        check("and not busy once the reading lands", not model.busy)
+        check("the reading arrived", model.unitInstalled)
+        check("the thread is still held for shutdown to wait on",
+              model._previous is not None)
+
+        model.refresh()
+        check("starting the next one releases the last", model._previous is None)
+        for _ in range(200):
+            if not model.busy:
+                break
+            spin(10)
+        model.wait(2000)
+        check("waiting leaves nothing behind",
+              model._thread is None and model._previous is None)
+    finally:
+        system_setup.checks = real
+        model.wait(2000)
+
+
+class CountingConfig(mapping.MappingConfig):
+    """A profile that says how often it was asked to decode itself."""
+
+    def __init__(self, blob, cfg_id=None):
+        super().__init__(blob, cfg_id)
+        self.decodes = {}
+
+    def _count(self, what):
+        self.decodes[what] = self.decodes.get(what, 0) + 1
+
+    def motion(self):
+        self._count("motion")
+        return super().motion()
+
+    def mapping(self, key):
+        self._count("mapping")
+        return super().mapping(key)
+
+    def macros(self):
+        self._count("macros")
+        return super().macros()
+
+
+MOTION_PROPERTIES = ("target", "enabled", "isMouse", "enableType", "key",
+                     "secondKey", "hasKey", "holdMode", "strandedKey",
+                     "sensitivity", "deadZone", "useMode")
+
+
+def counting_profile():
+    """A loaded profile whose config counts its own decodes."""
+    profile, _ = make_profile()
+    counting = CountingConfig(bytes(profile.config.blob), profile.cfgId)
+    profile._replace(counting)
+    return profile, counting
+
+
+def test_a_page_of_properties_decodes_the_profile_once():
+    """The state layer, asserted where it is invisible everywhere else.
+
+    A getter that decodes the blob for itself returns exactly the same answer as
+    one that reads a cached field, so no other test in this file can tell them
+    apart -- which is how `MotionModel` came to decode the same eight bytes
+    thirteen times for one `changed`, and `KeyMapModel` to decode the key table
+    207 times to fill 23 rows. Both were found by reading, not by failing.
+
+    So this counts. `CountingConfig` is the real `MappingConfig` with a tally on
+    the three decoders the models lean on hardest.
+    """
+    profile, counting = counting_profile()
+    motion = profile.motion
+
+    before = counting.decodes.get("motion", 0)
+    for _ in range(3):
+        for name in MOTION_PROPERTIES:
+            getattr(motion, name)
+    check("twelve properties read three times decode the motion block once",
+          counting.decodes.get("motion", 0) == before + 1,
+          counting.decodes.get("motion", 0) - before)
+
+    motion.sensitivity = 40
+    before = counting.decodes.get("motion", 0)
+    for name in MOTION_PROPERTIES:
+        getattr(motion, name)
+    check("and an edit costs exactly one more",
+          counting.decodes.get("motion", 0) == before + 1,
+          counting.decodes.get("motion", 0) - before)
+    check("which is still the value that was written", motion.sensitivity == 40)
+
+
+def test_a_sweep_of_the_key_table_decodes_it_once_per_row():
+    """23 rows across 9 roles is 23 decodes, not 207.
+
+    Three of the nine roles -- the key, its label and its cluster -- are answers
+    about the shell and not about the profile, so they are given before the
+    table is touched at all.
+    """
+    profile, counting = counting_profile()
+    keys = profile.keys
+    roles = list(keys.roleNames())
+
+    before = counting.decodes.get("mapping", 0)
+    for row in range(keys.count):
+        for role in roles:
+            keys.data(keys.index(row, 0), role)
+    check("one sweep decodes one row's worth per row",
+          counting.decodes.get("mapping", 0) == before + keys.count,
+          counting.decodes.get("mapping", 0) - before)
+
+    before = counting.decodes.get("mapping", 0)
+    for row in range(keys.count):
+        for role in roles:
+            keys.data(keys.index(row, 0), role)
+    check("and a second sweep, with nothing edited, decodes nothing",
+          counting.decodes.get("mapping", 0) == before,
+          counting.decodes.get("mapping", 0) - before)
+
+    keys.setTurbo(0, 20)
+    before = counting.decodes.get("mapping", 0)
+    for row in range(keys.count):
+        keys.data(keys.index(row, 0), keys.TargetRole)
+    check("a remap invalidates it, once", 
+          counting.decodes.get("mapping", 0) == before + keys.count,
+          counting.decodes.get("mapping", 0) - before)
+    check("and the row reads back what was written", keys.turboAt(0) == 20)
+
+
+def test_the_macro_page_is_not_decoded_for_every_row_count():
+    """`rowCount` is asked far more often than the macros change.
+
+    Decoding the macro page is the most expensive read in the model: 538 bytes
+    parsed into a list of dicts of lists, and it sat behind `rowCount`, `count`,
+    `canAdd`, `stepsUsed` and every role of every row.
+    """
+    profile, counting = counting_profile()
+    macros = profile.macros
+
+    before = counting.decodes.get("macros", 0)
+    for _ in range(20):
+        macros.rowCount()
+        macros.count
+        macros.canAdd
+        macros.stepsUsed
+    check("eighty reads decode the macro page once",
+          counting.decodes.get("macros", 0) == before + 1,
+          counting.decodes.get("macros", 0) - before)
+
+
+class CountingPrefs(prefs.Prefs):
+    """A preferences file that says which games it has been asked about.
+
+    `route` is what a game's row hangs off: it reads the game's stored entry
+    and rebuilds the list of routes the game offers, and every other field of
+    the row is worked out from what it returns. Counting it is how the two
+    tests below tell "decoded once" from "decoded once per read" without timing
+    anything, in the same spirit as `CountingConfig` above.
+    """
+
+    def __init__(self, path):
+        super().__init__(path)
+        self.asked = []
+
+    def route(self, game):
+        self.asked.append(prefs.key(game))
+        return super().route(game)
+
+
+def counting_games():
+    """The same list as `make_games`, over a preferences file that counts."""
+    settings = CountingPrefs(os.path.join(tempfile.mkdtemp(), "games.json"))
+    source = models.GameListModel(settings=settings)
+    source.setGames(GAMES)
+    return source, models.GameFilterModel(source), settings
+
+
+def test_a_game_row_is_worked_out_once_rather_than_once_per_role():
+    """Ninety-four rows across nine roles is what the Games page asks for.
+
+    `data` used to resolve the chosen route before it looked at which role it
+    had been asked for, so every one of those questions paid for it -- and two
+    of the roles then built a fresh list or a paragraph of prose on top. The
+    row is worked out where the data moves instead, and read back as fields.
+    """
+    source, view, settings = counting_games()
+    check("every game is worked out as the list is set",
+          set(settings.asked) == {prefs.key(game) for game in GAMES},
+          str(settings.asked))
+
+    del settings.asked[:]
+    roles = list(source.roleNames())
+    for row in range(source.rowCount()):
+        for role_id in roles:
+            source.data(source.index(row, 0), role_id)
+    check("and reading every role of every row works out nothing",
+          settings.asked == [], str(settings.asked))
+
+    # The one case where it has to happen again -- and one row's worth of it,
+    # because a preference was written for one game.
+    row = row_for(view, "Silksong")
+    view.setAutoAt(row, False)
+    check("a row whose preference was just written is worked out again",
+          set(settings.asked) == {prefs.key(GAMES[2])}, str(settings.asked))
+    check("and reads back what was written",
+          role(view, row, b"auto") is False, str(role(view, row, b"auto")))
+
+
+def test_a_search_matches_without_working_out_a_single_route():
+    """`filterAcceptsRow` runs for all 94 rows on every keystroke.
+
+    It used to lowercase a fresh haystack for each of them and resolve each
+    row's route on the way past, so typing a game's name paid for the whole
+    list once per letter. Both readings are settled when the row is decoded.
+    """
+    source, view, settings = counting_games()
+    del settings.asked[:]
+
+    view.search = "death"
+    check("the search still finds the game", view.count == 1, str(view.count))
+    check("the filter asks the preferences nothing", settings.asked == [],
+          str(settings.asked))
+
+    view.search = ""
+    view.route = "vibration"
+    check("nor does the route filter", settings.asked == [],
+          str(settings.asked))
+    check("and it still filters", view.count == 1, str(view.count))
+
+
+def test_a_battery_tick_moves_one_row_rather_than_rebuilding_the_list():
+    """A reset destroys every delegate attached, and the picker is on every page.
+
+    The equal-probe guard covers an idle bus, which is most polls. It does not
+    cover the one field that moves without anybody touching anything: the
+    battery level. Treating that as a new list put the whole window through the
+    same rebuild the guard exists to prevent -- a few times an hour rather than
+    twice a minute, and just as invisible from the page it happens on.
+    """
+    model, _settings = devices_model()
+    model.devicesReceived([pad_entry(2, "Desk"), dock_entry(6, "Shelf")])
+    model.select(0)
+    resets, changed = [], []
+    model.modelAboutToBeReset.connect(lambda: resets.append(1))
+    model.dataChanged.connect(
+        lambda top, _bottom, roles: changed.append((top.row(), list(roles))))
+
+    model.devicesReceived([pad_entry(2, "Desk"), dock_entry(6, "Shelf")])
+    check("an unchanged bus still says nothing at all",
+          (resets, changed) == ([], []), f"{resets} {changed}")
+
+    drained = pad_entry(2, "Desk")
+    drained["battery"] = 1
+    model.devicesReceived([drained, dock_entry(6, "Shelf")])
+    check("a battery tick rebuilds nothing", resets == [], str(len(resets)))
+    check("it names the row that moved",
+          [row for row, _roles in changed] == [0], str(changed))
+    check("and the one role that moved with it",
+          changed[0][1] == [models.DevicesModel.BatteryRole], str(changed))
+    check("the new level is what the row reads",
+          role(model, 0, b"battery") == 1, str(role(model, 0, b"battery")))
+    check("and the selection is where it was", model.currentIndex == 0,
+          str(model.currentIndex))
+
+    # A device really leaving is what a reset is for: the rows a view holds are
+    # no longer the rows the model has.
+    model.devicesReceived([dock_entry(6, "Shelf")])
+    check("losing a device is still a reset", len(resets) == 1,
+          str(len(resets)))
+
+
+def test_a_renamed_device_reports_the_name_the_picker_shows():
+    """`label` is a fallback chain, not a field of the entry.
+
+    So an in-place update has to know which roles a field feeds, or the picker
+    goes on showing "Apex 5" for a pad that has just been given a name. A
+    nickname feeds two roles and is read by neither of the ones it looks like.
+    """
+    model, _settings = devices_model()
+    model.devicesReceived([pad_entry(2)])
+    check("an unnamed pad shows its model", role(model, 0, b"label") == "Apex 5",
+          str(role(model, 0, b"label")))
+
+    changed = []
+    model.dataChanged.connect(
+        lambda _top, _bottom, roles: changed.append(set(roles)))
+    model.devicesReceived([pad_entry(2, "Desk")])
+    check("the name it was given is what the row says now",
+          role(model, 0, b"label") == "Desk", str(role(model, 0, b"label")))
+    check("and both roles a nickname feeds are named",
+          changed == [{models.DevicesModel.NicknameRole,
+                       models.DevicesModel.LabelRole}], str(changed))
+
+
+def screen_cache_files():
+    """The screen previews sitting in the cache directory, by path."""
+    from PySide6.QtCore import QStandardPaths
+
+    folder = QStandardPaths.writableLocation(QStandardPaths.CacheLocation)
+    try:
+        return {os.path.join(folder, name) for name in os.listdir(folder)
+                if name.startswith("screen-preview-")}
+    except OSError:
+        return set()
+
+
+def screen_frames_now(model):
+    """What the model would send this instant, taken through `upload`.
+
+    Only meaningful on a settled framing: sending is deliberately refused while
+    an encode is outstanding, which is its own case below.
+    """
+    sent = []
+
+    def took(frames, _interval, _restore):
+        sent.append(tuple(frames))
+
+    model.uploadRequested.connect(took)
+    try:
+        model.upload()
+        model.uploadFinished(True)
+    finally:
+        model.uploadRequested.disconnect(took)
+    return sent[-1] if sent else ()
+
+
+def test_a_framing_is_encoded_somewhere_other_than_the_gui_thread():
+    """The measured cost was 1.3 s a gesture for a 200-frame animation.
+
+    That was a pure-Python per-pixel encode of every held frame plus a decode
+    and a PNG write each, run from the plain slot `CropStage.qml` calls when a
+    drag settles -- so the window stopped answering the mouse for over a second
+    every time one ended.
+
+    Two claims, and they are different ones. That the slot returns before the
+    work is done is this model's contract. That the work really happens on
+    another thread is `EncodeWorker`'s, and it is checked by watching where
+    `CropFrame.render` is called from -- that is the expensive half, and the
+    half that touches Qt.
+    """
+    from PySide6.QtCore import QStandardPaths, QThread
+    from PySide6.QtGui import QImage
+
+    from flydigi import screen as backend
+    from gui.models.imaging import CropFrame
+    from gui.models.screen import (STAGE_HEIGHT, STAGE_WIDTH, EncodeWorker,
+                                   unlink_all)
+
+    model, _ = screen_model_with(1)
+    # Read behind the property on purpose: `upload` refuses while an encode is
+    # outstanding, which is the very state this is looking at.
+    held = list(model._frames)
+    model.panBy(0, -10000)
+    model.framingSettled()
+    check("the gesture's slot returns with the work outstanding", model.encoding)
+    check("and what is held is still the framing before the gesture",
+          list(model._frames) == held)
+    screen_settled(model)
+    check("the frames arrive once the worker is done",
+          list(model._frames) != held)
+
+    class WatchingFrame(CropFrame):
+        """Says which threads it was rendered from."""
+
+        threads = set()
+
+        def render(self, image):
+            WatchingFrame.threads.add(QThread.currentThread())
+            return super().render(image)
+
+    picture = QImage(90, 70, QImage.Format_RGB888)
+    picture.fill(0x204080)
+    frame = WatchingFrame(backend.WIDTH, backend.HEIGHT,
+                          STAGE_WIDTH, STAGE_HEIGHT)
+    frame.set_natural(90, 70)
+    worker = EncodeWorker(
+        1, [picture], frame,
+        QStandardPaths.writableLocation(QStandardPaths.CacheLocation))
+    landed = []
+    worker.done.connect(lambda _s, frames, paths: landed.append((frames, paths)))
+    worker.start()
+    for _ in range(500):
+        if landed:
+            break
+        spin(10)
+    worker.wait(2000)
+    check("the worker encoded the frame", len(landed) == 1 and landed[0][0])
+    check("and did it away from this thread",
+          bool(WatchingFrame.threads)
+          and QThread.currentThread() not in WatchingFrame.threads,
+          str(WatchingFrame.threads))
+    unlink_all(landed[0][1] if landed else [])
+
+
+def test_the_last_gesture_is_the_one_that_lands():
+    """A drag arriving mid-encode makes the running encode worthless.
+
+    It is a picture of where the picture used to be, so it is dropped -- said
+    here because dropping a result is a decision and not an accident. What must
+    never happen is the dropped one landing *after* the one that replaced it:
+    the pad would then be handed a framing nobody chose, with no further
+    gesture coming to correct it.
+
+    Driven without letting the event loop run between the two gestures, which
+    is exactly the overlap -- the first worker is still going when the second
+    framing is asked for.
+    """
+    from PySide6.QtCore import QUrl
+
+    from gui.models.screen import unlink_all
+
+    model, _ = screen_model_with(1)
+
+    model.panBy(0, 10000)
+    model.framingSettled()
+    screen_settled(model)
+    at_top = screen_frames_now(model)
+
+    model.panBy(0, -10000)
+    model.framingSettled()
+    screen_settled(model)
+    at_bottom = screen_frames_now(model)
+    check("the two ends of the drag are different pictures", at_top != at_bottom)
+
+    # Every model in this process names its previews from its own counter, so
+    # earlier cases leave files behind that can share a name with this one's.
+    # Swept first, so what is in the directory afterwards is this model's doing
+    # and nothing else's.
+    held = {QUrl(url).toLocalFile() for url in model.previewFrames}
+    unlink_all(screen_cache_files() - held)
+    before_files = screen_cache_files()
+
+    model.panBy(0, 10000)
+    model.framingSettled()
+    model.panBy(0, -10000)
+    model.framingSettled()
+    screen_settled(model)
+
+    check("the framing that landed is the one the gesture ended on",
+          screen_frames_now(model) == at_bottom)
+    check("and there is a preview for it", len(model.previewFrames) == 1,
+          str(len(model.previewFrames)))
+
+    # The overtaken worker writes PNGs before it notices, and nothing else knows
+    # their names -- so an orphan here is a cache directory that grows by a file
+    # per frame per drag.
+    now = {QUrl(url).toLocalFile() for url in model.previewFrames}
+    added = screen_cache_files() - before_files
+    check("no preview outlived the gesture that asked for it", added == now,
+          str(sorted(added - now)))
+    check("and the framing before it took its own files with it",
+          not any(os.path.exists(path) for path in held))
+
+
+def test_sending_waits_for_the_framing_it_would_send():
+    """The frames only change when a worker's answer lands.
+
+    So between a gesture and its answer the model is holding the framing from
+    *before* the gesture, and an upload started in that window would spend
+    minutes putting the wrong crop on a pad that cannot be interrupted once it
+    is across. The button is off for the duration instead.
+    """
+    model, _ = screen_model_with(1)
+    check("ready with a settled framing", model.canUpload)
+
+    model.panBy(0, -5000)
+    model.framingSettled()
+    check("not while the framing is being encoded", not model.canUpload)
+    started = []
+    model.uploadRequested.connect(lambda *a: started.append(a))
+    model.upload()
+    check("and calling upload() anyway sends nothing", started == [])
+    check("nor does it leave the page stuck busy", not model.busy)
+
+    screen_settled(model)
+    check("ready again once the frames are the ones on screen", model.canUpload)
+
+
+def test_the_screen_page_reads_fields_rather_than_recomputing_them():
+    """One `changed` covers thirty-odd bindings, and a drag emits one per move.
+
+    So a getter that computes is computed once per binding per pointer event.
+    `previewFrames` built a fresh list of file URLs on every read -- 200 of them
+    for a 200-frame animation -- and the four stage-geometry properties each
+    recomputed the rendered size, which `canPan` then recomputed twice more.
+
+    Counted rather than timed: `rendered_size` is where that arithmetic is, and
+    reading the stage must not reach it at all.
+    """
+    model, _ = screen_model_with(1)
+
+    calls = []
+    real = model._frame.rendered_size
+    model._frame.rendered_size = lambda: (calls.append(None) or real())
+    try:
+        for _ in range(20):
+            _ = (model.imageX, model.imageY, model.imageDrawWidth,
+                 model.imageDrawHeight, model.canPan, model.zoomLabel,
+                 model.imageSource, model.sourceWidth, model.sourceHeight,
+                 model.sourceName, model.estimate, model.previewFrames)
+        check("reading the stage costs no arithmetic at all", not calls,
+              str(len(calls)))
+
+        was = model.imageY
+        model.panBy(0, -10)
+        # Three: `clamp` needs it to pull the picture back, then the refresh
+        # takes it for the drawn size and `can_pan` asks again. Per pointer
+        # event rather than per binding, which is the whole of the change.
+        check("moving the picture is what pays for it", len(calls) == 3,
+              str(len(calls)))
+        check("and the stage followed", model.imageY != was)
+    finally:
+        del model._frame.rendered_size
+
+    check("the preview list is handed out, not rebuilt",
+          model.previewFrames is model.previewFrames)
+    urls = model.previewFrames
+    check("and it is the list of previews", len(urls) == 1
+          and urls[0].startswith("file:"), str(urls))
+    check("the estimate is a field too", model.estimate == "about 25 seconds",
+          model.estimate)
+
+
+def test_quitting_mid_encode_leaves_no_thread_running():
+    """Dropping a running QThread is a qFatal, which is a core dump on quit.
+
+    `gui/app.py`'s shutdown waits for the models that own threads and does not
+    know about this one yet, so the model hears `aboutToQuit` itself. `wait` is
+    the same call either way, and this is that call.
+    """
+    model, _ = screen_model_with(1)
+    model.panBy(0, -10000)
+    model.framingSettled()
+    check("a worker is running", model._worker is not None)
+
+    model.wait(5000)
+    check("waiting leaves nothing behind", model._worker is None)
+    check("and nothing claims to be encoding", not model.encoding)
+
+    # A result that got out before the worker noticed is dropped rather than
+    # applied to a model that has been told to stop.
+    spin(50)
+    check("the abandoned answer did not come back", not model.encoding)
+
+
+def test_the_dock_swatches_are_rows_rather_than_a_rebuilt_list():
+    """Editing one colour must not hand the Repeater a whole new model.
+
+    The swatches used to be a list-valued property notified by the model-wide
+    `lightingChanged`, so moving the brightness slider replaced the Repeater's
+    model and destroyed every swatch delegate -- including the one under the
+    pointer that had just opened a colour dialog. `EffectParamsModel` is the
+    same fix for the same defect on the Triggers page, where it was worse: the
+    knobs could not be dragged at all.
+    """
+    from PySide6.QtCore import QAbstractListModel
+
+    model = models.DockModel()
+    model.setSelector("uid:aa")
+    model.modeIndex = models.MODE_NAMES.index("Solid")
+    swatches = model.colours
+
+    check("the swatches are a model, not a list",
+          isinstance(swatches, QAbstractListModel))
+    check("with a row per colour the effect reads",
+          swatches.count == model.coloursUsed,
+          f"{swatches.count} vs {model.coloursUsed}")
+
+    resets = []
+    moved = []
+    swatches.modelAboutToBeReset.connect(lambda: resets.append(True))
+    swatches.dataChanged.connect(
+        lambda first, last, roles: moved.append((first.row(), last.row())))
+
+    before = swatches.data(swatches.index(0, 0), swatches.ColourRole)
+    model.setColour(0, "#123456")
+    after = swatches.data(swatches.index(0, 0), swatches.ColourRole)
+    check("editing a colour changes the row", after != before, f"{before} -> {after}")
+    check("and says so with dataChanged", moved, str(moved))
+    check("without rebuilding the list", not resets, str(resets))
+
+    # A different effect really does have different rows, and that is the one
+    # case a view cannot absorb any other way.
+    resets.clear()
+    model.modeIndex = models.MODE_NAMES.index("Diagonal flow")
+    check("picking an effect that reads two colours gives it two rows",
+          swatches.count == model.coloursUsed == 2,
+          f"{swatches.count} vs {model.coloursUsed}")
+    check("and that one is a reset, because they really are different rows",
+          resets, str(resets))
+
+
+def test_dragging_the_dock_picture_costs_the_stage_and_not_the_wedge():
+    """A pointer move moves the picture; the LEDs wait for the drag to end.
+
+    Following the pointer is four numbers. Re-reading what the *window* sees is
+    a 334x304 canvas repainted and 162 colours sampled off it -- 0.868 ms a
+    frame, measured -- and `_reframed` used to do both on every event. So a drag
+    across the stage paid for the LED wedge once per pointer move, for a wedge
+    whose final state is the only one anybody sees.
+
+    `framingSettled` is the hook `CropStage.qml` calls when the drag is released
+    or the zoom slider let go. It existed and had an empty body.
+    """
+    from PySide6.QtCore import QUrl
+    from PySide6.QtGui import QImage
+
+    path = os.path.join(tempfile.mkdtemp(), "wide.png")
+    image = QImage(600, 200, QImage.Format_RGB888)
+    image.fill(0x3366CC)
+    image.save(path, "PNG")
+
+    model = models.DockModel()
+    model.setSelector("uid:aa")
+    model.modeIndex = models.MODE_NAMES.index("Picture")
+    check("the picture loaded", model.openImage(QUrl.fromLocalFile(path)))
+    model.fit = models.dock.FIT_FILL
+    model.zoom = 200
+
+    framings = []
+    previews = []
+    model.framingChanged.connect(lambda: framings.append(True))
+    model.previewChanged.connect(lambda: previews.append(True))
+
+    for _ in range(12):
+        model.panBy(-4, 0)
+    check("every pointer move moves the stage", len(framings) == 12,
+          str(len(framings)))
+    check("and none of them resamples the wedge", not previews,
+          str(len(previews)))
+
+    model.framingSettled()
+    check("letting go does", len(previews) == 1, str(len(previews)))
+
+    # Reading the swatches is what actually takes the sample -- `framingSettled`
+    # only says they are stale. Until something has read them the framing really
+    # is unsampled, and saying so again is correct.
+    model.frameColours
+    previews.clear()
+    model.framingSettled()
+    check("and settling again on a framing already sampled is quiet",
+          not previews, str(len(previews)))
+
+
+def test_a_deferred_sample_is_never_the_framing_from_before_the_drag():
+    """What makes deferring the resample safe rather than merely cheaper.
+
+    The sampled frames are not recomputed while a drag is running, so between
+    the first pointer move and the release there is a cache full of colours from
+    a framing that is no longer true. Nothing may be handed those: `_sample`
+    keys them on the framing they were taken at, and `_reframed` moves that on,
+    so a reader arriving mid-drag pays for a fresh sample instead of being told
+    a comfortable lie. Anything that reads the wedge without waiting for the
+    release -- the preview timer, a test, a page rebuilt under the pointer --
+    is that reader.
+    """
+    model, _loaded = dock_model_with("still")
+    before = list(model.frameColours)
+
+    # No `framingSettled` anywhere in here: the drag is still in progress as
+    # far as this model knows.
+    model.panBy(-80, 0)
+    check("a read mid-drag is the framing it is at now, not the one it left",
+          model.frameColours != before, "the colours did not move")
+
+    mid = list(model.frameColours)
+    model.zoom = 14
+    check("and a zoom mid-gesture is no different",
+          model.frameColours != mid, "the colours did not move")
+
+    # The same guarantee from the other side: a frame sampled under this
+    # framing is kept, and asking twice does not sample twice.
+    sampled = []
+    drawn = model._render
+    model._render = lambda index: (sampled.append(index), drawn(index))[1]
+    model.frameColours
+    model.frameColours
+    check("a framing that has not moved is sampled once and remembered",
+          not sampled, str(sampled))
+
+
 def main():
     QCoreApplication.instance() or QCoreApplication([])
     for test in (test_selecting_an_unread_profile_requests_it_once,
@@ -2556,6 +3455,9 @@ def main():
                  test_vibration_keeps_min_below_max,
                  test_trigger_fields_are_independent,
                  test_each_effect_offers_its_own_controls,
+                 test_a_page_of_properties_decodes_the_profile_once,
+                 test_a_sweep_of_the_key_table_decodes_it_once_per_row,
+                 test_the_macro_page_is_not_decoded_for_every_row_count,
                  test_an_effect_remembers_its_numbers_across_a_switch,
                  test_an_unknown_knob_is_refused_rather_than_stored,
                  test_no_trigger_motor_controls_are_offered,
@@ -2595,6 +3497,7 @@ def main():
                  test_dsmode_refuses_to_start_what_cannot_run,
                  test_dsmode_does_not_call_a_clean_stop_a_failure,
                  test_dsmode_says_so_when_the_relay_goes_by_itself,
+                 test_dsmode_polls_only_while_it_is_asked_to,
                  test_dsmode_reports_a_cancelled_authentication,
                  test_setup_reports_ready_only_when_nothing_fails,
                  test_setup_asks_for_root_only_when_something_needs_it,
@@ -2640,8 +3543,24 @@ def main():
                  test_a_picture_that_is_not_there_is_not_uploaded,
                  test_a_huge_picture_is_not_kept_at_a_size_nothing_can_show,
                  test_the_playback_cursor_does_not_churn_the_framing,
+                 test_dragging_the_dock_picture_costs_the_stage_and_not_the_wedge,
+                 test_a_deferred_sample_is_never_the_framing_from_before_the_drag,
+                 test_the_dock_swatches_are_rows_rather_than_a_rebuilt_list,
                  test_a_file_qt_cannot_read_says_so_rather_than_half_loading,
-                 test_models_pull_in_no_view_code):
+                 test_lighting_dirty_comes_back_down_as_well_as_up,
+                 test_a_second_setup_reading_replaces_the_checklist,
+                 test_the_launcher_command_is_worked_out_once,
+                 test_a_reported_setup_worker_is_still_there_to_be_waited_on,
+                 test_a_game_row_is_worked_out_once_rather_than_once_per_role,
+                 test_a_search_matches_without_working_out_a_single_route,
+                 test_a_battery_tick_moves_one_row_rather_than_rebuilding_the_list,
+                 test_a_renamed_device_reports_the_name_the_picker_shows,
+                 test_models_pull_in_no_view_code,
+                 test_a_framing_is_encoded_somewhere_other_than_the_gui_thread,
+                 test_the_last_gesture_is_the_one_that_lands,
+                 test_sending_waits_for_the_framing_it_would_send,
+                 test_the_screen_page_reads_fields_rather_than_recomputing_them,
+                 test_quitting_mid_encode_leaves_no_thread_running):
         test()
     total = len(PASSED) + len(FAILED)
     print(f"\n{len(PASSED)}/{total} passed")

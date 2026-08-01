@@ -135,11 +135,20 @@ Kirigami.ScrollablePage {
                     }
                 }
 
+                // **The wheel belongs to the list, not to the controls on a
+                // row.** `org.kde.desktop` sets `wheelEnabled: true` on ComboBox
+                // and SpinBox where Qt's own default is false, so scrolling with
+                // the pointer over one of these rewrites a key mapping instead
+                // of moving the list -- silently, since a remap needs no
+                // confirmation. Off, the event goes unaccepted and reaches the
+                // view. See components/FormComboBox.qml for the same defect in
+                // the FormCard delegates, which cannot be told this directly.
                 Controls.ComboBox {
                     objectName: "target_" + keyRow.key
                     model: App.profile.keys.targets
                     currentIndex: keyRow.targetIndex
                     enabled: keyRow.isEditable
+                    wheelEnabled: false
                     Layout.minimumWidth: Kirigami.Units.gridUnit * 8
                     onActivated: App.profile.keys.setTarget(keyRow.index, currentIndex)
 
@@ -155,6 +164,7 @@ Kirigami.ScrollablePage {
                     value: keyRow.turbo
                     enabled: keyRow.isEditable
                     editable: true
+                    wheelEnabled: false
                     Layout.minimumWidth: Kirigami.Units.gridUnit * 6
                     // "0" means off rather than "repeat zero times a second".
                     textFromValue: (value) => value === 0 ? "off" : value + " Hz"
@@ -172,6 +182,7 @@ Kirigami.ScrollablePage {
                     // Turbo mode means nothing without a frequency, so it stays
                     // out of the way until one is set.
                     enabled: keyRow.isEditable && keyRow.turbo > 0
+                    wheelEnabled: false
                     Layout.minimumWidth: Kirigami.Units.gridUnit * 7
                     onActivated: App.profile.keys.setTurboMode(keyRow.index, currentIndex)
                 }

@@ -100,11 +100,54 @@ TestCase {
         findChild(page, "param_start_right").moved(60);
         findChild(page, "param_frequency_right").moved(120);
 
-        let values = {};
-        for (const row of App.profile.triggers.right.effectParams)
-            values[row.key] = row.value;
-        compare(values.start, 60, "start was lost");
-        compare(values.frequency, 120, "frequency was lost");
+        const side = App.profile.triggers.right;
+        compare(side.paramValue("start"), 60, "start was lost");
+        compare(side.paramValue("frequency"), 120, "frequency was lost");
+    }
+
+    function test_a_knob_survives_being_dragged() {
+        // The case the two above cannot make. They call `moved()` on the
+        // control, which reports a move that never involved the pointer -- and
+        // for months that hid the fact that these knobs could not be dragged at
+        // all. `effectParams` was a list rebuilt on every read and notified by
+        // the signal a knob move emits, so the first move replaced the
+        // Repeater's model, destroyed the delegate under the cursor, and took
+        // the mouse grab with it. One `moved` per drag instead of one per step.
+        //
+        // So this drags: press, several moves, release, and counts what the
+        // control reported. The threshold is deliberately far below the number
+        // of steps sent -- what is being asserted is that the control survived
+        // its own first update, not how Qt filters a drag into events.
+        // The left trigger, because the right one's rows sit below the fold in
+        // this window and a synthetic press outside it lands nowhere.
+        pick("left", 2);                         // sniper
+        tryVerify(() => findChild(page, "param_start_leftSlider"), 2000);
+
+        let slider = findChild(page, "param_start_leftSlider");
+        verify(slider, "the start knob has no slider");
+        // `tryVerify` returns when the row *exists*, which is a frame before it
+        // has been laid out -- long enough that the press landed at the row's
+        // old size and position and reached nothing at all.
+        waitForRendering(page);
+
+        let moves = 0;
+        slider.moved.connect(() => { moves += 1; });
+
+        // The button has to be named on every move: QtTest's `mouseMove`
+        // defaults to no buttons held, which a Slider reads as a hover and not
+        // as a drag.
+        const y = slider.height / 2;
+        mousePress(slider, 2, y, Qt.LeftButton);
+        for (let x = 4; x < slider.width - 2; x += Math.max(2, slider.width / 12))
+            mouseMove(slider, x, y, 1, Qt.LeftButton);
+        mouseMove(slider, slider.width - 2, y, 1, Qt.LeftButton);
+        mouseRelease(slider, slider.width - 2, y, Qt.LeftButton);
+
+        verify(moves > 1,
+               "the knob reported " + moves + " moves across a drag, so the "
+               + "delegate did not survive its own first update");
+        verify(App.profile.triggers.left.paramValue("start") > 0,
+               "the drag wrote nothing through to the profile");
     }
 
     function test_a_switch_writes_through_too() {
@@ -116,10 +159,8 @@ TestCase {
         match.checked = !before;
         match.toggled();
 
-        let values = {};
-        for (const row of App.profile.triggers.right.effectParams)
-            values[row.key] = row.value;
-        compare(values.match_input, before ? 0 : 1, "the switch did not write through");
+        compare(App.profile.triggers.right.paramValue("match_input"),
+                before ? 0 : 1, "the switch did not write through");
     }
 
     function test_the_stroke_window_writes_through() {

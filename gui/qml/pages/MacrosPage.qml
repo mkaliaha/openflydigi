@@ -115,7 +115,7 @@ Kirigami.ScrollablePage {
                 FormCard.FormCard {
                     enabled: !page.blocked
 
-                    FormCard.FormComboBoxDelegate {
+                    FormComboBox {
                         objectName: "macroType_" + macroEntry.index
                         text: "When pressed"
                         description: "Once, over and over while the key is "
@@ -255,6 +255,11 @@ Kirigami.ScrollablePage {
                 Layout.bottomMargin: Kirigami.Units.largeSpacing
                 model: App.profile.macros.triggerKeys
                 enabled: !App.profile.macros.recording
+                // Scrolling here would move the picker rather than the dialog,
+                // and Start recording passes `currentIndex` straight to
+                // `record()` -- so a stray notch records the macro onto a key
+                // nobody chose, with nothing on screen saying so.
+                wheelEnabled: false
             }
         }
     }

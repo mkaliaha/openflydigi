@@ -53,10 +53,22 @@ Kirigami.ScrollablePage {
                 }
             }
 
+            // `wheelEnabled: false` here and on the per-row picker below.
+            // `org.kde.desktop` turns the wheel on for ComboBox where Qt's own
+            // default leaves it off, so a scroll with the pointer over one
+            // silently changes the filter -- or, on a row, the route a game
+            // launches with.
+            //
+            // The row picker then hands the wheel to the list under it. This
+            // one has nothing to hand it to: a ScrollablePage's header sits
+            // outside the flickable, so the list is not an ancestor and never
+            // sees the event. Off, a wheel here scrolls nothing, which is the
+            // right answer for a control that is not over the list.
             Controls.ComboBox {
                 id: routeCombo
                 objectName: "routeFilter"
                 model: App.games.routeNames
+                wheelEnabled: false
                 Layout.minimumWidth: Kirigami.Units.gridUnit * 10
                 onActivated: {
                     App.games.route = currentText;
@@ -138,6 +150,15 @@ Kirigami.ScrollablePage {
         model: App.games
         currentIndex: page.selectedRow
 
+        // Ninety-four rows, each a handful of controls, and scrolling the page
+        // is what this costs. Recycling them is safe here because the delegate
+        // holds no state that outlives a row: every field it shows is a
+        // required property bound to a role, `highlighted` is the attached
+        // current-item flag, and there is no `Component.onCompleted` and no
+        // property written from a handler. That is what `ListView.onReused`
+        // would otherwise have to put back.
+        reuseItems: true
+
         // Inside the view: ScrollablePage reparents the Flickable and hides
         // everything else, so a sibling placeholder is never drawn. See
         // ButtonsPage for the full story.
@@ -205,33 +226,42 @@ Kirigami.ScrollablePage {
                 // A "pad-side" badge used to sit here too, on precisely the
                 // rows that already said "Preset — tunes the pad's
                 // rumble-to-trigger bind" and whose footer button was enabled.
-                Kirigami.Chip {
-                    objectName: "ds5Chip" + gameRow.index
-                    visible: gameRow.ds5Mark
-                    checkable: false
-                    closable: false
-                    text: "DualSense"
+                Loader {
+                    id: ds5Slot
+                    objectName: "ds5Slot" + gameRow.index
+                    active: gameRow.ds5Mark
+                    visible: ds5Slot.active
+                    sourceComponent: ds5Badge
                 }
 
                 // Only games that support more than one route get a choice; for
                 // the rest the combo would be a control with one option, which
                 // is furniture rather than information.
-                Controls.ComboBox {
-                    objectName: "routeChoice" + gameRow.index
-                    visible: gameRow.routeChoices.length > 1
-                    model: gameRow.routeChoices
-                    currentIndex: gameRow.chosenRouteIndex
-                    implicitWidth: Kirigami.Units.gridUnit * 9
-                    // `activated` rather than `currentIndexChanged`: the latter
-                    // also fires when the model reassigns the index after a
-                    // save, which would write the value back and loop.
-                    onActivated: App.games.setRouteIndexAt(gameRow.index, currentIndex)
+                //
+                // **A Loader, because `visible: false` still builds it.** One
+                // of the 94 entries offers a second route -- Fallout 4, with a
+                // mod and a preset (`flydigi/prefs.py:53-71`) -- so the other 93
+                // rows were each constructing a ComboBox, its popup and its
+                // delegates for something that could not be opened. Those rows
+                // are not left saying nothing: the line under the title already
+                // names the route, on every row, which is why there is no
+                // one-entry combo here in the first place.
+                Loader {
+                    id: routeSlot
+                    objectName: "routeSlot" + gameRow.index
+                    active: gameRow.routeChoices.length > 1
+                    visible: routeSlot.active
+                    sourceComponent: routePicker
                 }
 
                 // Hidden where there is no route to take. Fifteen games carry
                 // only Flydigi's DualSense flag, and that is not something the
                 // daemon does per game -- it is the DualSense switch, once, for
                 // everything. A toggle here would be an offer nothing keeps.
+                //
+                // Not behind a Loader like the two above it, because most rows
+                // do have a route: a Loader would build a Loader *and* a Switch
+                // on the common path to save one on the rare one.
                 Controls.Switch {
                     objectName: "autoSwitch" + gameRow.index
                     visible: gameRow.canAuto
@@ -241,6 +271,38 @@ Kirigami.ScrollablePage {
                     Controls.ToolTip.visible: hovered
                     Controls.ToolTip.text: "Act on this game by itself when it "
                                            + "starts. Needs the daemon — see Setup."
+                }
+            }
+
+            // The two rare controls, declared here rather than at page level so
+            // they can see `gameRow`. A Component is a compilation unit, not an
+            // instance: this is what the Loaders above build only where the row
+            // has something to say.
+            Component {
+                id: ds5Badge
+
+                Kirigami.Chip {
+                    objectName: "ds5Chip" + gameRow.index
+                    checkable: false
+                    closable: false
+                    text: "DualSense"
+                }
+            }
+
+            Component {
+                id: routePicker
+
+                Controls.ComboBox {
+                    objectName: "routeChoice" + gameRow.index
+                    model: gameRow.routeChoices
+                    currentIndex: gameRow.chosenRouteIndex
+                    wheelEnabled: false
+                    implicitWidth: Kirigami.Units.gridUnit * 9
+                    // `activated` rather than `currentIndexChanged`: the latter
+                    // also fires when the model reassigns the index after a
+                    // save, which would write the value back and loop.
+                    onActivated: App.games.setRouteIndexAt(gameRow.index,
+                                                           currentIndex)
                 }
             }
         }

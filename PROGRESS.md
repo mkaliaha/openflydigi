@@ -65,19 +65,11 @@ true — `gui/` may import `flydigi/` and never the reverse, and nothing Flydigi
 
 Roughly in order of value.
 
- 1. **The DualSense page's poll runs device work on the UI thread, and never stops.**
-    `DualSensePage.qml`'s `Component.onCompleted` calls `App.dsmode.refresh()`, which starts a
-    2-second `QTimer` that is only ever stopped at application shutdown — so one visit to that page
-    arms it for the rest of the session, on every other page too. Each tick runs `dsmode.state()`
-    on the **GUI thread**: 6 ms of filesystem work, measured. That breaks this project's own rule
-    that everything device-facing goes on the worker thread. It wants both halves fixed — stop the
-    poll when the page is not showing, and move `state()` behind the worker.
- 2. **Model updates are not atomic.** A model is filled property by property, each setter emitting
-    its own signal, so one logical update is a dozen invalidation waves with no commit boundary —
-    and on a cold load or a Reload every change-guard passes, which is exactly when it is worst.
-    `MacroModel.refresh()` resets its whole model unconditionally, the same defect already fixed in
-    `DevicesModel`. See [Scrolling is uneven](#scrolling-is-uneven).
- 3. **Third-party mode: optional polish.** Command 17 here is byte-identical to Space Station's.
+ 1. **Scroll on the pad with the watchdog on, and read what it says.** Everything under
+    [Scrolling is uneven](#scrolling-is-uneven) has been done and none of it has been scrolled on
+    hardware. `FLYDIGI_STALL_WATCHDOG=30:/tmp/stalls.txt` answers what `qmlprofiler` could not, and
+    an empty file is an answer too. → [gui/README.md](gui/README.md#watching-for-stalls)
+ 2. **Third-party mode: optional polish.** Command 17 here is byte-identical to Space Station's.
     After a reconnect with the flag already on, Steam stops *labelling* the pad Apex 5 while
     everything keeps working — cosmetic, plus a bindings-storage nuisance. The optional workaround,
     which neither app does, is to re-assert the flag off then on once SDL has enumerated; the real
@@ -203,9 +195,10 @@ one would fail exactly where the app runs — in the `apex-dev` distrobox.
 
 ## Scrolling is uneven
 
-**Open, and characterised rather than solved.** Scrolling the window is uneven from the first
-device read onward — smooth with `_read_the_rest()` suppressed, uneven once device data reaches the
-models, on every page, and it does not recover. Pressing **Reload from pad** reproduces it.
+**Characterised, worked through, and not yet confirmed fixed on hardware.** Scrolling the window
+was uneven from the first device read onward — smooth with `_read_the_rest()` suppressed, uneven
+once device data reached the models, on every page, and it did not recover. Pressing **Reload from
+pad** reproduced it.
 
 Measured with `qmlprofiler`, on a 165 Hz display: 97% of frames land in 6 ms and rendering is
 solid, but **49 frames in 38 seconds take over 40 ms**, and all 49 sit in one place —
@@ -217,17 +210,61 @@ GuiThread:polishAndSync -> RenderThread:render  median 0.07 ms   p99   0.41 ms
 ```
 
 So the GUI thread does not *begin* the next frame after a swap. Every one of those gaps has input
-activity around it, so they are stalls and not an idle window. No QML, no JavaScript, no binding
-and no delegate creation runs inside 45 of the 51 — the thread has nothing to do and is not being
-started.
+inside it, so they are stalls and not an idle window.
 
-**Ruled out by measurement**, so none of this is worth walking again: the GIL as CPU contention
-(0.5% CPU during a poll), GIL handover latency (`sys.setswitchinterval(0.0005)` changes nothing),
-the GIL in render sync (a control with Python-backed bindings notifying at 60 Hz is smooth), thread
-affinity (`moveToThread` is correct), Kirigami, the QQC2 style (a control under `org.kde.desktop`
-is smooth), Wayland versus XWayland, PySide6 itself (plain PySide6 + Kirigami is smooth), a worker
-thread doing the full device read and holding the pad open (smooth), all three poll timers, page
-retention (`visible=1` with fifteen pages cached), and page content.
+**A correction, because it is the kind that wastes days.** It was concluded from the same trace
+that no QML, JavaScript, binding or delegate creation runs inside 45 of the 51 gaps, and therefore
+that the thread "has nothing to do". *That does not follow.* `qmlprofiler` records QML and JS
+ranges only, so Python running in a queued cross-thread slot or a `QTimer` timeout leaves no mark
+in it — every `worker.*` reply slot, and the DS-mode poll. "Nothing to do" and "doing something the
+profiler cannot see" draw the same picture there, and two entries in the ruled-out list below rest
+on the difference.
+
+**Ruled out by measurement**, subject to that: the GIL as CPU contention (0.5% CPU during a poll),
+GIL handover latency (`sys.setswitchinterval(0.0005)` changes nothing), the GIL in render sync (a
+control with Python-backed bindings notifying at 60 Hz is smooth), thread affinity (`moveToThread`
+is correct), Kirigami, the QQC2 style (a control under `org.kde.desktop` is smooth), Wayland versus
+XWayland, PySide6 itself (plain PySide6 + Kirigami is smooth), a worker thread doing the full device
+read and holding the pad open (smooth), all three poll timers, and the garbage collector (no
+collection reached 15 ms). Every "smooth control" there was scrolled *without* inertia, so none of
+them exercised the animated scroll path the real window uses.
+
+**What an architectural review then found, and what was done about it.** Seventeen agents read
+`gui/` against the question; every finding below was checked against the code before it was acted
+on.
+
+  * **Reads were not free, and the design assumed they were.** `gui/models/` declared 273
+    properties, 98 of them notified by a single per-model `changed` signal — and the getters
+    decoded rather than read. One `changed` on `MotionModel` cost thirteen decodes of the same
+    eight bytes; a view sweeping the key table across its nine roles decoded it 207 times to fill
+    23 rows; `ProfileModel.dirty` was an 840-byte compare computed per read, three times per
+    footer, on seven pages that were all alive at once. Every model now decodes once where the
+    bytes move and reads a field thereafter. `tests/test_models.py` counts the decodes, because
+    nothing else can see the difference.
+  * **Fifteen pages were built and never destroyed**, and a hidden page's bindings re-evaluate like
+    any other. `pageFor` memoised them and nothing called `pop`, `clear` or `destroy`; Kirigami does
+    not destroy a replaced page either, since `ColumnView::replaceItem` gates its `deleteLater` on
+    `shouldDeleteOnRemove`, false as soon as an item has a visual parent. One page exists now.
+  * **Blocking work sat on the GUI thread that was not device I/O.** The Screen page's encode is
+    about 1.3 s for a 200-frame animation and it ran at the end of every crop gesture; the dock's
+    re-sample is 162 colours off a repainted canvas, 0.868 ms, and it ran on every pointer move
+    while a hook to defer it sat there empty. Both are fixed, and the rule this project states is
+    now "nothing blocking on the GUI thread", not "no HID".
+  * **A functional bug, not a performance one: the Triggers knobs could not be dragged.**
+    `effectParams` was a list rebuilt on every read and notified by the signal a knob move emits, so
+    the first move replaced the Repeater's model and destroyed the delegate under the pointer along
+    with its mouse grab. Measured with synthetic pointer events: a slider outside the Repeater
+    reported `moved` forty times across a drag, the same slider inside it reported once. The page's
+    own test missed it by calling `moved(60)` rather than dragging.
+  * **Combo boxes and spin boxes ate the wheel.** `org.kde.desktop` sets `wheelEnabled: true` where
+    Qt's default is false, so a scroll with the pointer over one silently *edited the profile* — one
+    notch over a row on Buttons remapped a key. Worth fixing whatever it did for frame rate.
+
+**Not confirmed.** None of this has been scrolled on the pad. What that needs is a session with
+`FLYDIGI_STALL_WATCHDOG` set — see [gui/README.md](gui/README.md#watching-for-stalls) — which
+answers the question `qmlprofiler` could not: during a stall, what Python frame is the GUI thread
+in, or is it in none. A file holding only the startup dump is itself an answer, and it points at
+`QSGThreadedRenderLoop` and the compositor rather than at anything here.
 
 **Profiling this app**, which took three obstacles to work out and is worth writing down:
 
@@ -237,6 +274,10 @@ retention (`visible=1` with fifteen pages cached), and page content.
     through a wrapper that puts it after a script path.
   * PySide6 has no `QT_QML_DEBUG` build flag, so the port stays shut until the process calls
     `QQmlDebuggingEnabler.enableDebugging(True)` before any QML engine exists.
+
+A `FLYDIGI_MOCK_BUS` run tells you nothing about any of this: the fake pad answers instantly, so a
+full read finishes in milliseconds instead of the seconds it takes on hardware, and there is no
+~970 Hz input stream on the node.
 
 ## Known limitations
 

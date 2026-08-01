@@ -87,6 +87,59 @@ def key_label(key):
     return KEY_LABELS.get(key, key.upper())
 
 
+class Decodes:
+    """Decode the profile once per edit, rather than once per property read.
+
+    Every getter in this file reads a field out of the profile blob, and the
+    blob is bytes -- so reading a field means decoding it. That is the right
+    shape when a read is a field access. It is the wrong one here: a read from
+    QML is an interpreter call wrapping real work, these models are wide, and
+    each of them notifies with a single `changed` covering the lot. `MotionModel`
+    has twelve properties and every one of them called `config.motion()`, so one
+    `changed` -- emitted on every knob move -- cost thirteen decodes of the same
+    eight bytes. `KeyMapModel.data` decoded a row before it looked at which role
+    was being asked for, and a view sweeping 23 rows across 9 roles decoded the
+    key table 207 times for 23 rows' worth of information.
+
+    So each decoder memoises against `ProfileModel.generation`, which moves
+    whenever the bytes might have. Reads come through `_decoded`; writers take
+    the config from `ProfileModel.edited()`, and *that* is what moves the
+    generation. The split is the whole safety argument: a mutator cannot forget
+    to invalidate, because the call that hands it something to mutate is the
+    call that invalidates.
+
+    There is one way round `edited`, and `refresh` is it: something outside
+    these models -- a test, a restore, a caller holding `config` -- can write
+    into the blob directly, and `refresh` is what it calls to say so. So every
+    `refresh` here drops the cache before it emits. That is not a patch over a
+    hole; it is what `refresh` has always meant.
+
+    Cached values are handed out by reference and must be treated as read-only.
+    Two mutators here want to edit what they just read, and both take a copy
+    first -- see `setEffectParam` and `_editable_macros`.
+
+    Held by each model rather than inherited: PySide6 is particular about what
+    may be mixed into a QObject, and a plain attribute costs nothing to be sure
+    about.
+    """
+
+    def __init__(self, profile):
+        self._profile = profile
+        self._cache = {}
+
+    def __call__(self, name, decode):
+        generation = self._profile.generation
+        cached = self._cache.get(name)
+        if cached is not None and cached[0] == generation:
+            return cached[1]
+        value = decode()
+        self._cache[name] = (generation, value)
+        return value
+
+    def clear(self):
+        self._cache.clear()
+
+
 @QmlElement
 class VibrationSideModel(QObject):
     """One grip motor's window.
@@ -101,13 +154,20 @@ class VibrationSideModel(QObject):
         super().__init__(profile)
         self._profile = profile
         self._side = side
+        self._decoded = Decodes(profile)
+
+    def _window(self):
+        config = self._profile.config
+        return self._decoded(
+            "vibration",
+            lambda: config.vibration(self._side) if config is not None else None)
 
     def _field(self, index):
-        config = self._profile.config
-        return config.vibration(self._side)[index] if config is not None else 0
+        window = self._window()
+        return window[index] if window is not None else 0
 
     def _set(self, **kwargs):
-        config = self._profile.config
+        config = self._profile.edited()
         if config is None:
             return
         config.set_vibration(self._side, **kwargs)
@@ -147,6 +207,7 @@ class VibrationSideModel(QObject):
         self._set(scale=int(value))
 
     def refresh(self):
+        self._decoded.clear()
         self.changed.emit()
 
 
@@ -180,7 +241,7 @@ class VibrationModel(QObject):
 
     @enabled.setter
     def enabled(self, value):
-        config = self._profile.config
+        config = self._profile.edited()
         if config is None:
             return
         config.vibration_enabled = bool(value)
@@ -194,6 +255,97 @@ class VibrationModel(QObject):
 
 
 @QmlElement
+class EffectParamsModel(QAbstractListModel):
+    """One row per knob the chosen trigger effect has.
+
+    **A model rather than a list, because a list broke the knobs.** This was a
+    `QVariantList` property built fresh on every read and notified by the same
+    `changed` signal that moving a knob emits -- so moving a knob replaced the
+    Repeater's model, and replacing a Repeater's model destroys its delegates.
+    The delegate being destroyed was the one under the pointer, and it took the
+    mouse grab with it. Driven with synthetic pointer events: a slider outside
+    the Repeater reported `moved` forty times across a drag, the same slider
+    inside it reported once. The knobs could not be dragged at all, only
+    clicked, and `tests/qml/tst_triggers.qml` missed it by calling `moved(60)`
+    on the control rather than dragging anything.
+
+    A model that answers an edit with `dataChanged` leaves the delegates alone,
+    which is the whole difference. The row *set* still changes when the effect
+    does -- Racing has two knobs, Sniper five, General none -- and that is a
+    reset, correctly, because those really are different rows.
+    """
+
+    KeyRole = Qt.UserRole + 1
+    LabelRole = Qt.UserRole + 2
+    DescriptionRole = Qt.UserRole + 3
+    MinimumRole = Qt.UserRole + 4
+    MaximumRole = Qt.UserRole + 5
+    KindRole = Qt.UserRole + 6
+    ValueRole = Qt.UserRole + 7
+
+    def __init__(self, trigger):
+        super().__init__(trigger)
+        self._trigger = trigger
+        self._rows = []
+
+    def roleNames(self):
+        # Not "from"/"to", which is what the list carried, because a role name
+        # becomes a property on the delegate and `from` is a keyword in enough
+        # contexts to be worth not finding out about.
+        return {
+            self.KeyRole: b"key",
+            self.LabelRole: b"label",
+            self.DescriptionRole: b"description",
+            self.MinimumRole: b"minimum",
+            self.MaximumRole: b"maximum",
+            self.KindRole: b"kind",
+            self.ValueRole: b"value",
+        }
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._rows)
+
+    def data(self, index, role=Qt.DisplayRole):
+        row = index.row()
+        if not 0 <= row < len(self._rows):
+            return None
+        param, value = self._rows[row]
+        if role == self.KeyRole:
+            return param.key
+        if role in (self.LabelRole, Qt.DisplayRole):
+            return param.label
+        if role == self.DescriptionRole:
+            return param.description
+        if role == self.MinimumRole:
+            return param.minimum
+        if role == self.MaximumRole:
+            return param.maximum
+        if role == self.KindRole:
+            return param.kind
+        if role == self.ValueRole:
+            return value
+        return None
+
+    def refresh(self):
+        """Take the current effect's knobs, saying only what actually moved."""
+        values = self._trigger._values()
+        rows = [(param, values.get(param.key, param.default))
+                for param in effects.effect(self._trigger._mode()).params]
+        if rows == self._rows:
+            return
+        same_knobs = [param.key for param, _v in rows] == [
+            param.key for param, _v in self._rows]
+        if same_knobs and rows:
+            self._rows = rows
+            self.dataChanged.emit(self.index(0, 0), self.index(len(rows) - 1, 0),
+                                  [self.ValueRole])
+            return
+        self.beginResetModel()
+        self._rows = rows
+        self.endResetModel()
+
+
+@QmlElement
 class TriggerSideModel(QObject):
     """One trigger's stored adaptive effect and travel window."""
 
@@ -203,16 +355,31 @@ class TriggerSideModel(QObject):
         super().__init__(profile)
         self._profile = profile
         self._side = side
+        self._decoded = Decodes(profile)
+        self._params = EffectParamsModel(self)
 
     def _mode(self):
         config = self._profile.config
-        return config.trigger_effect(self._side)[0] if config is not None else 0
+        return self._decoded(
+            "mode",
+            lambda: config.trigger_effect(self._side)[0] if config is not None else 0)
 
     def _values(self, mode=None):
         """One effect's knobs by name, as the vocabulary reads them out of the
         blob. `mode` defaults to the stored one; passing another asks what that
         effect would make of the same bytes, which is how switching effects
-        keeps the numbers an earlier visit to it left behind."""
+        keeps the numbers an earlier visit to it left behind.
+
+        Only the stored reading is cached. The others are asked for once, by
+        `effect`'s setter at the moment the picker moves, and caching a reading
+        under an effect that is not the stored one would need the mode in the
+        key for no benefit.
+        """
+        if mode is not None:
+            return self._read_values(mode)
+        return self._decoded("values", self._read_values)
+
+    def _read_values(self, mode=None):
         config = self._profile.config
         if config is None:
             return {}
@@ -221,11 +388,14 @@ class TriggerSideModel(QObject):
                               config.trigger_bind(self._side))
 
     def _store(self, mode, values):
-        config = self._profile.config
+        config = self._profile.edited()
         if config is None:
             return
         params, bind = effects.stored(mode, values)
         config.set_trigger_effect(self._side, mode, params, bind)
+        # Before `changed`, so a handler that reads the row model sees the knob
+        # it just moved rather than the one before it.
+        self._params.refresh()
         self.changed.emit()
         self._profile.markChanged()
 
@@ -245,20 +415,32 @@ class TriggerSideModel(QObject):
         # leave a frequency of 0 in a field the pad refuses at 0.
         self._store(mode, self._values(mode))
 
-    @Property("QVariantList", notify=changed)
+    @Property(EffectParamsModel, constant=True)
     def effectParams(self):
         """The chosen effect's knobs, in order, each ready to draw as a row.
 
-        A list rather than named properties because the knobs are not the same
-        from one effect to the next -- Racing has two, mode 2 has five, General
-        has none -- and a fixed pair of "start"/"strength" properties could only
-        describe one of them honestly.
+        A model rather than named properties because the knobs are not the same
+        from one effect to the next -- Racing has two, Sniper five, General none
+        -- and a fixed pair of "start"/"strength" properties could only describe
+        one of them honestly. `constant=True` because the model object never
+        changes; what changes is its contents, which it reports itself.
         """
-        values = self._values()
-        return [{"key": p.key, "label": p.label, "description": p.description,
-                 "from": p.minimum, "to": p.maximum, "kind": p.kind,
-                 "value": values.get(p.key, p.default)}
-                for p in effects.effect(self._mode()).params]
+        return self._params
+
+    @Slot(str, result=int)
+    def paramValue(self, key):
+        """One knob's stored value, by name. -1 when this effect has no such knob.
+
+        The row model is how the page *draws* the knobs; this is how anything
+        that already knows a key reads one, without asking for the whole list to
+        find it. Nothing decodes here that `effectParams` has not decoded
+        already -- both go through the same memoised reading.
+        """
+        param = next((p for p in effects.effect(self._mode()).params
+                      if p.key == key), None)
+        if param is None:
+            return -1
+        return self._values().get(key, param.default)
 
     @Slot(str, int)
     def setEffectParam(self, key, value):
@@ -267,6 +449,8 @@ class TriggerSideModel(QObject):
         values = self._values()
         if key not in values:
             return
+        # A copy: `_values` is memoised and hands out the cached dict itself.
+        values = dict(values)
         values[key] = int(value)
         self._store(mode, values)
 
@@ -292,10 +476,11 @@ class TriggerSideModel(QObject):
         config = self._profile.config
         if config is None:
             return 0 if key == "zero" else 255
-        return config.trigger_curve(self._side)[key]
+        return self._decoded(
+            "curve", lambda: config.trigger_curve(self._side))[key]
 
     def _set_stroke(self, **kwargs):
-        config = self._profile.config
+        config = self._profile.edited()
         if config is None:
             return
         config.set_trigger_curve(self._side, **kwargs)
@@ -319,6 +504,8 @@ class TriggerSideModel(QObject):
         self._set_stroke(end=int(value))
 
     def refresh(self):
+        self._decoded.clear()
+        self._params.refresh()
         self.changed.emit()
 
 
@@ -401,16 +588,20 @@ class StickSideModel(QObject):
         super().__init__(profile)
         self._profile = profile
         self._side = side
+        self._decoded = Decodes(profile)
 
-    def _stick(self):
+    def _read_stick(self):
         config = self._profile.config
         if config is None:
             return {"type": 0, "center": 0, "edge": 0, "circular": False,
                     "bank": list(mapping.stick_bank()), "is_stick": True}
         return config.stick(self._side)
 
+    def _stick(self):
+        return self._decoded("stick", self._read_stick)
+
     def _set(self, **kwargs):
-        config = self._profile.config
+        config = self._profile.edited()
         if config is None:
             return
         config.set_stick(self._side, **kwargs)
@@ -464,8 +655,13 @@ class StickSideModel(QObject):
 
         Exposed because this is the only honest thing to plot: the polyline is
         what the user edits, but the bank is what the stick will do.
+
+        Cached with the decode rather than rebuilt per read: this crosses into
+        QML as a `QVariantList`, which is a conversion of nine values, and the
+        page reads it on every notification whether or not the curve moved.
         """
-        return [int(v) for v in self._stick()["bank"]]
+        return self._decoded(
+            "bank", lambda: [int(v) for v in self._stick()["bank"]])
 
     @Property(bool, notify=changed)
     def isStick(self):
@@ -478,6 +674,7 @@ class StickSideModel(QObject):
         return bool(self._stick()["is_stick"])
 
     def refresh(self):
+        self._decoded.clear()
         self.changed.emit()
 
 
@@ -527,8 +724,9 @@ class MotionModel(QObject):
     def __init__(self, profile):
         super().__init__(profile)
         self._profile = profile
+        self._decoded = Decodes(profile)
 
-    def _motion(self):
+    def _read_motion(self):
         config = self._profile.config
         if config is None:
             # Space Station's own starting numbers, so a page with no profile
@@ -539,8 +737,14 @@ class MotionModel(QObject):
                     "use_mode": mapping.MOTION_FPS}
         return config.motion()
 
+    def _motion(self):
+        # Thirteen properties on this model read through here, and one `changed`
+        # invalidates all of them at once. Without the memo that was thirteen
+        # decodes of the same eight bytes per knob move.
+        return self._decoded("motion", self._read_motion)
+
     def _set(self, **kwargs):
-        config = self._profile.config
+        config = self._profile.edited()
         if config is None:
             return
         config.set_motion(**kwargs)
@@ -684,6 +888,7 @@ class MotionModel(QObject):
                 mapping.MOTION_RACER: "Racing"}.get(self._motion()["use_mode"], "")
 
     def refresh(self):
+        self._decoded.clear()
         self.changed.emit()
 
 
@@ -704,6 +909,7 @@ class KeyMapModel(QAbstractListModel):
     def __init__(self, profile):
         super().__init__(profile)
         self._profile = profile
+        self._decoded = Decodes(profile)
 
     def roleNames(self):
         return {
@@ -737,28 +943,41 @@ class KeyMapModel(QAbstractListModel):
     def turboMax(self):
         return TURBO_MAX_HZ
 
+    def _table(self):
+        """Every row's (key, target, mode, frequency), decoded once."""
+        config = self._profile.config
+
+        def decode():
+            if config is None:
+                return [(key, key, mapping.TURBO_OFF, 0)
+                        for key in mapping.APEX5_KEYS]
+            return [(key,) + tuple(config.mapping(key))
+                    for key in mapping.APEX5_KEYS]
+
+        return self._decoded("table", decode)
+
     def _row(self, row):
         """(key, target, mode, frequency) for a row, or None if out of range."""
         if not 0 <= row < len(mapping.APEX5_KEYS):
             return None
-        key = mapping.APEX5_KEYS[row]
-        config = self._profile.config
-        if config is None:
-            return key, key, mapping.TURBO_OFF, 0
-        target, mode, frequency = config.mapping(key)
-        return key, target, mode, frequency
+        return self._table()[row]
 
     def data(self, index, role=Qt.DisplayRole):
-        entry = self._row(index.row())
-        if entry is None:
+        row = index.row()
+        if not 0 <= row < len(mapping.APEX5_KEYS):
             return None
-        key, target, mode, frequency = entry
+        # The three roles that need only the key name are answered before the
+        # table is touched. A view sweeping 23 rows across 9 roles asked for the
+        # key table 207 times to fill in 23 rows' worth of labels; a third of
+        # those questions never needed the profile at all.
+        key = mapping.APEX5_KEYS[row]
         if role == self.KeyRole:
             return key
         if role in (self.LabelRole, Qt.DisplayRole):
             return key_label(key)
         if role == self.ClusterRole:
             return CLUSTER_OF.get(key, "Other")
+        _key, target, mode, frequency = self._table()[row]
         if role == self.TargetRole:
             return target
         if role == self.TargetIndexRole:
@@ -796,13 +1015,15 @@ class KeyMapModel(QAbstractListModel):
 
     def _write(self, row, target_index=None, turbo=None, turbo_mode=None):
         entry = self._row(row)
-        config = self._profile.config
+        current_target = self.data(self.index(row, 0), self.TargetIndexRole)
+        current_mode = self.data(self.index(row, 0), self.TurboModeRole)
+        # After the reads above, because asking for a writable config is what
+        # drops their cached decode -- see `ProfileModel.edited`.
+        config = self._profile.edited()
         if entry is None or config is None:
             return
         key = entry[0]
-        current_target = self.data(self.index(row, 0), self.TargetIndexRole)
         current_turbo = entry[3]
-        current_mode = self.data(self.index(row, 0), self.TurboModeRole)
 
         target_index = current_target if target_index is None else target_index
         turbo = current_turbo if turbo is None else turbo
@@ -846,6 +1067,7 @@ class KeyMapModel(QAbstractListModel):
             return -1
 
     def refresh(self):
+        self._decoded.clear()
         if self.rowCount():
             self.dataChanged.emit(self.index(0, 0),
                                   self.index(self.rowCount() - 1, 0))
@@ -892,6 +1114,7 @@ class MacroModel(QAbstractListModel):
         self._profile = profile
         self._recording = False
         self._record_key = ""
+        self._decoded = Decodes(profile)
         # What the view is currently showing, so `refresh` can tell a profile
         # whose macros differ from one whose macros are the same.
         self._shown = []
@@ -908,8 +1131,24 @@ class MacroModel(QAbstractListModel):
         }
 
     def _macros(self):
+        """The stored macros, decoded once per edit. Read-only -- see below.
+
+        `rowCount` is on this path, and Qt asks a list model for its row count
+        far more often than a page changes; `data` was on it once per role per
+        row. Decoding the macro page is the most expensive read in this file --
+        538 bytes, parsed into a list of dicts of lists.
+        """
         config = self._profile.config
-        return config.macros() if config is not None else []
+        return self._decoded(
+            "macros", lambda: config.macros() if config is not None else [])
+
+    def _editable_macros(self):
+        """A copy, for the three slots that edit what they have just read.
+
+        Shallow per macro is enough: they set a field on one macro or drop one
+        from the list, and nothing here reaches into a macro's steps.
+        """
+        return [dict(macro) for macro in self._macros()]
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._macros())
@@ -998,7 +1237,7 @@ class MacroModel(QAbstractListModel):
                 for step in macros[row]["steps"]]
 
     def _write(self, macros):
-        config = self._profile.config
+        config = self._profile.edited()
         if config is None:
             return False
         try:
@@ -1012,7 +1251,7 @@ class MacroModel(QAbstractListModel):
 
     @Slot(int, int)
     def setType(self, row, type_index):
-        macros = self._macros()
+        macros = self._editable_macros()
         if not 0 <= row < len(macros):
             return
         index = max(0, min(len(MACRO_TYPES) - 1, int(type_index)))
@@ -1021,7 +1260,7 @@ class MacroModel(QAbstractListModel):
 
     @Slot(int, int)
     def setInterval(self, row, milliseconds):
-        macros = self._macros()
+        macros = self._editable_macros()
         if not 0 <= row < len(macros):
             return
         macros[row]["interval"] = max(0, min(mapping.MACRO_INTERVAL_MAX,
@@ -1034,8 +1273,8 @@ class MacroModel(QAbstractListModel):
         macros = self._macros()
         if not 0 <= row < len(macros):
             return
-        config = self._profile.config
         key = macros[row]["key"]
+        config = self._profile.edited()
         try:
             config.clear_macro(key)
         except (ValueError, KeyError, mapping.ProtocolError) as exc:
@@ -1065,7 +1304,7 @@ class MacroModel(QAbstractListModel):
         key, self._record_key = self._record_key, ""
         self._recording = False
         self.recordingChanged.emit()
-        config = self._profile.config
+        config = self._profile.edited()
         if config is None or not key:
             return
         if not steps:
@@ -1099,6 +1338,7 @@ class MacroModel(QAbstractListModel):
         when the number of rows really has changed, which is the one case a view
         cannot absorb any other way.
         """
+        self._decoded.clear()
         macros = self._macros()
         if macros == self._shown:
             return
@@ -1266,6 +1506,8 @@ class ProfileModel(QObject):
         self._edited = None
         self._cfg_id = -1
         self._saved = True
+        self._generation = 0
+        self._dirty = False
         self._slots = ProfileListModel(self)
         self._keys = KeyMapModel(self)
         self._macros = MacroModel(self)
@@ -1279,7 +1521,43 @@ class ProfileModel(QObject):
     # from Python only.
     @property
     def config(self):
+        """The open config, to read from. See `edited` for writing to it."""
         return self._edited
+
+    @property
+    def generation(self):
+        """How many times the open profile's bytes may have moved.
+
+        What `Decodes` memoises against. It is deliberately an over-estimate --
+        it counts writes handed out, not writes that changed anything -- because
+        a cache that is dropped too often is slow and one that is kept too long
+        is wrong.
+        """
+        return self._generation
+
+    def edited(self):
+        """The open config, to write to. Returns None when none is open.
+
+        Handing the config out for writing is what invalidates every decode
+        cached against it, so a mutator that goes through here cannot forget to
+        invalidate. Readers use `config`; anything about to call a `set_*` uses
+        this. The difference is load-bearing rather than stylistic, and a
+        mutator that reads through `config` instead will leave stale values on
+        screen until the next unrelated edit.
+        """
+        self._generation += 1
+        return self._edited
+
+    def _replace(self, config):
+        """Swap the open profile out. Nothing else may assign `_edited`.
+
+        The generation moves *before* any notification goes out, because the
+        emissions below reach QML synchronously: a binding that re-read during
+        `_open` would otherwise be served the previous profile's cached decode
+        as though it were current.
+        """
+        self._edited = config
+        self._generation += 1
 
     @Property(ProfileListModel, constant=True)
     def slots(self):
@@ -1319,9 +1597,22 @@ class ProfileModel(QObject):
 
     @Property(bool, notify=dirtyChanged)
     def dirty(self):
-        if self._edited is None or self._cfg_id < 0:
-            return False
-        return bytes(self._edited.blob) != self._slots.stored(self._cfg_id)
+        """Whether the open profile differs from what the pad last gave us.
+
+        **A field, and it used to be an 840-byte compare per read.** Derived
+        state is still the right design -- nothing has to remember to set a flag
+        -- but deriving it inside the getter meant every reader paid for it, and
+        the readers are not few: `hint` consults it, `ProfileFooter` reads it
+        three times, and the footer is on seven pages that are all alive at
+        once. `_recompute_dirty` does the comparison once, where the bytes move.
+        """
+        return self._dirty
+
+    def _recompute_dirty(self):
+        self._dirty = (self._edited is not None and self._cfg_id >= 0
+                       and bytes(self._edited.blob)
+                       != self._slots.stored(self._cfg_id))
+        return self._dirty
 
     @Property(bool, notify=cfgIdChanged)
     def canSaveToFlash(self):
@@ -1359,7 +1650,7 @@ class ProfileModel(QObject):
         value = str(value)[:TITLE_MAX_CHARS]
         if self._edited is None or self._edited.title == value:
             return
-        self._edited.title = value
+        self.edited().title = value
         self.titleChanged.emit()
         self.markChanged()
 
@@ -1419,7 +1710,8 @@ class ProfileModel(QObject):
             return
         # Not read yet. Reading is expensive and switches the pad, so never ask
         # twice for the same profile.
-        self._edited = None
+        self._replace(None)
+        self._recompute_dirty()
         self.loadedChanged.emit()
         # The title has just become "" -- without this the name field goes on
         # showing the profile the user has navigated away from.
@@ -1430,7 +1722,7 @@ class ProfileModel(QObject):
             self.loadRequested.emit(cfg_id)
 
     def _open(self, blob):
-        self._edited = mapping.MappingConfig(bytearray(blob), self._cfg_id)
+        self._replace(mapping.MappingConfig(bytearray(blob), self._cfg_id))
         # Freshly read from the pad, so there is nothing waiting to be
         # committed to flash.
         self._saved = True
@@ -1478,16 +1770,22 @@ class ProfileModel(QObject):
     # -- editing -----------------------------------------------------------
 
     def markChanged(self):
-        """Recompute the derived dirty state. Called by every sub-model."""
-        self._slots.setDirtySlot(self._cfg_id if self.dirty else -1)
+        """Recompute the derived dirty state. Called by every sub-model.
+
+        Still emits unconditionally rather than only on a change: `saveNeeded`
+        and `hint` are notified by the same signal and both move without `dirty`
+        moving -- `confirmWritten` is exactly that case.
+        """
+        self._slots.setDirtySlot(self._cfg_id if self._recompute_dirty() else -1)
         self.dirtyChanged.emit()
 
     @Slot()
     def resetAll(self):
-        if self._edited is None:
+        config = self.edited()
+        if config is None:
             return
         for key in mapping.APEX5_KEYS:
-            self._edited.set_mapping(key, None)
+            config.set_mapping(key, None)
         self._keys.refresh()
         self.markChanged()
 
@@ -1548,7 +1846,7 @@ class ProfileModel(QObject):
                 f"That file is {len(blob)} bytes; this pad's profiles "
                 f"are {expected}. Refusing to write it.")
             return
-        self._edited = mapping.MappingConfig(bytearray(blob), self._cfg_id)
+        self._replace(mapping.MappingConfig(bytearray(blob), self._cfg_id))
         self.titleChanged.emit()
         self._keys.refresh()
         self._macros.refresh()

@@ -152,35 +152,28 @@ def dump_class(cls, singleton=False):
 
 def collect():
     """Every type the Apex5 module exports, and which one is the singleton."""
+    from PySide6.QtCore import QObject
+
     from gui import models
     from gui.app import App
 
-    types = [
-        (App, True),
-        (models.DevicesModel, False),
-        (models.DockModel, False),
-        (models.DeviceModel, False),
-        (models.ProfileModel, False),
-        (models.ProfileListModel, False),
-        (models.KeyMapModel, False),
-        (models.MacroModel, False),
-        (models.VibrationModel, False),
-        (models.VibrationSideModel, False),
-        (models.TriggerModel, False),
-        (models.TriggerSideModel, False),
-        (models.StickModel, False),
-        (models.StickSideModel, False),
-        (models.MotionModel, False),
-        (models.LightingModel, False),
-        (models.ColourListModel, False),
-        (models.GameListModel, False),
-        (models.GameFilterModel, False),
-        (models.ScreenModel, False),
-        (models.SettingsModel, False),
-        (models.SetupModel, False),
-        (models.SetupChecksModel, False),
-        (models.DsModeModel, False),
-    ]
+    # **Every QObject `gui/models` exports, found rather than listed.** This was
+    # fifteen lines of `(models.X, False)` kept in step by hand, and it was not:
+    # `DockColoursModel` and `EffectParamsModel` were both added, both decorated
+    # `@QmlElement`, and both missing from here -- so qmllint reported the
+    # property that returns one as an unresolved type while the app ran fine.
+    # A list nobody can forget to add to is the fix, the same one the sidebar's
+    # actions got.
+    #
+    # `__all__` is the boundary this package already maintains, and every
+    # QObject in it is a `@QmlElement`: there is no way to ask PySide6 which
+    # classes the decorator registered, since it returns the class unchanged.
+    # A QObject exported here that is *not* one would be the bug, not this.
+    types = [(App, True)]
+    for name in sorted(models.__all__):
+        attr = getattr(models, name)
+        if isinstance(attr, type) and issubclass(attr, QObject):
+            types.append((attr, False))
     return [dump_class(cls, singleton) for cls, singleton in types]
 
 

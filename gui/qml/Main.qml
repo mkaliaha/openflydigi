@@ -12,6 +12,12 @@
 // resolve -- it just does not translate. Strings are plain until there is a
 // translation story.
 
+// The sidebar's actions are built from `sections` inside a Component, and
+// reaching `root` from there is what this pragma is for -- without it the
+// reference resolves at runtime and qmllint reports it as unqualified, which is
+// a warning this project does not carry.
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import org.kde.kirigami as Kirigami
 import Apex5
@@ -131,10 +137,10 @@ Kirigami.ApplicationWindow {
     }
 
     // What the sidebar actually offers, and a way to press one of its entries.
-    // Both exist for `test_the_drawer_offers_every_section`: the drawer's
-    // actions are written out one by one and nothing keeps them in step with
-    // `sections`, so the test has to read the drawer rather than the list it
-    // is supposed to mirror. Reaching in from Python cannot do it -- the
+    // Both exist for `test_the_drawer_offers_every_section`, which reads the
+    // drawer rather than the list it is drawn from -- so it still asserts that
+    // the sidebar shows what it should, in the order this file chose, and not
+    // merely that a loop ran. Reaching in from Python cannot do it: the
     // drawer's own type has no Python converter.
     // `globalDrawer` is typed as the base OverlayDrawer, which has no actions,
     // so it is asserted back to what it really is -- the same move the page
@@ -153,14 +159,32 @@ Kirigami.ApplicationWindow {
         drawerActions[index].trigger()
     }
 
-    // Each page is built once, parented, and kept.
+    // One page exists at a time: the one being shown.
     //
-    // Handing pageStack a URL or a Component instead makes it create the page
-    // with no visual parent, which the engine reports as an object "not placed
-    // in the graphics scene" -- invisible unless something is listening to
+    // Handing pageStack a URL or a Component makes it create the page with no
+    // visual parent, which the engine reports as an object "not placed in the
+    // graphics scene" -- invisible unless something is listening to
     // QQmlEngine::warnings, but there all the same. Creating it here, parented
-    // and synchronously, is quiet, and keeping the instance means a section
-    // remembers its scroll position instead of being rebuilt on every visit.
+    // and synchronously, is quiet.
+    //
+    // **They used to be kept, and that was the expensive mistake.** The cache
+    // below never dropped anything and nothing called `pop`, `clear` or
+    // `destroy`; Kirigami does not destroy a replaced page either, because
+    // `ColumnView::replaceItem` gates its `deleteLater` on
+    // `shouldDeleteOnRemove`, which is false once an item has a visual parent
+    // -- and `createObject(pageStack)` gives it one. So every section visited
+    // stayed alive for the session, and a live page's bindings re-evaluate
+    // whether or not anyone can see them. Being hidden is not being idle. With
+    // seven profile pages open, one `dirtyChanged` ran the footer's bindings
+    // seven times over for six footers nobody was looking at; the review
+    // measured the fan-out of a single stick-slider step going from 67 Python
+    // calls on a cold window to 122 on a warm one.
+    //
+    // What this costs is the scroll position of the section you leave, and
+    // rebuilding a page on each visit. That is paid once per section change,
+    // which is a thing a person does occasionally, against a cost that was
+    // being paid on every notification, which is a thing the pad does
+    // constantly.
     readonly property var pageCache: ({})
 
     function pageFor(index) {
@@ -176,12 +200,28 @@ Kirigami.ApplicationWindow {
         return pageCache[index]
     }
 
+    // Drop a page the window has navigated away from.
+    //
+    // `destroy` takes a delay because the page is still on screen when this
+    // runs: `replace` animates the outgoing page away, and deleting an item
+    // mid-transition is how a window crashes rather than how it saves work.
+    // A second is far longer than the transition and costs nothing, since
+    // nothing is bound to the page any more by then.
+    function releaseSection(index) {
+        const page = pageCache[index]
+        if (!page)
+            return
+        delete pageCache[index]
+        page.destroy(1000)
+    }
+
     function openSection(index) {
         if (index === currentSection)
             return
         const page = pageFor(index)
         if (!page)
             return
+        const leaving = currentSection
         currentSection = index
         // replace() on an empty stack has nothing to replace and drops the
         // page on the floor -- it still gets created, just never shown.
@@ -189,6 +229,8 @@ Kirigami.ApplicationWindow {
             pageStack.push(page)
         else
             pageStack.replace(page)
+        if (leaving >= 0)
+            releaseSection(leaving)
     }
 
     globalDrawer: Kirigami.GlobalDrawer {
@@ -204,150 +246,46 @@ Kirigami.ApplicationWindow {
             objectName: "deviceStatus"
         }
 
-        // One action per entry in `sections`, in the same order, and there is no
-        // mechanism keeping them in step -- `actions` is a list of Action
-        // objects, not something a Repeater can fill. Adding the Screen page
-        // without adding its action here shifted every label after it by one
-        // and pushed Setup off the end entirely, where it stayed unreachable
-        // from the sidebar until a screenshot showed it missing. So
-        // `test_the_drawer_offers_every_section` asserts the pairing.
-        actions: [
+        // One action per entry in `sections`, built from the list rather than
+        // written out fifteen times over.
+        //
+        // **They were copy-pasted, and nothing kept them in step.** Adding the
+        // Screen page without adding its action shifted every label after it by
+        // one and pushed Setup off the end entirely, where it stayed
+        // unreachable from the sidebar until a screenshot showed it missing.
+        // `test_the_drawer_offers_every_section` was written to catch that;
+        // generated from the same list the pages come from, it cannot happen,
+        // and the test now asserts something true by construction rather than
+        // by vigilance. It is kept because it also asserts the *order*, which
+        // is still a choice this file makes.
+        //
+        // Built in `Component.onCompleted` rather than by a Repeater because
+        // `actions` is a list property of Action objects, and a Repeater fills
+        // a visual parent instead. The Action is not an Item, so the drawer is
+        // a perfectly good owner for it.
+        Component {
+            id: sectionAction
+
             Kirigami.Action {
-                objectName: "sectionDevices"
-                text: root.sections[0].name
-                icon.name: root.sections[0].icon
-                visible: root.sectionVisible(0)
+                required property int section
+
+                objectName: "section" + root.sections[section].name
+                text: root.sections[section].name
+                icon.name: root.sections[section].icon
+                visible: root.sectionVisible(section)
                 checkable: true
-                checked: root.currentSection === 0
-                onTriggered: root.openSection(0)
-            },
-            Kirigami.Action {
-                objectName: "sectionController"
-                text: root.sections[1].name
-                icon.name: root.sections[1].icon
-                visible: root.sectionVisible(1)
-                checkable: true
-                checked: root.currentSection === 1
-                onTriggered: root.openSection(1)
-            },
-            Kirigami.Action {
-                objectName: "sectionDevice"
-                text: root.sections[2].name
-                icon.name: root.sections[2].icon
-                visible: root.sectionVisible(2)
-                checkable: true
-                checked: root.currentSection === 2
-                onTriggered: root.openSection(2)
-            },
-            Kirigami.Action {
-                objectName: "sectionButtons"
-                text: root.sections[3].name
-                icon.name: root.sections[3].icon
-                visible: root.sectionVisible(3)
-                checkable: true
-                checked: root.currentSection === 3
-                onTriggered: root.openSection(3)
-            },
-            Kirigami.Action {
-                objectName: "sectionMacros"
-                text: root.sections[4].name
-                icon.name: root.sections[4].icon
-                visible: root.sectionVisible(4)
-                checkable: true
-                checked: root.currentSection === 4
-                onTriggered: root.openSection(4)
-            },
-            Kirigami.Action {
-                objectName: "sectionSticks"
-                text: root.sections[5].name
-                icon.name: root.sections[5].icon
-                visible: root.sectionVisible(5)
-                checkable: true
-                checked: root.currentSection === 5
-                onTriggered: root.openSection(5)
-            },
-            Kirigami.Action {
-                objectName: "sectionGyro"
-                text: root.sections[6].name
-                icon.name: root.sections[6].icon
-                visible: root.sectionVisible(6)
-                checkable: true
-                checked: root.currentSection === 6
-                onTriggered: root.openSection(6)
-            },
-            Kirigami.Action {
-                objectName: "sectionVibration"
-                text: root.sections[7].name
-                icon.name: root.sections[7].icon
-                visible: root.sectionVisible(7)
-                checkable: true
-                checked: root.currentSection === 7
-                onTriggered: root.openSection(7)
-            },
-            Kirigami.Action {
-                objectName: "sectionTriggers"
-                text: root.sections[8].name
-                icon.name: root.sections[8].icon
-                visible: root.sectionVisible(8)
-                checkable: true
-                checked: root.currentSection === 8
-                onTriggered: root.openSection(8)
-            },
-            Kirigami.Action {
-                objectName: "sectionLighting"
-                text: root.sections[9].name
-                icon.name: root.sections[9].icon
-                visible: root.sectionVisible(9)
-                checkable: true
-                checked: root.currentSection === 9
-                onTriggered: root.openSection(9)
-            },
-            Kirigami.Action {
-                objectName: "sectionScreen"
-                text: root.sections[10].name
-                icon.name: root.sections[10].icon
-                visible: root.sectionVisible(10)
-                checkable: true
-                checked: root.currentSection === 10
-                onTriggered: root.openSection(10)
-            },
-            Kirigami.Action {
-                objectName: "sectionGames"
-                text: root.sections[11].name
-                icon.name: root.sections[11].icon
-                visible: root.sectionVisible(11)
-                checkable: true
-                checked: root.currentSection === 11
-                onTriggered: root.openSection(11)
-            },
-            Kirigami.Action {
-                objectName: "sectionDualSense"
-                text: root.sections[12].name
-                icon.name: root.sections[12].icon
-                visible: root.sectionVisible(12)
-                checkable: true
-                checked: root.currentSection === 12
-                onTriggered: root.openSection(12)
-            },
-            Kirigami.Action {
-                objectName: "sectionDock"
-                text: root.sections[13].name
-                icon.name: root.sections[13].icon
-                visible: root.sectionVisible(13)
-                checkable: true
-                checked: root.currentSection === 13
-                onTriggered: root.openSection(13)
-            },
-            Kirigami.Action {
-                objectName: "sectionSetup"
-                text: root.sections[14].name
-                icon.name: root.sections[14].icon
-                visible: root.sectionVisible(14)
-                checkable: true
-                checked: root.currentSection === 14
-                onTriggered: root.openSection(14)
+                checked: root.currentSection === section
+                onTriggered: root.openSection(section)
             }
-        ]
+        }
+
+        Component.onCompleted: {
+            const built = []
+            for (let i = 0; i < root.sections.length; ++i)
+                built.push(sectionAction.createObject(this, {section: i}))
+            actions = built
+        }
+
     }
 
     // Over the page area rather than in ApplicationWindow.header, which is not
@@ -374,6 +312,27 @@ Kirigami.ApplicationWindow {
                 onTriggered: App.device.error = ""
             }
         ]
+    }
+
+    // DS mode's state comes from reading the process table, which is real work
+    // on the GUI thread -- 4.6 to 11.3 ms a call, measured -- so it runs only
+    // while a section that shows it is open.
+    //
+    // **Here rather than on the pages, because a page cannot own this.** Both
+    // pages that read DS mode used to arm the poll from `Component.onCompleted`
+    // with a comment saying it ran "while a page that cares is up". It did not:
+    // Kirigami keeps a replaced page alive, so `Component.onCompleted` means
+    // once and forever, and a single visit left /proc being scanned every two
+    // seconds from every other page for the rest of the session. Two pages each
+    // binding the same property would not fix it either -- both bindings would
+    // be live at once, since both pages stay alive, and the later one would
+    // simply win. The window is the one thing that knows which section is
+    // actually open.
+    Binding {
+        target: App.dsmode
+        property: "polling"
+        value: root.currentSection === root.indexOfSection("Controller")
+               || root.currentSection === root.indexOfSection("DualSense")
     }
 
     // Progress messages are transient by nature, so they pass through rather

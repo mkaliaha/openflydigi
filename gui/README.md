@@ -31,14 +31,34 @@ PySide6"`) rather than importing it.
 PySide6 (LGPLv3), not PyQt6 (GPL-only). Avoid the Qt add-ons that ship
 GPL-3.0-only under the open-source licence — Charts, Data Visualization,
 Virtual Keyboard. A response curve is what would otherwise pull in Qt Charts;
-`gui/qml/components/StickSide.qml` draws one in a QML `Canvas` instead, plotting
-the nine-point bank the pad actually plays for a stick.
+`gui/qml/components/StickSide.qml` draws one with `QtQuick.Shapes` instead,
+plotting the nine-point bank the pad actually plays for a stick. A `Canvas`
+would do it too and did: it is a texture painted in JavaScript on the GUI
+thread, and this plot is recompiled on every step of a slider drag.
 
 The interface is QML on Kirigami, and no file under `gui/` imports `QtWidgets`.
 `QQuickStyle.setStyle("org.kde.desktop")` must run before the first
 `QQuickWindow` exists, not merely before the window is shown, or Controls render
 in the default style. `tests/test_shell.py` and `tests/test_qml.py` set the same
 style, so a page that only lays out under the Basic style fails in the tests.
+
+**Every combo box and spin box has to be told to leave the wheel alone.** That
+style sets `wheelEnabled: true` in its own `ComboBox.qml` and `SpinBox.qml`;
+Qt's default is `false` and the Basic style leaves it there. Since every such
+control here is bound to a model and writes back on `activated`, a scroll with
+the pointer over one is swallowed and *edits the profile* — one notch over the B
+row on Buttons remaps B to A, with no confirmation and no undo. So bare
+`Controls.ComboBox` and `Controls.SpinBox` carry `wheelEnabled: false`, and the
+FormCard rows go through `components/FormComboBox.qml` and
+`components/FormSpinBox.qml`, which exist only to reach the control inside the
+kirigami-addons delegate — it is private and no version aliases the property
+out. `tests/qml/tst_wheel.qml` sends real wheel events and asserts both halves:
+the model did not move and the page did.
+
+Sliders are not covered and still take the wheel: `org.kde.desktop`'s
+`Slider.qml` implements scrolling in its own `MouseArea` — to snap to tick
+marks, which `wheelEnabled` does not — so setting the property has no effect on
+one. `RangeSlider` already lets the wheel through.
 
 ## Runtime
 
@@ -67,8 +87,9 @@ Running the app needs only `python3-pyside6`, `kf6-kirigami`,
 
 `build_engine()` in `main.py` adds `/usr/lib64/qt6/qml`, `/usr/lib/qt6/qml` and
 `/usr/lib/qml` to the engine's import path where they exist, so Kirigami
-resolves without an import-path environment variable; no module under `gui/`
-reads an environment variable. `tests/qml_harness.py` repeats the same list.
+resolves without an import-path environment variable; the only environment
+variable any module under `gui/` reads is the stall watchdog's, below.
+`tests/qml_harness.py` repeats the same list.
 
 The application identifies itself as application and organisation
 `flydigi-apex5`, display name "Flydigi Apex 5", desktop file `flydigi-apex5`,
@@ -82,15 +103,76 @@ from the app's own Setup page. The entry hard-codes
 container by name — renaming or deleting the box turns the launcher into a dead
 icon.
 
+## Watching for stalls
+
+Scrolling is uneven and `qmlprofiler` cannot say why: it records QML and JS
+ranges only, so Python running in a queued cross-thread slot or a `QTimer`
+timeout is invisible to it. `watchdog.py` answers the one question that leaves
+open — during a stall, what Python frame is the GUI thread in, or is it in none?
+
+```bash
+FLYDIGI_STALL_WATCHDOG=30:/tmp/stalls.txt distrobox enter apex-dev -- python3 -m gui
+```
+
+The GUI thread stamps a heartbeat every few milliseconds and a daemon thread
+dumps every thread's stack the moment one is more than the threshold late — 30
+ms here, which fires for the 40 ms+ frames and not for ordinary jitter. The
+value is `[<milliseconds>][:<path>]`; anything not starting with a number is
+taken as a path and uses the default threshold, and with the variable unset the
+timer and the thread are never created.
+
+Each stall writes one `faulthandler` dump, then two lines under it:
+
+    Current thread 0x… [stall-watchdog] (most recent call first):
+      File "…/gui/watchdog.py", line … in _watch
+      …
+    Thread 0x… [python3] (most recent call first):
+      File "…/gui/models/…", line … in …
+      …
+      File "…/gui/main.py", line … in main
+      File "…/gui/__main__.py", line 11 in <module>
+      File "<frozen runpy>", line 88 in _run_code
+      File "<frozen runpy>", line 203 in _run_module_as_main
+    === stall: GUI thread was <n> ms late above ===
+    === stall over: the GUI thread ran again after <n> ms ===
+
+The labels come *after* the dump on purpose: writing anything before it drops the
+GIL, and the stall can end in the time it takes to get back — see the module
+docstring.
+
+**The GUI thread is the block containing `gui/__main__.py`; `Current thread` is
+always the watchdog itself.** Read the deepest frame of that block. If that
+deepest frame is `main.py`'s own `qt_app.exec()` line — Qt's event loop, which
+is a C call and so has no frame of its own — then no Python was running on the
+GUI thread at that instant, and the search moves to `QSGThreadedRenderLoop` and
+the compositor rather than to anything here.
+
+`grep -c '^=== stall:' /tmp/stalls.txt` counts the stalls;
+`grep '^=== stall over:' /tmp/stalls.txt` is their histogram, and it is the
+second number that carries it — the first is the threshold plus a sampling slice
+every time, since how long a stall lasts is not knowable while you are still
+inside it. The module docstring sets out what a dump does and does not prove.
+
+**A file holding only the startup dump is a result, not a failure.** The
+qmlprofiler trace behind this found input events *inside* all 49 slow frames, so
+the GUI thread's event loop was delivering during them — and a loop delivering
+input also delivers the heartbeat, which would keep the watchdog quiet for
+exactly the frames being chased. That silence rules the event loop out and sends
+the search to `QSGThreadedRenderLoop`, `polishAndSync` waiting on the render
+thread's swap, and the compositor. The startup dump is what proves the tool was
+armed rather than mis-parsed. A mock-bus run proves nothing about timing either
+way.
+
 ## Layout
 
     __main__.py       `python3 -m gui`, from the repository root
     main.py           QML engine setup: import paths, i18n shim, style, the window
     app.py            the application graph: models, worker thread, the wiring
     worker.py         device access, on its own thread
+    watchdog.py       off by default: what the GUI thread is in when a frame is late
     i18n.py           the i18n*() shim the engine needs -- PySide6 has no KLocalizedContext
     models/           view-agnostic state -- no QtWidgets, no QtQuick
-    qml/              Main.qml, pages/ (fifteen), components/ (seven)
+    qml/              Main.qml, pages/ (fifteen), components/ (eleven)
     requirements.txt  what the runtime must provide -- documentation, not a pip file
 
 QML constructs `App`, so opening the device is a separate `start()`, and

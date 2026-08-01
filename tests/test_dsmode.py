@@ -195,6 +195,22 @@ def main():
                          set(state) == {"available", "loaded", "running",
                                         "pids", "relay"}, str(sorted(state))))
 
+    # The desktop app asks for this every two seconds on the thread that draws
+    # the window, and `running` used to be answered by a second scan of the
+    # process table -- the same question as `pids`, asked again.
+    walks = []
+    real_running_pids = dsmode.running_pids
+    dsmode.running_pids = lambda: (walks.append(None) or [4242])
+    try:
+        state = dsmode.state()
+    finally:
+        dsmode.running_pids = real_running_pids
+    results.append(check("one walk of /proc answers the whole reading",
+                         len(walks) == 1, f"{len(walks)} walks"))
+    results.append(check("and both answers come out of that one walk",
+                         state["running"] is True and state["pids"] == [4242],
+                         str(state)))
+
     ok = sum(1 for r in results if r)
     print(f"\n{ok}/{len(results)} passed")
     return 0 if ok == len(results) else 1

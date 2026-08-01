@@ -102,6 +102,8 @@ class SetupChecksModel(QAbstractListModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._checks = []
+        # Built beside the list, never separately -- see `setChecks`.
+        self._state_by_id = {}
 
     def roleNames(self):
         return {
@@ -131,16 +133,38 @@ class SetupChecksModel(QAbstractListModel):
         return None
 
     def setChecks(self, checks):
+        """The one place the rows move, so the one place the index is built.
+
+        `_state_by_id` is assigned here and nowhere else, and only ever from
+        the list assigned on the line above it, so there is no ordering in
+        which the two can disagree. `_checks` is not handed out and the rows
+        are `setup.Check` namedtuples, so nothing outside can edit a state
+        behind the index's back.
+
+        `setdefault` rather than a comprehension so that a repeated id keeps
+        the first row's state, which is what a scan for it found. `checks()`
+        never emits one -- every id is a single if/elif chain -- but this takes
+        whatever list it is handed, and a silent change of which duplicate wins
+        is not worth saving a line.
+        """
         self.beginResetModel()
         self._checks = list(checks or [])
+        self._state_by_id = {}
+        for check in self._checks:
+            self._state_by_id.setdefault(check.id, check.state)
         self.endResetModel()
         self.countChanged.emit()
 
     def state(self, check_id):
-        for check in self._checks:
-            if check.id == check_id:
-                return check.state
-        return setup.UNKNOWN
+        """One requirement's state, or UNKNOWN if it was not reported.
+
+        A lookup rather than a scan of the rows. Seven of `SetupModel`'s
+        properties are answered from here and all seven hang off one `changed`,
+        so a reading of the checklist asks this up to fourteen times -- `ready`
+        alone asks up to five, `rulesNeeded` up to four -- and each of those
+        was a walk of the ten rows looking for an id.
+        """
+        return self._state_by_id.get(check_id, setup.UNKNOWN)
 
     @Property(int, notify=countChanged)
     def count(self):
@@ -159,7 +183,10 @@ class SetupModel(QObject):
         super().__init__(parent)
         self._checks = SetupChecksModel(self)
         self._thread = None
+        # The one that has reported but may not have exited -- see `_run`.
+        self._previous = None
         self._loaded = False
+        self._desktop_command = ""
 
     # -- state -------------------------------------------------------------
 
@@ -205,8 +232,24 @@ class SetupModel(QObject):
         The app is normally started from a terminal here, and a launcher whose
         command nobody can see is the kind of thing that quietly points at the
         wrong checkout after a move.
+
+        **Worked out once, because working it out touches the filesystem.**
+        `setup.desktop_exec` opens /run/.containerenv to name the box and then
+        asks `shutil.which` for distrobox's helper, which walks every directory
+        on PATH. That is a syscall-per-read getter on the UI thread, in the one
+        file whose whole shape is an argument for keeping blocking work off it,
+        and it re-ran on every `changed` -- which every action on this page
+        emits.
+
+        Holding the answer for the life of the process is honest because none
+        of its inputs can move while the process runs: which container we are
+        inside, and where this checkout is. Installing does not read it either
+        -- `setup.desktop_text` calls `desktop_exec` itself, on the worker
+        thread -- so the file that gets written is never taken from here.
         """
-        return setup.desktop_exec()
+        if not self._desktop_command:
+            self._desktop_command = setup.desktop_exec()
+        return self._desktop_command
 
     @Property(bool, notify=changed)
     def rulesNeeded(self):
@@ -267,13 +310,29 @@ class SetupModel(QObject):
     def _run(self, action):
         if self._thread is not None:
             return
-        self._thread = SetupWorker(action, self)
+        # Join the previous one before letting go of it. It has emitted `done`
+        # -- that is why it is here rather than in `_thread` -- but `done` is
+        # the last statement of `run()`, so it need not have returned yet, and
+        # this is the only place the object is dropped. Nothing waits here in
+        # practice for the same reason: there is one statement left to run.
+        if self._previous is not None:
+            self._previous.wait()
+            self._previous = None
+        # Unparented, and held by these two attributes alone. As a child of the
+        # model each worker outlived its work: `_finished` let go of the Python
+        # reference but the parent kept the object, so one dead QThread stayed
+        # on the model per reading -- and the page takes a reading every time it
+        # is opened and again on every "Check again".
+        self._thread = SetupWorker(action)
         self._thread.done.connect(self._finished)
         self._thread.start()
         self.busyChanged.emit()
 
     def _finished(self, action, checks, error):
-        self._thread = None
+        # `busy` goes false here, but the thread is not gone yet -- see `_run`
+        # and `wait`. Nulling `_thread` without keeping the handle is what left
+        # `wait` with nothing to wait on.
+        self._thread, self._previous = None, self._thread
         self._loaded = True
         self._checks.setChecks(checks)
         self.busyChanged.emit()
@@ -282,7 +341,24 @@ class SetupModel(QObject):
             self.failed.emit(error)
 
     def wait(self, msecs=5000):
-        """For shutdown: dropping a running QThread is a qFatal."""
-        if self._thread is not None:
-            self._thread.wait(msecs)
-            self._thread = None
+        """For shutdown: dropping a running QThread is a qFatal.
+
+        Both handles, because `_finished` runs the moment `done` reaches this
+        thread's event loop and the worker has one statement to go after
+        emitting it. A window closed inside that gap used to find `_thread`
+        already None, wait on nothing, and then destroy a QThread that had not
+        returned from `run()`.
+
+        **A handle is dropped only when its thread has really finished.** The
+        wait is bounded, and a bounded wait can time out with the thread still
+        running -- `installRules` is behind a polkit prompt whose subprocess
+        timeout is five minutes, against five seconds here. Clearing the handle
+        anyway would drop the last reference to a running QThread, since these
+        are unparented, which is precisely the qFatal this exists to prevent.
+        A worker still going is kept instead, and the process takes it with it.
+        `gui/models/screen.py`'s encode worker is held on the same terms.
+        """
+        for name in ("_thread", "_previous"):
+            thread = getattr(self, name)
+            if thread is not None and thread.wait(msecs):
+                setattr(self, name, None)

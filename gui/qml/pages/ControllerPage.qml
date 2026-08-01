@@ -31,9 +31,8 @@ Kirigami.ScrollablePage {
 
     // The conflict warning below reads DS mode's state, which is only current
     // once something has asked for it -- the model polls rather than being
-    // pushed to. Cheap: a process-table read every two seconds while a page
-    // that cares is up.
-    Component.onCompleted: App.dsmode.refresh()
+    // pushed to. Arming that poll is `Main.qml`'s job and not this page's: see
+    // the `polling` binding there for why a page cannot own it.
 
     ColumnLayout {
         spacing: 0

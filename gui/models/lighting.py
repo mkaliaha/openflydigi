@@ -188,6 +188,7 @@ class LightingModel(QObject):
         self._edited = None
         self._effect_index = 0    # 0 is KEEP_CURRENT
         self._saved = True
+        self._dirty = False
         self._colours = ColourListModel(self)
         self._colours.changed.connect(self._regenerate)
         self._info = ""
@@ -202,8 +203,20 @@ class LightingModel(QObject):
 
     @Property(bool, notify=dirtyChanged)
     def dirty(self):
-        return (self._edited is not None
-                and bytes(self._edited.blob) != self._stored)
+        """Whether the edited config differs from what the pad last gave us.
+
+        **A field, and it used to be a copy of the whole blob per read.** The
+        LED blob is header plus every frame -- 380 bytes on this pad, 10 frames
+        of 12 LEDs -- so deriving this in the getter meant allocating and
+        comparing all of it once per binding that asked. The page has three
+        such bindings -- the hint line, the Apply button and the Save button --
+        and `dirtyChanged` re-runs the lot.
+
+        Derived state is still the right design, so nothing has to remember to
+        set a flag; what moved is *where* it is derived. `_mark` is the one
+        place that does it, and see there for why that cannot go stale.
+        """
+        return self._dirty
 
     @Property(bool, notify=dirtyChanged)
     def saveNeeded(self):
@@ -354,6 +367,22 @@ class LightingModel(QObject):
         self._mark()
 
     def _mark(self):
+        """Recompute the derived dirty state, then announce it.
+
+        **This is what guarantees `_dirty` cannot go stale, and it holds
+        because there is nowhere else to move either blob.** `_edited` is
+        assigned only in `configLoaded`, `_stored` only there and in
+        `confirmWritten`, and the bytes inside `_edited` only in the three
+        setters and `_regenerate` -- every one of which already ended here,
+        because every one of them had to notify. So a path that changes the
+        answer and skips this is a path that was already failing to tell QML.
+
+        Still recomputed and emitted unconditionally rather than only on a
+        change: `saveNeeded` rides the same signal and moves without `dirty`
+        moving, which is exactly what `confirmWritten(False)` does.
+        """
+        self._dirty = (self._edited is not None
+                       and bytes(self._edited.blob) != self._stored)
         self.dirtyChanged.emit()
 
     @Slot(bool)

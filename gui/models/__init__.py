@@ -11,7 +11,7 @@ QML pages are both views onto these objects.
 from .device import BATTERY_STEPS, DeviceModel
 from .devices import DevicesModel
 from .dock import (DIRECTION_NAMES, MODE_NAMES, SWITCH_LABELS, SWITCHES,
-                   DockModel)
+                   DockColoursModel, DockModel)
 from .dsmode import DsModeModel
 from .games import (ALL_ROUTES, APPLIABLE_ROUTE, ROUTE_NAMES, TIER_LABELS,
                     GameFilterModel, GameListModel, game_name, route_detail,
@@ -23,11 +23,10 @@ from .profile import (CURVE_PRESETS, DEFAULT_TARGET, KEY_CLUSTERS, KEY_LABELS,
                       MACRO_TYPES, MOTION_ENABLE_TYPES, MOTION_KEYS,
                       MOTION_NO_KEY, MOTION_TARGETS, RECORD_SECONDS, STICK_MAX,
                       TARGETS, TITLE_MAX_CHARS, TRIGGER_MODES, TURBO_MAX_HZ,
-                      TURBO_MODES, KeyMapModel, MacroModel, MotionModel,
-                      ProfileListModel, ProfileModel, StickModel,
-                      StickSideModel, TriggerModel,
-                      TriggerSideModel, VibrationModel, VibrationSideModel,
-                      key_label)
+                      TURBO_MODES, EffectParamsModel, KeyMapModel, MacroModel,
+                      MotionModel, ProfileListModel, ProfileModel, StickModel,
+                      StickSideModel, TriggerModel, TriggerSideModel,
+                      VibrationModel, VibrationSideModel, key_label)
 from .screen import FIT_MODES, MAX_FRAMES, ScreenModel
 from .settings import (PRECISION_NAMES, PRECISION_WIRE, SENSITIVITY_NAMES,
                        SENSITIVITY_WIRE, SettingsModel)
@@ -45,13 +44,13 @@ __all__ = [
     "TIER_LABELS", "TITLE_MAX_CHARS",
     "TRIGGER_MODES", "TURBO_MAX_HZ",
     "TURBO_MODES",
-    "ColourListModel", "DeviceModel", "DevicesModel", "DockModel",
-    "DsModeModel", "GameFilterModel",
+    "ColourListModel", "DeviceModel", "DevicesModel", "DockColoursModel",
+    "DockModel", "DsModeModel", "EffectParamsModel", "GameFilterModel",
     "GameListModel", "KeyMapModel", "LightingModel", "MacroModel",
-    "MotionModel", "ProfileListModel",
-    "ProfileModel",
+    "MotionModel", "ProfileListModel", "ProfileModel",
     "ScreenModel", "SettingsModel", "SetupChecksModel", "SetupModel",
-    "StickModel", "StickSideModel", "TriggerModel", "TriggerSideModel", "VibrationModel", "VibrationSideModel",
+    "StickModel", "StickSideModel", "TriggerModel", "TriggerSideModel",
+    "VibrationModel", "VibrationSideModel",
     "from_hex", "game_name", "invert_cycle", "key_label", "route_detail",
     "route_name", "to_hex",
 ]

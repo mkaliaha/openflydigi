@@ -111,6 +111,14 @@ TestCase {
         App.screen.fitMode = 1;
         tryCompare(App.screen, "fitMode", 1);
         compare(App.screen.frameCount, 4, "the frames should survive a fit change");
+
+        // `tryVerify`, because the encode is no longer done by the time this
+        // line runs: it is a per-pixel pass over every held frame, about 1.3 s
+        // for a 200-frame animation, and it moved off the GUI thread. So the
+        // fit changes now and the preview follows when the worker reports.
+        // Waiting on `encoding` first makes a failure say which half broke.
+        tryCompare(App.screen, "encoding", false, 5000,
+                   "the encode never finished");
         // The preview is written to one path, so Qt would show a cached image
         // without something varying in the URL.
         verify(App.screen.previewSource !== before,

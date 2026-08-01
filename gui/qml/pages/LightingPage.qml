@@ -86,7 +86,7 @@ Kirigami.ScrollablePage {
         FormCard.FormCard {
             visible: App.lighting.loaded
 
-            FormCard.FormComboBoxDelegate {
+            FormComboBox {
                 objectName: "effectCombo"
                 text: "Effect"
                 // The stored mode byte uses Space Station's numbering, so on

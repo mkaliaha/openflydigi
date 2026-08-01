@@ -26,8 +26,9 @@ a file their installer ships and this repository does not have.
 import math
 import os
 
-from PySide6.QtCore import (Property, QObject, QRectF, QSize, QStandardPaths, Qt,
-                            QUrl, Signal, Slot)
+from PySide6.QtCore import (Property, QAbstractListModel, QModelIndex, QObject,
+                            QRectF, QSize, QStandardPaths, Qt, QUrl, Signal,
+                            Slot)
 from PySide6.QtGui import QImage, QImageReader, QPainter
 from PySide6.QtQml import QmlElement
 
@@ -71,8 +72,6 @@ USES_COLOUR = {charger.MODE_SOLID: 1, charger.MODE_BREATH: 1,
                charger.MODE_WAVE_GRADIENT: 2}
 USES_DIRECTION = (charger.MODE_RAINBOW, charger.MODE_WAVE_GRADIENT)
 
-# The switches, in the order the page shows them, with Flydigi's own labels and
-# what each actually does.
 # The switches, in the order the page shows them, with what each actually does
 # and Flydigi's own name for it kept alongside -- their labels are what Space
 # Station shows and what a search finds, and "Intelligent start" says nothing
@@ -189,19 +188,107 @@ def from_hex(text):
 
 
 @QmlElement
+class DockColoursModel(QAbstractListModel):
+    """The swatches the chosen effect reads, one row each.
+
+    **A model rather than a list of colour strings**, for the reason
+    `gui/models/lighting.py`'s `ColourListModel` is one. The page draws these
+    with a Repeater, and a list-valued property notified by the model-wide
+    `lightingChanged` hands that Repeater a whole new model every time the
+    brightness slider moves -- which destroys and rebuilds the swatch under the
+    pointer. A row that answers an edit with `dataChanged` leaves the delegates
+    where they are. The same shape broke the Triggers page's knobs outright; see
+    `EffectParamsModel` in `gui/models/profile.py` for what that looked like.
+
+    The rows are the colours the *current mode* reads, not every colour the
+    model remembers, because that is what the page has always drawn -- its
+    Repeater ran to `coloursUsed` and read `colours[index]` out of a longer
+    list, falling back to black where the list was shorter. Same swatches, one
+    row apiece.
+    """
+
+    ColourRole = Qt.UserRole + 1
+
+    countChanged = Signal()
+
+    def __init__(self, dock):
+        super().__init__(dock)
+        self._dock = dock
+        self._rows = []                # "#rrggbb", one per swatch on screen
+
+    def roleNames(self):
+        # The name the pad's own colour list uses, so a delegate written against
+        # one of the two reads the other unchanged.
+        return {self.ColourRole: b"colour"}
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._rows)
+
+    def data(self, index, role=Qt.DisplayRole):
+        row = index.row()
+        if not 0 <= row < len(self._rows):
+            return None
+        if role in (self.ColourRole, Qt.DisplayRole):
+            return self._rows[row]
+        return None
+
+    @Property(int, notify=countChanged)
+    def count(self):
+        return len(self._rows)
+
+    @Slot(int, str)
+    def setColour(self, row, text):
+        """Edit a swatch, for a caller holding this model rather than the dock.
+
+        `DockModel` owns the colours -- this is a view of them -- so the write
+        goes there. `App.dock.setColour` is the same call and both are kept: the
+        page's colour dialog knows which dock it is editing and not which list.
+        """
+        self._dock.setColour(row, text)
+
+    def refresh(self):
+        """Take the swatches the chosen mode shows, saying only what moved.
+
+        A reset only when the number of swatches really changes, which means a
+        different effect was picked -- those really are different rows. Editing
+        a colour is `dataChanged`, which updates the delegates in place, so the
+        button under the pointer survives being clicked.
+        """
+        rows = [to_hex(colour) for colour in self._dock._swatch_colours()]
+        if rows == self._rows:
+            return
+        if len(rows) == len(self._rows):
+            self._rows = rows
+            self.dataChanged.emit(self.index(0, 0), self.index(len(rows) - 1, 0),
+                                  [self.ColourRole])
+            return
+        self.beginResetModel()
+        self._rows = rows
+        self.endResetModel()
+        self.countChanged.emit()
+
+
+@QmlElement
 class DockModel(QObject):
     """What the Dock page binds to, for whichever dock is selected."""
 
     changed = Signal()
     lightingChanged = Signal()
     busyChanged = Signal()
-    # The picture half. Kept apart from `lightingChanged` because it fires on
-    # every pan event and the effect controls have no reason to re-evaluate.
+    # The picture half: which file, how much of it, what it will cost to send.
+    # Kept apart from `lightingChanged` because the effect controls have no
+    # reason to re-evaluate when a trim handle moves.
     imageChanged = Signal()
-    # And the preview cursor is kept apart from *that*, because it ticks ten
+    # Where the picture sits on the stage, which is the half that has to keep up
+    # with a pointer. Split out of `imageChanged` because a drag emitted that on
+    # every event, and twenty-five properties hang off it -- including the trim
+    # slider's, which has to be written to rather than bound, so a drag on the
+    # stage wrote to the *other* control on every move. What a drag actually
+    # moves is four numbers, and this is the signal that says so.
+    framingChanged = Signal()
+    # And the preview cursor is kept apart from both, because it ticks ten
     # times a second while an animation plays. On one signal, every framing
-    # property would re-evaluate per tick -- and the trim slider, which has to
-    # be written to rather than bound, would be written to underneath a drag.
+    # property would re-evaluate per tick.
     previewChanged = Signal()
     # Requests out. The selector rides along on every one of them: the page
     # binds to whichever dock is chosen, and a write must not land on the dock
@@ -235,14 +322,115 @@ class DockModel(QObject):
         self._trim = (0, 0)            # inclusive, into `_images`
         self._interval = DEFAULT_INTERVAL_MS
         self._preview_frame = 0
-        # Sampling one frame costs about half a millisecond, so frames are
-        # taken on demand and remembered rather than all recomputed whenever
-        # the picture moves under the window. Dragging re-samples the one frame
-        # on screen; playing an animation fills this in as it goes round.
-        self._sampled = {}
+        # Sampling one frame costs about half a millisecond, so frames are taken
+        # on demand and remembered rather than all recomputed whenever the
+        # picture moves under the window. `_framing` counts the moves, and the
+        # two caches record which move they were filled at -- see `_sample`.
+        self._framing = 0
+        self._sampled = {}             # frame index -> 162 colours
+        self._hexed = {}               # the same frames, ready for the wedge
+        self._sampled_at = 0
         self._filmstrip = ""
         self._filmstrip_serial = 0
         self._image_message = ""
+        self._swatches = DockColoursModel(self)
+        # Everything below this line is derived state, and the four calls at the
+        # end of this constructor are what derive it: `_restated` for the
+        # device, `_relit` for the lighting, `_repictured` for the file and what
+        # sending it costs, `_reframed` for where the picture sits. Seeding the
+        # fields by hand here would be a second copy of that arithmetic to keep
+        # in step, so they are seeded by the same calls that maintain them; the
+        # signals reach nothing, since nothing can be connected to a model still
+        # in its constructor.
+        self._restated()
+        self._relit()
+        self._repictured()
+        self._reframed()
+
+    # -- deriving once, where the state moves ------------------------------
+    #
+    # **Each of these four is the only place its signal is emitted.** A property
+    # read from QML is an interpreter call wrapping whatever the getter does,
+    # and one signal here invalidates a dozen bindings at once: `lightingChanged`
+    # carried twelve properties, of which one rebuilt a list of colour strings
+    # per read, two handed a combo box a fresh copy of a list that never
+    # changes, and two walked a table to turn a stored id into an index.
+    # Deriving inside the getters meant paying for each of those once per
+    # binding rather than once per change.
+    #
+    # So the work is on the write side, and what keeps it from going stale is
+    # that pairing: `changed` is emitted by `_restated` and nowhere else,
+    # `lightingChanged` by `_relit` and nowhere else, and so on down. A mutator
+    # cannot forget to re-derive, because the call that tells the page is the
+    # call that re-derives. Anything added here has to keep that -- notify
+    # through the helper, never `emit()` on your own account.
+
+    def _restated(self):
+        """The dock answered, or one of its switches moved."""
+        self._model_name = charger.name_for(self._info.get("device_type")) or ""
+        self._docked_state = self._describe_docked()
+        self.changed.emit()
+
+    def _relit(self):
+        """The lighting config moved: its mode, colours, period or direction."""
+        self._period_range = charger.MODE_PERIOD_RANGE.get(
+            self._mode, charger.PERIOD_RANGE_FALLBACK)
+        self._mode_index = next(
+            (i for i, (_name, mode) in enumerate(MODES) if mode == self._mode),
+            -1)
+        self._direction_index = next(
+            (i for i, (_name, value) in enumerate(DIRECTIONS)
+             if value == self._direction), 0)
+        self._colours_used = USES_COLOUR.get(self._mode, 0)
+        # Before the signal, so a handler that reads the swatches sees the
+        # colour it has just set rather than the one before it.
+        self._swatches.refresh()
+        self.lightingChanged.emit()
+
+    def _repictured(self):
+        """The file, the trim or the frame time moved."""
+        self._image_name = os.path.basename(self._source) if self._source else ""
+        self._source_url = (QUrl.fromLocalFile(self._source).toString()
+                            if self._source else "")
+        self._filmstrip_url = (QUrl.fromLocalFile(self._filmstrip).toString()
+                               if self._filmstrip else "")
+        first = self._images[0] if self._images else None
+        self._source_size = (first.width(), first.height()) if first else (0, 0)
+        self._frame_count = (self._trim[1] - self._trim[0] + 1
+                             if self._images else 0)
+        self._packets = self._count_packets()
+        self._estimate = self._describe_upload()
+        self.imageChanged.emit()
+
+    def _reframed(self):
+        """The picture moved under the window: the stage follows, the LEDs wait.
+
+        **Two halves, and only one of them can afford to run per pointer move.**
+        Following the pointer is four numbers -- where the picture sits and how
+        big it is drawn -- and the stage needs them on every event or the drag
+        comes unstuck from the cursor. Re-reading what the *window* sees is a
+        334x304 canvas repainted and 162 colours sampled off it, measured at
+        0.868 ms a frame -- and this call used to do that as well, on every one
+        of those same events.
+
+        So it emits `framingChanged` and nothing else. The sampled frames are
+        not recomputed here, only moved out of date by `_framing`;
+        `framingSettled` -- which `CropStage.qml` calls when the drag is
+        released or the zoom slider let go -- is what asks for them again.
+
+        Nothing can be handed a sample taken under an older framing, because
+        `_sample` drops the caches whenever `_framing` has moved past what they
+        were filled at, and every call in this file that moves `self._frame`
+        ends here.
+        """
+        self._framing += 1
+        x, y = self._frame.pan
+        width, height = self._frame.rendered_size()
+        self._draw = (x, y, width, height)
+        self._rendered_size = [width, height]
+        self._can_pan = bool(self._images) and self._frame.can_pan()
+        self._zoom_text = self._frame.zoom_label()
+        self.framingChanged.emit()
 
     # -- which dock --------------------------------------------------------
 
@@ -260,7 +448,7 @@ class DockModel(QObject):
             return
         self._selector = selector
         self._present = False
-        self.changed.emit()
+        self._restated()
         if selector:
             self.refreshRequested.emit(selector)
 
@@ -307,13 +495,13 @@ class DockModel(QObject):
         else:
             self._docked = bool(status.get("docked"))
             self._dock_battery = int(status.get("battery", -1))
-        self.changed.emit()
-        self.lightingChanged.emit()
+        self._restated()
+        self._relit()
 
     @Slot(str)
     def failed(self, message):
         self._error = str(message or "")
-        self.changed.emit()
+        self._restated()
 
     @Slot(float)
     def progressReceived(self, fraction):
@@ -354,7 +542,7 @@ class DockModel(QObject):
         # Optimistic, then corrected by the read that follows: the page should
         # not feel like it lags a device that answers in milliseconds.
         self._info[name] = bool(value)
-        self.changed.emit()
+        self._restated()
         self.switchRequested.emit(self._selector, str(name), bool(value))
 
     @Property(bool, notify=changed)
@@ -409,11 +597,15 @@ class DockModel(QObject):
 
     @Property(str, notify=changed)
     def model(self):
-        return charger.name_for(self._info.get("device_type")) or ""
+        return self._model_name
 
     @Property(str, notify=changed)
     def dockedState(self):
-        """One sentence about what is sitting in it.
+        """One sentence about what is sitting in it. Built by `_restated`."""
+        return self._docked_state
+
+    def _describe_docked(self):
+        """That sentence, worked out once per report rather than once per read.
 
         The charge goes through `charger.describe_battery`, which reads the byte
         the way a controller's own battery is read -- 0..5, with 6 meaning
@@ -439,10 +631,7 @@ class DockModel(QObject):
 
     @Property(int, notify=lightingChanged)
     def modeIndex(self):
-        for index, (_name, mode) in enumerate(MODES):
-            if mode == self._mode:
-                return index
-        return -1
+        return self._mode_index
 
     @modeIndex.setter
     def modeIndex(self, index):
@@ -462,9 +651,15 @@ class DockModel(QObject):
         self._direction = direction
         if colours:
             self._colours = [tuple(c) for c in colours]
-        self.lightingChanged.emit()
+        self._relit()
 
-    @Property(list, notify=lightingChanged)
+    # `constant`, not notified, for the two lists below: they are module
+    # constants and never move. Notified by `lightingChanged` they were rebuilt
+    # and marshalled into QML on every unrelated lighting edit -- and a combo
+    # box handed a new `model` rebuilds its popup and re-reads `currentIndex`,
+    # which is a great deal of work to say that "Rainbow" is still called
+    # Rainbow.
+    @Property(list, constant=True)
     def modeNames(self):
         return MODE_NAMES
 
@@ -478,7 +673,7 @@ class DockModel(QObject):
                     min(charger.BRIGHTNESS_MAX, int(value)))
         if value != self._brightness:
             self._brightness = value
-            self.lightingChanged.emit()
+            self._relit()
 
     @Property(int, notify=lightingChanged)
     def period(self):
@@ -487,22 +682,19 @@ class DockModel(QObject):
 
     @period.setter
     def period(self, value):
-        low, high = charger.MODE_PERIOD_RANGE.get(
-            self._mode, charger.PERIOD_RANGE_FALLBACK)
+        low, high = self._period_range
         value = max(low, min(high, int(value)))
         if value != self._period:
             self._period = value
-            self.lightingChanged.emit()
+            self._relit()
 
     @Property(int, notify=lightingChanged)
     def periodMin(self):
-        return charger.MODE_PERIOD_RANGE.get(
-            self._mode, charger.PERIOD_RANGE_FALLBACK)[0]
+        return self._period_range[0]
 
     @Property(int, notify=lightingChanged)
     def periodMax(self):
-        return charger.MODE_PERIOD_RANGE.get(
-            self._mode, charger.PERIOD_RANGE_FALLBACK)[1]
+        return self._period_range[1]
 
     @Property(bool, notify=lightingChanged)
     def isPicture(self):
@@ -518,42 +710,63 @@ class DockModel(QObject):
     @Property(int, notify=lightingChanged)
     def coloursUsed(self):
         """How many colours this mode's generator reads. Zero means it ignores them."""
-        return USES_COLOUR.get(self._mode, 0)
+        return self._colours_used
 
     @Property(bool, notify=lightingChanged)
     def usesDirection(self):
         return self._mode in USES_DIRECTION
 
-    @Property(list, notify=lightingChanged)
+    @Property(DockColoursModel, constant=True)
     def colours(self):
-        return [to_hex(c) for c in self._colours]
+        """The swatches to draw, as rows. See `DockColoursModel` for why.
 
-    @Property(list, notify=lightingChanged)
+        `constant` because the model object itself never changes; what changes
+        is its contents, which it reports on its own.
+        """
+        return self._swatches
+
+    def _swatch_colours(self):
+        """What the swatches show: one colour per swatch the mode reads.
+
+        Black where the stored list is shorter than the mode wants, which is the
+        fallback the page's own delegate used to carry. Only a mode's own
+        defaults ever fill the list, so the gap is not a state a person can put
+        it in -- it is what a dock reporting fewer colours than its mode reads
+        would leave behind.
+        """
+        return [self._colours[i] if i < len(self._colours) else (0, 0, 0)
+                for i in range(self._colours_used)]
+
+    @Property(list, constant=True)
     def directionNames(self):
         return DIRECTION_NAMES
 
     @Property(int, notify=lightingChanged)
     def directionIndex(self):
-        for index, (_name, value) in enumerate(DIRECTIONS):
-            if value == self._direction:
-                return index
-        return 0
+        return self._direction_index
 
     @directionIndex.setter
     def directionIndex(self, index):
         index = int(index)
         if 0 <= index < len(DIRECTIONS) and DIRECTIONS[index][1] != self._direction:
             self._direction = DIRECTIONS[index][1]
-            self.lightingChanged.emit()
+            self._relit()
 
     @Slot(int, str)
     def setColour(self, index, text):
         colour = from_hex(text)
+        # `grew` because filling the list out to `index` leaves the new entry
+        # already equal to the colour asked for, so the comparison below decides
+        # nothing happened and nothing is notified. The swatch then sat on its
+        # fallback black until some unrelated lighting edit came past. Reachable
+        # only from a dock that reports fewer colours than its mode reads, which
+        # is why it survived this long.
+        grew = len(self._colours) <= index
         while len(self._colours) <= index:
             self._colours.append(colour)
-        if self._colours[index] != colour:
+        if grew or self._colours[index] != colour:
             self._colours[index] = colour
-            self.lightingChanged.emit()
+            self._relit()
 
     @Property(bool, notify=busyChanged)
     def busy(self):
@@ -610,7 +823,7 @@ class DockModel(QObject):
         if not frames:
             self.clearImage()
             self._image_message = f"Qt could not read {os.path.basename(path)}"
-            self.imageChanged.emit()
+            self._repictured()
             return False
 
         total = max(reader.imageCount(), len(frames))
@@ -623,11 +836,13 @@ class DockModel(QObject):
         self._trim = (0, min(len(frames), charger.SAFE_FRAMES) - 1)
         self._preview_frame = 0
         self._image_message = _load_note(total, len(frames))
-        self._sampled = {}
         self._write_filmstrip()
-        self.imageChanged.emit()
+        # `_reframed` is what makes the last picture's samples unreachable, and
+        # it has to run: `set_natural` above moved the framing.
+        self._repictured()
+        self._reframed()
         self.previewChanged.emit()
-        self.lightingChanged.emit()
+        self._relit()
         return True
 
     @Slot()
@@ -635,20 +850,20 @@ class DockModel(QObject):
         self._source = ""
         self._images = []
         self._frame.set_natural(0, 0)
+        # Dropped here as well as being made unreachable by `_reframed` below.
+        # `_sample` is what empties these when the framing has moved, and with
+        # no picture left nothing will ever call it again -- so a two-hundred
+        # frame animation's samples would sit in memory for the session.
         self._sampled = {}
+        self._hexed = {}
         self._trim = (0, 0)
         self._preview_frame = 0
         self._image_message = ""
         self._clear_filmstrip()
-        self.imageChanged.emit()
+        self._repictured()
+        self._reframed()
         self.previewChanged.emit()
-        self.lightingChanged.emit()
-
-    def _reframed(self):
-        """The picture moved under the window: nothing sampled is still true."""
-        self._sampled = {}
-        self.imageChanged.emit()
-        self.previewChanged.emit()
+        self._relit()
 
     def _render(self, index):
         """One source frame, framed onto the 334x304 crop canvas."""
@@ -657,7 +872,21 @@ class DockModel(QObject):
         return self._frame.render(self._images[index])
 
     def _sample(self, index):
-        """One frame's 162 colours, computed once per framing."""
+        """One frame's 162 colours, computed once per framing.
+
+        **The cache is keyed on the framing rather than cleared by hand.**
+        Sampling is the expensive thing this model does, so frames are taken on
+        demand and kept: an animation costs one sample per frame the first time
+        round the loop and nothing on the way round again. What makes that safe
+        is that every path which moves the picture goes through `_reframed`,
+        which moves `_framing` on -- so a cache filled under an older framing is
+        dropped here, on the way to the first read that would have used it.
+        There is no invalidation to forget and none to get out of order.
+        """
+        if self._sampled_at != self._framing:
+            self._sampled = {}
+            self._hexed = {}
+            self._sampled_at = self._framing
         if index not in self._sampled:
             self._sampled[index] = charger.sample_frame(
                 rgb_bytes(self._render(index)))
@@ -706,12 +935,12 @@ class DockModel(QObject):
 
     @Property(str, notify=imageChanged)
     def imageName(self):
-        return os.path.basename(self._source) if self._source else ""
+        return self._image_name
 
     @Property(str, notify=imageChanged)
     def imageSource(self):
         """The file itself, for the page to draw on the stage."""
-        return QUrl.fromLocalFile(self._source).toString() if self._source else ""
+        return self._source_url
 
     # The size the page must ask Qt to decode the same file at. **Not
     # cosmetic**: the crop stage loads the picture a second time through QML,
@@ -720,11 +949,11 @@ class DockModel(QObject):
 
     @Property(int, notify=imageChanged)
     def sourceWidth(self):
-        return self._images[0].width() if self._images else 0
+        return self._source_size[0]
 
     @Property(int, notify=imageChanged)
     def sourceHeight(self):
-        return self._images[0].height() if self._images else 0
+        return self._source_size[1]
 
     @Property(str, notify=imageChanged)
     def imageMessage(self):
@@ -732,7 +961,7 @@ class DockModel(QObject):
 
     @Property(str, notify=imageChanged)
     def filmstripSource(self):
-        return QUrl.fromLocalFile(self._filmstrip).toString() if self._filmstrip else ""
+        return self._filmstrip_url
 
     # the stage, in the coordinates the page lays it out in
 
@@ -760,46 +989,70 @@ class DockModel(QObject):
     def holeHeight(self):
         return charger.CROP_HEIGHT
 
-    @Property("QVariantList", notify=imageChanged)
+    # The framing block, all of it on `framingChanged`: this is what a drag
+    # moves, and the only part of the model a drag is allowed to cost anything.
+    # Every one of these reads a field that `_reframed` computed once for the
+    # move -- `rendered_size()` alone was being run three times per read of the
+    # four below.
+
+    @Property("QVariantList", notify=framingChanged)
     def renderedSize(self):
         """How big the picture is drawn on the stage, at this fit and zoom."""
-        return list(self._frame.rendered_size())
+        return self._rendered_size
 
-    @Property(float, notify=imageChanged)
+    @Property(float, notify=framingChanged)
     def imageX(self):
-        return self._frame.pan[0]
+        return self._draw[0]
 
-    @Property(float, notify=imageChanged)
+    @Property(float, notify=framingChanged)
     def imageY(self):
-        return self._frame.pan[1]
+        return self._draw[1]
 
-    @Property(float, notify=imageChanged)
+    @Property(float, notify=framingChanged)
     def imageDrawWidth(self):
-        return self._frame.rendered_size()[0]
+        return self._draw[2]
 
-    @Property(float, notify=imageChanged)
+    @Property(float, notify=framingChanged)
     def imageDrawHeight(self):
-        return self._frame.rendered_size()[1]
+        return self._draw[3]
 
-    @Property(bool, notify=imageChanged)
+    @Property(bool, notify=framingChanged)
     def canPan(self):
         """False when the picture is smaller than the window on both axes."""
-        return bool(self._images) and self._frame.can_pan()
+        return self._can_pan
 
     @Slot(float, float)
     def panBy(self, dx, dy):
         if not self._images:
             return
+        before = self._frame.pan
         self._frame.pan_by(dx, dy)
-        self._reframed()
+        # A drag already against an edge moves nothing, and there is a lot of
+        # that: the clamp eats every event once a picture is as far over as it
+        # goes. Saying so anyway would throw the sampled frames away for a
+        # framing that did not change.
+        if self._frame.pan != before:
+            self._reframed()
 
     @Slot()
     def framingSettled(self):
-        """A drag ended. Nothing owed here: sampling one frame is half a
-        millisecond, so the wedge has been keeping up the whole way down.
-        The Screen page's is not free and this is the hook it needs."""
+        """The drag was released or the zoom slider let go: re-read the LEDs.
 
-    @Property(int, notify=imageChanged)
+        The hook `CropStage.qml` calls, and until now it did nothing, because
+        `_reframed` re-sampled on every pointer event instead. It no longer
+        does, so this is where a drag's one resample happens -- telling the
+        preview its colours have moved is enough, since `frameColours` samples
+        on demand and `_sample` will find its cache out of date.
+
+        Quiet when the framing has not moved since the last sample was taken,
+        which is a press that never became a drag, and a zoom slider pressed and
+        released on the value it was already showing.
+        """
+        if self._sampled_at == self._framing:
+            return
+        self.previewChanged.emit()
+
+    @Property(int, notify=framingChanged)
     def zoom(self):
         return self._frame.zoom
 
@@ -816,11 +1069,11 @@ class DockModel(QObject):
     def zoomMax(self):
         return ZOOM_MAX
 
-    @Property(str, notify=imageChanged)
+    @Property(str, notify=framingChanged)
     def zoomLabel(self):
-        return self._frame.zoom_label()
+        return self._zoom_text
 
-    @Property(int, notify=imageChanged)
+    @Property(int, notify=framingChanged)
     def imageFitMode(self):
         return self._frame.fit
 
@@ -828,6 +1081,11 @@ class DockModel(QObject):
     def imageFitMode(self, index):
         if self._frame.set_fit(index):
             self._reframed()
+            # A combo box has no drag behind it: this framing is the final one
+            # the moment it is picked, so the wedge is asked for its colours now
+            # rather than waiting for a release that is never coming. The zoom
+            # slider is the opposite case and deliberately waits.
+            self.framingSettled()
 
     @Property(list, constant=True)
     def imageFitModes(self):
@@ -871,7 +1129,7 @@ class DockModel(QObject):
             self._trim = (low, high)
             if not 0 <= self._preview_frame < high - low + 1:
                 self._preview_frame = 0
-            self.imageChanged.emit()
+            self._repictured()
             # The first selected frame may be a different frame now, so what the
             # wedge is showing has changed even though the cursor has not.
             self.previewChanged.emit()
@@ -879,13 +1137,11 @@ class DockModel(QObject):
     @Property(int, notify=imageChanged)
     def frameCount(self):
         """How many frames the dock would be sent."""
-        if not self._images:
-            return 0
-        return self._trim[1] - self._trim[0] + 1
+        return self._frame_count
 
     @Property(bool, notify=imageChanged)
     def animated(self):
-        return self.frameCount > 1
+        return self._frame_count > 1
 
     @Property(int, notify=imageChanged)
     def intervalMs(self):
@@ -896,7 +1152,7 @@ class DockModel(QObject):
         value = max(INTERVAL_MIN_MS, min(INTERVAL_MAX_MS, int(value)))
         if value != self._interval:
             self._interval = value
-            self.imageChanged.emit()
+            self._repictured()
 
     @Property(int, constant=True)
     def intervalMin(self):
@@ -931,11 +1187,24 @@ class DockModel(QObject):
 
     @Property(list, notify=previewChanged)
     def frameColours(self):
-        """The 162 colours on the wedge right now. Empty for a dark panel."""
-        if not self._images or not self.frameCount:
+        """The 162 colours on the wedge right now. Empty for a dark panel.
+
+        Kept as hex beside the samples they came from rather than formatted per
+        read: it is 162 strings, the preview timer reads it on every tick, and
+        the frames it walks are the same handful over and over. Handed out by
+        reference, and read-only in the same way the samples are.
+        """
+        if not self._images or not self._frame_count:
             return []
-        return [to_hex(c)
-                for c in self._sample(self._trim[0] + self._preview_frame)]
+        index = self._trim[0] + self._preview_frame
+        # First, and not merely for the colours: this is the call that drops
+        # both caches when the picture has moved since the frame was taken.
+        colours = self._sample(index)
+        hexed = self._hexed.get(index)
+        if hexed is None:
+            hexed = [to_hex(colour) for colour in colours]
+            self._hexed[index] = hexed
+        return hexed
 
     @Property(list, constant=True)
     def wedgeCentres(self):
@@ -965,14 +1234,20 @@ class DockModel(QObject):
 
     @Property(int, notify=imageChanged)
     def imagePackets(self):
+        return self._packets
+
+    def _count_packets(self):
         """Packets, counted the way `charger.write_led_config` counts them."""
-        if not self.frameCount:
+        if not self._frame_count:
             return 0
-        blob = 6 + self.frameCount * charger.LED_COUNT * 3
+        blob = 6 + self._frame_count * charger.LED_COUNT * 3
         return math.ceil(blob / charger.PACK_BYTES)
 
     @Property(str, notify=imageChanged)
     def imageEstimate(self):
+        return self._estimate
+
+    def _describe_upload(self):
         """The upload's size in words, before anyone commits to waiting for it.
 
         Measured on this dock: about a hundred packets a second, each one
@@ -980,7 +1255,7 @@ class DockModel(QObject):
         already takes and two hundred is about twenty -- long enough to want
         saying beforehand rather than discovering.
         """
-        packets = self.imagePackets
+        packets = self._packets
         if not packets:
             return ""
         seconds = packets / 100.0
@@ -992,7 +1267,7 @@ class DockModel(QObject):
 
     @Property(bool, notify=imageChanged)
     def canApplyImage(self):
-        return bool(self._images) and self.frameCount > 0
+        return bool(self._images) and self._frame_count > 0
 
     @Slot()
     def apply(self):

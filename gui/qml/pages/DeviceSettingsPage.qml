@@ -19,6 +19,7 @@ import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 import org.kde.kirigamiaddons.formcard as FormCard
 import Apex5
+import "../components"
 
 Kirigami.ScrollablePage {
     id: page
@@ -66,7 +67,7 @@ Kirigami.ScrollablePage {
 
             FormCard.FormDelegateSeparator { visible: App.settings.quickSwitchUsable }
 
-            FormCard.FormSpinBoxDelegate {
+            FormSpinBox {
                 id: sleepSpin
 
                 objectName: "sleepMinutes"
@@ -159,7 +160,7 @@ Kirigami.ScrollablePage {
 
             FormCard.FormDelegateSeparator {}
 
-            FormCard.FormComboBoxDelegate {
+            FormComboBox {
                 objectName: "precisionCombo"
                 text: "Resolution"
                 description: "How finely the sticks are quantised. It does not "
@@ -172,7 +173,7 @@ Kirigami.ScrollablePage {
 
             FormCard.FormDelegateSeparator {}
 
-            FormCard.FormComboBoxDelegate {
+            FormComboBox {
                 objectName: "sensitivityCombo"
                 text: "Centre sensitivity"
                 description: "How far off centre a stick has to move before the "

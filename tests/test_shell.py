@@ -50,7 +50,7 @@ with open(_BUS, "w") as _fh:
 os.environ["FLYDIGI_MOCK_BUS"] = _BUS
 
 try:
-    from PySide6.QtCore import QThread, QUrl
+    from PySide6.QtCore import QObject, QThread, QUrl
     from PySide6.QtGui import QGuiApplication
     from PySide6.QtQuickControls2 import QQuickStyle
 except ImportError:
@@ -747,6 +747,54 @@ def test_a_pad_that_comes_back_keeps_unsaved_edits(qt_app):
     app_object.shutdown()
 
 
+def test_leaving_a_section_destroys_its_page(qt_app):
+    """A page the window has navigated away from must actually go.
+
+    **It did not, for the whole life of the window.** `pageFor` memoised every
+    page it built and nothing ever called `pop`, `clear` or `destroy`, and
+    Kirigami does not destroy a replaced page either: `ColumnView::replaceItem`
+    gates its `deleteLater` on `shouldDeleteOnRemove`, which is false as soon as
+    an item has a visual parent, and the page is created with `pageStack` as its
+    parent. So every section ever opened stayed alive, and a live page's
+    bindings re-evaluate whether or not anyone can see them -- seven profile
+    pages meant seven footers recomputing on every `dirtyChanged` for six
+    footers nobody was looking at.
+
+    Nothing else here can see that. The window looks and behaves identically
+    either way; the only difference is how much work a notification causes. So
+    this asserts the page object itself is gone, by name, from the object tree.
+    """
+    pad = TestPad()
+    app_object, engine, window = load_shell(qt_app, pad)
+    pump(qt_app, rounds=20)
+
+    check("the window opens on Controller",
+          window.property("openPageTitle") == "Controller",
+          str(window.property("openPageTitle")))
+    check("and that page exists",
+          window.findChild(QObject, "controllerPage") is not None)
+
+    window.pressDrawerAction(SECTIONS.index("Triggers"))
+    # Long enough for the deferred `destroy` to run: it is deferred on purpose,
+    # because the outgoing page is still being animated away when the window
+    # asks for it to go.
+    pump(qt_app, rounds=80)
+
+    check("the section that was opened is there",
+          window.findChild(QObject, "triggersPage") is not None)
+    check("and the one that was left is not",
+          window.findChild(QObject, "controllerPage") is None)
+
+    # Going back rebuilds it, which is the other half of the bargain.
+    window.pressDrawerAction(SECTIONS.index("Controller"))
+    pump(qt_app, rounds=40)
+    check("going back builds it again",
+          window.findChild(QObject, "controllerPage") is not None)
+    check("and shows it", window.property("openPageTitle") == "Controller",
+          str(window.property("openPageTitle")))
+    app_object.shutdown()
+
+
 def main():
     QQuickStyle.setStyle("org.kde.desktop")
     qt_app = QGuiApplication.instance() or QGuiApplication([])
@@ -757,6 +805,7 @@ def main():
                      test_a_charging_pad_says_so_rather_than_a_level,
                      test_every_section_opens,
                      test_the_drawer_offers_every_section,
+                 test_leaving_a_section_destroys_its_page,
                      test_the_sidebar_follows_the_selected_device,
                      test_choosing_another_pad_does_not_move_the_page,
                      test_the_i18n_functions_are_installed,

@@ -6,6 +6,7 @@
 
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Shapes
 import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
 import org.kde.kirigamiaddons.formcard as FormCard
@@ -37,7 +38,7 @@ ColumnLayout {
     FormCard.FormCard {
         visible: root.side.isStick
 
-        FormCard.FormComboBoxDelegate {
+        FormComboBox {
             objectName: "curveType_" + root.sideName
             text: "Sensitivity curve"
             description: "Instant is quicker off centre, Delay slower. Editing "
@@ -65,54 +66,92 @@ ColumnLayout {
                     color: Kirigami.Theme.disabledTextColor
                 }
 
-                Canvas {
-                    id: plot
-                    objectName: "curvePlot_" + root.sideName
+                // **A Shape rather than a Canvas.** A Canvas is a texture the
+                // GUI thread paints in JavaScript and re-uploads; a Shape is
+                // scene-graph geometry, and the nine points below are ten line
+                // segments. The plot is bound to the compiled curve and the
+                // curve is recompiled on every step of a slider drag, so the
+                // redraw is on the drag path rather than a one-off.
+                //
+                // **It sits in a plain Item rather than being the layout item
+                // itself.** A Shape's implicit size is the bounding box of its
+                // paths, and the paths are laid out in the item's own width and
+                // height, so a Shape that the layout sizes from its contents is
+                // a binding loop. This box carries the size and the plot is
+                // told what it is.
+                Item {
                     Layout.fillWidth: true
                     Layout.preferredHeight: Kirigami.Units.gridUnit * 8
 
-                    // Repaint whenever the compiled curve moves. The bank is a
-                    // list, so bind to it rather than to the controls -- that
-                    // way a preset change and a slider drag both land here.
-                    readonly property var bank: root.side.bank
-                    onBankChanged: requestPaint()
-                    onWidthChanged: requestPaint()
-                    onHeightChanged: requestPaint()
+                    Shape {
+                        id: plot
+                        objectName: "curvePlot_" + root.sideName
+                        anchors.fill: parent
+                        // As on the dock's wedge outline. The default geometry
+                        // renderer leans on the window having multisampling,
+                        // which this app never asks for, and a diagonal line is
+                        // the whole of what this control draws.
+                        preferredRendererType: Shape.CurveRenderer
 
-                    onPaint: {
-                        const ctx = getContext("2d");
-                        ctx.reset();
-                        const w = width, h = height;
-                        const points = bank;
-                        if (!points || points.length < 2)
-                            return;
+                        // Redraw whenever the compiled curve moves. The bank is
+                        // a list, so bind to it rather than to the controls --
+                        // that way a preset change and a slider drag both land
+                        // here.
+                        readonly property var bank: root.side.bank
+
+                        // The same points in item coordinates. Stored values are
+                        // biased by 50: 50 is no output and 150 is full, so
+                        // subtract the bias before plotting.
+                        readonly property var curve: {
+                            const points = plot.bank;
+                            if (!points || points.length < 2)
+                                return [];
+                            const out = [];
+                            for (let i = 0; i < points.length; ++i)
+                                out.push(Qt.point(
+                                    plot.width * i / (points.length - 1),
+                                    plot.height - plot.height * Math.max(
+                                        0, Math.min(100, points[i] - 50)) / 100));
+                            return out;
+                        }
 
                         // The straight line, for comparison. Without it a curve
                         // reads as "some shape" rather than "faster than linear
                         // here, slower there".
-                        ctx.strokeStyle = Kirigami.Theme.disabledTextColor;
-                        ctx.lineWidth = 1;
-                        ctx.setLineDash([3, 3]);
-                        ctx.beginPath();
-                        ctx.moveTo(0, h);
-                        ctx.lineTo(w, 0);
-                        ctx.stroke();
+                        ShapePath {
+                            strokeColor: Kirigami.Theme.disabledTextColor
+                            strokeWidth: 1
+                            fillColor: "transparent"
+                            strokeStyle: ShapePath.DashLine
+                            // `dashPattern` counts stroke widths where Canvas's
+                            // `setLineDash` counted pixels; at a stroke width of
+                            // 1 they are the same three on, three off.
+                            dashPattern: [3, 3]
+                            capStyle: ShapePath.FlatCap
 
-                        // Stored values are biased by 50: 50 is no output and
-                        // 150 is full, so subtract the bias before plotting.
-                        ctx.setLineDash([]);
-                        ctx.strokeStyle = Kirigami.Theme.highlightColor;
-                        ctx.lineWidth = 2;
-                        ctx.beginPath();
-                        for (let i = 0; i < points.length; ++i) {
-                            const x = w * i / (points.length - 1);
-                            const y = h - h * Math.max(0, Math.min(100, points[i] - 50)) / 100;
-                            if (i === 0)
-                                ctx.moveTo(x, y);
-                            else
-                                ctx.lineTo(x, y);
+                            PathPolyline {
+                                // Empty whenever the curve is. A reference line
+                                // on its own is a plot of nothing, and drawing
+                                // nothing is what the Canvas did before a
+                                // profile was open.
+                                path: plot.curve.length > 1
+                                      ? [Qt.point(0, plot.height),
+                                         Qt.point(plot.width, 0)]
+                                      : []
+                            }
                         }
-                        ctx.stroke();
+
+                        ShapePath {
+                            strokeColor: Kirigami.Theme.highlightColor
+                            strokeWidth: 2
+                            fillColor: "transparent"
+                            // Canvas's defaults, which are not ShapePath's:
+                            // butt caps and mitred joins.
+                            capStyle: ShapePath.FlatCap
+                            joinStyle: ShapePath.MiterJoin
+
+                            PathPolyline { path: plot.curve }
+                        }
                     }
                 }
             }

@@ -17,7 +17,7 @@ FormCard.FormCard {
     required property var side
     required property string sideName
 
-    FormCard.FormComboBoxDelegate {
+    FormComboBox {
         objectName: "effect_" + root.sideName
         text: "Effect"
         model: App.profile.triggers.effectNames
@@ -29,29 +29,41 @@ FormCard.FormCard {
     // General none -- so the rows come from the model rather than being written
     // out here and enabled or disabled. A greyed-out row for a knob the chosen
     // effect does not have is a row that says nothing.
+    //
+    // **A list model, and it used to be a list.** `effectParams` was a
+    // `QVariantList` rebuilt on every read and notified by the same signal a
+    // knob move emits, so moving a knob replaced this Repeater's model -- which
+    // destroys its delegates, including the one under the pointer, along with
+    // its mouse grab. The knobs could be clicked and not dragged. Roles and
+    // `dataChanged` leave the delegates in place; see `EffectParamsModel`.
     Repeater {
         model: root.side.effectParams
 
         delegate: Loader {
             id: row
 
-            required property var modelData
+            required property string key
+            required property string label
+            required property string description
+            required property int minimum
+            required property int maximum
+            required property string kind
+            required property int value
 
             Layout.fillWidth: true
-            sourceComponent: row.modelData.kind === "switch" ? switchRow : sliderRow
+            sourceComponent: row.kind === "switch" ? switchRow : sliderRow
 
             Component {
                 id: sliderRow
 
                 SliderRow {
-                    objectName: "param_" + row.modelData.key + "_" + root.sideName
-                    label: row.modelData.label
-                    description: row.modelData.description
-                    from: row.modelData.from
-                    to: row.modelData.to
-                    value: row.modelData.value
-                    onMoved: (newValue) => root.side.setEffectParam(
-                                 row.modelData.key, newValue)
+                    objectName: "param_" + row.key + "_" + root.sideName
+                    label: row.label
+                    description: row.description
+                    from: row.minimum
+                    to: row.maximum
+                    value: row.value
+                    onMoved: (newValue) => root.side.setEffectParam(row.key, newValue)
                 }
             }
 
@@ -59,12 +71,11 @@ FormCard.FormCard {
                 id: switchRow
 
                 FormCard.FormSwitchDelegate {
-                    objectName: "param_" + row.modelData.key + "_" + root.sideName
-                    text: row.modelData.label
-                    description: row.modelData.description
-                    checked: row.modelData.value !== 0
-                    onToggled: root.side.setEffectParam(row.modelData.key,
-                                                        checked ? 1 : 0)
+                    objectName: "param_" + row.key + "_" + root.sideName
+                    text: row.label
+                    description: row.description
+                    checked: row.value !== 0
+                    onToggled: root.side.setEffectParam(row.key, checked ? 1 : 0)
                 }
             }
         }

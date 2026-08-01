@@ -32,9 +32,18 @@ TestCase {
     }
 
     function init() {
+        // The page does not arm the poll -- `Main.qml` does, from the section
+        // that is open, because a page Kirigami keeps alive cannot tell when
+        // nobody is looking at it any more. A test that shows the page on its
+        // own therefore has to say so, exactly as the window would.
+        App.dsmode.polling = true;
         page = createTemporaryObject(pageComponent, suite);
         verify(page, "the DualSense page did not load");
         waitForRendering(page);
+    }
+
+    function cleanup() {
+        App.dsmode.polling = false;
     }
 
     function test_the_switch_reflects_what_the_system_is_doing() {

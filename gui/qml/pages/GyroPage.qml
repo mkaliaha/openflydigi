@@ -56,7 +56,7 @@ Kirigami.ScrollablePage {
         FormCard.FormCard {
             visible: App.profile.loaded
 
-            FormCard.FormComboBoxDelegate {
+            FormComboBox {
                 objectName: "gyroTarget"
                 text: "Mapped to"
                 description: "Tilting the pad moves this stick."
@@ -99,7 +99,7 @@ Kirigami.ScrollablePage {
             visible: App.profile.loaded && App.profile.motion.enabled
             Layout.topMargin: Kirigami.Units.largeSpacing
 
-            FormCard.FormComboBoxDelegate {
+            FormComboBox {
                 objectName: "gyroEnableType"
                 text: "Turned on by"
                 model: App.profile.motion.enableTypeNames
@@ -109,7 +109,7 @@ Kirigami.ScrollablePage {
 
             FormCard.FormDelegateSeparator {}
 
-            FormCard.FormComboBoxDelegate {
+            FormComboBox {
                 objectName: "gyroKey"
                 text: "Enable key"
                 // The factory blob holds Left trigger here, so a fresh profile
@@ -129,7 +129,7 @@ Kirigami.ScrollablePage {
             // byte 7 in that branch alone, so the control would not write in
             // toggle mode. Space Station reveals its own second-key row on the
             // same condition.
-            FormCard.FormComboBoxDelegate {
+            FormComboBox {
                 objectName: "gyroSecondKey"
                 visible: App.profile.motion.holdMode
                 text: "Second enable key"

@@ -226,7 +226,7 @@ Kirigami.ScrollablePage {
             Layout.fillWidth: true
             visible: App.dock.present
 
-            FormCard.FormComboBoxDelegate {
+            FormComboBox {
                 objectName: "dockModeBox"
                 text: "Effect"
                 description: "162 LEDs, computed here and uploaded as frames"
@@ -253,21 +253,25 @@ Kirigami.ScrollablePage {
                         Layout.minimumWidth: Kirigami.Units.gridUnit * 7
                     }
 
+                    // One row per swatch, and the colour comes off the row.
+                    // This used to run to `coloursUsed` and index into
+                    // `App.dock.colours`, which rebuilt a Python list of hex
+                    // strings per read and was read twice per swatch -- once
+                    // for the length, once for the element. `DockColoursModel`
+                    // is the same shape LightingPage's swatches already had.
                     Repeater {
-                        model: App.dock.coloursUsed
+                        model: App.dock.colours
 
                         delegate: Controls.AbstractButton {
                             id: swatch
+
                             required property int index
+                            required property string colour
 
                             objectName: "dockColourSwatch" + swatch.index
                             implicitWidth: Kirigami.Units.gridUnit * 3
                             implicitHeight: Kirigami.Units.gridUnit * 1.75
                             hoverEnabled: true
-
-                            readonly property string colour:
-                                swatch.index < App.dock.colours.length
-                                ? App.dock.colours[swatch.index] : "#000000"
 
                             Controls.ToolTip.visible: swatch.hovered
                             Controls.ToolTip.text: "Click to change this colour ("
@@ -372,7 +376,7 @@ Kirigami.ScrollablePage {
                 visible: App.dock.usesDirection
             }
 
-            FormCard.FormComboBoxDelegate {
+            FormComboBox {
                 objectName: "dockDirectionBox"
                 text: "Direction"
                 visible: App.dock.usesDirection
@@ -540,7 +544,7 @@ Kirigami.ScrollablePage {
                 visible: App.dock.hasImage
             }
 
-            FormCard.FormComboBoxDelegate {
+            FormComboBox {
                 objectName: "dockFitBox"
                 visible: App.dock.hasImage
                 text: "Fit"
@@ -689,6 +693,11 @@ Kirigami.ScrollablePage {
                         stepSize: App.dock.intervalStep
                         value: App.dock.intervalMs
                         editable: true
+                        // `org.kde.desktop` turns the wheel on for SpinBox and
+                        // Qt's own default leaves it off, so without this a
+                        // scroll over the box retimes the animation instead of
+                        // moving the page. See components/FormComboBox.qml.
+                        wheelEnabled: false
                         onValueModified: App.dock.intervalMs = value
                     }
 

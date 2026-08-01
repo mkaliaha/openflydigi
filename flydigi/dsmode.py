@@ -307,11 +307,23 @@ def state():
     answers: an unloaded module is loaded by the relay itself at the moment DS
     mode is switched on, and a kernel without the module cannot run DS mode at
     all.
+
+    **One walk of /proc, not two.** `running` is the same question as `pids`
+    asked as a yes or no, and answering it through `running()` scanned the whole
+    process table a second time.
+
+    Measured here over 595 processes, median of forty calls: **2.30 ms now,
+    against 4.67 ms for the two-walk shape**, with a worst case either way of
+    about 7.6 ms when the table is being read under load. Worth knowing before
+    reaching for a thread: it is a few milliseconds on the thread that draws the
+    window, not the ten-plus the earlier note claimed -- that figure was the two
+    walks, and it outlived them.
     """
+    pids = running_pids()
     return {
         "available": usbip.module_available(),
         "loaded": usbip.module_loaded(),
-        "running": running(),
-        "pids": running_pids(),
+        "running": bool(pids),
+        "pids": pids,
         "relay": RELAY,
     }

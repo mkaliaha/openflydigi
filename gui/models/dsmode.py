@@ -56,6 +56,7 @@ class DsModeModel(QObject):
     changed = Signal()
     busyChanged = Signal()
     statsChanged = Signal()
+    pollingChanged = Signal()
     failed = Signal(str)
     # Ordinary news, which is most of it. Stopping is something the user asked
     # for, and even an unasked-for clean exit is not a fault -- reporting either
@@ -172,10 +173,18 @@ class DsModeModel(QObject):
 
     @Slot()
     def refresh(self):
-        """Re-read the system's state, and keep re-reading while the page is up."""
-        self._repoll()
-        if not self._poll.isActive():
-            self._poll.start()
+        """Re-read the system's state, and keep re-reading it.
+
+        Unchanged for the QML that calls this: still "now, and every couple of
+        seconds after". What is new is that `polling` can turn the second half
+        of that back off again.
+        """
+        if self.polling:
+            self._repoll()
+        else:
+            # Turning the poll on takes its own first reading, so asking for
+            # one here as well would walk /proc twice for one refresh.
+            self.polling = True
 
     @Slot(bool)
     def setRunning(self, value):
@@ -234,6 +243,42 @@ class DsModeModel(QObject):
                              "pkill -f flydigi-ds5-usbip")
 
     # -- polling -----------------------------------------------------------
+
+    @Property(bool, notify=pollingChanged)
+    def polling(self):
+        """Whether the process table is being re-read on a timer.
+
+        Writable, so that something with a lifetime can own the poll. Reading
+        the system costs milliseconds on the GUI thread -- see
+        `flydigi.dsmode.state` -- and the only reader that ever needs the
+        answer is a page somebody is looking at. Until this existed the poll
+        was armed from a page's `Component.onCompleted` and stopped only at
+        shutdown, and since Kirigami keeps a replaced page alive, one visit to
+        the DualSense page left /proc being scanned every two seconds for the
+        rest of the session, from whatever page the window was showing.
+
+        Nothing starts it by itself: a model that has just been built is not
+        polling, and stays that way until asked.
+
+        The timer is the state rather than a flag kept beside it, because
+        `wait()` stops the timer at shutdown and a flag would go on claiming a
+        poll that no longer runs.
+        """
+        return self._poll.isActive()
+
+    @polling.setter
+    def polling(self, value):
+        if bool(value) == self.polling:
+            return
+        if value:
+            # Whoever turned this on is about to show the answer, and the last
+            # one may be two seconds old -- or, on the first page visit of a
+            # session, as old as the app.
+            self._repoll()
+            self._poll.start()
+        else:
+            self._poll.stop()
+        self.pollingChanged.emit()
 
     def _repoll(self):
         was = dict(self._state)
@@ -318,7 +363,10 @@ class DsModeModel(QObject):
         The relay is deliberately left alone -- see the module docstring.
         """
         try:
-            self._poll.stop()
+            # Through the property, so anything bound to `polling` is told. The
+            # timer is the state, but for QML the notification *is* the state:
+            # without this a binding goes on reporting a poll that has stopped.
+            self.polling = False
         except RuntimeError:
             # Shutdown can arrive after the QML engine has already taken the
             # object graph down, leaving a Python wrapper around a deleted

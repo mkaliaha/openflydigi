@@ -27,8 +27,10 @@ Kirigami.ScrollablePage {
     objectName: "dualSensePage"
     title: "DualSense"
 
-    // Reads the process table, so it starts only when someone is looking.
-    Component.onCompleted: App.dsmode.refresh()
+    // Reads the process table, so it runs only while someone is looking -- and
+    // making that true is `Main.qml`'s job, not this page's. It used to be
+    // started here, from `Component.onCompleted`, which on a page Kirigami
+    // never destroys means "started for the rest of the session".
 
     ColumnLayout {
         spacing: 0
