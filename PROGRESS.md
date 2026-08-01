@@ -87,14 +87,6 @@ true — `gui/` may import `flydigi/` and never the reverse, and nothing Flydigi
 
 ## What's next
 
-Roughly in order of value.
-
- 1. **Third-party mode: optional polish.** Command 17 here is byte-identical to Space Station's.
-    After a reconnect with the flag already on, Steam stops *labelling* the pad Apex 5 while
-    everything keeps working — cosmetic, plus a bindings-storage nuisance. The optional workaround,
-    which neither app does, is to re-assert the flag off then on once SDL has enumerated; the real
-    fixes are upstream. → [docs/findings-steam.md](docs/findings-steam.md)
-
 **Single commands, each verifiable on the hardware here.** The write-ups are under "Commands beyond
 the settings block" in [docs/device-settings.md](docs/device-settings.md).
 

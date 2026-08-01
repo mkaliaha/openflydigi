@@ -425,6 +425,20 @@ if it is on, send off then on after SDL has enumerated — is not implemented he
 upstream: a stable serial for the device, or Steam not reusing one config set across both
 representations.
 
+**The stable serial is a small patch, and the pad already carries the id it needs.**
+`identity.read_uid` is command **4** — one exchange, thirteen bytes, measured on this pad — and
+`registry.key` prefers it precisely because the free identifier, command 1's address field, reads
+all zeroes here. SDL's driver never asks for it: its command vocabulary is `0x01` info, `0x10`/`0x11`
+status, `0x12` haptic and `0x1C` acquire, with no command 4 anywhere, which is why the device
+presents no serial for Steam to use. Reading the uid at init and setting the device serial from it
+would give the HIDAPI representation a stable identity of its own — so it would stop colliding with
+the xpad one, keep its own config set, and hold its label across a reconnect, with no ritual. Two
+things are untested and both bear on whether it is worth doing: that Steam honours a supplied serial
+at all — the log line says "Invalid or missing", which implies a valid one is used, but nothing here
+has tried it — and how long an upstream merge would take to reach Steam Input, which carries its own
+SDL. Parked rather than attempted; the label is cosmetic and the bindings are recoverable by
+re-toggling.
+
 **HIDAPI and xpad blocks never share a timestamp.** Across the whole log the two never appear at the
 same timestamp for `37d7/2501`, though both can be live at once (01:24:30 and 01:24:37 above). That
 sits awkwardly with a carve-out whose stated purpose is to make the XInput interface *always* show
