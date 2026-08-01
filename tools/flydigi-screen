@@ -47,7 +47,7 @@ import time
 
 sys.path.insert(0, __file__.rsplit("/", 2)[0])
 
-from flydigi import device, motion, registry, screen, screen_ota
+from flydigi import device, identity, motion, registry, screen, screen_ota
 
 
 def open_pad(args):
@@ -56,11 +56,24 @@ def open_pad(args):
     Takes the parsed arguments rather than a selector because every caller here
     has them and none of them has anything else -- one parameter that is always
     available beats a global set by `main`.
+
+    Gated, and this is the tool where it matters most: every subcommand below
+    that touches the pad writes to it, and `send` puts the screen chip into
+    upgrade mode, which nothing on the PC can undo -- the pad's own power
+    switch is the way out. Aimed at a pad with no screen that is a state
+    nobody asked for and nobody can see. `--i-know` does not reach this: it
+    excuses a wireless upload, not the wrong device.
     """
     try:
-        return registry.open_pad(getattr(args, "device", None))
+        ctrl = registry.open_pad(getattr(args, "device", None))
     except device.DeviceNotFound as exc:
         sys.exit(f"error: {exc}")
+    try:
+        identity.require(ctrl)
+    except identity.WrongDevice as exc:
+        ctrl.close()
+        sys.exit(f"error: {exc}")
+    return ctrl
 
 
 def need_pillow(what):

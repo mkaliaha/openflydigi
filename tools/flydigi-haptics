@@ -30,7 +30,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flydigi import effects, haptics  # noqa: E402
+from flydigi import effects, haptics, identity  # noqa: E402
 from flydigi.device import Controller, DeviceNotFound  # noqa: E402
 
 CHUNK_FRAMES = 240      # 5 ms -- short enough to track sharp transients
@@ -158,9 +158,16 @@ def main():
     if not args.dump:
         try:
             ctrl = Controller()
+            # This drives the motors continuously off a real DualSense's audio,
+            # and a bare Controller() is whichever Flydigi pad answered first.
+            identity.require(ctrl)
             log(f"controller: {ctrl.path}")
         except DeviceNotFound:
             log("Apex 5 not found; running in dump mode")
+        except identity.WrongDevice as exc:
+            ctrl.close()
+            ctrl = None
+            log(f"{exc} Running in dump mode")
 
     log(f"sink: {sink}")
     log(f"crossover {args.crossover:.0f} Hz -> low band drives the left motor "

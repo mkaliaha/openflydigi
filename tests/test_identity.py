@@ -134,8 +134,69 @@ def test_a_caller_can_ask_for_another_model():
         check("and an Apex 5 is then the wrong device", True)
 
 
+# Files that open a pad handle and are allowed not to gate it, each for a
+# reason that has to be stated rather than assumed.
+UNGATED_BY_DESIGN = {
+    # The guard itself. Its docstring's example opens a pad in order to show
+    # `require` being called on it.
+    "flydigi/identity.py":
+        "it is the guard",
+    # Answers "which device", deliberately never "may it be written to". The
+    # split is documented at registry.open_pad and is the design, not an
+    # oversight -- callers take the permission half.
+    "flydigi/registry.py":
+        "selection is not permission, by design",
+    # Opens pads only from `registry.drivable_pads()`, which already filters on
+    # identity.SUPPORTED, so the gate is upstream of every handle it holds.
+    "tools/flydigid":
+        "every pad it opens came from drivable_pads()",
+}
+
+OPENS_A_PAD = ("registry.open_pad(", "device.Controller(", " Controller()",
+               "Controller(self.path)", "registry.open_device(")
+
+
+def test_everything_that_opens_a_pad_to_write_takes_the_guard():
+    """The defect no unit test of `require` can see: a caller that never calls it.
+
+    Every Flydigi pad of this generation opens identically, so a handle is not
+    evidence of anything -- the identify read is. Four call sites had the guard
+    and ten did not, and the ones that did not included the screen upload,
+    which strands the pad in upgrade mode, and the DualSense relay, which
+    writes for a whole play session.
+
+    Finding those took reading every file. This is that reading, kept, so the
+    eleventh call site cannot be added quietly. A new opener either gates or
+    puts its reason in UNGATED_BY_DESIGN above.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    offenders = []
+    for folder in ("flydigi", "gui", "tools"):
+        for dirpath, _dirs, files in os.walk(os.path.join(root, folder)):
+            if "__pycache__" in dirpath or "/mock" in dirpath:
+                continue
+            for name in sorted(files):
+                path = os.path.join(dirpath, name)
+                rel = os.path.relpath(path, root)
+                if rel in UNGATED_BY_DESIGN:
+                    continue
+                try:
+                    with open(path) as fh:
+                        body = fh.read()
+                except (OSError, UnicodeDecodeError):
+                    continue
+                if not any(marker in body for marker in OPENS_A_PAD):
+                    continue
+                if "identity.require" in body or "models.require" in body:
+                    continue
+                offenders.append(rel)
+    check("every file that opens a pad either gates it or says why not",
+          not offenders, ", ".join(offenders))
+
+
 def main():
     for test in (test_the_table_matches_the_sdk_dispatch,
+                 test_everything_that_opens_a_pad_to_write_takes_the_guard,
                  test_an_apex5_is_accepted,
                  test_a_vader_is_refused,
                  test_an_unknown_model_is_refused_rather_than_assumed,

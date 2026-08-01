@@ -13,7 +13,54 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flydigi import ds5, evdev, relay  # noqa: E402
+import json                                        # noqa: E402
+import tempfile                                     # noqa: E402
+
+from flydigi import ds5, evdev, mock, relay  # noqa: E402
+
+
+def open_ctrl_tests(results):
+    """The real `PadLink._open_ctrl`, which `FakeLink` above replaces.
+
+    Everything else in this file points that seam at `FakeBus`, so none of it
+    says anything about what the method itself does -- and what it does now is
+    take the identify read before handing back a handle the relay will write
+    trigger effects and rumble to for a whole play session. An unpinned relay
+    opens whichever Flydigi pad answered first, and every pad of this
+    generation answers the same way.
+
+    `hide_real` is not optional here. Mock devices enumerate *after* real ones,
+    so on a desk with an Apex 5 plugged in this test would otherwise open it
+    and assert against the developer's own hardware.
+    """
+    def with_bus(devices, body):
+        handle, path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(handle, "w") as fh:
+            json.dump({"hide_real": True, "devices": devices}, fh)
+        os.environ[mock.ENV] = path
+        mock.reset()
+        try:
+            body()
+        finally:
+            os.environ.pop(mock.ENV, None)
+            mock.reset()
+            os.unlink(path)
+
+    def a_pad_we_drive():
+        ctrl, error = relay.PadLink()._open_ctrl()
+        results.append(check("an Apex 5 opens for the relay",
+                             ctrl is not None and error is None, str(error)))
+        if ctrl is not None:
+            ctrl.close()
+
+    def a_pad_we_do_not():
+        ctrl, error = relay.PadLink()._open_ctrl()
+        results.append(check("a Vader 5 does not", ctrl is None, "got a handle"))
+        results.append(check("and the relay is told why, not left guessing",
+                             bool(error) and "Vader 5" in error, str(error)))
+
+    with_bus([{"kind": "pad", "code": "k5", "nickname": "Desk"}], a_pad_we_drive)
+    with_bus([{"kind": "pad", "code": "f5", "nickname": "Vader"}], a_pad_we_do_not)
 
 
 class FakeReader:
@@ -355,6 +402,7 @@ def main():
                          relay.translate(ds5.TriggerEffect("right", 1, b"\x05")) is not None))
 
     link_tests(results)
+    open_ctrl_tests(results)
 
     print(f"\n{sum(results)}/{len(results)} passed")
     return 0 if all(results) else 1

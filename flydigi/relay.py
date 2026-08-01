@@ -15,7 +15,7 @@ import os
 import threading
 import time
 
-from . import ds5, effects, evdev, motion, registry
+from . import ds5, effects, evdev, identity, motion, registry
 from .device import Controller, DeviceNotFound
 
 FLYDIGI_VID, FLYDIGI_PID = 0x37D7, 0x2501
@@ -414,15 +414,27 @@ class PadLink:
         try:
             # By node when this link is pinned: the path came from the same
             # resolve that chose the input node, so both are the one device.
-            return (Controller(self.path) if self.path else Controller()), None
+            ctrl = (Controller(self.path) if self.path else Controller())
         except DeviceNotFound:
             return None, "vendor interface not found; effects will not be applied"
         except OSError as exc:
-            # Permission, most likely, and for the same reason as above. Not
-            # fatal: input still reaches the game, only the Apex 5's own motors
-            # and triggers go unwritten.
+            # Permission, most likely. Not fatal: input still reaches the game
+            # through evdev, only the pad's own motors and triggers go
+            # unwritten.
             return None, (f"vendor interface not usable ({exc}); effects will "
                           f"not be applied -- tools/apex5-setup install-rules")
+        # This handle is written to for the length of a play session -- trigger
+        # effects on every change and rumble on every report -- and an unpinned
+        # relay takes whichever Flydigi pad answered first. Not fatal, for the
+        # same reason a permission failure is not: input still reaches the game
+        # through evdev, and only the physical pad's own motors and triggers go
+        # unwritten.
+        try:
+            identity.require(ctrl)
+        except identity.WrongDevice as exc:
+            ctrl.close()
+            return None, f"{exc} Effects will not be applied."
+        return ctrl, None
 
     # -- reading ------------------------------------------------------------
 

@@ -40,7 +40,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flydigi import device, effects, evdev, mapping
+from flydigi import device, effects, evdev, identity, mapping
 
 # Below this the stick is at rest and the motors should be too, or the pad buzzes
 # continuously from centre noise and the dead zone cannot be felt at all.
@@ -109,6 +109,12 @@ def main():
              else (evdev.ABS_RX, evdev.ABS_RY))
 
     ctrl = device.Controller()
+    # This probe writes the stick bank and drives the motors, and a bare
+    # Controller() is whichever Flydigi pad answered first.
+    try:
+        identity.require(ctrl)
+    except identity.WrongDevice as exc:
+        sys.exit(f"error: {exc}")
     status = mapping.read_status(ctrl)
     if status is None:
         sys.exit("the pad did not answer -- press a button to wake it")
