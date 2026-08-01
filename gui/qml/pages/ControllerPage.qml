@@ -150,7 +150,33 @@ Kirigami.ScrollablePage {
                 // the title, so a binding and a setter chase each other
                 // whenever the cap bites -- Qt reports it as a binding loop.
                 // Assigning only when the two actually differ settles at once.
-                onTextEdited: App.profile.title = text
+
+                // Pushed on `Qt.callLater` rather than assigned in the handler,
+                // because `FormTextFieldDelegate.textEdited` is a bare signal
+                // (no argument) that the delegate re-emits from its internal
+                // TextField *before* its own `onTextChanged: root.text = text`
+                // writeback has run. So `text` read from the handler is the
+                // value from before this keystroke, and the field was one edit
+                // behind for as long as this page has existed. Measured against
+                // the pad: typing "123" stored "12", and deleting a character
+                // stored the string that still had it.
+                //
+                // The dirty flag was the worse half. The model's setter returns
+                // early when the title looks unchanged, so a stale value meant
+                // the last edit did not mark the profile dirty either.
+                //
+                // callLater runs at the end of the current event-loop pass --
+                // after the writeback, and long before any click on Apply.
+                // The focus-out pair is not redundant with it: a button here
+                // does not take focus from the field, so nothing else
+                // guarantees a further edit to flush the last one.
+                function pushToModel() {
+                    App.profile.title = text;
+                }
+
+                onTextEdited: Qt.callLater(nameField.pushToModel)
+                onEditingFinished: nameField.pushToModel()
+                onAccepted: nameField.pushToModel()
 
                 function syncFromModel() {
                     if (text !== App.profile.title)

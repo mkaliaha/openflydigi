@@ -57,13 +57,47 @@ TestCase {
         compare(Pad.reads.length, 1, "read more than one profile: " + Pad.reads);
     }
 
+    // Type the way a person does -- through the internal TextField, so the
+    // delegate's own signal chain runs. These tests used to assign `field.text`
+    // and fire `textEdited()` by hand, which sets the property the handler
+    // reads *before* the handler runs. That is the one ordering the real widget
+    // does not produce, and it is why the bug below lived here unseen.
+    function typeInto(field, value) {
+        field.clear();
+        for (let i = 0; i < value.length; ++i)
+            field.insert(i, value[i]);
+        // The push to the model is deferred to the end of the event-loop pass
+        // on purpose; give it that pass before anyone asserts.
+        wait(1);
+    }
+
+    function test_typing_a_name_does_not_lose_the_last_character() {
+        // FormTextFieldDelegate re-emits `textEdited` from its internal
+        // TextField *before* its own `onTextChanged: root.text = text`
+        // writeback runs, so a handler reading `text` gets the value from
+        // before this keystroke. Measured against the pad: typing "123" stored
+        // "12", and deleting a character stored the string that still had it.
+        //
+        // The dirty flag was the worse half -- the model's setter returns early
+        // on an unchanged title, so the last edit did not mark the profile
+        // dirty and Apply could be offered, or not, on stale information.
+        let field = findChild(page, "profileName");
+        verify(field, "no name field -- renaming would be impossible");
+        verify(!App.profile.dirty, "started dirty");
+
+        typeInto(field, "123");
+
+        compare(App.profile.title, "123",
+                "the last character never reached the model");
+        verify(App.profile.dirty, "the last edit did not mark the profile dirty");
+    }
+
     function test_renaming_reaches_the_config_and_marks_it_dirty() {
         let field = findChild(page, "profileName");
         verify(field, "no name field -- renaming would be impossible");
         verify(!App.profile.dirty, "started dirty");
 
-        field.text = "Racing";
-        field.textEdited();
+        typeInto(field, "Racing");
 
         compare(App.profile.title, "Racing", "the rename did not reach the model");
         verify(App.profile.dirty, "renaming should be a change");
@@ -71,8 +105,7 @@ TestCase {
 
     function test_a_rename_can_be_applied_and_lands_on_the_pad() {
         let field = findChild(page, "profileName");
-        field.text = "Racing";
-        field.textEdited();
+        typeInto(field, "Racing");
 
         let apply = findChild(page, "applyButton");
         verify(apply, "the controller page needs an apply button to be useful");
@@ -89,8 +122,7 @@ TestCase {
         // truncates silently, so the model refuses to hand it more.
         compare(App.profile.titleMaxChars, 10);
         let field = findChild(page, "profileName");
-        field.text = "a name far too long for the pad";
-        field.textEdited();
+        typeInto(field, "a name far too long for the pad");
         compare(App.profile.title.length, 10,
                 "the title was not capped: " + App.profile.title);
     }
@@ -109,8 +141,7 @@ TestCase {
         // Both buttons used to be bound to `dirty`, so applying a change
         // greyed out the only way to keep it.
         let field = findChild(page, "profileName");
-        field.text = "Racing";
-        field.textEdited();
+        typeInto(field, "Racing");
 
         let apply = findChild(page, "applyButton");
         let save = findChild(page, "saveButton");
