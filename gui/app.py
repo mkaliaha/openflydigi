@@ -239,6 +239,12 @@ class App(QObject):
         # now, and closing this window is no reason to take a pad away from a
         # game. Only the model's own short-lived thread is waited for.
         self._dsmode.wait(5000)
+        # The picture encode, for the same reason. It is the one most likely to
+        # be running when a window closes -- it starts on every crop gesture --
+        # and this is the path that has to stop it, not `aboutToQuit`: nothing
+        # here quits Qt, and `tests/qml_harness.py` and `tests/test_shell.py`
+        # both bring the app down through this call and nothing else.
+        self._screen.wait(5000)
         if self._fetch is not None:
             # Bounded because flydigi.games.fetch_gamelist has its own timeout;
             # dropping the last reference to a running QThread is a qFatal.

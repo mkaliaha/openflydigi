@@ -201,8 +201,10 @@ class ScreenModel(QObject):
     than once per change. That was not academic on this page: a drag emits
     `changed` per mouse move, and `previewFrames` built a fresh list of file
     URLs on every read, so panning a 200-frame animation constructed 200 `QUrl`s
-    per binding evaluation per pointer event. The four stage-geometry properties
-    each recomputed the rendered size, and `canPan` recomputed it twice more.
+    per binding evaluation per pointer event. Three of the stage's properties
+    recomputed the rendered size as well -- the two that give its drawn width
+    and height, and `canPan`; the two that give its position read the pan
+    straight off, and did not.
 
     So the derived state is worked out where its inputs move, and `_notify` is
     the only place in this file that emits `changed`. That is what makes it
@@ -256,10 +258,12 @@ class ScreenModel(QObject):
         self._queued = None
         self._encode_serial = 0
         self._encoding = False
-        # `gui/app.py`'s shutdown waits for the models that own threads, and
-        # this one is not on its list; until it is, the model looks after
-        # itself. Dropping a running QThread is a qFatal, and an encode is
-        # exactly the sort of thing that is in flight when a window is closed.
+        # `App.shutdown` waits for this model, which is the path that matters:
+        # nothing in this project quits Qt to bring the window down, and both
+        # `tests/qml_harness.py` and `tests/test_shell.py` end through that call
+        # alone. `aboutToQuit` is kept beside it for the case where something
+        # else does quit the application, since dropping a running QThread is a
+        # qFatal and `wait` is safe to call twice.
         app = QCoreApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self._stop_encoding)
@@ -376,6 +380,13 @@ class ScreenModel(QObject):
         self._message = (
             f"Only the first {MAX_FRAMES} frames were taken — the frame count is "
             "one byte on the wire" if truncated else "")
+        # Cleared rather than left to be replaced when the encode lands. The
+        # encode is a second or more for a long animation, and until this was
+        # here the page went on showing the *previous* picture's preview and its
+        # upload estimate beside the new picture's name and stage -- which is
+        # not a page catching up, it is a page saying something untrue.
+        self._set_frames([])
+        self._set_previews([])
         self._reencode()
         return True
 
@@ -504,8 +515,8 @@ class ScreenModel(QObject):
         Bounded, and the bound is generous: `cancel` is checked once per frame,
         so what is being waited for is one frame's encode and not the job.
 
-        The handle is kept when the wait times out, the way `AppModel.shutdown`
-        keeps the worker thread's -- a thread that did not finish is exactly the
+        The handle is kept when the wait times out, the way `App.shutdown`
+        keeps the device worker's -- a thread that did not finish is exactly the
         one that must not be let go of.
         """
         self._abandon()

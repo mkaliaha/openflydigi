@@ -210,6 +210,15 @@ ColumnLayout {
         }
     }
 
+    // Long enough that a run of wheel notches is one settle rather than one
+    // each, short enough to read as immediate. Only ever armed by a change with
+    // no release of its own -- see the zoom slider's `onMoved`.
+    Timer {
+        id: settle
+        interval: 150
+        onTriggered: root.frame.framingSettled()
+    }
+
     RowLayout {
         Layout.fillWidth: true
         spacing: Kirigami.Units.largeSpacing
@@ -228,15 +237,31 @@ ColumnLayout {
             stepSize: 1
             snapMode: Controls.Slider.SnapAlways
             value: root.frame.zoom
-            onMoved: root.frame.zoom = value
+            onMoved: {
+                root.frame.zoom = value;
+                // **A scrolled zoom has no release to settle on.**
+                // `org.kde.desktop`'s Slider does not implement the wheel
+                // through `wheelEnabled`; it has its own MouseArea, so that it
+                // can snap to tick marks, and that path calls `moved()` without
+                // ever setting `pressed`. The arrow keys are the same shape. So
+                // a zoom the user scrolled moved the picture and left the LED
+                // wedge showing the colours from before it, until something
+                // else happened to settle. A short idle timer covers every
+                // route that has no release; the drag below keeps its own,
+                // because a deliberate gesture should not wait for a timer.
+                if (!zoomSlider.pressed)
+                    settle.restart();
+            }
             // A slider dragged across its range fires `onMoved` at every step,
             // which is the same problem the stage's drag has: the picture must
             // follow, and what the window sees need not be recomputed twenty
             // times on the way past. A click on the groove moves and releases
             // in one go, so this covers that too.
             onPressedChanged: {
-                if (!zoomSlider.pressed)
+                if (!zoomSlider.pressed) {
+                    settle.stop();
                     root.frame.framingSettled();
+                }
             }
         }
 

@@ -65,11 +65,7 @@ true — `gui/` may import `flydigi/` and never the reverse, and nothing Flydigi
 
 Roughly in order of value.
 
- 1. **Scroll on the pad with the watchdog on, and read what it says.** Everything under
-    [Scrolling is uneven](#scrolling-is-uneven) has been done and none of it has been scrolled on
-    hardware. `FLYDIGI_STALL_WATCHDOG=30:/tmp/stalls.txt` answers what `qmlprofiler` could not, and
-    an empty file is an answer too. → [gui/README.md](gui/README.md#watching-for-stalls)
- 2. **Third-party mode: optional polish.** Command 17 here is byte-identical to Space Station's.
+ 1. **Third-party mode: optional polish.** Command 17 here is byte-identical to Space Station's.
     After a reconnect with the flag already on, Steam stops *labelling* the pad Apex 5 while
     everything keeps working — cosmetic, plus a bindings-storage nuisance. The optional workaround,
     which neither app does, is to re-assert the flag off then on once SDL has enumerated; the real
@@ -193,10 +189,11 @@ ordinary user process; stopping it is a plain SIGTERM, and the vhci port frees i
 closes. A socket-passing helper is not an alternative: `SCM_RIGHTS` does not survive `host-spawn`, so
 one would fail exactly where the app runs — in the `apex-dev` distrobox.
 
-## Scrolling is uneven
+## Scrolling was uneven
 
-**Characterised, worked through, and not yet confirmed fixed on hardware.** Scrolling the window
-was uneven from the first device read onward — smooth with `_read_the_rest()` suppressed, uneven
+**Fixed, confirmed on the pad: pressing Reload no longer makes it jelly.** Kept here because the
+measurements are worth having and because a regression would come back the same way. Scrolling the
+window was uneven from the first device read onward — smooth with `_read_the_rest()` suppressed, uneven
 once device data reached the models, on every page, and it did not recover. Pressing **Reload from
 pad** reproduced it.
 
@@ -260,11 +257,17 @@ on.
     Qt's default is false, so a scroll with the pointer over one silently *edited the profile* — one
     notch over a row on Buttons remapped a key. Worth fixing whatever it did for frame rate.
 
-**Not confirmed.** None of this has been scrolled on the pad. What that needs is a session with
-`FLYDIGI_STALL_WATCHDOG` set — see [gui/README.md](gui/README.md#watching-for-stalls) — which
-answers the question `qmlprofiler` could not: during a stall, what Python frame is the GUI thread
-in, or is it in none. A file holding only the startup dump is itself an answer, and it points at
-`QSGThreadedRenderLoop` and the compositor rather than at anything here.
+**Which one of those fixed it is not known**, and it is worth saying so rather than picking a
+favourite. They landed together, the confirmation is one session on the pad, and the honest reading
+is that the window no longer stalls after a Reload — not that any single line above was the cause.
+Anyone bisecting a regression should start from the whole list.
+
+The instrument built to answer that question is still there and still the right first move if it
+comes back: `FLYDIGI_STALL_WATCHDOG` — see
+[gui/README.md](gui/README.md#watching-for-stalls) — reports what `qmlprofiler` cannot, namely
+which Python frame the GUI thread is in during a stall. A file holding only the startup dump is
+itself an answer, and points at `QSGThreadedRenderLoop` and the compositor rather than at anything
+here.
 
 **Profiling this app**, which took three obstacles to work out and is worth writing down:
 

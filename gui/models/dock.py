@@ -191,14 +191,20 @@ def from_hex(text):
 class DockColoursModel(QAbstractListModel):
     """The swatches the chosen effect reads, one row each.
 
-    **A model rather than a list of colour strings**, for the reason
-    `gui/models/lighting.py`'s `ColourListModel` is one. The page draws these
-    with a Repeater, and a list-valued property notified by the model-wide
-    `lightingChanged` hands that Repeater a whole new model every time the
-    brightness slider moves -- which destroys and rebuilds the swatch under the
-    pointer. A row that answers an edit with `dataChanged` leaves the delegates
-    where they are. The same shape broke the Triggers page's knobs outright; see
-    `EffectParamsModel` in `gui/models/profile.py` for what that looked like.
+    **A model rather than a count and a list beside it**, for the reason
+    `gui/models/lighting.py`'s `ColourListModel` is one. The page's Repeater ran
+    to `coloursUsed` and each delegate then read `colours` twice -- once for its
+    length and once for its element -- off a property that rebuilt a Python list
+    of hex strings on every read, notified by the model-wide `lightingChanged`.
+    Moving the brightness slider therefore rebuilt that list twice per swatch,
+    per step of the drag.
+
+    Not the defect the Triggers page had, and worth being exact about, because
+    the fix looks identical: there the Repeater's model *was* the rebuilt list,
+    so a knob move replaced it and destroyed the delegate under the pointer --
+    see `EffectParamsModel` in `gui/models/profile.py`. Here the Repeater's
+    model was an integer that did not change, so the delegates survived and only
+    the reads were wasted. Rows fix both, for different reasons.
 
     The rows are the colours the *current mode* reads, not every colour the
     model remembers, because that is what the page has always drawn -- its

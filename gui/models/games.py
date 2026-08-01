@@ -135,8 +135,8 @@ class GameListModel(QAbstractListModel):
     start from the chosen route, and working that out is not free: it reads the
     preferences entry for the game and rebuilds the list of routes the game
     offers, which itself walks the entry's capability flags. `data` did that
-    before it looked at which role it had been asked for, so the nine roles the
-    Games page's delegate binds cost nine resolutions per row -- 94 rows, and
+    before it looked at which role it had been asked for, so the eight roles the
+    Games page's delegate reads cost eight resolutions per row -- 94 rows, and
     the page is drawn from scratch whenever the filter moves. Two of those roles
     then built something on top of it on every read: `routeChoices` a fresh
     `QVariantList`, `detail` a paragraph of prose.
