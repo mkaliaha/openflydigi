@@ -1666,6 +1666,9 @@ def pad_entry(index, nickname=None, path=None, supported=True):
             "device_type": 128 if supported else 130,
             "code": "k5" if supported else "f5",
             "model": "Apex 5" if supported else "Vader 5 Pro",
+            # `supported` here means "the app may write to it", which both pads
+            # now are; the parameter still names the *other model* because that
+            # is what every caller uses it for.
             "uid": f"{index:02x}" * 13, "mac": None, "nickname": nickname,
             "firmware": "7.0.4.5", "battery": 4, "charging": False,
             "connect_type": "wired", "supported": supported, "info": {},
@@ -1769,6 +1772,46 @@ def test_a_pad_this_project_does_not_drive_never_becomes_the_daemon_s():
     check("but the daemon's file is left on the pad it can drive",
           prefs.Prefs(settings.path).primary_pad() == "uid:" + "02" * 13,
           str(prefs.Prefs(settings.path).primary_pad()))
+
+
+def test_the_sidebar_is_told_what_the_selected_pad_can_do():
+    """Two pads are driven now and they are not the same hardware.
+
+    `kinds` keeps a dock's pages away from a pad; this is the second filter and
+    a different question -- a Vader is a pad, and gets Buttons, Macros, Sticks,
+    Gyro, Vibration and Lighting like any pad, but it has no screen and no force
+    triggers. Offering a Screen page for a panel that is not there would be the
+    window offering to configure something that does not exist.
+    """
+    model, _settings = devices_model()
+    model.devicesReceived([pad_entry(2, "Desk"),
+                           pad_entry(4, "Vader", supported=False)])
+
+    model.select(0)
+    check("an Apex 5 has force triggers",
+          model.capabilities.get("adaptive_triggers") is True,
+          str(model.capabilities))
+    check("and a screen", model.capabilities.get("screen") is True,
+          str(model.capabilities))
+    check("and no trigger motors",
+          model.capabilities.get("trigger_motors") is False,
+          str(model.capabilities))
+
+    model.select(1)
+    check("a Vader has neither the triggers",
+          model.capabilities.get("adaptive_triggers") is False,
+          str(model.capabilities))
+    check("nor the screen", model.capabilities.get("screen") is False,
+          str(model.capabilities))
+    check("but it does have the trigger motors",
+          model.capabilities.get("trigger_motors") is True,
+          str(model.capabilities))
+
+    # An empty bus reads as "can nothing", which is what hides those pages
+    # while the window is still looking for a controller.
+    model.devicesReceived([])
+    check("nothing attached can nothing", model.capabilities == {},
+          str(model.capabilities))
 
 
 def test_a_dock_nobody_picked_is_still_read():
@@ -3804,6 +3847,7 @@ def main():
                  test_the_device_list_shows_what_each_device_is,
                  test_choosing_a_pad_tells_the_daemon_and_choosing_a_dock_does_not,
                  test_a_pad_this_project_does_not_drive_never_becomes_the_daemon_s,
+                 test_the_sidebar_is_told_what_the_selected_pad_can_do,
                  test_a_dock_nobody_picked_is_still_read,
                  test_the_selection_survives_a_pad_moving_to_another_node,
                  test_a_pad_that_goes_away_is_not_forgotten,

@@ -69,7 +69,7 @@ def open_pad(args):
     except device.DeviceNotFound as exc:
         sys.exit(f"error: {exc}")
     try:
-        identity.require(ctrl)
+        identity.require_capability(ctrl, "screen")
     except identity.WrongDevice as exc:
         ctrl.close()
         sys.exit(f"error: {exc}")

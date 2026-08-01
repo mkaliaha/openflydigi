@@ -430,7 +430,10 @@ class PadLink:
         # through evdev, and only the physical pad's own motors and triggers go
         # unwritten.
         try:
-            identity.require(ctrl)
+            # The capability, not just the model: this streams trigger
+            # effects for a whole session, and a Vader has no force triggers
+            # to play them on.
+            identity.require_capability(ctrl, "adaptive_triggers")
         except identity.WrongDevice as exc:
             ctrl.close()
             return None, f"{exc} Effects will not be applied."

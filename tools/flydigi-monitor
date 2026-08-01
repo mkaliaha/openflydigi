@@ -93,7 +93,7 @@ def main():
         # which the app's picker will happily write into the preferences file
         # this daemon reads.
         try:
-            identity.require(ctrl)
+            identity.require_capability(ctrl, "adaptive_triggers")
         except identity.WrongDevice as exc:
             sys.exit(str(exc))
         log(f"controller: {ctrl.path}")

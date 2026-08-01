@@ -155,19 +155,30 @@ def test_every_device_is_listed_with_what_it_is():
     check("and its firmware", desk["firmware"] == "7.0.4.5", str(desk))
     check("and a uid", len(desk["uid"] or "") == 26, str(desk["uid"]))
     check("a k5 is supported", desk["supported"])
-    check("a Vader 5 is not", not found[2]["supported"], str(found[2]))
-    check("but is still named, so a refusal can say what it found",
+    check("and so is a Vader 5, since this project drives both now",
+          found[2]["supported"], str(found[2]))
+    check("each is named as itself, so a refusal can say what it found",
           found[2]["model"] == "Vader 5 Pro", str(found[2]))
 
 
 @with_bus(TWO_PADS_TWO_DOCKS)
 def test_only_the_pads_this_project_drives_are_fanned_out_to():
-    """What the daemon writes a tier-1 bind to."""
+    """What the daemon writes a tier-1 bind to.
+
+    Two questions, not one. Every pad here is driven, so all three are
+    `drivable_pads()` -- but the tier-1 bind is command 82, which ties the pad's
+    own rumble to its *force triggers*, and no Vader has those. Which is why the
+    daemon asks for the capability rather than for the list.
+    """
     drivable = registry.drivable_pads()
-    check("two of the three pads", len(drivable) == 2, str(len(drivable)))
-    check("and not the Vader",
-          all(e["code"] == "k5" for e in drivable),
-          str([e["code"] for e in drivable]))
+    check("all three pads are driven", len(drivable) == 3, str(len(drivable)))
+
+    bindable = registry.drivable_pads(capability="adaptive_triggers")
+    check("but only two can take a trigger bind", len(bindable) == 2,
+          str(len(bindable)))
+    check("and the Vader is not one of them",
+          all(e["code"] == "k5" for e in bindable),
+          str([e["code"] for e in bindable]))
 
 
 @with_bus(TWO_PADS_TWO_DOCKS)
@@ -240,12 +251,22 @@ def test_a_selected_pad_is_the_one_that_is_opened():
               identity.read_nickname(pad) == "Couch")
         identity.require(pad)
     with registry.open_pad("Vader") as pad:
+        # Driven, so the profile and settings guard lets it through.
+        check("a Vader is opened and accepted for what both pads share",
+              identity.require(pad)["code"] == "f5")
+        # Not for what only one of them has. This is the guard that matters now
+        # that both are supported: a handle is not permission to send anything.
         try:
-            identity.require(pad)
-            check("the guard still refuses a pad this project cannot drive",
-                  False)
+            identity.require_capability(pad, "adaptive_triggers")
+            check("but is refused for hardware it does not have", False)
         except identity.WrongDevice as exc:
-            check("the guard still refuses a pad this project cannot drive",
+            check("but is refused for hardware it does not have",
+                  "Vader 5 Pro" in str(exc), str(exc))
+        try:
+            identity.require_capability(pad, "screen")
+            check("and refused for the screen it does not have", False)
+        except identity.WrongDevice as exc:
+            check("and refused for the screen it does not have",
                   "Vader 5 Pro" in str(exc), str(exc))
 
 

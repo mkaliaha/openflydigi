@@ -39,6 +39,11 @@ Kirigami.ApplicationWindow {
     // shows the sections of whichever device the picker is on -- see
     // `sectionVisible` -- so choosing a dock does not leave Buttons and
     // Macros on offer for a pad nobody is looking at.
+    //
+    // `needs` is the second filter and a different question: not what sort of
+    // device this is, but what that particular model actually has. Both pads
+    // this project drives are pads, and only one of them has a screen or force
+    // triggers. See `identity.CAPABILITIES`.
     readonly property var sections: [
         // Every Flydigi device attached, and which pad and dock the rest of the
         // window is showing. First because it is the answer to "what am I
@@ -65,17 +70,17 @@ Kirigami.ApplicationWindow {
         {name: "Vibration", icon: "media-playback-start", url: "pages/VibrationPage.qml",
          kinds: ["pad"]},
         {name: "Triggers", icon: "input-gamepad", url: "pages/TriggersPage.qml",
-         kinds: ["pad"]},
+         kinds: ["pad"], needs: "adaptive_triggers"},
         {name: "Lighting", icon: "color-management", url: "pages/LightingPage.qml",
          kinds: ["pad"]},
         {name: "Screen", icon: "video-display", url: "pages/ScreenPage.qml",
-         kinds: ["pad"]},
+         kinds: ["pad"], needs: "screen"},
         // A pad section, not a global one: what it does is write a game's preset
         // into a controller and choose that game's route.
         {name: "Games", icon: "applications-games", url: "pages/GamesPage.qml",
-         kinds: ["pad"]},
+         kinds: ["pad"], needs: "adaptive_triggers"},
         {name: "DualSense", icon: "input-gaming-symbolic", url: "pages/DualSensePage.qml",
-         kinds: ["pad"]},
+         kinds: ["pad"], needs: "adaptive_triggers"},
         // The charging dock's own pages. `kinds` is what keeps them and the pad's
         // apart: a sidebar offering Buttons and Macros while a dock is
         // selected would be offering to edit something that is not on screen.
@@ -101,8 +106,17 @@ Kirigami.ApplicationWindow {
     // cache and every action's index stay valid, and a section reappears the
     // moment the other kind of device is selected again.
     function sectionVisible(index) {
-        const kinds = sections[index].kinds
-        return !kinds || kinds.indexOf(App.devices.currentKind) >= 0
+        const section = sections[index]
+        const kinds = section.kinds
+        if (kinds && kinds.indexOf(App.devices.currentKind) < 0)
+            return false
+        // `needs` is hardware, where `kinds` is which sort of device. A Vader
+        // is a pad and gets the pad's pages, but it has no screen and no force
+        // triggers -- so a Screen page for a panel it does not have, or the six
+        // trigger effects it cannot play, would be the window offering to
+        // configure something that is not there. Games and DualSense go with
+        // the triggers: every route in both exists to deliver trigger effects.
+        return !section.needs || App.devices.capabilities[section.needs] === true
     }
 
     // Which kind of device the window last moved itself to. Picking a dock in

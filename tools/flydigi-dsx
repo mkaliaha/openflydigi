@@ -63,7 +63,7 @@ def main():
         # See tools/flydigi-monitor: selection is not permission, and this
         # session rewrites trigger effects for as long as the mod is sending.
         try:
-            identity.require(ctrl)
+            identity.require_capability(ctrl, "adaptive_triggers")
         except identity.WrongDevice as exc:
             sys.exit(str(exc))
         log(f"controller: {ctrl.path}")

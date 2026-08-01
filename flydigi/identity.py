@@ -119,7 +119,20 @@ PRODUCT_NAMES = {
 
 # What this project actually drives. Everything else is recognised so the error
 # can name it, which is the difference between "wrong device" and "no idea".
-SUPPORTED = ("k5",)
+#
+# **`f5` is here unvalidated, and that is a decision rather than an oversight.**
+# No Vader 5 has been on this desk. What it rests on is that the protocol is
+# shared -- `IsOldProtocol()` is `VendorId != 0x37D7` and the f5 carries that id,
+# so the frame, the command numbers and the 840-byte blob are the ones measured
+# here -- plus a capability table below saying what it does *not* have. The
+# blob layout is the half of the decompile this project has found reliable;
+# declared capabilities are the half that has repeatedly been wrong, which is
+# why every one of them is stated rather than inferred, and why the pages a
+# Vader cannot use are hidden rather than merely expected to fail politely.
+#
+# Anyone who reaches this line after a bug report on a Vader 5: the first thing
+# to doubt is CAPABILITIES, not the transport.
+SUPPORTED = ("k5", "f5")
 
 # What each model can do, keyed by DeviceCode. **Driving a pad and being able
 # to ask it for a particular thing are different questions**, and conflating
@@ -146,6 +159,28 @@ CAPABILITIES = {
     "k5": {"adaptive_triggers": True, "trigger_motors": False, "screen": True},
     "f5": {"adaptive_triggers": False, "trigger_motors": True, "screen": False},
 }
+
+
+def require_capability(ctrl, capability, wait=0.6):
+    """Refuse unless the device has the hardware `capability` names.
+
+    `require` answers "is this a pad we drive"; this answers "can it do the
+    thing I am about to send". Two pads are driven now and they do not have the
+    same hardware, so the first question stopped being enough the moment `f5`
+    joined SUPPORTED: a relay streaming trigger effects, or a screen upload,
+    would otherwise open a Vader 5 quite happily and write to something that is
+    not there. Costs the same one exchange, and is the same shape of refusal.
+    """
+    found = identify(ctrl, wait=wait)
+    if found["code"] not in SUPPORTED:
+        raise WrongDevice(
+            f"this is {found['name']}, and this project does not drive it.")
+    if not can(found["code"], capability):
+        raise WrongDevice(
+            f"this is {found['name']}, which has no {capability.replace('_', ' ')}. "
+            "The pad answered normally -- it is the right kind of device and the "
+            "wrong model for this.")
+    return found
 
 
 def can(code, capability):

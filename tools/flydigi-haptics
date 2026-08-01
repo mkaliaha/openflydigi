@@ -160,7 +160,7 @@ def main():
             ctrl = Controller()
             # This drives the motors continuously off a real DualSense's audio,
             # and a bare Controller() is whichever Flydigi pad answered first.
-            identity.require(ctrl)
+            identity.require_capability(ctrl, "adaptive_triggers")
             log(f"controller: {ctrl.path}")
         except DeviceNotFound:
             log("Apex 5 not found; running in dump mode")

@@ -36,7 +36,7 @@ from PySide6.QtCore import (Property, QAbstractListModel, QModelIndex, Qt,
                             Signal, Slot)
 from PySide6.QtQml import QmlElement
 
-from flydigi import prefs, registry
+from flydigi import identity, prefs, registry
 
 # See gui/models/device.py for what these two names do.
 QML_IMPORT_NAME = "Apex5"
@@ -106,9 +106,9 @@ class DevicesModel(QAbstractListModel):
     # has decided about -- see `_moved_roles`, which treats the unknown as
     # every role. `family` and `device_type` are identity the label never
     # shows, `code` feeds `model` upstream in `flydigi/registry.py` and its own
-# role here, since a pad's key list depends on it, `info` is
-    # the raw reply the entry was built from, and `connect_type` is read from
-    # the pad's own model rather than from here.
+    # role here, since a pad's key list and its capabilities both depend on it,
+    # `info` is the raw reply the entry was built from, and `connect_type` is
+    # read from the pad's own model rather than from here.
     FIELD_ROLES = {
         "path": (PathRole, LabelRole, DetailRole, SelectorRole),
         "kind": (KindRole, IconRole),
@@ -485,10 +485,32 @@ class DevicesModel(QAbstractListModel):
         follows a dock too: choosing a dock must not blank the key list of the
         pad whose pages are still built.
         """
-        row = self._row_for_kind(registry.KIND_PAD)
+        # `_row_for` on the pad selector, not `_row_for_kind`, which answers
+        # "the first pad on the bus" -- a different device the moment there are
+        # two, and the wrong answer for a question about the selected one.
+        # Falls back to the first pad, for the window that has not chosen yet.
+        row = self._row_for(self._pad)
+        if row < 0:
+            row = self._row_for_kind(registry.KIND_PAD)
         if not 0 <= row < len(self._rows):
             return ""
         return self._rows[row][self.CodeRole]
+
+    @Property("QVariantMap", notify=currentChanged)
+    def capabilities(self):
+        """What the selected pad can do, for the sidebar to hide pages by.
+
+        A map rather than a property per feature so that adding a capability is
+        one line in `identity.CAPABILITIES` and one word in a section, instead
+        of a new property, a new signal and a new binding.
+
+        Empty when no pad is attached, which reads as "can nothing" -- and that
+        is right: the sections it hides say "looking for a controller" anyway,
+        and offering a Screen page while nothing is plugged in was never the
+        useful state. A dock being selected does not empty it, because
+        `currentCode` follows the pad.
+        """
+        return dict(identity.CAPABILITIES.get(self.currentCode, {}))
 
     @Property(str, notify=currentChanged)
     def currentLabel(self):
