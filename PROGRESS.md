@@ -130,18 +130,22 @@ Unfixed because requiring more confidence overrides a documented decision and tr
 positive nobody has hit for a false negative on the one route that currently always fires.
 → [docs/findings-games.md](docs/findings-games.md)
 
-**Unsettled by measurement.** Whether the firmware accepts 164/165 aimed at a slot it is not
-running.
+**Whether the firmware accepts 164/165 aimed at a slot it is not running stops mattering, because
+such a write could never be made to stick.** An apply is working memory: it dies on a sleep, on a
+power cycle, and on a profile change. Command 166 commits whichever profile is *live*. So a write
+aimed at another slot would have to be saved by switching to that slot, and switching is precisely
+what discards it. Editing a profile without switching to it is not something the firmware leaves
+room for, which is why the app opens a profile in order to edit it.
 
-**Whether a trigger still reads as an analogue axis while it is the gyro's enable key.** The pad
-ships with `Lt` in that byte, and the enable key is *not* swallowed — the probe correlated stick
-movement against `BTN_TL` arriving on evdev throughout, so a digital button goes on working while it
-gates the gyro. A trigger is an axis rather than a button, and one that went digital whenever gyro
-mapping was on would be the pad's own factory setting doing it. One window of
-`tools/gyro-map-probe` cannot be pointed at `Lt` as it stands: the gate keys are hardcoded to LB
-and RB, and every entry in `WINDOWS` is written `gate="lb"`, precisely because evdev reports those
-as buttons. Settling it needs a **new window** that writes `Lt` as the enable key and watches
-`ABS_Z` through a slow pull, not a run of an existing one.
+**A trigger still reads as an analogue axis while it is the gyro's enable key** — answered in use
+rather than by a probe, and so no longer a question worth a probe window. The pad ships with `Lt`
+in that byte, the enable key is not swallowed (the probe correlated stick movement against `BTN_TL`
+arriving on evdev throughout), and the axis goes on reporting while it gates the gyro. Which is the
+point of shipping `Lt` as the default: gyro aim belongs on aim-down-sights, and ADS is that trigger
+in most games, so an enable key that cost you the trigger's travel would defeat the pairing it was
+chosen for. `tools/gyro-map-probe` still cannot be pointed at `Lt` — the gate keys are hardcoded to
+LB and RB and every entry in `WINDOWS` is written `gate="lb"`, because evdev reports those as
+buttons — and there is now no reason to build the window that could.
 
 ## What's done
 
@@ -196,17 +200,18 @@ is read once at start, so it has to be set *before* DS mode is turned on.
 both relays used to go with it — the first `ENODEV` off the evdev node fell through to the cleanup
 that detaches the virtual pad, so putting the pad down during a cutscene cost the game its
 controller. Haptics are the reason to expect it cost more than the input: a game opens its audio
-stream to the DualSense at launch, so a DualSense that goes away and comes back would plausibly
-come back mute even once the input works again. That consequence is reasoning from how the stream
-is opened, not something measured here. `flydigi/relay.py`'s `PadLink` holds the physical pad as
+stream to the DualSense at launch, so a DualSense that goes away and comes back might have come back
+mute even once the input worked again. It does not — see below. `flydigi/relay.py`'s `PadLink` holds
+the physical pad as
 something that may be absent — a failed read means "gone", not "fatal", and the nodes are looked
 for again once a second under whatever numbers they come back as. Meanwhile the virtual pad stays
 attached, fed a released state so a pad that vanished mid-press does not leave a button held, and
 the trigger effects are sent again when the pad returns, since it forgets them when it sleeps.
 `pad=` and `drops=` in the status line are the physical pad, never the virtual one; the app's
-DualSense page shows them as their own row. Not yet observed in a real game — the loop is covered
-in `tests/test_relay.py` against a fake bus, and what wants confirming on hardware is that the
-game's haptics really do survive the nap.
+DualSense page shows them as their own row. **Confirmed in a real game**: the pad slept mid-session,
+came back, and the game's haptics came back with it — which is the half that was reasoned about
+rather than measured, since a game opens its audio stream to the DualSense once at launch. The loop
+is also covered in `tests/test_relay.py` against a fake bus.
 
 **DS mode requires third-party mode off**, and the two switches are in the same app. Both relays take
 sticks and buttons from evdev, and the third-party toggle switches `controller_data` off — the report
@@ -460,7 +465,8 @@ the test files are re-export shims and the tests import them by the old names.
     name/descriptor, never by path. Anything that holds the pad for a whole session has to expect
     this: `flydigi/relay.py`'s `PadLink` is that expectation for both DualSense relays.
   * **The pad discards unsaved config when it sleeps**, not merely on a power cycle — observed with
-    lighting. Applying is working memory in the literal sense; command 166 is what makes it last.
+    lighting — **and on a profile change too**. Applying is working memory in the literal sense;
+    command 166 is what makes it last, and it commits whichever profile is live.
   * **Effects persist in controller state** until changed; there is no timeout.
   * **The trigger travel window is the block at blob offset 123, and this pad plays it — the
     force-trigger `Param[0..1]` at 195/215 is inert.** Measured with `tools/trigger-stroke-probe`.
@@ -731,7 +737,7 @@ do.
 | `PROTOCOL.md` | Full wire protocol + hardware verification results |
 | `flydigi/` | Library — `device.py` (transport), `identity.py` (the command-1 device-type guard), `blobs.py` (packetised config transfer), `effects.py` (live trigger commands), `mapping.py` (profiles, remapping, macros, vibration, stored triggers), `macros.py` (recording one off the pad's evdev node), `lighting.py` (RGB), `screen.py` (160x80 screen: LVGL image format, settings, and the HID upload that puts no picture on this pad), `screen_ota.py` (the serial upload that works), `settings.py` (the pad's own settings: command 3 and the small writes behind it), `games.py`, `forza.py`, `evdev.py` (the xpad evdev reader every relay's input comes from), `ds5.py` (DualSense report codec), `dsx.py` (DSX UDP protocol), `monitor.py` (process-memory engine), `motion.py` (battery, gyro/accel and the third-party toggle), `relay.py` (Apex 5 → DualSense translation, and `PadLink`: holding a pad that leaves the bus every time it sleeps) |
 | `gui/` | PySide6/QML desktop app (GPL-3.0-or-later) — `app.py` (the object graph), `main.py` (entry point), `worker.py` (all device I/O, on its own thread), `i18n.py` (the `i18n*()` shim the engine needs; without it every Kirigami form delegate throws `ReferenceError: i18ndc is not defined`, so `main.py` installs it unconditionally), `models/` (view-agnostic state; `screen.py`, `dock.py` and `imaging.py` are the ones that touch QtGui, for image decoding and for `CropFrame`, the framing both picture pages share), `qml/` (`Main.qml`, `pages/`, `components/`) |
-| `tools/flydigi-devices` | Every device attached — `list`, `show`, and `name` to write a nickname (unproven; it asks first). The `--device` selector every other tool takes is defined here |
+| `tools/flydigi-devices` | Every device attached — `list`, `show`, and `name` to write a nickname (measured on the pad; it asks first). The `--device` selector every other tool takes is defined here |
 | `tools/flydigi-mapping` | CLI for profiles — list/show/set/clear/rename/apply/backup/restore, plus `macros`, `macro-record`, `macro-set`, `macro-clear`, `gyro` |
 | `tools/gyro-map-probe` | What the pad does with the motion block at 137: five windows answering whether it plays it, whether each enable key gates it, whether Click toggles, and whether the curve at 830 is read. Transitions counted out on the motors, in `stick-feel`'s grammar |
 | `tools/flydigi-forza` | Forza driver — UDP 5300 → rules → triggers (`--port`, `--config` for a rule file other than `configs/forza.json`, `--dump` for telemetry only, `--quiet`; `--accept LEN:OFFSET`, e.g. `--accept 331:12`, for a newer Forza shipping an unknown packet size) |
