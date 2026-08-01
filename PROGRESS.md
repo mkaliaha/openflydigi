@@ -46,8 +46,18 @@ trigger; `MappingConfig.trigger_motor` reads and writes that block and **no page
 **DualSense mode stays available on it**, because only the trigger half of that relay is
 Apex-specific: input, rumble, haptic audio to the motors and the gyro are the same on both pads, so
 a Vader relays usefully and `PadLink.has_triggers` skips the effect translation rather than the
-session. Anyone debugging a Vader should doubt `identity.CAPABILITIES` before doubting the
-transport.
+session.
+
+**And the gyro is the reason to want it, which is not the same argument as coverage.** The pad's own
+gyro-to-stick mapping works in every game with nothing running on the host, and DS mode's true gyro
+axes only work in DS5-aware ones — but the narrower one is the *better* one where it applies.
+Emulated stick motion is indistinguishable from a real stick, so a game cannot gate it: it keeps
+aiming through menus, cutscenes and vehicles. Motion a game knows is motion can be switched off in
+its own options, ratcheted, or bound to aim-down-sights alone. So the two are not a wide path and a
+narrow copy of it; they are an always-on one and a context-aware one, and that is why this is worth
+keeping on a pad with no adaptive triggers at all.
+
+Anyone debugging a Vader should doubt `identity.CAPABILITIES` before doubting the transport.
 
 **Left to build:** a trigger-motor editor for the Vader, and the smaller pieces under What's next.
 Supporting an older pad is [ruled out](#ruled-out).
