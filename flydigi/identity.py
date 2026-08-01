@@ -227,12 +227,33 @@ UID_LEN = 13
 NICKNAME_MAX = 26
 
 
+def answers(cmd_id):
+    """`Controller.send`'s `until`, for a one-frame reply to `cmd_id`.
+
+    **Worth passing, not optional.** Without an `until` these reads sit out the
+    whole timeout, and the vendor node is not quiet while they do: it delivers
+    input reports at about 970 Hz, so a 0.6 s wait appends some six hundred
+    packets nobody wants and tests each one in Python. Three of those per pad,
+    on a bus poll every ten seconds, is most of a second in a hot loop on the
+    worker thread -- which the GUI thread then queues behind for the GIL every
+    time a QML binding reads a model property. It shows up as the whole window
+    dropping frames on a timer, with nothing on screen to blame for it.
+    """
+    def check(replies):
+        # Their `IsAck` is the command byte alone, at data[2] before the report
+        # id is put back. Anything else on the node is somebody else's reply.
+        reply = replies[-1]
+        return (len(reply) > 3 and reply[0] == motion.INPUT_REPORT_ID
+                and reply[3] == cmd_id)
+    return check
+
+
 def _ask(ctrl, cmd_id, wait):
     """Send a bare command and return the reply that answers it, or None."""
     buf = build(cmd_id)
     buf[4] = 2
     buf[5] = checksum(buf, 3, 3 + buf[4])
-    for reply in ctrl.send(buf, wait=wait):
+    for reply in ctrl.send(buf, wait=wait, until=answers(cmd_id)):
         # Their `IsAck` is the command byte alone, at data[2] before the report
         # id is put back. Anything else on the node is somebody else's reply.
         if len(reply) > 3 and reply[0] == motion.INPUT_REPORT_ID \

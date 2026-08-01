@@ -318,7 +318,11 @@ def read_info(ctrl, wait=0.6):
     buf = build(CMD_GET_INFO)
     buf[4] = 2
     buf[5] = checksum(buf, 3, 3 + buf[4])
-    for reply in ctrl.send(buf, wait=wait):
+    # `until`, or this sits out the whole timeout however early the answer
+    # arrives -- and this is the poll, so it does that every two seconds while
+    # the pad is away. See `Controller.send`.
+    for reply in ctrl.send(buf, wait=wait,
+                           until=lambda seen: parse_info(seen[-1]) is not None):
         info = parse_info(reply)
         if info:
             return info

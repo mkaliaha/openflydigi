@@ -150,6 +150,16 @@ ColumnLayout {
             objectName: root.prefix + "CropDrag"
             anchors.fill: parent
             enabled: root.frame.canPan
+            // Both pages are a `Kirigami.ScrollablePage`, which is a Flickable
+            // — and a Flickable steals the pointer as soon as a drag passes its
+            // threshold. Without this the picture follows for a few pixels and
+            // then stops dead while the page scrolls underneath, so getting it
+            // all the way to one edge takes half a dozen separate gestures.
+            // It shows up on the Screen page first because that window is 2:1
+            // and its pictures pan vertically, which is the axis the Flickable
+            // wants; the dock's window is nearly square, so its pictures
+            // mostly pan sideways and the theft is rarer.
+            preventStealing: true
             cursorShape: root.frame.canPan
                 ? (pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor)
                 : Qt.ArrowCursor

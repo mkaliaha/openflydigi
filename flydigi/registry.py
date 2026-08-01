@@ -120,7 +120,10 @@ def blank(path, kind):
 
 def probe_pad(ctrl, entry, deep=False):
     """Fill in a pad's entry. One exchange, or three with `deep`."""
-    replies = ctrl.send(_info_request(), wait=0.6)
+    # `until`, or every probe costs the full 0.6 s even when the pad answers at
+    # once -- and the bus is probed on a timer. See `Controller.send`.
+    replies = ctrl.send(_info_request(), wait=0.6,
+                        until=lambda seen: motion.parse_info(seen[-1]) is not None)
     for reply in replies:
         info = motion.parse_info(reply)
         if not info:

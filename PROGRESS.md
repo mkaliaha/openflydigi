@@ -65,7 +65,19 @@ true — `gui/` may import `flydigi/` and never the reverse, and nothing Flydigi
 
 Roughly in order of value.
 
- 1. **Third-party mode: optional polish.** Command 17 here is byte-identical to Space Station's.
+ 1. **The DualSense page's poll runs device work on the UI thread, and never stops.**
+    `DualSensePage.qml`'s `Component.onCompleted` calls `App.dsmode.refresh()`, which starts a
+    2-second `QTimer` that is only ever stopped at application shutdown — so one visit to that page
+    arms it for the rest of the session, on every other page too. Each tick runs `dsmode.state()`
+    on the **GUI thread**: 6 ms of filesystem work, measured. That breaks this project's own rule
+    that everything device-facing goes on the worker thread. It wants both halves fixed — stop the
+    poll when the page is not showing, and move `state()` behind the worker.
+ 2. **Model updates are not atomic.** A model is filled property by property, each setter emitting
+    its own signal, so one logical update is a dozen invalidation waves with no commit boundary —
+    and on a cold load or a Reload every change-guard passes, which is exactly when it is worst.
+    `MacroModel.refresh()` resets its whole model unconditionally, the same defect already fixed in
+    `DevicesModel`. See [Scrolling is uneven](#scrolling-is-uneven).
+ 3. **Third-party mode: optional polish.** Command 17 here is byte-identical to Space Station's.
     After a reconnect with the flag already on, Steam stops *labelling* the pad Apex 5 while
     everything keeps working — cosmetic, plus a bindings-storage nuisance. The optional workaround,
     which neither app does, is to re-assert the flag off then on once SDL has enumerated; the real
@@ -188,6 +200,43 @@ before it opens a device or starts a thread. What runs for the length of a play 
 ordinary user process; stopping it is a plain SIGTERM, and the vhci port frees itself when the socket
 closes. A socket-passing helper is not an alternative: `SCM_RIGHTS` does not survive `host-spawn`, so
 one would fail exactly where the app runs — in the `apex-dev` distrobox.
+
+## Scrolling is uneven
+
+**Open, and characterised rather than solved.** Scrolling the window is uneven from the first
+device read onward — smooth with `_read_the_rest()` suppressed, uneven once device data reaches the
+models, on every page, and it does not recover. Pressing **Reload from pad** reproduces it.
+
+Measured with `qmlprofiler`, on a 165 Hz display: 97% of frames land in 6 ms and rendering is
+solid, but **49 frames in 38 seconds take over 40 ms**, and all 49 sit in one place —
+
+```
+RenderThread:swap -> GuiThread:polishAndSync    median 1.15 ms   p99 169.60 ms
+RenderThread:render -> RenderThread:swap        median 4.82 ms   p99   6.41 ms
+GuiThread:polishAndSync -> RenderThread:render  median 0.07 ms   p99   0.41 ms
+```
+
+So the GUI thread does not *begin* the next frame after a swap. Every one of those gaps has input
+activity around it, so they are stalls and not an idle window. No QML, no JavaScript, no binding
+and no delegate creation runs inside 45 of the 51 — the thread has nothing to do and is not being
+started.
+
+**Ruled out by measurement**, so none of this is worth walking again: the GIL as CPU contention
+(0.5% CPU during a poll), GIL handover latency (`sys.setswitchinterval(0.0005)` changes nothing),
+the GIL in render sync (a control with Python-backed bindings notifying at 60 Hz is smooth), thread
+affinity (`moveToThread` is correct), Kirigami, the QQC2 style (a control under `org.kde.desktop`
+is smooth), Wayland versus XWayland, PySide6 itself (plain PySide6 + Kirigami is smooth), a worker
+thread doing the full device read and holding the pad open (smooth), all three poll timers, page
+retention (`visible=1` with fifteen pages cached), and page content.
+
+**Profiling this app**, which took three obstacles to work out and is worth writing down:
+
+  * `qDebug` is compiled out of Fedora's Qt, so `QSG_RENDER_TIMING`, `QSG_INFO` and `console.log`
+    all print nothing however the logging rules are set. `console.warn` and above still work.
+  * `python3 -m gui` makes the interpreter eat qmlprofiler's `-qmljsdebugger=…` as `-q -m`. Launch
+    through a wrapper that puts it after a script path.
+  * PySide6 has no `QT_QML_DEBUG` build flag, so the port stays shut until the process calls
+    `QQmlDebuggingEnabler.enableDebugging(True)` before any QML engine exists.
 
 ## Known limitations
 

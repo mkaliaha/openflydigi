@@ -177,9 +177,25 @@ class DevicesModel(QAbstractListModel):
         A device that is gone leaves the selection alone rather than clearing
         it: `pad` and `dock` are what the app reopens by, and forgetting the
         pad because it dozed off during a config edit would lose the edit.
+
+        **An unchanged bus is not news, and saying it was cost the whole window
+        its frame rate.** This arrives every ten seconds whether or not anything
+        moved, and a reset destroys and rebuilds every delegate attached to the
+        model -- including the picker in the sidebar header, which is on screen
+        on *every* page. The result was a hitch across the entire application
+        twice a minute, with nothing on the page responsible for it and no way
+        to tell from the symptom which page was at fault.
+
+        A probe of an idle bus is deep-equal to the last one: the fields are
+        identity, firmware, nickname, and a battery level that is a 0..5 integer
+        moving a few times an hour. So the common case compares equal and
+        returns, and a reset happens when the bus really did change.
         """
+        entries = list(entries)
+        if entries == self._entries:
+            return
         self.beginResetModel()
-        self._entries = list(entries)
+        self._entries = entries
         self.endResetModel()
         self.countChanged.emit()
         self._reselect()
