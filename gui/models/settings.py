@@ -104,6 +104,9 @@ class SettingsModel(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._state = {}
+        # Setting name -> what it read before a write moved it, for as long as
+        # that write is in the air. See `_remember`.
+        self._pending = {}
         self._loaded = False
 
     # -- what the worker hands back ----------------------------------------
@@ -112,6 +115,31 @@ class SettingsModel(QObject):
     def stateReceived(self, state):
         self._state = dict(state)
         self._loaded = True
+        # The pad has spoken about all of it, so nothing is waiting to be put
+        # back any more.
+        self._pending.clear()
+        self.changed.emit()
+
+    def _remember(self, name):
+        """Keep what a setting read before a write moves it optimistically.
+
+        Every control on this page writes as it is touched and shows the new
+        value at once, because a pad that answers in milliseconds should not
+        feel like it lags. What was missing is the other half: a write the pad
+        refuses left the control showing a state it never took, and only the
+        *next* successful write put it right. `setdefault`, so a second click
+        while the first is still in the air still remembers the value the page
+        started from.
+        """
+        self._pending.setdefault(name, self._state.get(name))
+
+    @Slot(str, bool)
+    def writeFinished(self, name, ok):
+        """The write landed, or it did not and the control goes back."""
+        was = self._pending.pop(str(name), None)
+        if ok or was is None:
+            return
+        self._state[str(name)] = was
         self.changed.emit()
 
     @Property(bool, notify=changed)
@@ -131,6 +159,7 @@ class SettingsModel(QObject):
 
     def _set_flag(self, name, value):
         value = bool(value)
+        self._remember(name)
         if self._flag(name) != value:
             self._state[name] = value
             self.changed.emit()
@@ -212,6 +241,7 @@ class SettingsModel(QObject):
     @sleepMinutes.setter
     def sleepMinutes(self, value):
         value = max(0, min(settings.SLEEP_MAX_MINUTES, int(value)))
+        self._remember("sleep_minutes")
         if self.sleepMinutes != value:
             self._state["sleep_minutes"] = value
             self.changed.emit()
@@ -241,6 +271,7 @@ class SettingsModel(QObject):
     def precision(self, index):
         if not 0 <= int(index) < len(PRECISION_WIRE) or self.precision == int(index):
             return
+        self._remember("precision")
         wire = PRECISION_WIRE[int(index)]
         self._state["precision"] = wire
         self.changed.emit()
@@ -259,6 +290,7 @@ class SettingsModel(QObject):
     def sensitivity(self, index):
         if not 0 <= int(index) < len(SENSITIVITY_WIRE) or self.sensitivity == int(index):
             return
+        self._remember("sensitivity")
         wire = SENSITIVITY_WIRE[int(index)]
         self._state["sensitivity"] = wire
         self.changed.emit()

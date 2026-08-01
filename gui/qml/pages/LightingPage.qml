@@ -131,13 +131,13 @@ Kirigami.ScrollablePage {
             // "React to rumble", writing byte 2 -- which is inert on this pad.
             // Byte 9 is the one that measurably dims the ring while a motor
             // runs. See docs/device-settings.md for the measurement.
-            FormCard.FormSwitchDelegate {
+            ModelSwitch {
                 objectName: "gripSync"
                 text: "Vibration light effect"
                 description: "The pad dims part of the ring while a grip motor "
                              + "runs, on top of whatever effect is playing."
-                checked: App.lighting.gripSync
-                onToggled: App.lighting.gripSync = checked
+                value: App.lighting.gripSync
+                onMoved: (wanted) => App.lighting.gripSync = wanted
             }
         }
 

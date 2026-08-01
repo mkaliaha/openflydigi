@@ -52,7 +52,7 @@ Kirigami.ScrollablePage {
         FormCard.FormCard {
             visible: App.settings.loaded
 
-            FormCard.FormSwitchDelegate {
+            ModelSwitch {
                 objectName: "quickSwitchToggle"
                 visible: App.settings.quickSwitchUsable
                 text: "Switch profile from the pad"
@@ -61,8 +61,8 @@ Kirigami.ScrollablePage {
                 // with nothing running on the host.
                 description: "FN + A, B, X or Y selects one of the four profiles — "
                              + "no application needed, and it works in any game."
-                checked: App.settings.quickSwitch
-                onToggled: App.settings.quickSwitch = checked
+                value: App.settings.quickSwitch
+                onMoved: (wanted) => App.settings.quickSwitch = wanted
             }
 
             FormCard.FormDelegateSeparator { visible: App.settings.quickSwitchUsable }
@@ -117,20 +117,20 @@ Kirigami.ScrollablePage {
         FormCard.FormCard {
             visible: App.settings.loaded
 
-            FormCard.FormSwitchDelegate {
+            ModelSwitch {
                 objectName: "stickDebounceToggle"
                 visible: App.settings.stickDebounceUsable
                 text: "Stick debounce"
                 description: "On, the sticks ignore the smallest movements and sit "
                              + "still at rest. Off reads subtle input better and "
                              + "jitters when untouched — and turns auto-calibration off."
-                checked: App.settings.stickDebounce
-                onToggled: App.settings.stickDebounce = checked
+                value: App.settings.stickDebounce
+                onMoved: (wanted) => App.settings.stickDebounce = wanted
             }
 
             FormCard.FormDelegateSeparator { visible: App.settings.stickDebounceUsable }
 
-            FormCard.FormSwitchDelegate {
+            ModelSwitch {
                 objectName: "autoCalibrationToggle"
                 visible: App.settings.stickDebounceUsable
                 text: "Auto-calibration"
@@ -142,20 +142,20 @@ Kirigami.ScrollablePage {
                              ? "The pad re-learns its stick centres as they wear."
                              : "Needs stick debounce on — the pad cannot calibrate "
                                + "against a signal it is not filtering."
-                checked: App.settings.autoCalibration
-                onToggled: App.settings.autoCalibration = checked
+                value: App.settings.autoCalibration
+                onMoved: (wanted) => App.settings.autoCalibration = wanted
             }
 
             FormCard.FormDelegateSeparator { visible: App.settings.stickReboundUsable }
 
-            FormCard.FormSwitchDelegate {
+            ModelSwitch {
                 objectName: "stickReboundToggle"
                 visible: App.settings.stickReboundUsable
                 text: "Rebound filter"
                 description: "Suppresses the reverse spike a stick's own inertia "
                              + "makes when you let it snap back to centre."
-                checked: App.settings.stickRebound
-                onToggled: App.settings.stickRebound = checked
+                value: App.settings.stickRebound
+                onMoved: (wanted) => App.settings.stickRebound = wanted
             }
 
             FormCard.FormDelegateSeparator {}
@@ -207,7 +207,7 @@ Kirigami.ScrollablePage {
 
             FormCard.FormDelegateSeparator { visible: App.settings.mappingSwitchUsable }
 
-            FormCard.FormSwitchDelegate {
+            ModelSwitch {
                 objectName: "mappingSwitchToggle"
                 visible: App.settings.mappingSwitchUsable
                 text: "Mapping switch"
@@ -218,8 +218,8 @@ Kirigami.ScrollablePage {
                 description: "Undocumented. The pad supports it and Flydigi's own "
                              + "application never names it, so what it changes is "
                              + "unknown — it is here because the pad has it."
-                checked: App.settings.mappingSwitch
-                onToggled: App.settings.mappingSwitch = checked
+                value: App.settings.mappingSwitch
+                onMoved: (wanted) => App.settings.mappingSwitch = wanted
             }
         }
 

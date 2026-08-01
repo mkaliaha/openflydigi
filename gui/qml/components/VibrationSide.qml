@@ -14,11 +14,11 @@ FormCard.FormCard {
     required property var side
     required property string sideName
 
-    FormCard.FormSwitchDelegate {
+    ModelSwitch {
         objectName: "enabled_" + root.sideName
         text: "Enabled"
-        checked: root.side.enabled
-        onToggled: root.side.enabled = checked
+        value: root.side.enabled
+        onMoved: (wanted) => root.side.enabled = wanted
     }
 
     FormCard.FormDelegateSeparator {}

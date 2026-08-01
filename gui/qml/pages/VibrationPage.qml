@@ -35,12 +35,12 @@ Kirigami.ScrollablePage {
         FormCard.FormCard {
             visible: App.profile.loaded
 
-            FormCard.FormSwitchDelegate {
+            ModelSwitch {
                 objectName: "vibrationMaster"
                 text: "Rumble enabled"
                 description: "The master switch for both grip motors"
-                checked: App.profile.vibration.enabled
-                onToggled: App.profile.vibration.enabled = checked
+                value: App.profile.vibration.enabled
+                onMoved: (wanted) => App.profile.vibration.enabled = wanted
             }
         }
 

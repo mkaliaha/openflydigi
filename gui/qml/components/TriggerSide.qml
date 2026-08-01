@@ -70,11 +70,11 @@ FormCard.FormCard {
             Component {
                 id: switchRow
 
-                FormCard.FormSwitchDelegate {
+                ModelSwitch {
                     objectName: "param_" + row.key + "_" + root.sideName
                     text: row.label
                     description: row.description
-                    checked: row.value !== 0
+                    value: row.value !== 0
                     onToggled: root.side.setEffectParam(row.key, checked ? 1 : 0)
                 }
             }

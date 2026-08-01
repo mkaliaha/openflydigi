@@ -65,6 +65,9 @@ class DeviceModel(QObject):
         # The last failure reported, so the same one is not reported twice. See
         # `failed`.
         self._last_failure = None
+        # What the takeover flag read before a click moved it, for as long as
+        # the write is in the air. See `thirdParty`'s setter.
+        self._pending_third_party = None
 
     @Property(bool, notify=connectedChanged)
     def connected(self):
@@ -176,11 +179,26 @@ class DeviceModel(QObject):
         # Optimistic locally, then corrected by the read that follows the write:
         # the new holder reconfigures the transport itself, so what the pad ends
         # up reporting is not simply what we asked for.
+        #
+        # And put back when the write fails, which the correcting read cannot do
+        # because a failed write has no read after it. Same hole the dock's
+        # switches and the pad's settings had.
         value = bool(value)
+        if self._pending_third_party is None:
+            self._pending_third_party = self._third_party
         if self._third_party != value:
             self._third_party = value
             self.thirdPartyChanged.emit()
         self.thirdPartyRequested.emit(value)
+
+    @Slot(bool)
+    def thirdPartyFinished(self, ok):
+        """The takeover write landed, or it did not and the switch goes back."""
+        was, self._pending_third_party = self._pending_third_party, None
+        if ok or was is None or was == self._third_party:
+            return
+        self._third_party = was
+        self.thirdPartyChanged.emit()
 
     @Property(str, notify=thirdPartyChanged)
     def controlBy(self):
@@ -206,6 +224,8 @@ class DeviceModel(QObject):
 
     @Slot(dict)
     def transportReceived(self, state):
+        # The pad has spoken, so nothing is waiting to be put back.
+        self._pending_third_party = None
         self._third_party = bool(state.get("third_party"))
         self._control_by = str(state.get("control_by") or "")
         self.thirdPartyChanged.emit()

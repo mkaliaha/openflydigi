@@ -186,7 +186,7 @@ ColumnLayout {
 
         FormCard.FormDelegateSeparator {}
 
-        FormCard.FormSwitchDelegate {
+        ModelSwitch {
             objectName: "circular_" + root.sideName
             text: "Circular range"
             // Not a neutral preference. Confirmed on hardware: circular clamps
@@ -196,8 +196,8 @@ ColumnLayout {
             description: "Limits diagonals to the same travel as straight "
                          + "pushes. Some games test each axis separately and "
                          + "will stop responding on the diagonal."
-            checked: root.side.circular
-            onToggled: root.side.circular = checked
+            value: root.side.circular
+            onMoved: (wanted) => root.side.circular = wanted
         }
     }
 }

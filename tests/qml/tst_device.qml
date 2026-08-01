@@ -79,6 +79,43 @@ TestCase {
         compare(App.settings.quickSwitch, false);
     }
 
+    function test_a_switch_still_follows_the_model_after_it_is_clicked() {
+        // **Clicking a QQC2 switch assigns its own `checked`**, and assigning a
+        // property is how a declarative binding to it is broken -- so from the
+        // first click onwards a plain `checked: someModel.thing` is a local
+        // variable that happens to have started out agreeing with the model.
+        //
+        // That is invisible while every write succeeds, and it is what makes a
+        // *failure* unreportable: a setting the pad refuses is put back in the
+        // model (`SettingsModel.writeFinished`) and the switch went on showing
+        // what the click had put there, so the page claimed a write that never
+        // happened. `components/ModelSwitch.qml` is the fix; this is the case
+        // that fails without it.
+        //
+        // Driven by moving the model rather than by making a write fail,
+        // because the fake pad has no way to refuse and the property being
+        // asserted is the same either way: after a click, does this control
+        // still listen?
+        let toggle = findChild(page, "quickSwitchToggle");
+        verify(toggle, "no quick-switch toggle");
+
+        let seen = Fixture.settingsReads;
+        const was = toggle.checked;
+        toggle.toggle();
+        toggle.toggled();
+        tryVerify(() => Fixture.settingsReads > seen, 5000,
+                  "the write was never answered");
+        compare(toggle.checked, !was, "the click did not move the control");
+
+        // The model now says something the control was not told by a click.
+        App.settings.stateReceived({
+            "quick_switch": was, "quick_switch_usable": true,
+            "sleep_minutes": App.settings.sleepMinutes,
+            "precision": 0, "sensitivity": 0});
+        tryCompare(toggle, "checked", was, 2000,
+                   "the switch stopped following the model after being clicked");
+    }
+
     function test_the_sleep_time_is_written_as_minutes() {
         let spin = findChild(page, "sleepMinutes");
         verify(spin, "no sleep control");

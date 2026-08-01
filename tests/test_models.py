@@ -3429,6 +3429,180 @@ def test_a_deferred_sample_is_never_the_framing_from_before_the_drag():
           not sampled, str(sampled))
 
 
+def dock_state(effect="Wave gradient", brightness=40, sleep=True):
+    """One whole dock read, the shape `gui/worker.py` sends.
+
+    `effect` is named rather than numbered because the wire mode and the
+    dropdown index are different numbers, and mixing them up is the obvious way
+    to write a test that asserts nothing.
+    """
+    mode = models.dock.MODES[models.MODE_NAMES.index(effect)][1]
+    return {
+        "selector": "uid:aa",
+        "info": {"firmware": "0.0.3.9", "device_type": 0,
+                 "sleep_when_charging": sleep, "led_sync": False,
+                 "close_with_system": True,
+                 "show_animation_when_charging": False},
+        "uid": "aa" * 13, "nickname": "Shelf",
+        "lighting": {"mode": mode, "brightness": brightness, "period": 3,
+                     "direction": 0, "colours": [[0, 116, 255]]},
+        "status": {"docked": True, "battery": 3}}
+
+
+def test_a_switch_write_does_not_throw_away_an_unapplied_effect():
+    """Flicking a switch must not undo the effect somebody just picked.
+
+    Every switch write ends in a read of the whole dock -- the reply to a write
+    says nothing about what it changed -- and that read landed on the lighting
+    block as well, which arrives in the same packet and has nothing to do with
+    the switch. So choosing an effect and then turning "Sleep while docked" on
+    put the dropdown back to whatever the dock was still playing, with nothing
+    on screen to say why.
+    """
+    model = models.DockModel()
+    model.setSelector("uid:aa")
+    model.stateReceived(dock_state("Wave gradient"))
+    check("the dock's own effect is shown",
+          model.modeIndex == models.MODE_NAMES.index("Wave gradient"),
+          str(model.modeIndex))
+    check("and nothing is unapplied yet", not model.lightingDirty)
+
+    chosen = models.MODE_NAMES.index("Breath")
+    model.modeIndex = chosen
+    check("picking an effect is an unapplied change", model.lightingDirty)
+
+    # The switch. Nothing reads the dock back for it any more -- see
+    # `DeviceWorker.set_dock_switch` -- so the worst that can arrive is the
+    # confirmation, which carries no lighting at all.
+    model.setSwitch("sleep_when_charging", False)
+    model.switchFinished("uid:aa", "sleep_when_charging", True)
+
+    check("the switch took", not model.sleepWhenCharging)
+    check("and the effect that was picked is still picked",
+          model.modeIndex == chosen, str(model.modeIndex))
+    check("still marked as not on the dock", model.lightingDirty)
+
+    # And once it has been applied, the dock's version is the same version, so
+    # the next read stops being something to defend against.
+    model.stateReceived(dock_state("Breath"))
+    check("an applied effect leaves nothing unapplied", not model.lightingDirty,
+          str(model.modeIndex))
+    check("and it is still the one that was picked", model.modeIndex == chosen,
+          str(model.modeIndex))
+
+
+def test_a_switch_the_dock_refuses_goes_back():
+    """A page that moves the moment it is clicked has to be able to move back.
+
+    Nothing reads the switches back: each one is its own command and the write
+    raises unless the dock answers that command, so pass and fail are known
+    where the write is made. What that buys has to be paid for here -- a
+    failure the page is not told about leaves a switch showing a state the dock
+    never took.
+    """
+    model = models.DockModel()
+    model.setSelector("uid:aa")
+    model.stateReceived(dock_state(sleep=True))
+    check("the dock's own answer is shown", model.sleepWhenCharging)
+
+    model.setSwitch("sleep_when_charging", False)
+    check("the page moves at once", not model.sleepWhenCharging)
+    model.switchFinished("uid:aa", "sleep_when_charging", False)
+    check("and back, when the dock refused it", model.sleepWhenCharging)
+
+    # A confirmation leaves it where the click put it.
+    model.setSwitch("led_sync", True)
+    model.switchFinished("uid:aa", "led_sync", True)
+    check("a switch that landed stays where it was put", model.ledSync)
+    # And a late failure for a switch already settled changes nothing.
+    model.switchFinished("uid:aa", "led_sync", False)
+    check("a second answer for it is not a second chance", model.ledSync)
+
+    # A reply for a dock nobody is looking at is not this dock's business.
+    model.setSwitch("close_with_system", False)
+    model.switchFinished("uid:zz", "close_with_system", False)
+    check("another dock's answer is ignored", not model.closeWithSystem)
+
+
+def test_a_read_still_lands_when_nothing_was_edited():
+    """The guard above must not turn into "the dock can never say anything".
+
+    A dock has its own button, so its lighting can change while the app is
+    watching. With nothing edited here, what it reports is the truth.
+    """
+    model = models.DockModel()
+    model.setSelector("uid:aa")
+    model.stateReceived(dock_state("Wave gradient", brightness=40))
+    model.stateReceived(dock_state("Breath", brightness=90))
+    check("the dock's new effect is shown",
+          model.modeIndex == models.MODE_NAMES.index("Breath"),
+          str(model.modeIndex))
+    check("and its new brightness", model.brightness == 90, str(model.brightness))
+
+    # A different dock is a different device: what was on screen belonged to
+    # the one being left, however unapplied it was.
+    model.modeIndex = models.MODE_NAMES.index("Rainbow")
+    check("that is an unapplied change", model.lightingDirty)
+    model.setSelector("uid:bb")
+    model.stateReceived(dict(dock_state("Wave gradient"), selector="uid:bb"))
+    check("choosing another dock shows that dock's lighting",
+          model.modeIndex == models.MODE_NAMES.index("Wave gradient"),
+          str(model.modeIndex))
+    check("with nothing carried over", not model.lightingDirty)
+
+
+def test_a_setting_the_pad_refuses_goes_back():
+    """The pad's controls move as they are touched, so they have to move back.
+
+    Unlike the dock's switches, these cannot skip the read: command 19 covers
+    every one of them and its ack echoes the value without the sub-id, so a
+    reply says nothing about which setting moved -- and a setting the pad does
+    not support is acknowledged and changed anyway. Command 3 is the only
+    honest answer, and it is one exchange returning exactly this page's state.
+
+    What the read cannot do is arrive when the write failed. Until this existed
+    a refused write left the toggle showing a state the pad never took, and only
+    the *next* successful write put it right.
+    """
+    model = models.SettingsModel()
+    model.stateReceived({"quick_switch": True, "quick_switch_usable": True,
+                         "sleep_minutes": 15, "precision": 0, "sensitivity": 0})
+    check("the pad's own answer is shown", model.quickSwitch)
+
+    asked = []
+    model.writeRequested.connect(lambda name, value: asked.append((name, value)))
+
+    model.quickSwitch = False
+    check("the page moves at once", not model.quickSwitch)
+    check("and the write went out", asked == [("quick_switch", 0)], str(asked))
+    model.writeFinished("quick_switch", False)
+    check("and back, when the pad refused it", model.quickSwitch)
+
+    # A successful write is corrected by the read that follows it, so the
+    # confirmation only has to release the value.
+    model.quickSwitch = False
+    model.stateReceived({"quick_switch": False, "quick_switch_usable": True,
+                         "sleep_minutes": 15, "precision": 0, "sensitivity": 0})
+    model.writeFinished("quick_switch", True)
+    check("a setting that landed stays landed", not model.quickSwitch)
+
+    # The numbers too, not only the bits.
+    model.sleepMinutes = 45
+    check("the number moves at once", model.sleepMinutes == 45,
+          str(model.sleepMinutes))
+    model.writeFinished("sleep_minutes", False)
+    check("and back when it is refused", model.sleepMinutes == 15,
+          str(model.sleepMinutes))
+
+    # And a read is the pad's whole truth, so it settles anything outstanding.
+    model.sleepMinutes = 30
+    model.stateReceived({"quick_switch": False, "quick_switch_usable": True,
+                         "sleep_minutes": 30, "precision": 0, "sensitivity": 0})
+    model.writeFinished("sleep_minutes", False)
+    check("a failure after the pad has answered does not undo the answer",
+          model.sleepMinutes == 30, str(model.sleepMinutes))
+
+
 def main():
     QCoreApplication.instance() or QCoreApplication([])
     for test in (test_selecting_an_unread_profile_requests_it_once,
@@ -3546,6 +3720,10 @@ def main():
                  test_dragging_the_dock_picture_costs_the_stage_and_not_the_wedge,
                  test_a_deferred_sample_is_never_the_framing_from_before_the_drag,
                  test_the_dock_swatches_are_rows_rather_than_a_rebuilt_list,
+                 test_a_switch_write_does_not_throw_away_an_unapplied_effect,
+                 test_a_switch_the_dock_refuses_goes_back,
+                 test_a_setting_the_pad_refuses_goes_back,
+                 test_a_read_still_lands_when_nothing_was_edited,
                  test_a_file_qt_cannot_read_says_so_rather_than_half_loading,
                  test_lighting_dirty_comes_back_down_as_well_as_up,
                  test_a_second_setup_reading_replaces_the_checklist,

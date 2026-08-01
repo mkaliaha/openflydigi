@@ -22,6 +22,8 @@ import org.kde.kirigami as Kirigami
 import org.kde.kirigamiaddons.formcard as FormCard
 import Apex5
 
+import "../components"
+
 Kirigami.ScrollablePage {
     id: page
     objectName: "dualSensePage"
@@ -70,7 +72,7 @@ Kirigami.ScrollablePage {
         }
 
         FormCard.FormCard {
-            FormCard.FormSwitchDelegate {
+            ModelSwitch {
                 objectName: "dsModeToggle"
                 text: "Present the pad as a DualSense"
                 description: "Adds a virtual DualSense that the Apex 5 drives. "
@@ -78,7 +80,7 @@ Kirigami.ScrollablePage {
                              + "with no per-game setup — including games "
                              + "Flydigi has never heard of. Attaching a USB "
                              + "device needs your password once."
-                checked: App.dsmode.running
+                value: App.dsmode.running
                 // Refused rather than warned about while another driver holds
                 // the pad: the relay's own input source is switched off in that
                 // state, so starting it produces a DualSense with working
@@ -87,12 +89,12 @@ Kirigami.ScrollablePage {
                 // above says so; this makes it true.
                 enabled: App.dsmode.available && !App.dsmode.busy
                          && (App.dsmode.running || !App.device.thirdParty)
-                onToggled: App.dsmode.setRunning(checked)
+                onMoved: (wanted) => App.dsmode.setRunning(wanted)
             }
 
             FormCard.FormDelegateSeparator {}
 
-            FormCard.FormSwitchDelegate {
+            ModelSwitch {
                 objectName: "dsMotorsToggle"
                 text: "Reproduce haptic audio on the pad's motors"
                 // The thing nothing else does. A DualSense has no rumble
@@ -104,11 +106,11 @@ Kirigami.ScrollablePage {
                              + "the controller's audio device rather than motor "
                              + "values. Those are split by frequency and played "
                              + "on the Apex 5's two motors."
-                checked: App.dsmode.motors
+                value: App.dsmode.motors
                 // Read once at startup, so changing it mid-session would say
                 // something the running relay is not doing.
                 enabled: !App.dsmode.running && !App.dsmode.busy
-                onToggled: App.dsmode.motors = checked
+                onMoved: (wanted) => App.dsmode.motors = wanted
             }
 
             FormCard.FormDelegateSeparator {}

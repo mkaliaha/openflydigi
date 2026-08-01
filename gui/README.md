@@ -66,6 +66,18 @@ taking it means the page scroll is done by hand, since anything passed on would
 be picked up by the MouseArea being defeated. `RangeSlider` already lets the
 wheel through and needs nothing.
 
+**And a control that has been clicked stops following its model.** Clicking a
+QQC2 switch assigns its own `checked`, which is how a declarative binding to it
+is broken — so `checked: someModel.thing` is a local variable from the first
+click onwards. That is invisible while every write succeeds and is precisely
+what makes a failure unreportable: a setting the pad refuses is put back in the
+model and the switch goes on showing what the click put there, so the page
+claims a write that never happened. `components/ModelSwitch.qml` re-applies the
+binding through a `Binding` element, which survives being overwritten;
+`tst_device.qml::test_a_switch_still_follows_the_model_after_it_is_clicked`
+fails against a plain binding. The same trap is why `components/SliderRow.qml`
+says its `value` must never be assigned from a handler.
+
 The crop stage's zoom is the deliberate exception: scrolling a picture's zoom is
 what a person means by it, so that slider keeps the wheel and settles on a timer
 instead of on a release it never gets.

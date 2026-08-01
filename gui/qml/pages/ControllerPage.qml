@@ -214,7 +214,7 @@ Kirigami.ScrollablePage {
             // than no switch.
             visible: App.device.thirdPartyAvailable
 
-            FormCard.FormSwitchDelegate {
+            ModelSwitch {
                 objectName: "thirdPartyToggle"
                 text: "Let other software take the pad over"
                 // Deliberately not sold as a preference. It is a handover: the
@@ -232,8 +232,8 @@ Kirigami.ScrollablePage {
                              + "it as an Apex 5. The ordinary gamepad input "
                              + "stops, so anything not going through them sees "
                              + "nothing; adaptive triggers still work."
-                checked: App.device.thirdParty
-                onToggled: App.device.thirdParty = checked
+                value: App.device.thirdParty
+                onMoved: (wanted) => App.device.thirdParty = wanted
             }
 
             FormCard.FormDelegateSeparator { visible: App.device.controlBy !== "" }

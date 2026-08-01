@@ -169,7 +169,7 @@ Kirigami.ScrollablePage {
             Layout.fillWidth: true
             visible: App.dock.present
 
-            FormCard.FormSwitchDelegate {
+            ModelSwitch {
                 objectName: "dockSleepWhenCharging"
                 // Named for what it does. Flydigi's own label is "Intelligent
                 // start", which says nothing about taking two devices' lighting
@@ -177,42 +177,42 @@ Kirigami.ScrollablePage {
                 text: "Sleep while docked"
                 description: "Both the pad and the dock go dark while a pad "
                            + "sits in it. Flydigi call this “Intelligent start”."
-                checked: App.dock.sleepWhenCharging
-                onToggled: App.dock.sleepWhenCharging = checked
+                value: App.dock.sleepWhenCharging
+                onMoved: (wanted) => App.dock.sleepWhenCharging = wanted
             }
 
             FormCard.FormDelegateSeparator {}
 
-            FormCard.FormSwitchDelegate {
+            ModelSwitch {
                 objectName: "dockLedSync"
                 text: "Lighting sync"
                 description: "keep the dock's lighting in step with the pad's — "
                            + "the two arrange it between themselves, with nothing "
                            + "host-side in the loop"
-                checked: App.dock.ledSync
-                onToggled: App.dock.ledSync = checked
+                value: App.dock.ledSync
+                onMoved: (wanted) => App.dock.ledSync = wanted
             }
 
             FormCard.FormDelegateSeparator {}
 
-            FormCard.FormSwitchDelegate {
+            ModelSwitch {
                 objectName: "dockCloseWithSystem"
                 text: "Close when shut down"
                 description: "go dark when the host powers off"
-                checked: App.dock.closeWithSystem
-                onToggled: App.dock.closeWithSystem = checked
+                value: App.dock.closeWithSystem
+                onMoved: (wanted) => App.dock.closeWithSystem = wanted
             }
 
             FormCard.FormDelegateSeparator {}
 
-            FormCard.FormSwitchDelegate {
+            ModelSwitch {
                 objectName: "dockPowerDisplay"
                 text: "Power display"
                 // Space Station forces this and Intelligent start apart in its
                 // own UI. Nothing in the firmware does, so nothing here does.
                 description: "play the charge animation while a pad is docked"
-                checked: App.dock.showAnimationWhenCharging
-                onToggled: App.dock.showAnimationWhenCharging = checked
+                value: App.dock.showAnimationWhenCharging
+                onMoved: (wanted) => App.dock.showAnimationWhenCharging = wanted
             }
         }
 

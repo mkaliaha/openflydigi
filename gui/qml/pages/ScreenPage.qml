@@ -233,7 +233,7 @@ Kirigami.ScrollablePage {
         }
 
         FormCard.FormCard {
-            FormCard.FormSwitchDelegate {
+            ModelSwitch {
                 objectName: "screenAlwaysOn"
                 text: "Keep the picture on screen"
                 // Named for what it does rather than for the bit behind it: the
@@ -244,20 +244,20 @@ Kirigami.ScrollablePage {
                              ? "The screen shows your picture."
                              : "The screen stays dark; the logo button wakes the "
                                + "status view for a couple of seconds."
-                checked: App.screen.alwaysOn
+                value: App.screen.alwaysOn
                 enabled: App.screen.loaded && App.screen.supported && !App.screen.busy
-                onToggled: App.screen.setAlwaysOn(checked)
+                onMoved: (wanted) => App.screen.setAlwaysOn(wanted)
             }
 
             FormCard.FormDelegateSeparator {}
 
-            FormCard.FormSwitchDelegate {
+            ModelSwitch {
                 objectName: "screenStatusBar"
                 text: "Keep the status bar up"
                 description: "Otherwise it hides itself after a moment."
-                checked: App.screen.statusBarAlwaysOn
+                value: App.screen.statusBarAlwaysOn
                 enabled: App.screen.loaded && !App.screen.busy
-                onToggled: App.screen.setStatusBarAlwaysOn(checked)
+                onMoved: (wanted) => App.screen.setStatusBarAlwaysOn(wanted)
             }
         }
     }

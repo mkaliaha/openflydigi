@@ -36,8 +36,10 @@ class DeviceWorker(QObject):
     profile_written = Signal(int, int, bool)   # cfg_id, packets, saved to flash
     vibration_applied = Signal(str, str)       # game name, sides applied
     transport_changed = Signal(dict)     # third-party flag + who holds the pad
+    third_party_written = Signal(bool)   # did the takeover flag land
     versions_changed = Signal(dict)      # the seven firmware components
     settings_changed = Signal(dict)      # the whole command-3 block
+    setting_written = Signal(str, bool)  # setting name, did it land
     screen_status = Signal(dict)
     screen_progress = Signal(int, int)
     screen_finished = Signal(bool)
@@ -48,6 +50,7 @@ class DeviceWorker(QObject):
     devices_changed = Signal(list)       # every device attached, probed
     pad_selected = Signal(str)           # a different pad is now the open one
     dock_state = Signal(dict)            # one dock's whole state
+    dock_switch = Signal(str, str, bool)  # selector, switch name, did it land
     dock_progress = Signal(float)        # 0..1 through a lighting upload
     dock_finished = Signal(bool)
     status = Signal(str)
@@ -239,10 +242,31 @@ class DeviceWorker(QObject):
 
     @Slot(str, str, bool)
     def set_dock_switch(self, selector, name, value):
-        """One of the four switches, then a read of the whole heartbeat back.
+        """One of the four switches, then the heartbeat back -- and only that.
 
-        Read back for the same reason every device-settings write is: the reply
-        carries the command id and nothing about what it changed.
+        **Not read back, unlike the pad's**, and the difference is in the
+        protocol rather than in how much is trusted. Command 19 covers every
+        one of the pad's settings and its ack echoes the value without the
+        sub-id, so nothing in a reply says *which* setting moved -- and an
+        unsupported one acks and changes nothing, measured. A re-read of
+        command 3 is the only way to know, and it happens to be exactly that
+        page's own state, so it costs one exchange and disturbs nothing.
+
+        Each of the dock's four switches is its own command, and
+        `charger._set_flag` already raises when the dock does not answer that
+        command. So pass and fail are known at the point of writing, and the
+        page can be optimistic and be put back if it was wrong. What is not
+        known is whether the dock can acknowledge a command and ignore it; the
+        pad does that for a setting it lacks, and nothing here has been seen to.
+        If one ever is, `charger.read_info` is one exchange and carries all four.
+
+        Nothing else, and that is the change. It used to call `load_dock`, so
+        confirming one bit also fetched the uid, the nickname, a forty-two
+        packet read of the LED config and a wait for an unsolicited status
+        frame -- none of which a switch can change. It cost about a second a
+        toggle, and the lighting it dragged back landed on the page and put an
+        effect somebody had chosen but not applied back to whatever the dock was
+        still playing.
         """
         setter = {
             "sleep_when_charging": charger.set_sleep_when_charging,
@@ -255,10 +279,14 @@ class DeviceWorker(QObject):
             return
         if self._with_dock(selector, lambda dock: setter(dock, value),
                            f"changing {name.replace('_', ' ')}") is None:
+            # Said rather than left implied: the page moved the switch the
+            # moment it was clicked, and a failure it is not told about leaves
+            # it showing a state the dock never took.
+            self.dock_switch.emit(selector, name, False)
             return
         self.status.emit(f"Dock: {name.replace('_', ' ')} "
                          f"{'on' if value else 'off'}")
-        self.load_dock(selector)
+        self.dock_switch.emit(selector, name, True)
 
     @Slot(str, dict)
     def write_dock_lighting(self, selector, wanted):
@@ -372,6 +400,9 @@ class DeviceWorker(QObject):
             return motion.read_transport(ctrl)
 
         state = self._attempt(work, "changing third-party control")
+        # Either way: the switch moved when it was clicked, and a failure it is
+        # not told about leaves it claiming a handover that never happened.
+        self.third_party_written.emit(bool(state))
         if state:
             self.transport_changed.emit(state)
             holder = state.get("control_by") or "nothing"
@@ -519,14 +550,27 @@ class DeviceWorker(QObject):
         """Write one setting, then report the block as the pad reads it back.
 
         Never what was asked for: a command-19 ack echoes the value and never
-        the sub-id, so nothing in a reply says which setting moved. Command 3
-        does, which is why `settings.apply` ends in a read.
+        the sub-id, so nothing in a reply says which setting moved. Worse, a
+        setting the pad does not support is acknowledged and changed anyway --
+        measured, and asserted in `tests/test_settings.py`. Command 3 says what
+        is actually true, which is why `settings.apply` ends in a read of it.
+
+        **That is why this reads back and the dock's switches do not.** Each of
+        those is its own command and the write raises unless the dock answers
+        it, so there is nothing a read would add; here there is no such thing as
+        the reply to one setting. The read costs one exchange and returns
+        exactly this page's own state, so unlike the dock's it has nothing
+        unrelated to overwrite -- see `set_dock_switch` for what that cost.
         """
         block = self._attempt(lambda ctrl: settings.apply(ctrl, name, value),
                               f"changing {SETTING_LABELS.get(name, name).lower()}")
         if block:
             self._settings_read(block)
             self.status.emit(describe_setting(name, block))
+        # Either way, because the page moved the control the moment it was
+        # touched. On success the block above has already corrected it and this
+        # only releases it; on failure it is the only thing that will.
+        self.setting_written.emit(name, bool(block))
 
     # -- screen ------------------------------------------------------------
 

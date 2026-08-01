@@ -315,6 +315,15 @@ class DockModel(QObject):
         self._period = 2
         self._direction = charger.DIR_NONE
         self._colours = [charger.BLUE]
+        # The lighting the dock last reported, or None before it has answered
+        # for the selected dock. What `lightingDirty` is measured against, and
+        # what lets a re-read leave an unapplied edit alone -- see
+        # `stateReceived`.
+        self._stored_lighting = None
+        self._lighting_dirty = False
+        # Switch name -> what it read before it was clicked, for as long as the
+        # write is in the air. See `setSwitch` and `switchFinished`.
+        self._pending_switches = {}
         self._docked = None
         self._dock_battery = -1
         self._busy = False
@@ -377,8 +386,16 @@ class DockModel(QObject):
         self._docked_state = self._describe_docked()
         self.changed.emit()
 
+    def _lighting_snapshot(self):
+        """The five fields Apply sends, as something comparable."""
+        return {"mode": self._mode, "brightness": self._brightness,
+                "period": self._period, "direction": self._direction,
+                "colours": [tuple(c) for c in self._colours]}
+
     def _relit(self):
         """The lighting config moved: its mode, colours, period or direction."""
+        self._lighting_dirty = (self._stored_lighting is not None
+                                and self._lighting_snapshot() != self._stored_lighting)
         self._period_range = charger.MODE_PERIOD_RANGE.get(
             self._mode, charger.PERIOD_RANGE_FALLBACK)
         self._mode_index = next(
@@ -454,6 +471,10 @@ class DockModel(QObject):
             return
         self._selector = selector
         self._present = False
+        # A different dock is a different device: what is on screen belongs to
+        # the one being left, so the next reply lands whole.
+        self._stored_lighting = None
+        self._lighting_dirty = False
         self._restated()
         if selector:
             self.refreshRequested.emit(selector)
@@ -488,13 +509,35 @@ class DockModel(QObject):
         self._nickname = state.get("nickname") or ""
         lighting = state.get("lighting") or {}
         if lighting:
-            self._mode = int(lighting.get("mode", self._mode))
-            self._brightness = int(lighting.get("brightness", self._brightness))
-            self._period = int(lighting.get("period", self._period))
-            self._direction = int(lighting.get("direction", self._direction))
             colours = lighting.get("colours")
-            if colours:
-                self._colours = [tuple(c) for c in colours]
+            fresh = {
+                "mode": int(lighting.get("mode", self._mode)),
+                "brightness": int(lighting.get("brightness", self._brightness)),
+                "period": int(lighting.get("period", self._period)),
+                "direction": int(lighting.get("direction", self._direction)),
+                "colours": ([tuple(c) for c in colours] if colours
+                            else [tuple(c) for c in self._colours]),
+            }
+            # **An unapplied edit survives a read it did not ask for.**
+            # `ProfileModel` draws the same line for the same reason: a re-read
+            # nobody asked for must not cost unsaved work.
+            #
+            # The bug that made this necessary is fixed at its source -- a
+            # switch write no longer reads the whole dock back, so it no longer
+            # arrives carrying a lighting block at all. This stays because the
+            # invariant is worth stating and `refreshRequested` is a public
+            # path: anything wired to it later inherits the guarantee instead of
+            # rediscovering the bug. A *different* dock is not a re-read and is
+            # handled by `setSelector`, which drops the stored copy so the first
+            # reply for the new one always lands whole.
+            keep = self._lighting_dirty
+            self._stored_lighting = fresh
+            if not keep:
+                self._mode = fresh["mode"]
+                self._brightness = fresh["brightness"]
+                self._period = fresh["period"]
+                self._direction = fresh["direction"]
+                self._colours = [tuple(c) for c in fresh["colours"]]
         status = state.get("status")
         if status is None:
             self._docked, self._dock_battery = None, -1
@@ -543,13 +586,38 @@ class DockModel(QObject):
 
     @Slot(str, bool)
     def setSwitch(self, name, value):
+        """Move a switch now, and put it back if the dock refuses it.
+
+        **Optimistic, and nothing reads it back.** Each of the dock's switches
+        is its own command and `charger._set_flag` raises unless the dock
+        answers that command, so whether the write landed is known where it is
+        made -- there is nothing a read would add. It used to end in a read of
+        the whole dock, which cost about a second and overwrote the lighting on
+        the page with what was still on the device. See
+        `DeviceWorker.set_dock_switch`; the pad's settings are re-read and the
+        reason they have to be is there too.
+
+        A page that moves the instant it is clicked has to be able to move back,
+        so what the switch read before is kept until the worker says.
+        """
         if not self._selector:
             return
-        # Optimistic, then corrected by the read that follows: the page should
-        # not feel like it lags a device that answers in milliseconds.
+        name = str(name)
+        self._pending_switches.setdefault(name, bool(self._info.get(name)))
         self._info[name] = bool(value)
         self._restated()
-        self.switchRequested.emit(self._selector, str(name), bool(value))
+        self.switchRequested.emit(self._selector, name, bool(value))
+
+    @Slot(str, str, bool)
+    def switchFinished(self, selector, name, ok):
+        """The write landed, or it did not and the switch goes back."""
+        if selector != self._selector:
+            return
+        was = self._pending_switches.pop(str(name), None)
+        if ok or was is None:
+            return
+        self._info[str(name)] = was
+        self._restated()
 
     @Property(bool, notify=changed)
     def sleepWhenCharging(self):
@@ -717,6 +785,20 @@ class DockModel(QObject):
     def coloursUsed(self):
         """How many colours this mode's generator reads. Zero means it ignores them."""
         return self._colours_used
+
+    @Property(bool, notify=lightingChanged)
+    def lightingDirty(self):
+        """Whether what is on screen differs from what the dock last reported.
+
+        False before the dock has answered, because there is nothing to differ
+        from yet. Derived in `_relit`, which every path that moves the lighting
+        ends at, so it cannot be left stale.
+
+        The page does not draw it. It exists because `stateReceived` needs it --
+        an unapplied edit has to survive a read nobody asked for -- and because
+        a boolean that decides that is worth being able to assert about.
+        """
+        return self._lighting_dirty
 
     @Property(bool, notify=lightingChanged)
     def usesDirection(self):
