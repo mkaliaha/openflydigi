@@ -239,6 +239,15 @@ two coincide, at sub 1 written to 1; match on `data[2] == 19 && data[5] == value
 `ResetAllMappingUsable`, which the SDK sets unconditionally in the NewXInput branch — this pad's
 mode. This is the stock app's "Restore default". Destructive: test on slot 4 or the fake pad first.
 
+**It works on this pad, and it takes the profile's name with it.** Observed through Space Station's
+own "Restore default" on the Apex 5 here: a slot renamed out of its factory name came back carrying
+that factory name again — which on this pad is Chinese. That follows from where a name lives: blob
+offset **770**, twenty bytes of UTF-16LE (`MappingConfig.title`), so it is a field of the slot like
+any other and a slot reset restores it along with the rest. Two consequences for a UI offering this.
+The rename on the app's Controller page is undone by it, so the confirmation has to say more than
+"restore defaults". And twenty bytes of UTF-16 is ten characters whichever script they are in, which
+is why ten Chinese ones fit where a longer English name will not.
+
 **Controller nickname** — write `UpdateNicknameCommandFactory` **24**, read
 `ReadNicknameCommandFactory` **2**. The decompiled writer puts the CRC at `[6]`, which would
 overwrite the second name byte — assume it belongs at `5 + len`.
