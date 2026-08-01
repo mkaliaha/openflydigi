@@ -18,6 +18,16 @@ Apex 5 speaks:
     write  164  [cfgId, startIdx, nPkts, pkgSize] then 165 [pktNum, data...]
     save   166  [versionLo, versionHi]        commit to flash
 
+From protocol 3.2 the macros are a second config beside the profile, addressed
+by the same cfgId and moved by three commands of exactly the same shape:
+
+    read   172  [cfgId, pkgSize]              -> multi-packet reply
+    write  173  [cfgId, startIdx, nPkts, pkgSize] then 174 [pktNum, data...]
+
+An Apex 5 is v3.1 and keeps them at blob offset 230; a Vader 5 is v3.2 and does
+not. `MacroStore` is that store and `MappingConfig.macro_store` carries one, so
+`macros()` and `set_macros()` mean the same thing on either pad.
+
 Unlike the trigger-effect commands, these are checksummed and the pad rejects
 a packet whose checksum is wrong -- see `build`.
 
@@ -43,6 +53,7 @@ not into any packet:
 Everything this module does not interpret is carried through byte-for-byte, so
 writing a config back cannot disturb settings it does not understand.
 """
+import collections
 import random
 import struct
 
@@ -114,8 +125,10 @@ TITLE_BYTES = 20
 # **Where this lives depends on the protocol version.** From v3.2 the macros
 # move out of the blob into their own store behind commands 172/173/174, with
 # ten macros at 1 ms resolution. An Apex 5 reports v3.1 and keeps them here --
-# confirmed by the hardware dump, which holds five cycle bytes at 820. Anything
-# newer is refused rather than written to a region its firmware does not read.
+# confirmed by the hardware dump, which holds five cycle bytes at 820. That
+# store is `MacroStore` further down; the constants here describe the v3.1 page
+# and only the v3.1 page, which is why they are not the limits a caller asks
+# for. `macro_limits` is.
 MACRO_REGION = 538
 MACRO_SLOTS = 5
 MACRO_WORD = 4
@@ -127,6 +140,92 @@ MACRO_WORDS = (MACRO_REGION - MACRO_HEADER) // MACRO_WORD
 MACRO_STEP_BUDGET = MACRO_WORDS - MACRO_SLOTS
 MACRO_TICK_MS = 10         # the stored unit below protocol 3.2
 MACRO_MAX_VERSION = 2      # (proto & 0xF) at or above this keeps macros elsewhere
+
+# The repeat interval at 820, one byte per slot, stored as milliseconds / 10.
+# 0xFF is what an untouched slot holds and is carried through as None rather
+# than reported as 2550 ms.
+MACRO_INTERVAL_UNSET = 0xFF
+MACRO_INTERVAL_MAX = 2540
+
+# -- how many macros, how many steps, how fine the clock ----------------------
+#
+# **All three move with the protocol version, and hardcoding v3.1's was wrong
+# in a way a Vader 5 owner would see.** `MappingConfigParser.GetMaxMacroCount`,
+# `GetMaxMacroActionCount` and `GetMinMacroInterval` are one-line functions over
+# the same test, and a UI that reads them from a constant offers a v3.2 pad half
+# the slots it has, half the steps, and a repeat gap ten times coarser than its
+# firmware accepts.
+#
+# **The test is `ProtoVersion >= 770`, not `(ProtoVersion & 0xF) >= 2`.** Those
+# agree on every version that exists -- 769 is v3.1 and 770 is v3.2 -- and they
+# are copied from different functions, so both are kept as written rather than
+# unified into whichever one reads better. `MACRO_MAX_VERSION` above is the
+# *layout* test, `ParseDataToConfig`'s own `data[0] >= 2`, and it decides where
+# the macros live; this one is the *capability* test and decides how many fit.
+PROTO_V32 = 770
+
+MacroLimits = collections.namedtuple(
+    "MacroLimits", "slots steps tick_ms interval_max")
+
+# 128 steps is `MACRO_STEP_BUDGET` arrived at from the other end -- the page at
+# 230 holds exactly that many -- and the two agreeing is the check that the
+# region layout above and Flydigi's declared limit are the same fact.
+#
+# **`interval_max` is the field's ceiling and not a measured one**, on both
+# rows. v3.1's 2540 ms is a byte of 10 ms units and has been on the pad here;
+# v3.2's is a 16-bit millisecond field, so 65535 ms is what fits rather than
+# what a Vader 5's firmware has been seen to accept. Flydigi clamp neither --
+# their renderer bounds a *step's* delay to 8000 ms and leaves the repeat gap to
+# the field.
+MACRO_LIMITS_V31 = MacroLimits(MACRO_SLOTS, MACRO_STEP_BUDGET, MACRO_TICK_MS,
+                               MACRO_INTERVAL_MAX)
+MACRO_LIMITS_V32 = MacroLimits(slots=10, steps=256, tick_ms=1,
+                               interval_max=0xFFFF)
+
+
+def macro_limits(proto_version):
+    """How many macros a profile of this version holds, and how finely.
+
+    Take these off the config rather than off the model. A profile carries its
+    own `ProtoVersion` and that is what Flydigi branch on, so a pad that ships
+    v3.1 firmware and gains v3.2 in an update needs nothing here changed.
+    """
+    return MACRO_LIMITS_V32 if proto_version >= PROTO_V32 else MACRO_LIMITS_V31
+
+
+# Key ids for a macro, shared by the v3.1 page and the v3.2 store. Module-level
+# rather than methods on either, because which keys a macro may trigger and
+# which it may press are facts about the pad and not about where the bytes are
+# kept. They are defined here, above `KEY_NAMES`, and read at call time.
+
+def _macro_key_name(key):
+    name = key if isinstance(key, str) else KEY_NAMES.get(key)
+    if name not in KEY_IDS:
+        raise KeyError(f"no key {key!r}")
+    return name
+
+
+def _macro_key(key):
+    """A trigger key id. Any key on the shell may run a macro."""
+    if isinstance(key, int):
+        return key & 0xFF
+    return KEY_IDS[_macro_key_name(key)]
+
+
+def _macro_step_key(key):
+    """A key id for one step, refusing the ones nothing can receive.
+
+    M1-M4 and C/Z are remap *sources*: they have no XInput equivalent, so a
+    step that presses one is a step the host never sees. Same reasoning as
+    XINPUT_TARGETS, and the same failure if it is skipped -- a macro that
+    plays perfectly and does nothing.
+    """
+    name = key if isinstance(key, str) else KEY_NAMES.get(key)
+    if name not in XINPUT_TARGETS:
+        raise ValueError(
+            f"a macro step cannot send {key!r}: only {', '.join(XINPUT_TARGETS)} "
+            "reach a host, the rest are remap sources with no XInput id")
+    return KEY_IDS[name]
 
 # MacroEnableType: what pressing the trigger key does.
 MACRO_NONE, MACRO_ONCE, MACRO_WHILE_HELD, MACRO_TOGGLE = 0, 1, 2, 3
@@ -147,12 +246,6 @@ MACRO_EVENTS = {
     MACRO_LEFT_STICK: "left stick",
     MACRO_RIGHT_STICK: "right stick",
 }
-
-# The repeat interval at 820, one byte per slot, stored as milliseconds / 10.
-# 0xFF is what an untouched slot holds and is carried through as None rather
-# than reported as 2550 ms.
-MACRO_INTERVAL_UNSET = 0xFF
-MACRO_INTERVAL_MAX = 2540
 
 # The trigger motor's strength byte holds the percentage Flydigi's own slider
 # shows (`SaveTriggerVibrationConfig` assigns it straight across), unlike the
@@ -504,7 +597,7 @@ def read_status(ctrl, wait=1.0, slots=4):
     return None
 
 
-def read_config(ctrl, cfg_id, wait=1.5, retries=3):
+def read_config(ctrl, cfg_id, wait=1.5, retries=3, macros=True):
     """Read one stored config off the pad.
 
     The reply is a run of packets carrying (total, index, cfgId, 20 bytes). The
@@ -517,10 +610,22 @@ def read_config(ctrl, cfg_id, wait=1.5, retries=3):
     caller that does not intend to change what the user is playing with must
     read the status first and re-apply the original afterwards; see
     `read_config_preserving`.
+
+    **A v3.2 profile is two reads**, because from that version the macros are
+    not in the blob -- so this follows with command 172 and attaches the store,
+    which is what Space Station's own read does (`ControllerRepository:401`,
+    a `ReadMacroConfigById` per slot after the mapping config). `macros=False`
+    skips it for a caller that only wants the blob and is counting exchanges;
+    such a config reports no macros rather than raising, and refuses to write
+    any. Costs nothing on an Apex 5, which never takes this branch.
     """
     blob = blobs.read_blob(ctrl, CMD_READ, cfg_id, f"config {cfg_id}",
                            wait=wait, retries=retries)
-    return MappingConfig(blob, cfg_id)
+    config = MappingConfig(blob, cfg_id)
+    if macros and not config.macros_in_blob:
+        config.macro_store = read_macro_store(ctrl, cfg_id, wait=wait,
+                                              retries=retries)
+    return config
 
 
 def read_config_preserving(ctrl, cfg_id, wait=1.5):
@@ -623,12 +728,27 @@ def reset_config(ctrl, cfg_id, wait=0.5):
     Not command 175, which ignores the slot it is given and resets all four --
     see `reset_all_configs`. Space Station restores a single slot by writing a
     factory profile into it and committing, from a `default_mapping_<DeviceType>`
-    file they ship; this does the same from `flydigi/factory_config.py`, which
-    is the same bytes read off the hardware.
+    file they ship; this does the same from `flydigi/factory_config.py`.
 
     The slot has to be the running one, because command 166 commits whichever
     profile the pad is playing -- so this reads it first, and reading is what
     makes it live. The pad is left on the restored profile.
+
+    **This restores the profile and not the lighting**, which is a real
+    difference from Space Station and is deliberate. Their restore writes three
+    things: the mapping config, then the LED config over 168/169
+    (`WriteRgbConfigById`, gated on `IsSupportLed`), then at v3.2 the macro
+    store. The LED config is **not in the profile blob** -- the ten bytes at 3
+    are `OldLedConfig`, a legacy mirror nothing here decodes -- so restoring it
+    would mean shipping one per model, and their own files show why that is not
+    the same thing: the six Apex 5 SKUs carry six different LED configs, with
+    the base model at brightness 20 and the Eva edition at 100. One k5 LED blob
+    would put the base model's lighting on every themed pad that restored a
+    slot. The ten legacy bytes that *are* in the blob are identical across all
+    six, so writing them carries nothing across.
+
+    So the honest scope is the profile, and anything offering this has to say
+    that lighting is left alone rather than let a user infer it was reset.
 
     Refused on any model whose factory profile this project has not got. That is
     a data gate rather than a hardware one, and it is the dangerous kind to skip:
@@ -638,10 +758,20 @@ def reset_config(ctrl, cfg_id, wait=0.5):
     # Asked of the pad rather than read off the handle: `device_code` is an
     # attribute one CLI happens to set, so a gate on it would pass by accident
     # there and refuse by accident everywhere else. One command-1 exchange, and
-    # the refusal names the model.
-    identity.require_capability(ctrl, "factory_profile")
+    # the refusal names the model -- and names which model's bytes to write,
+    # which is the other half of why it is asked rather than assumed.
+    found = identity.require_capability(ctrl, "factory_profile")
     current = read_config(ctrl, cfg_id, wait=max(wait, 1.5))
-    factory = MappingConfig(factory_config.for_slot(cfg_id), cfg_id)
+    factory = MappingConfig(factory_config.for_slot(cfg_id, found["code"]),
+                            cfg_id)
+    if current.macro_store is not None:
+        # A factory profile has no macros, and on a v3.2 pad they are not in the
+        # blob -- so a restore that wrote only the profile would leave whatever
+        # macros were recorded playing on a slot the user just restored. The
+        # store's own version word is carried over from the read rather than
+        # invented, as everywhere else.
+        factory.macro_store = MacroStore(cfg_id=cfg_id)
+        factory.macro_store.version = current.macro_store.version
     write_config(ctrl, cfg_id, factory, old=current, wait=wait)
     version = next_data_version(current.data_version)
     saved = save_config(ctrl, version)
@@ -735,20 +865,374 @@ def write_config(ctrl, cfg_id, config, old=None, wait=0.5):
     Returns the number of packets sent. Call `save_config` afterwards to make
     it survive a power cycle.
     """
-    return blobs.write_blob(ctrl, CMD_WRITE_START, CMD_WRITE_PACK, cfg_id,
+    sent = blobs.write_blob(ctrl, CMD_WRITE_START, CMD_WRITE_PACK, cfg_id,
                             config.blob, old.blob if old is not None else None,
                             wait=wait)
+    # **The profile first, the macros after**, which is the order Space Station
+    # writes them in -- `WriteMappingConfigPartial` and then, in its completion
+    # handler and gated on `ProtoVersion >= 770`, `WriteMacroConfigPartial`.
+    # Nothing here has measured whether the reverse order loses anything, so it
+    # is copied rather than reasoned about, as the force-trigger ordering was.
+    if config.macro_store is not None:
+        sent += write_macro_store(
+            ctrl, cfg_id, config.macro_store,
+            old=old.macro_store if old is not None else None, wait=wait)
+    return sent
+
+
+# -- the macro store, from protocol 3.2 ---------------------------------------
+#
+# From v3.2 the macro page leaves the profile and becomes a store of its own,
+# moved by three commands with exactly the shape of 163/164/165:
+#
+#     read        172  [cfgId, pkgSize]                    -> N packets
+#     write start 173  [cfgId, startIdx, nPkts, pkgSize]
+#     write pack  174  [pktNum, data...]                   x N
+#
+# so `blobs.read_blob` and `blobs.write_blob` drive it with nothing added.
+#
+# `MacroConfigParser.MacroConfigParserV10` is the layout. The V10 in the name is
+# the store's own version and not the profile's -- it is the only parser there
+# is, and it answers 81 packets whatever version it is handed, so the store is
+# **1620 bytes** where the profile is 840.
+#
+#     [0..2]    version, little endian -- the store's own, echoed back on write
+#     [2..4]    how many macros, little endian; 1..10, anything else means none
+#     [4..24]   ten offsets into the bodies, 16-bit, in 4-byte words from 24.
+#               0xFFFF for a slot with nothing in it
+#     [24..]    the bodies, each one
+#                   [0]      trigger key id
+#                   [1..3]   step count, little endian
+#                   [3]      type, MacroEnableType
+#                   [4..6]   repeat interval, little endian, milliseconds
+#                   [6..12]  0xFF padding
+#                   [12..32] a name, UTF-8, 0xFF filled
+#                   [32..]   4 bytes per step: cumulative time (16-bit),
+#                            key id, event
+#
+# Three things here are **not** what the v3.1 page does, and each is a way to
+# get a v3.2 pad subtly wrong:
+#
+#   * **A step's time is in milliseconds, not 10 ms ticks.** The multiplier is
+#     `GetMinMacroInterval`, which is 1 from 770 on. Writing 10 ms ticks into
+#     this field would play every macro ten times too slow.
+#   * **The repeat interval belongs to the macro, not to the slot.** It is a
+#     field of the body here, where v3.1 keeps five bytes at blob offset 820 --
+#     and it is **milliseconds in both**, which is settled rather than assumed:
+#     `MappingConfigParserV31` scales that byte by ten on the way into the bean
+#     and by ten on the way out, and this store reads and writes it raw.
+#   * **A macro can be named**, twenty bytes of it, which the v3.1 page has no
+#     room for at all. Flydigi fill it with the name of the local macro file a
+#     slot was loaded from.
+#
+# **None of this has been near a Vader 5**, which is the only pad that speaks
+# it. It is a transcription of a decompiled parser, held to the same standard as
+# the rest of the f5 path: layout from the reference is the half this project
+# has found reliable, and anything about *meaning* is marked where it is a
+# reading rather than a measurement.
+
+CMD_READ_MACROS = 172
+CMD_WRITE_MACROS_START = 173
+CMD_WRITE_MACROS_PACK = 174
+
+MACRO_STORE_PACKETS = 81
+MACRO_STORE_BYTES = MACRO_STORE_PACKETS * PKG_SIZE
+MACRO_STORE_HEADER = 24
+# Ten offsets whatever the limit, because the header is a fixed 24 bytes: the
+# offset table is the shape of the store, and `MACRO_LIMITS_V32.slots` is how
+# many of them a caller may fill.
+MACRO_STORE_SLOTS = 10
+MACRO_STORE_BODY = 32
+MACRO_STORE_BODY_WORDS = MACRO_STORE_BODY // MACRO_WORD
+MACRO_NAME_BYTES = 20
+MACRO_OFFSET_UNSET = 0xFFFF
+
+
+def read_macro_store(ctrl, cfg_id, wait=1.5, retries=3):
+    """Read one profile's macro store. Command 172.
+
+    Addressed by `cfg_id` like the profile it belongs to, and read the same way,
+    so a v3.2 pad holds one of these per slot.
+    """
+    blob = blobs.read_blob(ctrl, CMD_READ_MACROS, cfg_id,
+                           f"macro store {cfg_id}", wait=wait, retries=retries)
+    return MacroStore(blob, cfg_id)
+
+
+def write_macro_store(ctrl, cfg_id, store, old=None, wait=0.5):
+    """Write a macro store, sending only the packets that changed. 173 + 174.
+
+    Returns the number of packets sent. Like a profile write this needs
+    `save_config` to survive a power cycle, and `apply_config` to be *played* --
+    the firmware parses macros when a profile is loaded, which is measured for
+    the v3.1 page and assumed to hold here for the same reason it does there.
+    """
+    return blobs.write_blob(ctrl, CMD_WRITE_MACROS_START, CMD_WRITE_MACROS_PACK,
+                            cfg_id, store.blob,
+                            old.blob if old is not None else None, wait=wait)
+
+
+class MacroStore:
+    """One profile's macros, as a v3.2 pad keeps them. See the block above.
+
+    Wraps the raw 1620 bytes and edits them in place, the same shape as
+    `MappingConfig`, so the two are written by the same machinery and a caller
+    that holds both diffs both.
+    """
+
+    def __init__(self, blob=None, cfg_id=None):
+        self.blob = bytearray(blob if blob is not None
+                              else b"\xff" * MACRO_STORE_BYTES)
+        self.cfg_id = cfg_id
+
+    def copy(self):
+        return MacroStore(bytearray(self.blob), self.cfg_id)
+
+    @property
+    def version(self):
+        """The store's own version word, which is not the profile's.
+
+        **0xFFFF is what a store nobody has written reads**, and it is carried
+        straight back out on a write. That is Flydigi's behaviour rather than a
+        considered choice on this side: their writer emits `configBean.Version`,
+        and the only thing that ever sets it is the read. Preserved because a
+        version word invented here would be a guess about firmware nobody has,
+        and because a store that round-trips unchanged is the one property worth
+        having before a Vader 5 is on the desk.
+        """
+        return struct.unpack_from("<H", self.blob, 0)[0]
+
+    @version.setter
+    def version(self, value):
+        struct.pack_into("<H", self.blob, 0, int(value) & 0xFFFF)
+
+    def macros(self):
+        """Every macro in the store, in slot order.
+
+        Permissive in the same places `MappingConfig.macros` is: an unknown key
+        id is reported raw rather than refused, and a body is trusted for the
+        space it occupies rather than for the step count it claims.
+        """
+        data = self.blob
+        if len(data) < MACRO_STORE_HEADER:
+            return []
+        count = struct.unpack_from("<H", data, 2)[0]
+        # An untouched store is 0xFF throughout, so the count separates "ten
+        # macros" from "never written" exactly as the v3.1 count byte does.
+        if not 1 <= count <= MACRO_STORE_SLOTS:
+            return []
+        offsets = struct.unpack_from(f"<{MACRO_STORE_SLOTS}H", data, 4)
+        out = []
+        for slot in range(count):
+            if offsets[slot] == MACRO_OFFSET_UNSET:
+                continue
+            start = MACRO_STORE_HEADER + offsets[slot] * MACRO_WORD
+            end = len(data)
+            if slot + 1 < count and offsets[slot + 1] != MACRO_OFFSET_UNSET:
+                end = MACRO_STORE_HEADER + offsets[slot + 1] * MACRO_WORD
+            end = min(end, len(data))
+            body = data[start:end]
+            if len(body) < MACRO_STORE_BODY:
+                continue
+            claimed = body[1] | (body[2] << 8)
+            steps = min(claimed, (len(body) - MACRO_STORE_BODY) // MACRO_WORD)
+            actions, previous = [], 0
+            for index in range(steps):
+                at = MACRO_STORE_BODY + index * MACRO_WORD
+                when = body[at] | (body[at + 1] << 8)
+                actions.append({
+                    "delay": when - previous,
+                    "key": KEY_NAMES.get(body[at + 2], body[at + 2]),
+                    "event": body[at + 3],
+                })
+                previous = when
+            out.append({
+                "key": KEY_NAMES.get(body[0], body[0]),
+                "type": body[3],
+                "interval": struct.unpack_from("<H", body, 4)[0],
+                "name": _macro_name(body[12 : 12 + MACRO_NAME_BYTES]),
+                "steps": actions,
+            })
+        return out
+
+    def macro(self, key):
+        """The macro bound to one key, or None."""
+        name = KEY_NAMES.get(key, key) if not isinstance(key, str) else key
+        return next((m for m in self.macros() if m["key"] == name), None)
+
+    def set_macros(self, macros, limits=MACRO_LIMITS_V32):
+        """Replace the whole store, the same read-modify-write as everywhere.
+
+        A macro may carry a `name`; anything longer than twenty **bytes** is
+        refused rather than truncated, for the reason `identity.NICKNAME_MAX` is
+        -- a name silently shortened on the device is worse than a rejected one.
+        """
+        macros = list(macros)
+        if len(macros) > limits.slots:
+            raise ValueError(
+                f"the store holds {limits.slots} macros, got {len(macros)}")
+        total = sum(len(m.get("steps", ())) for m in macros)
+        if total > limits.steps:
+            raise ValueError(
+                f"{total} steps across {len(macros)} macro(s); the store holds "
+                f"{limits.steps} in total")
+
+        offsets = [MACRO_OFFSET_UNSET] * MACRO_STORE_SLOTS
+        bodies = bytearray()
+        word = 0
+        for slot, macro in enumerate(macros):
+            offsets[slot] = word
+            steps = list(macro.get("steps", ()))
+            # 0xFF fill, so the six padding bytes and the unused tail of the
+            # name come out as Flydigi's writer emits them.
+            body = bytearray(b"\xff" * MACRO_STORE_BODY)
+            body[0] = _macro_key(macro.get("key"))
+            struct.pack_into("<H", body, 1, len(steps))
+            body[3] = int(macro.get("type", MACRO_ONCE)) & 0xFF
+            # None is 0 here, not "leave it alone": a v3.1 interval lives in a
+            # slot the writer re-emits from the read, and this one lives in a
+            # body that is rebuilt whole, so there is nothing to leave alone.
+            struct.pack_into("<H", body, 4,
+                             max(0, min(0xFFFF, int(macro.get("interval") or 0))))
+            raw = str(macro.get("name") or "").encode("utf-8")
+            if len(raw) > MACRO_NAME_BYTES:
+                raise ValueError(
+                    f"the macro name {macro.get('name')!r} is {len(raw)} bytes "
+                    f"and the field holds {MACRO_NAME_BYTES}")
+            body[12 : 12 + len(raw)] = raw
+            when = 0
+            for step in steps:
+                # Accumulated in milliseconds and divided once, which is what
+                # their v3.2 writer does -- and differs from the v3.1 page,
+                # where each gap is quantised on its own before being summed.
+                # Identical while `tick_ms` is 1, and copied anyway.
+                when += max(0, int(step.get("delay", 0)))
+                stored = min(0xFFFF, when // MACRO_LIMITS_V32.tick_ms)
+                body += bytes([stored & 0xFF, stored >> 8,
+                               _macro_step_key(step.get("key")),
+                               int(step.get("event", MACRO_PRESS)) & 0xFF])
+            bodies += body
+            word += MACRO_STORE_BODY_WORDS + len(steps)
+
+        header = bytearray(MACRO_STORE_HEADER)
+        struct.pack_into("<H", header, 0, self.version)
+        struct.pack_into("<H", header, 2, len(macros))
+        struct.pack_into(f"<{MACRO_STORE_SLOTS}H", header, 4, *offsets)
+        if len(header) + len(bodies) > MACRO_STORE_BYTES:
+            raise ValueError(
+                f"{len(header) + len(bodies)} bytes of macros; the store holds "
+                f"{MACRO_STORE_BYTES}")
+        blob = bytearray(b"\xff" * MACRO_STORE_BYTES)
+        blob[: len(header) + len(bodies)] = header + bodies
+        self.blob = blob
+
+    def set_macro(self, key, steps, macro_type=MACRO_ONCE, interval=None,
+                  name=None, limits=MACRO_LIMITS_V32):
+        """Bind a macro to one key, replacing any macro already on it.
+
+        Unlike `MappingConfig.set_macro` this writes no key table -- the store
+        does not have one. A caller binding a key to its macro does both, which
+        is what `MappingConfig.set_macro` is for on a v3.2 profile.
+        """
+        wanted = _macro_key_name(key)
+        macros = [m for m in self.macros() if m["key"] != wanted]
+        if len(macros) >= limits.slots:
+            raise ValueError(
+                f"all {limits.slots} macro slots are taken; clear one first")
+        macros.append({"key": wanted, "type": macro_type, "interval": interval,
+                       "name": name, "steps": list(steps)})
+        self.set_macros(macros, limits=limits)
+
+    def clear_macro(self, key):
+        """Drop the macro on a key. Leaves the key table to the caller."""
+        wanted = _macro_key_name(key)
+        self.set_macros([m for m in self.macros() if m["key"] != wanted])
+
+
+def pack_config(config):
+    """A profile and its macro store as one byte string. See `unpack_config`.
+
+    **Why this exists.** A profile used to be one blob, and everything that
+    carries one around -- the desktop app's worker signals, its per-slot cache,
+    its dirty compare, and the backup files a user keeps -- carries `bytes` and
+    nothing else. From v3.2 a profile is *two* transfers, and threading a second
+    argument through all of that would leave every one of those places able to
+    forget it. One value cannot be half-carried.
+
+    The join is unambiguous because the store is a fixed size and the profile is
+    smaller than it: 1620 bytes against 840, so anything longer than a store is
+    a profile with one behind it and anything shorter is a profile alone. A v3.1
+    profile packs to exactly the 840 bytes it always was, which is what keeps
+    every backup file written before this readable -- and written by this, for a
+    pad that has no store.
+
+    **Not split on the package-count byte**, which was the obvious rule and is
+    wrong: the Apex 5 on this desk reports **77** there while its profile is 840
+    bytes, so `blob[2] * 10` is 770 and would cut seventy bytes off the end of
+    every profile. `MappingConfigParser`'s 84 is the packet count of the
+    *transfer*; the byte in the blob is a different number that happens to look
+    like one, and the factory blob committed here is the proof.
+    """
+    if config.macro_store is None:
+        return bytes(config.blob)
+    return bytes(config.blob) + bytes(config.macro_store.blob)
+
+
+def unpack_config(data, cfg_id=None):
+    """The inverse of `pack_config`. Tolerates a bare blob, which is the point.
+
+    A short read, a truncated file or a backup taken before any of this existed
+    all arrive as a blob with nothing after it, and each is a profile with no
+    macro store rather than an error -- the same profile it was.
+    """
+    data = bytes(data)
+    if len(data) <= MACRO_STORE_BYTES:
+        return MappingConfig(bytearray(data), cfg_id)
+    return MappingConfig(
+        bytearray(data[:-MACRO_STORE_BYTES]), cfg_id,
+        MacroStore(bytearray(data[-MACRO_STORE_BYTES:]), cfg_id))
+
+
+def _macro_name(raw):
+    """The name field as text, or "" -- which is what an unwritten one is.
+
+    **Flydigi's own reader cannot do this**, and the divergence is deliberate.
+    Their writer fills the twenty bytes with 0xFF and copies the name over the
+    front; their reader then calls `Encoding.UTF8.GetString` on the lot and
+    trims `'\\uffff'`, which is not the character 0xFF decodes to -- .NET
+    substitutes U+FFFD, the replacement character, and the trim does not match
+    it. So a name shorter than the field comes back from their own parser with
+    up to nineteen replacement characters welded to the end of it.
+
+    Padding is stripped here before decoding rather than after, which is the
+    same fix `read_nickname` needed for the same reason: a field is text up to
+    its filler, and the filler is not text.
+    """
+    raw = bytes(raw).split(b"\xff", 1)[0].split(b"\x00", 1)[0]
+    try:
+        return raw.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return ""
 
 
 class MappingConfig:
     """One stored profile. Wraps the raw blob and edits it in place."""
 
-    def __init__(self, blob, cfg_id=None):
+    def __init__(self, blob, cfg_id=None, macro_store=None):
         self.blob = bytearray(blob)
         self.cfg_id = cfg_id
+        # **Attached rather than owned**, because from v3.2 the macros are not
+        # in this blob at all -- they are a second transfer against the same
+        # cfg_id. Carrying it here is what keeps `macros()` and `set_macros()`
+        # meaning the same thing on both protocol versions, so the CLI, the GUI
+        # and the tests do not each grow a branch on the version. None on a
+        # v3.1 profile, where the page at 230 is the whole story.
+        self.macro_store = macro_store
 
     def copy(self):
-        return MappingConfig(bytearray(self.blob), self.cfg_id)
+        return MappingConfig(
+            bytearray(self.blob), self.cfg_id,
+            None if self.macro_store is None else self.macro_store.copy())
 
     def packets(self, size=PKG_SIZE):
         return [bytes(self.blob[i : i + size]) for i in range(0, len(self.blob), size)]
@@ -855,8 +1339,14 @@ class MappingConfig:
         # of three X taps gives `press a`, `x x x`, `release a`. Flydigi's own
         # repository drops the macro at exactly this moment, and this is the
         # only place that can see the change happen.
-        if (target != "macro" and self.macros_in_blob
-                and self.blob[offset] == TARGET_MACRO):
+        #
+        # **Wherever the body is kept.** Their cleanup is a bean edit and so
+        # runs on both versions -- it is `WriteMacroConfigPartial` that is gated
+        # on 770, not the removal. The test here is therefore "are the macros
+        # reachable", not "are they in the blob": a v3.2 profile read without
+        # its store cannot tidy up after itself and must not pretend to.
+        if (target != "macro" and self.blob[offset] == TARGET_MACRO
+                and (self.macros_in_blob or self.macro_store is not None)):
             name = KEY_NAMES.get(key_id)
             self.set_macros([m for m in self.macros() if m["key"] != name])
         if target is None:
@@ -915,6 +1405,12 @@ class MappingConfig:
     # factory leaves at 30 ms; None means the slot has never been written.
 
     @property
+    def macro_limits(self):
+        """How many macros this profile holds, how many steps, how fine. See
+        `macro_limits`, which this reads off the profile's own version."""
+        return macro_limits(self.proto_version)
+
+    @property
     def macro_page(self):
         """The stored macro bytes, for asking whether they have changed.
 
@@ -926,7 +1422,15 @@ class MappingConfig:
         the millisecond afterwards. So anything writing a profile compares this
         and applies when it differs, rather than applying every time and making
         the pad re-seat its trigger motors over a remap that did not need it.
+
+        **From v3.2 this is the store's bytes and not the blob's**, which is the
+        whole reason it is a property rather than a slice at the call site: the
+        one caller that owns the apply decision (`gui/worker.py`) compares this
+        and would otherwise compare 538 bytes of a region a v3.2 pad does not
+        read, find them identical every time, and never apply a macro at all.
         """
+        if not self.macros_in_blob:
+            return b"" if self.macro_store is None else bytes(self.macro_store.blob)
         page = bytes(self.blob[OFF_MACROS : OFF_MACROS + MACRO_REGION])
         cycles = bytes(self.blob[OFF_MACRO_CYCLE : OFF_MACRO_CYCLE + MACRO_SLOTS])
         return page + cycles
@@ -957,7 +1461,14 @@ class MappingConfig:
         receive is reported as the raw id rather than refused, so a profile
         written by something else reads back as what it is. `set_macros` is
         the strict half.
+
+        From v3.2 this is the attached store's list. A v3.2 profile with no
+        store attached reports no macros rather than raising: it has not been
+        asked for, and a profile read without one is a profile whose macros
+        were not fetched, not a profile with none.
         """
+        if not self.macros_in_blob:
+            return [] if self.macro_store is None else self.macro_store.macros()
         data = self.blob[OFF_MACROS : OFF_MACROS + MACRO_REGION]
         count = data[0] if data else 0
         # An untouched region is 0xFF throughout, so the count byte alone
@@ -1012,18 +1523,23 @@ class MappingConfig:
         The key table is left alone. Binding a key to its macro is
         `set_mapping(key, "macro")`, and `set_macro` does both.
         """
+        limits = self.macro_limits
         if not self.macros_in_blob:
-            raise ProtocolError(
-                f"protocol {self.proto_version >> 8}.{self.proto_version & 0xF} "
-                "keeps macros in their own store, not in the profile")
+            if self.macro_store is None:
+                raise ProtocolError(
+                    f"protocol {self.proto_version >> 8}.{self.proto_version & 0xF} "
+                    "keeps macros in their own store, not in the profile, and "
+                    "this config has none attached -- read one with "
+                    "read_macro_store(), or let read_config() do it")
+            return self.macro_store.set_macros(macros, limits=limits)
         macros = list(macros)
-        if len(macros) > MACRO_SLOTS:
-            raise ValueError(f"the pad holds {MACRO_SLOTS} macros, got {len(macros)}")
+        if len(macros) > limits.slots:
+            raise ValueError(f"the pad holds {limits.slots} macros, got {len(macros)}")
         total = sum(len(m.get("steps", ())) for m in macros)
-        if total > MACRO_STEP_BUDGET:
+        if total > limits.steps:
             raise ValueError(
                 f"{total} steps across {len(macros)} macro(s); the page holds "
-                f"{MACRO_STEP_BUDGET} in total")
+                f"{limits.steps} in total")
 
         header = bytearray(MACRO_HEADER)
         header[0] = len(macros)
@@ -1032,7 +1548,7 @@ class MappingConfig:
         for slot, macro in enumerate(macros):
             header[1 + slot] = word
             steps = list(macro.get("steps", ()))
-            body += bytes([self._macro_key(macro.get("key")),
+            body += bytes([_macro_key(macro.get("key")),
                            len(steps) & 0xFF, (len(steps) >> 8) & 0xFF,
                            int(macro.get("type", MACRO_ONCE)) & 0xFF])
             ticks = 0
@@ -1044,7 +1560,7 @@ class MappingConfig:
                 ticks = min(0xFFFF, ticks + max(0, int(step.get("delay", 0)))
                             // MACRO_TICK_MS)
                 body += bytes([ticks & 0xFF, ticks >> 8,
-                               self._macro_step_key(step.get("key")),
+                               _macro_step_key(step.get("key")),
                                int(step.get("event", MACRO_PRESS)) & 0xFF])
             word += 1 + len(steps)
 
@@ -1066,62 +1582,42 @@ class MappingConfig:
                     self.blob[OFF_MACRO_CYCLE + slot] = max(
                         0, min(MACRO_INTERVAL_MAX, int(interval))) // MACRO_TICK_MS
 
-    def set_macro(self, key, steps, macro_type=MACRO_ONCE, interval=None):
+    def set_macro(self, key, steps, macro_type=MACRO_ONCE, interval=None,
+                  name=None):
         """Bind a macro to one key, replacing any macro already on it.
 
         Writes the key table as well: a body with no `TARGET_MACRO` beside it
         is a macro the pad will never run, and a key set to `TARGET_MACRO` with
-        no body is a key that does nothing. The two are one edit.
+        no body is a key that does nothing. The two are one edit -- and they
+        stay one edit at v3.2, where the body goes to the store and the key
+        table stays in the blob, which is exactly the split that would
+        otherwise leave a caller to remember both.
+
+        `name` is a v3.2 field and is dropped on a v3.1 profile, whose page has
+        no room for one. Silently, because a name is a label on a macro and not
+        the macro: refusing the write would cost the user the macro to keep the
+        label.
         """
-        name = self._macro_key_name(key)
-        macros = [m for m in self.macros() if m["key"] != name]
-        if len(macros) >= MACRO_SLOTS:
+        wanted = _macro_key_name(key)
+        limits = self.macro_limits
+        macros = [m for m in self.macros() if m["key"] != wanted]
+        if len(macros) >= limits.slots:
             raise ValueError(
-                f"all {MACRO_SLOTS} macro slots are taken; clear one first")
-        macros.append({"key": name, "type": macro_type, "interval": interval,
-                       "steps": list(steps)})
+                f"all {limits.slots} macro slots are taken; clear one first")
+        macros.append({"key": wanted, "type": macro_type, "interval": interval,
+                       "name": name, "steps": list(steps)})
         self.set_macros(macros)
-        self.set_mapping(name, "macro")
+        self.set_mapping(wanted, "macro")
 
     def clear_macro(self, key):
         """Drop the macro on a key and give the key back to itself."""
-        name = self._macro_key_name(key)
+        name = _macro_key_name(key)
         macros = [m for m in self.macros() if m["key"] != name]
         self.set_macros(macros)
         # The body is already gone, so `set_mapping` finds nothing to clean up
         # and this is a plain key-table write.
         if self.mapping(name)[0] == "macro":
             self.set_mapping(name, None)
-
-    @staticmethod
-    def _macro_key_name(key):
-        name = key if isinstance(key, str) else KEY_NAMES.get(key)
-        if name not in KEY_IDS:
-            raise KeyError(f"no key {key!r}")
-        return name
-
-    @staticmethod
-    def _macro_key(key):
-        """A trigger key id. Any key on the shell may run a macro."""
-        if isinstance(key, int):
-            return key & 0xFF
-        return KEY_IDS[MappingConfig._macro_key_name(key)]
-
-    @staticmethod
-    def _macro_step_key(key):
-        """A key id for one step, refusing the ones nothing can receive.
-
-        M1-M4 and C/Z are remap *sources*: they have no XInput equivalent, so a
-        step that presses one is a step the host never sees. Same reasoning as
-        XINPUT_TARGETS, and the same failure if it is skipped -- a macro that
-        plays perfectly and does nothing.
-        """
-        name = key if isinstance(key, str) else KEY_NAMES.get(key)
-        if name not in XINPUT_TARGETS:
-            raise ValueError(
-                f"a macro step cannot send {key!r}: only {', '.join(XINPUT_TARGETS)} "
-                "reach a host, the rest are remap sources with no XInput id")
-        return KEY_IDS[name]
 
     # -- the gyro mapped to a stick ---------------------------------------
     #

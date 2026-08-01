@@ -1,4 +1,39 @@
-This project includes material from third-party open source software.
+This project includes material from third-party open source software, and one
+block of device data that is not software at all. The second is first, because
+it is the one that needs explaining.
+
+--------------------------------------------------------------------------------
+Flydigi factory profiles
+
+flydigi/factory_config.py holds one 840-byte factory profile per controller
+model. These are device state -- the bytes a pad holds in flash when it leaves
+the factory -- and they are here because a per-slot restore has to write one:
+the firmware's own reset (command 175) resets all four slots and ignores the
+slot it is given, so restoring a single profile means writing the factory bytes
+into it.
+
+The two blobs have different provenance and it is worth stating which is which.
+
+  * The Apex 5's was read off the controller on the author's desk after a
+    factory reset, with tools/gen-factory-config. It is a measurement of
+    hardware, on the same footing as flydigi/ds5_usb.py's captured DualSense
+    descriptors.
+
+  * The Vader 5 Pro's was derived from Flydigi Space Station's bundled
+    Configs/Controller/f5/default/default_mapping_130.dat, translated into wire
+    form by tools/mapping_bean.py. No Vader 5 was available to read.
+
+The project's rule is that nothing Flydigi-owned is committed, and everything
+gitignored is reproducible with tools/fetch-configs. This is the one deliberate
+exception, made because the alternative was a feature that could not work: the
+protocol is fully documented here, the derived form is 840 bytes of device
+configuration rather than any part of their program, and there is no way to
+obtain a Vader 5's factory profile without either the file or the hardware. The
+translator is committed alongside it, so the derivation can be re-run and
+checked rather than taken on trust -- tools/gen-factory-config --check holds it
+against the Apex 5 blob read from hardware.
+
+Neither blob is claimed as this project's work.
 
 --------------------------------------------------------------------------------
 inputtino

@@ -226,8 +226,14 @@ Kirigami.ScrollablePage {
                 // description rather than only in the dialog: the title lives
                 // in the profile blob, so a factory restore brings the factory
                 // name back with it, which on this pad is Chinese.
+                // Lighting is the one thing it does *not* touch, and saying
+                // so is not pedantry: Space Station's own restore rewrites the
+                // LED config as well, from a per-SKU file. Matching that would
+                // mean shipping one LED blob per model, and their six Apex 5
+                // files carry six different ones — so a single blob would put
+                // the base model's lighting on every themed pad.
                 description: "Every mapping, the sticks, the triggers, the "
-                             + "macros — and the name."
+                             + "macros — and the name. Not the lighting."
                 icon.name: "edit-undo"
                 enabled: App.profile.loaded
                 onClicked: resetDialog.open()
@@ -346,7 +352,10 @@ Kirigami.ScrollablePage {
                   + "left the factory: every mapping, the sticks, the triggers, "
                   + "the macros — and its name, which becomes the factory one "
                   + "again. This is written to the pad's flash and cannot be "
-                  + "undone.\n\nBack it up first if you want it back."
+                  + "undone.\n\nLighting is left as it is. It is not stored in "
+                  + "the profile, and the factory lighting differs between "
+                  + "editions of the same pad, so this does not guess at "
+                  + "yours.\n\nBack it up first if you want it back."
         standardButtons: Kirigami.Dialog.Cancel
         customFooterActions: [
             Kirigami.Action {

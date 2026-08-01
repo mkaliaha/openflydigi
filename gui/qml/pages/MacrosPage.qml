@@ -64,6 +64,26 @@ Kirigami.ScrollablePage {
                   + "record or edit a macro."
         }
 
+        // Protocol 3.2 keeps macros somewhere else entirely — their own store,
+        // behind three commands nothing here has ever sent to hardware. Every
+        // macro measurement behind this page was made against the older layout
+        // on an Apex 5, so a Vader 5 owner is the first person to find out
+        // whether this works, and is told so rather than left to wonder why a
+        // macro did nothing.
+        Kirigami.InlineMessage {
+            objectName: "macrosExperimental"
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.largeSpacing
+            visible: App.profile.loaded && App.profile.macros.experimental
+            type: Kirigami.MessageType.Warning
+            text: "Experimental on this pad. Its profiles use protocol 3.2, "
+                  + "which stores macros separately from the profile — a path "
+                  + "built from Flydigi's own software and never tested on the "
+                  + "hardware it is for. Everything here may work exactly as it "
+                  + "reads, or a macro may simply never play. Save a backup of "
+                  + "the profile first."
+        }
+
         Kirigami.PlaceholderMessage {
             objectName: "macrosPlaceholder"
             Layout.fillWidth: true
@@ -181,10 +201,15 @@ Kirigami.ScrollablePage {
                       + App.profile.macros.slots + " macros, "
                       + App.profile.macros.stepsUsed + " of "
                       + App.profile.macros.stepBudget + " steps"
+                // Both numbers come off the open profile rather than from a
+                // constant: protocol 3.2 doubles them, so a pad that has ten
+                // slots must not be shown five.
                 description: "One profile holds " + App.profile.macros.slots
                              + " macros and " + App.profile.macros.stepBudget
                              + " steps between them — that is the size of the "
-                             + "page the pad keeps them in."
+                             + (App.profile.macros.experimental
+                                ? "store the pad keeps them in."
+                                : "page the pad keeps them in.")
             }
         }
     }

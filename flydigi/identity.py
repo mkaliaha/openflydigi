@@ -160,16 +160,24 @@ SUPPORTED = ("k5", "f5")
 #                        single slot means *writing* a factory config, since the
 #                        firmware's reset resets all four and ignores the slot it
 #                        is given -- so it needs the real bytes for the real
-#                        model. `flydigi/factory_config.py` has an Apex 5's, read
-#                        off the pad here. Writing those to a Vader would install
-#                        an Apex 5's key table on a pad that has C and Z, so a
-#                        model whose profile nobody has dumped must answer no.
-#                        `tools/gen-factory-config` is how another one gets added.
+#                        model. Writing an Apex 5's to a Vader would install a
+#                        key table with nothing on C and Z and call it factory,
+#                        so this asks per model rather than per project.
+#
+#                        **Both models have one now, and they are not equally
+#                        good.** The Apex 5's was read off the pad here; the
+#                        Vader 5's was translated from the file Space Station
+#                        ships, which makes it what their own restore *writes*
+#                        rather than what a factory Vader holds. That is a real
+#                        difference and it is stated in `factory_config.py`
+#                        rather than smoothed over -- but it is also the same
+#                        bytes Space Station would send, which is the standard a
+#                        restore has to meet and not a lower one.
 CAPABILITIES = {
     "k5": {"adaptive_triggers": True, "trigger_motors": False, "screen": True,
            "factory_profile": True},
     "f5": {"adaptive_triggers": False, "trigger_motors": True, "screen": False,
-           "factory_profile": False},
+           "factory_profile": True},
 }
 
 

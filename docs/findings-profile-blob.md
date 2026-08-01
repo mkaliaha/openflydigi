@@ -641,10 +641,30 @@ if (num >= 2) MappingConfigParserV32.ParseConfigToArray(config, array);
 and the bodies move out of the blob into commands 172/173/174, which nothing here implements.
 `MappingConfig.macros_in_blob` already refuses to write 230..768 from 3.2 on.
 
-**`mapping.MACRO_SLOTS`, `MACRO_STEP_BUDGET` and the 10 ms interval floor are the v3.1 numbers,
-hardcoded** -- correct for an Apex 5 and wrong for a Vader 5. The Macros page would offer a Vader
-five slots where it has ten, and a 10 ms floor where it can do 1 ms. Version them off
-`ProtoVersion` rather than off the model, since that is what Flydigi branch on.
+**Built.** `mapping.macro_limits(proto_version)` is that table, `MappingConfig.macro_limits` reads
+it off the profile's own version, and the Macros page takes its slot count, step budget and interval
+ceiling from there rather than from a constant. Versioned off `ProtoVersion` rather than off the
+model, since that is what Flydigi branch on -- a pad that gains v3.2 in a firmware update needs
+nothing changed here.
+
+The bodies moving out of the blob is built too: `mapping.MacroStore` is the store behind commands
+172/173/174, laid out in [PROTOCOL.md](../PROTOCOL.md) §9a, and `MappingConfig.macro_store` carries
+one so that `macros()` and `set_macros()` mean the same thing on either protocol version. Reading a
+v3.2 profile fetches it; writing one writes it back, profile first, as Space Station do. A profile
+and its store travel as a single value through `mapping.pack_config` -- which is what lets the
+desktop app's worker signals, its per-slot cache, its dirty compare and its backup files carry a
+v3.2 profile without each of them growing a second argument to forget.
+
+**The split point is not the package-count byte**, which is the obvious rule and is wrong: the Apex 5
+here reports **77** at blob offset 2 while its profile is 840 bytes, so `blob[2] * 10` is 770 and
+would cut seventy bytes off the end of every profile. `MappingConfigParser`'s 84 is the packet count
+of the *transfer*. The store is a fixed 1620 bytes and a profile is smaller, so length alone splits
+them.
+
+**Untested on hardware, and marked as such in the app.** No Vader 5 exists here, and unlike the rest
+of the f5 support this path does not share a code route with anything measured -- it is new bytes
+down a new command, where every macro measurement in this project was made against the v3.1 page.
+The Macros page says so when the open profile is v3.2.
 
 ## The bean behind the blob, for translating a factory profile
 
@@ -671,9 +691,32 @@ this document already measures:
 | 14 | `Lunpan` | 183..185, the wheel block |
 
 **The k5 file is the test, and it is committed.** `flydigi/factory_config.py` holds the Apex 5's
-factory blob as read off the pad, so a translator can be checked by running it over
+factory blob as read off the pad, so the translator is checked by running it over
 `default_mapping_128.dat` and comparing: every field mapped wrongly shows up as a byte mismatch,
-so it cannot be quietly wrong. Only once that matches is `default_mapping_130.dat` worth emitting.
+so it cannot be quietly wrong. `tools/mapping_bean.py` is the translator -- a schema-free protobuf
+wire reader plus `MappingConfigParserV30` and `V31`'s emit paths -- and `tools/gen-factory-config
+--check` is the gate.
+
+**828 of 840 bytes match, and the twelve that do not are Flydigi's own, not the translator's.** Each
+was pinned down by running all six k5 SKU files rather than by reasoning about one:
+
+| Bytes | What | Why it differs |
+|---|---|---|
+| 142 | the gyro's second sensitivity axis | **Their format cannot express it.** The pad ships (25, 20); `MotionMapTypeJoystick` holds a *single* `Sensitivity`, read as `Math.Max(data[4], data[5])` and written back to both axes. A round trip through Space Station flattens the two to 25, in any version of the file. Structural, not stale data |
+| 154 | the trigger-motor enable, for motors an Apex 5 has none of | **Authored, not read.** Within one Space Station release the files for DeviceType 128, 129, 133 and 134 say "disabled" and those for 135 and 136 say "enabled" — same model. The pad holds 0 |
+| 776..786 | ten bytes of title padding | The pad zero-fills the title field to 786 and leaves 786..790 at 0xFF; their emitter copies the title into an 0xFF-filled buffer and pads with nothing. A convention, and both readers strip both fillers |
+
+A *thirteenth* fails the check, which is what makes the gate worth having.
+
+**All six Apex 5 SKUs are one profile.** 128, 129, 133 and 134 emit a byte-identical blob and
+135/136 differ only at 154 -- so one k5 factory blob covers every edition, and the one committed
+here, read off a DeviceType 128, is it. The files themselves differ by up to 2 KB and almost all of
+it is `LedConfigBean`, which is **not in the blob**: factory brightness is 20 on the base model and
+100 on the Eva edition. That is why `reset_config` restores the profile and not the lighting --
+matching Space Station, whose restore also writes the LED config over 168/169, would mean shipping
+one LED blob per model, and a single k5 one would put the base model's lighting on every themed pad
+that restored a slot. The ten legacy LED bytes that *are* in the blob, at offset 3, are identical
+across all six.
 
 **How far apart the two models actually are.** Comparing the k5 and f5 beans field by field: 494
 leaf fields, of which 336 are inside `LedConfigBean` and irrelevant, and **21 differ** among the
@@ -682,8 +725,17 @@ different trigger values (51/114 against 30/80), an extra key-table entry at ind
 `ProtoVersion` and `DataVersion`, and the macro-cycle block replaced by a single field, which is
 the 3.2 move showing up in the bean.
 
-**Provenance is the open question.** The k5 blob came off the hardware and is committed on the same
-footing as `flydigi/ds5_usb.py`. An f5 blob would be derived from a file Flydigi ship, which the
-rule in [PROGRESS.md](../PROGRESS.md) keeps out of the repository -- so either the generator grows a
-mode that reads an installed Space Station into a gitignored file, or the derived bytes are
-accepted as device state. Undecided.
+**Provenance was the open question, and it is settled: the derived bytes are committed as device
+state.** The k5 blob came off the hardware and is on the same footing as `flydigi/ds5_usb.py`; the
+f5 blob is `default_mapping_130.dat` put through the translator above. They do not have equal
+standing and `factory_config.py` says so -- the Vader's is what Space Station *would write* to
+restore a slot, which is not provably what a factory Vader holds in flash. It is also the same bytes
+their own restore sends, which is the standard the feature has to meet rather than a lower one. The
+reasoning, and the fact that neither blob is claimed as this project's work, is in
+[NOTICE](../NOTICE); the translator is committed beside them so the derivation can be re-run rather
+than trusted.
+
+The f5 blob differs from the k5's in 37 bytes: `ProtoVersion` 770, a different stick bank
+(`45 58 71 84 ...` against `50 62 75 87 ...`), different trigger travel and trigger-motor values,
+the trigger motors enabled, and the macro regions at 230 and 820 left at 0xFF because a v3.2 profile
+does not have them.

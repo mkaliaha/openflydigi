@@ -505,6 +505,6 @@ each (all in `decompiled/`).
 | Trigger config, game-independent | `SetForceTriggerCommandFactory`, `K6Trigger*` |
 | Profile switching | `ApplyMappingConfigByCfgId`, `SaveCurrentMappingConfig`, `ReadCurrentMappingConfigId`, `WriteAllMappingConfig`, `ResetMappingConfigByCfgId` |
 | RGB / LED | `WriteRgbConfig`, `WriteAllRgbConfig`, `ReadLedConfig`, `TestLed` |
-| Macros | The profile's own page at 230, plus command 162 to make one live. `ReadMacroConfig` (172) and `WriteMarcoConfig` (173/174) belong to protocol 3.2 and later, which is not this pad; `SetHardwareMacroEnable` (80) is XInput/DInput-only dead code. → [findings-profile-blob.md](findings-profile-blob.md) |
+| Macros | On v3.1 the profile's own page at 230, plus command 162 to make one live — this pad. On v3.2 a store of its own behind `ReadMacroConfig` (172) and `WriteMarcoConfig` (173/174), which is a Vader 5 and is implemented but untested; `SetHardwareMacroEnable` (80) is XInput/DInput-only dead code. → [PROTOCOL.md](../PROTOCOL.md) §9a, [findings-profile-blob.md](findings-profile-blob.md) |
 | Device settings | 22 in `command.setting/`: report rate, stick sensitivity/precision, debounce, rebound, auto-calibration, motion debounce, sleep time, dock smart stop, mode switch, nickname |
 | Dock / cooler | `Flydigi.ChargerSdk.dll`, `Flydigi.CoolerSdk.dll` (in `bundle/`, not decompiled) |

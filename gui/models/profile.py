@@ -1142,6 +1142,11 @@ class MacroModel(QAbstractListModel):
     # Not `constant`: which keys can run a macro is the pad's business, and a
     # constant property would be cached for the life of the window.
     keyLabelsChanged = Signal()
+    # How many macros fit, how many steps and how fine the repeat gap -- all
+    # three move with the open profile's protocol version, so they are a
+    # notified group and not the three constants they used to be. A Vader 5
+    # reports v3.2 and gets ten slots where this window offered five.
+    limitsChanged = Signal()
     refused = Signal(str)
     recordRequested = Signal(float)      # matches the worker's slot
 
@@ -1154,6 +1159,9 @@ class MacroModel(QAbstractListModel):
         # What the view is currently showing, so `refresh` can tell a profile
         # whose macros differ from one whose macros are the same.
         self._shown = []
+        # And which limits it is showing them under. Starts at v3.1's, which is
+        # what `_limits` answers with no profile open.
+        self._limits_shown = mapping.MACRO_LIMITS_V31
 
     def modelChanged(self):
         """The pad on screen is a different model.
@@ -1163,6 +1171,7 @@ class MacroModel(QAbstractListModel):
         both drawn from the pad's key list, so the binder has to be rebuilt.
         """
         self._decoded.clear()
+        self._refresh_limits()
         self.keyLabelsChanged.emit()
 
     def roleNames(self):
@@ -1203,13 +1212,52 @@ class MacroModel(QAbstractListModel):
     def count(self):
         return len(self._macros())
 
-    @Property(int, constant=True)
-    def slots(self):
-        return mapping.MACRO_SLOTS
+    def _refresh_limits(self):
+        """Notify if the open profile's macro limits have moved. See `refresh`."""
+        limits = self._limits()
+        if limits != self._limits_shown:
+            self._limits_shown = limits
+            self.limitsChanged.emit()
 
-    @Property(int, constant=True)
+    def _limits(self):
+        """The open profile's macro limits, or v3.1's when nothing is open.
+
+        v3.1 is the right fallback rather than a neutral one: it is the smaller
+        of the two, so a window with no profile open offers nothing a pad might
+        refuse. Cheap enough to read per call -- it is two integer compares on a
+        field already decoded.
+        """
+        config = self._profile.config
+        return (mapping.MACRO_LIMITS_V31 if config is None
+                else config.macro_limits)
+
+    @Property(int, notify=limitsChanged)
+    def slots(self):
+        return self._limits().slots
+
+    @Property(int, notify=limitsChanged)
     def stepBudget(self):
-        return mapping.MACRO_STEP_BUDGET
+        return self._limits().steps
+
+    @Property(bool, notify=limitsChanged)
+    def experimental(self):
+        """Whether this profile's macros go somewhere nothing has tested.
+
+        True on protocol 3.2, where the macros are not in the profile blob but
+        in their own store behind commands 172/173/174. That path is a
+        transcription of a decompiled parser and **has never been near the pad
+        it is for** -- no Vader 5 exists to test it on here, and the rest of the
+        f5 support is in the same position but has the excuse of sharing a code
+        path with hardware that has been measured. This one does not: the whole
+        store is new bytes down a new command, and every other macro measurement
+        in this project was made against the v3.1 page.
+
+        So the page says so, rather than presenting ten slots with the same
+        confidence as five. Not disabled -- a Vader 5 owner has nothing else,
+        and an editor that refuses to try is worth less than one that warns.
+        """
+        config = self._profile.config
+        return config is not None and not config.macros_in_blob
 
     @Property(int, notify=countChanged)
     def stepsUsed(self):
@@ -1230,9 +1278,9 @@ class MacroModel(QAbstractListModel):
         """
         return [key_label(key) for key in self._profile.padKeys]
 
-    @Property(int, constant=True)
+    @Property(int, notify=limitsChanged)
     def intervalMax(self):
-        return mapping.MACRO_INTERVAL_MAX
+        return self._limits().interval_max
 
     @Property(bool, notify=recordingChanged)
     def recording(self):
@@ -1245,7 +1293,7 @@ class MacroModel(QAbstractListModel):
     @Property(bool, notify=countChanged)
     def canAdd(self):
         return (self._profile.config is not None
-                and len(self._macros()) < mapping.MACRO_SLOTS)
+                and len(self._macros()) < self._limits().slots)
 
     def data(self, index, role=Qt.DisplayRole):
         macros = self._macros()
@@ -1385,6 +1433,14 @@ class MacroModel(QAbstractListModel):
         cannot absorb any other way.
         """
         self._decoded.clear()
+        # The limits belong to the profile, not to the macros in it, so this
+        # comes before the early return: opening a v3.2 profile after a v3.1 one
+        # changes how many slots the page offers while the list of macros in it
+        # may well be identical -- both empty, most obviously, which is exactly
+        # the case a user meets first. Compared rather than emitted blind, for
+        # the reason every notify in this file is: a signal nothing needed still
+        # re-evaluates the bindings on it.
+        self._refresh_limits()
         macros = self._macros()
         if macros == self._shown:
             return
@@ -1712,7 +1768,7 @@ class ProfileModel(QObject):
 
     def _recompute_dirty(self):
         self._dirty = (self._edited is not None and self._cfg_id >= 0
-                       and bytes(self._edited.blob)
+                       and mapping.pack_config(self._edited)
                        != self._slots.stored(self._cfg_id))
         return self._dirty
 
@@ -1829,7 +1885,7 @@ class ProfileModel(QObject):
             self.loadRequested.emit(cfg_id)
 
     def _open(self, blob):
-        self._replace(mapping.MappingConfig(bytearray(blob), self._cfg_id))
+        self._replace(mapping.unpack_config(blob, self._cfg_id))
         # Freshly read from the pad, so there is nothing waiting to be
         # committed to flash.
         self._saved = True
@@ -1910,7 +1966,7 @@ class ProfileModel(QObject):
                 "would save the wrong one. Switch the pad to this profile "
                 "first, then save.")
             return
-        self.writeRequested.emit(self._cfg_id, bytes(self._edited.blob),
+        self.writeRequested.emit(self._cfg_id, mapping.pack_config(self._edited),
                                  self._slots.stored(self._cfg_id) or b"",
                                  bool(save))
 
@@ -1922,7 +1978,7 @@ class ProfileModel(QObject):
         is only in the pad's working memory and dies with the next sleep.
         """
         if self._edited is not None and cfg_id == self._cfg_id:
-            self._slots.setStored(cfg_id, bytes(self._edited.blob),
+            self._slots.setStored(cfg_id, mapping.pack_config(self._edited),
                                   self._edited.title)
             self._saved = bool(saved)
             self.markChanged()
@@ -1976,7 +2032,10 @@ class ProfileModel(QObject):
     def backup(self, where):
         if self._edited is None:
             return
-        blob = self._slots.stored(self._cfg_id) or bytes(self._edited.blob)
+        # Packed, so a v3.2 pad's backup carries its macros too -- they are
+        # not in the profile blob, and a backup without them would restore a
+        # profile whose macros were somebody else's.
+        blob = self._slots.stored(self._cfg_id) or mapping.pack_config(self._edited)
         with open(local_path(where), "wb") as fh:
             fh.write(blob)
 
@@ -1990,13 +2049,31 @@ class ProfileModel(QObject):
         except OSError as exc:
             self.restoreFailed.emit(str(exc))
             return
-        expected = len(self._edited.blob)
-        if len(blob) != expected:
+        # Two sizes are acceptable and neither is "whatever this pad happens to
+        # hold": the profile alone, and the profile with its macro store behind
+        # it. A backup taken from a v3.1 pad is the first and restores onto a
+        # v3.2 one as a profile with no macros -- which is what it is -- while
+        # the reverse would carry macros into a pad that keeps them at offset
+        # 230 and never reads them, so the store is dropped rather than written
+        # somewhere it does not belong.
+        blob_len = len(self._edited.blob)
+        accepted = (blob_len, blob_len + mapping.MACRO_STORE_BYTES)
+        if len(blob) not in accepted:
             self.restoreFailed.emit(
-                f"That file is {len(blob)} bytes; this pad's profiles "
-                f"are {expected}. Refusing to write it.")
+                f"That file is {len(blob)} bytes; this pad's profiles are "
+                f"{' or '.join(str(n) for n in accepted)}. Refusing to write it.")
             return
-        self._replace(mapping.MappingConfig(bytearray(blob), self._cfg_id))
+        restored = mapping.unpack_config(blob, self._cfg_id)
+        if restored.macros_in_blob:
+            restored.macro_store = None
+        elif restored.macro_store is None and self._edited.macro_store is not None:
+            # A v3.1 backup onto a v3.2 pad. The store has to stay attached or
+            # the write would leave whatever macros are on the pad in place,
+            # which is not what restoring a profile means -- so it is attached
+            # and emptied.
+            restored.macro_store = mapping.MacroStore(cfg_id=self._cfg_id)
+            restored.macro_store.version = self._edited.macro_store.version
+        self._replace(restored)
         self.titleChanged.emit()
         self._keys.refresh()
         self._macros.refresh()

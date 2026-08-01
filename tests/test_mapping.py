@@ -1265,21 +1265,60 @@ def test_restoring_one_profile_writes_the_factory_bytes_instead():
           mapping.read_config(pad, 0).title)
 
 
-def test_a_model_with_no_dumped_profile_is_refused_the_per_slot_restore():
+def test_a_restore_writes_this_model_s_profile_and_not_the_other_s():
     """The dangerous half of shipping factory bytes.
 
     Restoring one slot means writing a config, so it needs *this model's*
     config. An Apex 5's key table written to a Vader would leave C and Z mapped
-    to nothing and call the result factory. The firmware's own reset has no such
-    problem and stays available -- it just takes all four with it.
+    to nothing and call the result factory -- so the identify read decides which
+    bytes go out, and this is the assertion that they are not the Apex 5's.
     """
     vader = FakePad(device_type=130)
+    restored, _saved = mapping.reset_config(vader, 0)
+    # What landed on the pad, not what was returned: the returned config carries
+    # the fresh change tag the save went out under, which is the one field a
+    # factory profile is *meant* to differ in afterwards.
+    check("a Vader gets the Vader's factory profile",
+          bytes(vader.blobs[0]) == bytes(factory_config.for_slot(0, "f5")))
+    check("which is not the Apex 5's",
+          bytes(vader.blobs[0]) != bytes(factory_config.for_slot(0, "k5")))
+    tag = mapping.OFF_DATA_VERSION
+    check("and only the change tag differs from the bytes as committed",
+          bytes(restored.blob[:tag]) == bytes(factory_config.for_slot(0, "f5")[:tag])
+          and bytes(restored.blob[tag + 2:])
+              == bytes(factory_config.for_slot(0, "f5")[tag + 2:]))
+    check("and it is a v3.2 profile, so its macros are not in the blob",
+          restored.proto_version == mapping.PROTO_V32
+          and not restored.macros_in_blob, str(restored.proto_version))
+    # The store is the half a v3.1-shaped restore would miss: the profile blob
+    # carries no macros on this pad, so a restore that wrote only the blob would
+    # leave the old macros playing on a slot the user just put back to factory.
+    check("the macro store is emptied too",
+          restored.macro_store is not None and restored.macro_store.macros() == [])
+
+    check("and the firmware's own reset still works on it",
+          mapping.reset_all_configs(vader) is True)
+
+
+def test_a_model_with_no_factory_profile_is_refused_the_per_slot_restore():
+    """The gate is still there, and it is a data gate rather than a hardware one.
+
+    Both driven models have factory bytes now, so the refusal has to be provoked
+    by taking one away -- which is exactly the state a *third* model would be in
+    the day it joined SUPPORTED, and the day this matters.
+    """
+    vader = FakePad(device_type=130)
+    without = dict(identity.CAPABILITIES["f5"], factory_profile=False)
+    original = identity.CAPABILITIES["f5"]
+    identity.CAPABILITIES["f5"] = without
     try:
         mapping.reset_config(vader, 0)
     except identity.WrongDevice as exc:
         check("the refusal names the model", "Vader 5" in str(exc), str(exc))
     else:
-        check("a Vader should not accept an Apex 5's factory profile", False)
+        check("a model with no factory profile should be refused", False)
+    finally:
+        identity.CAPABILITIES["f5"] = original
 
     check("but the firmware's own reset still works on it",
           mapping.reset_all_configs(vader) is True)
@@ -1291,13 +1330,30 @@ def test_the_factory_blob_is_one_blob_and_a_digit():
     `tools/gen-factory-config` refuses to regenerate if that stops being true,
     so this is the assertion that would notice a firmware change first.
     """
-    blobs = [factory_config.for_slot(cfg) for cfg in range(4)]
-    differing = sorted({i for other in blobs[1:]
-                        for i in range(len(blobs[0])) if blobs[0][i] != other[i]})
-    check("exactly one byte differs across the four",
-          differing == [mapping.OFF_TITLE + 4], str(differing))
-    titles = [mapping.MappingConfig(blob, i).title for i, blob in enumerate(blobs)]
-    check("and it is the digit in the title", len(set(titles)) == 4, str(titles))
+    for code in sorted(factory_config.FACTORY_BLOBS):
+        blobs = [factory_config.for_slot(cfg, code) for cfg in range(4)]
+        differing = sorted({i for other in blobs[1:]
+                            for i in range(len(blobs[0])) if blobs[0][i] != other[i]})
+        check(f"{code}: exactly one byte differs across the four",
+              differing == [mapping.OFF_TITLE + 4], str(differing))
+        titles = [mapping.MappingConfig(blob, i).title
+                  for i, blob in enumerate(blobs)]
+        check(f"{code}: and it is the digit in the title",
+              len(set(titles)) == 4, str(titles))
+        check(f"{code}: 840 bytes, the length every profile command expects",
+              len(blobs[0]) == 840, str(len(blobs[0])))
+
+    # Both driven models have one, and a model that does not must say so rather
+    # than fall back on somebody else's bytes.
+    for code in identity.SUPPORTED:
+        check(f"{code} has a factory profile", factory_config.have(code))
+    check("and an unknown model does not", not factory_config.have("k6"))
+    try:
+        factory_config.for_slot(0, "k6")
+    except ValueError:
+        pass
+    else:
+        check("asking for one should be refused", False)
 
 
 def test_a_switch_save_is_aimed_at_the_second_bank():
@@ -1633,8 +1689,141 @@ def test_a_newer_protocol_keeps_its_macros_elsewhere():
     blob[mapping.OFF_PROTO_VERSION] = 2          # v3.2
     config = mapping.MappingConfig(blob)
     check("v3.2 is not a blob-macro profile", not config.macros_in_blob)
-    check("and writing one is refused",
+    # Refused only while nothing is attached. A v3.2 profile read off a pad
+    # comes with its store and writes perfectly well -- see the tests below.
+    check("and writing one with no store attached is refused",
           _raises(lambda: config.set_macro("m1", TAP_A), mapping.ProtocolError))
+    check("reading reports none rather than raising", config.macros() == [])
+
+
+def test_the_macro_limits_move_with_the_protocol_version():
+    """Five and 128 are v3.1's numbers, and this project used to hardcode them.
+
+    `GetMaxMacroCount`, `GetMaxMacroActionCount` and `GetMinMacroInterval` are
+    one-line functions over `ProtoVersion >= 770`. A Macros page that read a
+    constant offered a Vader 5 half the slots its firmware has.
+    """
+    check("v3.1 is five macros, 128 steps, 10 ms",
+          mapping.macro_limits(769) == (5, 128, 10, 2540),
+          str(mapping.macro_limits(769)))
+    check("v3.2 is ten, 256 and 1 ms",
+          mapping.macro_limits(770) == (10, 256, 1, 0xFFFF),
+          str(mapping.macro_limits(770)))
+    check("the v3.1 step budget is the page's own size, arrived at both ways",
+          mapping.MACRO_LIMITS_V31.steps == mapping.MACRO_STEP_BUDGET == 128)
+
+    v31 = mapping.MappingConfig(blank_blob())
+    check("a config answers for its own version", v31.macro_limits.slots == 5)
+    blob = blank_blob()
+    blob[mapping.OFF_PROTO_VERSION] = 2
+    check("and a v3.2 one for its",
+          mapping.MappingConfig(blob).macro_limits.slots == 10)
+
+
+def test_the_v32_store_round_trips_through_a_pad():
+    """Ten macros at 1 ms, named, read and written over 172/173/174."""
+    pad = FakePad(device_type=130)             # a Vader 5, so v3.2 profiles
+    config = mapping.read_config(pad, 0)
+    check("reading a v3.2 profile attaches its store",
+          config.macro_store is not None)
+    check("an untouched store holds no macros", config.macros() == [])
+
+    edited = config.copy()
+    check("copy() copies the store, rather than sharing it",
+          edited.macro_store is not None
+          and edited.macro_store is not config.macro_store)
+    keys = ["m1", "m2", "m3", "m4", "m5", "m6", "c", "z", "thl", "thr"]
+    for index, key in enumerate(keys):
+        edited.set_macro(key, [{"delay": 0, "key": "a", "event": mapping.MACRO_PRESS},
+                               {"delay": 1, "key": "a", "event": mapping.MACRO_RELEASE},
+                               {"delay": 7, "key": "b", "event": mapping.MACRO_PRESS}],
+                         macro_type=mapping.MACRO_WHILE_HELD, interval=333,
+                         name=f"combo {index}")
+    check("ten macros fit, where a v3.1 page holds five",
+          len(edited.macros()) == 10, str(len(edited.macros())))
+
+    mapping.write_config(pad, 0, edited, old=config)
+    back = mapping.read_config(pad, 0)
+    stored = back.macros()
+    check("all ten come back", len(stored) == 10, str(len(stored)))
+    first = stored[0]
+    check("the trigger key survives", first["key"] == "m1", str(first["key"]))
+    check("so does the name, which v3.1 has no room for",
+          first["name"] == "combo 0", repr(first["name"]))
+    check("the repeat interval is per macro and in milliseconds",
+          first["interval"] == 333, str(first["interval"]))
+    # The measurement that matters most: a 1 ms gap survives. Quantised to the
+    # v3.1 tick it would come back as 0 and every macro would play wrong.
+    check("a 1 ms gap survives, which 10 ms ticks would round away",
+          [step["delay"] for step in first["steps"]] == [0, 1, 7],
+          str([step["delay"] for step in first["steps"]]))
+    check("the key table was written too",
+          back.mapping("m1")[0] == "macro", str(back.mapping("m1")))
+    check("and the whole store round-tripped byte for byte",
+          bytes(back.macro_store.blob) == bytes(edited.macro_store.blob))
+
+
+def test_the_v32_store_is_bounded_and_orphan_free():
+    pad = FakePad(device_type=130)
+    config = mapping.read_config(pad, 0)
+    for key in ("m1", "m2", "m3", "m4", "m5", "m6", "c", "z", "thl", "thr"):
+        config.set_macro(key, TAP_A)
+    check("an eleventh is refused",
+          _raises(lambda: config.set_macro("start", TAP_A), ValueError))
+    step = {"delay": 0, "key": "a", "event": mapping.MACRO_PRESS}
+    check("and so is a batch past 256 steps",
+          _raises(lambda: config.macro_store.set_macros(
+              [{"key": "m1", "steps": [step] * 257}]), ValueError))
+    check("a name longer than the field is refused rather than truncated",
+          _raises(lambda: config.macro_store.set_macros(
+              [{"key": "m1", "steps": [], "name": "x" * 21}]), ValueError))
+
+    # Same orphan cleanup as the v3.1 page, and it has to reach the store: the
+    # key table and the macro bodies are read independently by the firmware, so
+    # a body left behind goes on playing underneath the new binding.
+    config.set_mapping("m1", "b")
+    check("remapping a key away from its macro drops the body",
+          len(config.macros()) == 9, str(len(config.macros())))
+    check("and the key really moved", config.mapping("m1")[0] == "b")
+
+
+def test_a_profile_and_its_store_travel_as_one_value():
+    """`pack_config` -- what the desktop app carries across its worker thread."""
+    apex = mapping.read_config(FakePad(), 0)
+    packed = mapping.pack_config(apex)
+    check("a v3.1 profile packs to the 840 bytes it always was",
+          len(packed) == 840)
+    check("and unpacks with no store", mapping.unpack_config(packed).macro_store is None)
+    check("byte for byte", bytes(mapping.unpack_config(packed).blob) == bytes(apex.blob))
+
+    vader = mapping.read_config(FakePad(device_type=130), 0)
+    packed = mapping.pack_config(vader)
+    check("a v3.2 profile packs to the profile plus its store",
+          len(packed) == 840 + mapping.MACRO_STORE_BYTES, str(len(packed)))
+    again = mapping.unpack_config(packed, 0)
+    check("and unpacks into both halves",
+          bytes(again.blob) == bytes(vader.blob)
+          and bytes(again.macro_store.blob) == bytes(vader.macro_store.blob))
+
+    # The rule that made the obvious split wrong: the pad reports 77 in the
+    # package-count byte while its profile is 840 bytes, so `blob[2] * 10` would
+    # cut seventy bytes off the end of every profile ever backed up.
+    check("the package-count byte is not the split point",
+          apex.package_count * 10 != len(apex.blob),
+          f"{apex.package_count} * 10 vs {len(apex.blob)}")
+
+
+def test_the_apply_decision_can_see_a_v32_macro_change():
+    """`macro_page` is what the app compares to know it owes command 162."""
+    pad = FakePad(device_type=130)
+    config = mapping.read_config(pad, 0)
+    before = config.macro_page
+    edited = config.copy()
+    edited.set_macro("m1", TAP_A)
+    check("a v3.2 macro edit is visible in macro_page",
+          edited.macro_page != before)
+    check("and macro_page is the store's bytes, not the blob's dead region",
+          edited.macro_page == bytes(edited.macro_store.blob))
 
 
 def test_cycle_time_is_a_duration():
@@ -1700,6 +1889,11 @@ def main():
                  test_the_interval_belongs_to_the_slot_not_the_macro,
                  test_editing_macros_does_not_disturb_its_neighbours,
                  test_a_newer_protocol_keeps_its_macros_elsewhere,
+                 test_the_macro_limits_move_with_the_protocol_version,
+                 test_the_v32_store_round_trips_through_a_pad,
+                 test_the_v32_store_is_bounded_and_orphan_free,
+                 test_a_profile_and_its_store_travel_as_one_value,
+                 test_the_apply_decision_can_see_a_v32_macro_change,
                  test_lighting_round_trip, test_lighting_brightness_is_clamped,
                  test_lighting_effects_write_frames, test_cycle_time_is_a_duration,
                  test_a_models_keys_are_its_own,
@@ -1708,7 +1902,8 @@ def main():
                  test_command_175_resets_every_profile_not_the_one_it_is_given,
                  test_restoring_one_profile_writes_the_factory_bytes_instead,
                  test_the_factory_blob_is_one_blob_and_a_digit,
-                 test_a_model_with_no_dumped_profile_is_refused_the_per_slot_restore,
+                 test_a_restore_writes_this_model_s_profile_and_not_the_other_s,
+                 test_a_model_with_no_factory_profile_is_refused_the_per_slot_restore,
                  test_a_switch_save_is_aimed_at_the_second_bank,
                  test_a_switch_save_commits_the_running_profile_under_a_new_tag,
                  test_the_switch_save_frame_is_flydigis_own_odd_one,

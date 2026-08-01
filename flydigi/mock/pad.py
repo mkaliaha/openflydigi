@@ -35,8 +35,26 @@ import contextlib
 from .. import device, identity, lighting, mapping, motion, screen, settings
 
 PROTO_V31 = 0x0301
-PACKAGE_COUNT = 84
-BLOB_LEN = PACKAGE_COUNT * 10          # 840 bytes, matching a real v3.1 config
+# 770. A Vader 5's factory profile carries this, an Apex 5's carries 769, and
+# the difference is where the macros live -- see `mapping.MacroStore`. Both are
+# 840-byte configs: `MappingConfigParserV32` adds no bytes at all.
+PROTO_V32 = 0x0302
+# **77, not 84, and the two are different numbers that both look like one.**
+# `MappingConfigParser`'s 84 is the packet count of the *transfer* -- 84 packets
+# of ten bytes, which is the 840 this reads. The byte the pad stores at blob
+# offset 2 is 77, measured: `flydigi/factory_config.py`'s Apex 5 blob, read off
+# the hardware, holds 0x4d there. A fake that wrote 84 made `blob[2] * 10` come
+# out as the blob's own length, which is exactly the coincidence that would let
+# a splitter keyed on it pass here and truncate every profile on the pad.
+PACKAGE_COUNT = 77
+BLOB_LEN = 840                         # 84 packets of 10, matching a real config
+
+# Which protocol version a model's profiles carry. Derived from the factory
+# `default_mapping_<DeviceType>.dat` files Flydigi ship -- the f5's says 770 and
+# the k5's says 769 -- so a mock `pad:f5` is a v3.2 pad and exercises the store
+# rather than the page. Anything not listed is assumed to be v3.1, which is what
+# the pad on this desk is and the only one measured.
+MODEL_PROTO = {"f5": PROTO_V32}
 
 
 # Commands that carry no checksum. The trigger-effect family is the whole of
@@ -62,11 +80,11 @@ UNVERIFIED = frozenset((identity.CMD_WRITE_NICKNAME,))
 SLOT_PAST_THE_CHECKSUM = frozenset((mapping.CMD_SAVE_SWITCH,))
 
 
-def blank_blob(title="Profile"):
+def blank_blob(title="Profile", proto=PROTO_V31):
     """A config with every key at its default, laid out like the real thing."""
     blob = bytearray(b"\xff" * BLOB_LEN)
-    blob[mapping.OFF_PROTO_VERSION] = PROTO_V31 & 0xFF
-    blob[mapping.OFF_PROTO_VERSION + 1] = PROTO_V31 >> 8
+    blob[mapping.OFF_PROTO_VERSION] = proto & 0xFF
+    blob[mapping.OFF_PROTO_VERSION + 1] = proto >> 8
     blob[mapping.OFF_PACKAGE_COUNT] = PACKAGE_COUNT
     for slot in range(mapping.KEY_SLOTS):
         offset = mapping.OFF_KEY_TABLE + slot * mapping.KEY_ENTRY
@@ -98,10 +116,17 @@ def blank_blob(title="Profile"):
     # five interval slots. Read off the hardware, like the curves above; the
     # 0xFF fill this used to have parses as "no macros" too, but by a different
     # route, so a reader tested against it was not tested against the pad.
-    blob[mapping.OFF_MACROS : mapping.OFF_MACROS + mapping.MACRO_HEADER] = (
-        bytes(mapping.MACRO_HEADER))
-    blob[mapping.OFF_MACRO_CYCLE : mapping.OFF_MACRO_CYCLE + mapping.MACRO_SLOTS] = (
-        bytes([3] * mapping.MACRO_SLOTS))
+    #
+    # **Neither region exists on a v3.2 profile.** The macros move to their own
+    # store and `MappingConfigParserV31`'s write of 820 is gated on
+    # `ProtoVersion < 770`, so both are left at the 0xFF fill -- which is what a
+    # region the firmware does not write actually holds. A fake that filled them
+    # in anyway would let a reader that ignores the version pass here.
+    if proto < mapping.PROTO_V32:
+        blob[mapping.OFF_MACROS : mapping.OFF_MACROS + mapping.MACRO_HEADER] = (
+            bytes(mapping.MACRO_HEADER))
+        blob[mapping.OFF_MACRO_CYCLE : mapping.OFF_MACRO_CYCLE
+             + mapping.MACRO_SLOTS] = bytes([3] * mapping.MACRO_SLOTS)
     config = mapping.MappingConfig(blob)
     config.title = title
     return bytearray(config.blob)
@@ -142,7 +167,8 @@ class FakePad:
 
     def __init__(self, slots=4, path="/dev/hidraw-fake", device_type=128,
                  mac=DEFAULT_MAC, uid=None, nickname=None, battery=4,
-                 charging=False, wired=True, firmware=DEFAULT_FIRMWARE):
+                 charging=False, wired=True, firmware=DEFAULT_FIRMWARE,
+                 proto=None):
         self.path = path
         # -- what this pad *is*, as opposed to what is stored on it ----------
         self.device_type = device_type
@@ -170,7 +196,25 @@ class FakePad:
         self.transport = {"controller_data": True, "raw_data": False,
                           "keyboard": True, "mouse": True, "third_party": False}
         self.control_by = ""
-        self.blobs = {i: blank_blob(f"Profile {i + 1}") for i in range(slots)}
+        # Which protocol version this pad's profiles carry, from its model
+        # unless a caller says otherwise. It is the one field here that changes
+        # where a whole feature lives, so it is derived from the same table the
+        # bus spec uses rather than defaulted per test.
+        self.proto = (MODEL_PROTO.get(identity.code_for(device_type), PROTO_V31)
+                      if proto is None else proto)
+        self.blobs = {i: blank_blob(f"Profile {i + 1}", self.proto)
+                      for i in range(slots)}
+        # The v3.2 macro store, one per slot and 1620 bytes each -- 81 packets
+        # of 20 where a profile is 42. 0xFF throughout is a store nobody has
+        # written, which is the state a factory pad is in, and it decodes as no
+        # macros by way of a count word of 0xFFFF. Present on a v3.1 pad too,
+        # and never read there: what makes the branch real is that command 172
+        # is answered either way, exactly as an Apex 5's firmware would if it
+        # knew the command. Nothing asks it, because `read_config` branches on
+        # the profile's version and not on the pad's model.
+        self.macro_blobs = {i: bytearray(b"\xff" * mapping.MACRO_STORE_BYTES)
+                            for i in range(slots)}
+        self._pending_macro_write = None
         # Lighting is a separate config with the same transfer shape.
         self.led_blob = bytearray(b"\xff" * 380)
         self.led_blob[lighting.OFF_VERSION] = 0x00
@@ -189,6 +233,7 @@ class FakePad:
             self.led_blob[i] = 0
         self.active = 0
         self.saved = {}
+        self.saved_macros = {}
         # The version tag the last save carried. Recorded because command 166
         # writes whatever it is given into the slot's version id, and
         # `read_status` reports that back as how a caller tells whether its
@@ -362,6 +407,9 @@ class FakePad:
             mapping.CMD_RESET: self._reset,
             mapping.CMD_WRITE_START: self._write_start,
             mapping.CMD_WRITE_PACK: self._write_pack,
+            mapping.CMD_READ_MACROS: self._read_macros,
+            mapping.CMD_WRITE_MACROS_START: self._write_macros_start,
+            mapping.CMD_WRITE_MACROS_PACK: self._write_macros_pack,
             screen.CMD_UPLOAD_START: self._upload_start,
             screen.CMD_UPLOAD_DATA: self._upload_data,
             screen.CMD_UPLOAD_END: self._upload_end,
@@ -606,6 +654,11 @@ class FakePad:
 
     def _save(self, payload):
         self.saved = {k: bytes(v) for k, v in self.blobs.items()}
+        # The macro store is committed by the same command, which is Space
+        # Station's own ordering read backwards: they write the profile, then
+        # the store, and only then call `SaveConfig`. So a macro written and not
+        # saved is lost to a sleep exactly as a remap is.
+        self.saved_macros = {k: bytes(v) for k, v in self.macro_blobs.items()}
         self.saved_version = payload[0] | (payload[1] << 8) if len(payload) > 1 else 0
         return [self._ack(mapping.CMD_SAVE)]
 
@@ -624,8 +677,11 @@ class FakePad:
         """
         self.reset_slots.append(payload[0] if payload else None)
         for cfg_id in self.blobs:
-            self.blobs[cfg_id] = blank_blob(f"Profile {cfg_id + 1}")
+            self.blobs[cfg_id] = blank_blob(f"Profile {cfg_id + 1}", self.proto)
             self.saved[cfg_id] = bytes(self.blobs[cfg_id])
+            # A factory pad has no macros, wherever it keeps them.
+            self.macro_blobs[cfg_id] = bytearray(b"\xff" * mapping.MACRO_STORE_BYTES)
+            self.saved_macros[cfg_id] = bytes(self.macro_blobs[cfg_id])
         return [self._ack(mapping.CMD_RESET)]
 
     def _save_switch(self, payload):
@@ -655,6 +711,40 @@ class FakePad:
         blob[index * mapping.PKG_SIZE : index * mapping.PKG_SIZE + len(chunk)] = chunk
         self.packets_received += 1
         return [self._ack(mapping.CMD_WRITE_PACK)]
+
+    # -- the v3.2 macro store ----------------------------------------------
+    #
+    # Commands 172/173/174, the same three shapes as 163/164/165 against a
+    # different store. Deliberately **not** wired to `self.active`: reading a
+    # macro store is not documented as switching the pad the way reading a
+    # profile is, and inventing a side effect would be modelling a guess. If a
+    # Vader 5 turns out to switch on 172 as well, this is where it goes.
+
+    def _read_macros(self, payload):
+        cfg_id, pkg_size = payload[0], payload[1]
+        blob = self.macro_blobs.get(cfg_id)
+        if blob is None:
+            return []
+        self.reads_answered += 1
+        if self.fail_reads:
+            return []
+        return self._stream(mapping.CMD_READ_MACROS, blob, cfg_id, pkg_size)
+
+    def _write_macros_start(self, payload):
+        cfg_id, start, count, _size = payload[0], payload[1], payload[2], payload[3]
+        self._pending_macro_write = (cfg_id, start, count)
+        return [self._ack(mapping.CMD_WRITE_MACROS_START)]
+
+    def _write_macros_pack(self, payload):
+        if self._pending_macro_write is None:
+            return []
+        cfg_id, start, _count = self._pending_macro_write
+        offset, chunk = payload[0], payload[1:]
+        index = start + offset
+        blob = self.macro_blobs[cfg_id]
+        blob[index * mapping.PKG_SIZE : index * mapping.PKG_SIZE + len(chunk)] = chunk
+        self.packets_received += 1
+        return [self._ack(mapping.CMD_WRITE_MACROS_PACK)]
 
     # -- screen ------------------------------------------------------------
 

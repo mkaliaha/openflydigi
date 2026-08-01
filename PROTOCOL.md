@@ -853,15 +853,73 @@ One wire-ordering trap goes with that: LED-blob byte 2 latches the ring on the f
 ([docs/device-settings.md](docs/device-settings.md)), and `write_config` sends packet 0 first, so
 setting byte 2 in the same write freezes the pad before its own frames arrive.
 
-**For macros, 162 is not optional.** They ride inside the mapping profile — the page at offset 230,
-laid out in [docs/findings-profile-blob.md](docs/findings-profile-blob.md) — and there is no macro
-command in this protocol version at all: the `ReadMacroConfig`/`WriteMarcoConfig` family (172, 173,
-174) belongs to protocol 3.2 and later, where the macros moved out of the blob. A macro written with 164/165 is
+**For macros, 162 is not optional.** On protocol 3.1 they ride inside the mapping profile — the page
+at offset 230, laid out in [docs/findings-profile-blob.md](docs/findings-profile-blob.md) — and
+there is no macro command in that protocol version at all. A macro written with 164/165 is
 **stored and not played** until the profile is applied with 162: the firmware parses the page into
 its own structs at load time, while the key table beside it is read as it stands. Verified on
 hardware — four macros sat silent while an ordinary remap beside them worked, played after a 162,
 and a fifth written and applied with no 166 at all played as well. So 166 decides whether macros
 survive a sleep, not whether they run.
+
+### 9a. The macro store — protocol 3.2 and later
+
+**From v3.2 the macros leave the profile and become a config of their own**, addressed by the same
+`cfgId` and moved by three commands with exactly the shapes above. An Apex 5 reports **769 = v3.1**
+and keeps its macros at offset 230; a Vader 5 reports **770 = v3.2** and does not have them there at
+all. `MappingConfigParser` branches on `data[0] >= 2` for the layout and on `ProtoVersion >= 770` for
+the limits.
+
+| Command | Payload | Reply |
+|---|---|---|
+| 172 `ReadMacroConfig` | `[cfgId, pkgSize]` | N packets `(total, index, cfgId, data)` |
+| 173 `WriteMarcoConfig` start | `[cfgId, startIdx, nPkts, pkgSize]` | ack |
+| 174 `WriteMarcoConfig` pack | `[pktNum, data…]` | ack per packet |
+
+The store is **81 packets = 1620 bytes**, against a profile's 42 and 840. `MacroConfigParserV10` is
+the only parser for it and declares 81 whatever version it is handed.
+
+```
+0..2      version, little endian — the store's own, not the profile's
+2..4      how many macros, little endian; 1..10, anything else means none
+4..24     ten offsets into the bodies, 16-bit, in 4-byte words from 24;
+          0xFFFF for a slot with nothing in it
+24..      the bodies, each  [0]      trigger key id
+                            [1..3]   step count, little endian
+                            [3]      type, MacroEnableType
+                            [4..6]   repeat interval, little endian, milliseconds
+                            [6..12]  0xFF padding
+                            [12..32] a name, UTF-8, 0xFF filled
+                            [32..]   4 bytes per step: cumulative time (16-bit),
+                                     key id, event
+```
+
+Three things differ from the v3.1 page, and each is a way to get a v3.2 pad quietly wrong:
+
+  * **A step's time is in milliseconds, not 10 ms ticks.** `GetMinMacroInterval` is the multiplier
+    and it is 1 from 770 on. Writing ticks here plays every macro ten times too slow.
+  * **The repeat interval belongs to the macro, not to the slot** — a field of the body, where v3.1
+    keeps five bytes at blob offset 820. It is **milliseconds in both**, which is settled rather than
+    assumed: `MappingConfigParserV31` scales that byte by ten going into the bean and by ten coming
+    out, and this store reads and writes it raw.
+  * **A macro can be named**, twenty bytes, which the v3.1 page has no room for.
+
+The capability limits move with the same version test:
+
+| | v3.1 | v3.2 |
+|---|---|---|
+| `GetMaxMacroCount` | 5 | **10** |
+| `GetMaxMacroActionCount` | 128 | **256** |
+| `GetMinMacroInterval` | 10 ms | **1 ms** |
+
+**Write order is the profile first, the store second**, which is Space Station's own:
+`WriteMappingConfigPartial`, then `WriteMacroConfigPartial` from its completion handler, gated on
+`ProtoVersion >= 770`, then `SaveConfig`.
+
+**None of this section has been sent to hardware.** It is transcribed from `MacroConfigParser` and
+`WriteMarcoConfigCommandFactory`, and the only pad that speaks it is one nobody here owns — so the
+layout is on the footing this project has found the decompile reliable for, and nothing about the
+firmware's *behaviour* is claimed. The desktop app marks the page experimental for that reason.
 
 ---
 

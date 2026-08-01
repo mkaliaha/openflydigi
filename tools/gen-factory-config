@@ -3,24 +3,35 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Regenerate `flydigi/factory_config.py` from a pad sitting at factory.
+"""Regenerate `flydigi/factory_config.py`. Two sources, one file.
 
-What a factory profile actually contains cannot be derived -- this project's
-own `blank_blob()` reconstruction differs from the real thing in 93 of 840
-bytes, across the header, the grip-vibration block and the whole trigger
-region. So the bytes are read off hardware, the way `tools/gen_ds5_usb.py`
-reads a real DualSense.
+A factory profile cannot be derived -- this project's own `blank_blob()`
+reconstruction differs from the real thing in 93 of 840 bytes, across the
+header, the grip-vibration block and the whole trigger region. So the bytes come
+from somewhere real, and there are two somewheres:
 
-Getting a pad into that state means command 175, which resets **all four**
-profiles and cannot be undone. This tool therefore only reads: put the pad
-there yourself with `flydigi-mapping reset`, then run this.
+  * **A pad on the desk**, read back after a factory reset. This is how the
+    Apex 5's blob was obtained and it is the better source, because it is what
+    the firmware actually holds. `--from-pad`.
+  * **The file Space Station ships**, `Configs/Controller/<code>/default/
+    default_mapping_<DeviceType>.dat`, translated by `tools/mapping_bean.py`.
+    The only source for a model nobody here owns, which is the whole reason the
+    Vader 5 has a factory profile at all. `--from-file`.
 
-    tools/flydigi-mapping reset        # destroys every profile
-    tools/gen-factory-config > flydigi/factory_config.py
+**The translator is checked against the pad before it is trusted**, which is
+what `--check` does: it runs the k5 file through the same translator and diffs
+it against the committed blob that came off the hardware. 828 of 840 bytes
+match, and the twelve that do not are listed in `KNOWN_DIVERGENCES` with a
+reason each -- so a *thirteenth* fails the check. That is the gate a Vader 5
+blob passes through, and the reason its bytes are worth more than a careful
+transcription would be.
 
-The four slots turn out to be one blob: they differ at exactly one byte, 774,
-which is the digit in the factory title 配置1..4. So one blob and a digit is
-the whole of it.
+    tools/gen-factory-config --check                  # prove the translator
+    tools/flydigi-mapping reset                       # destroys every profile
+    tools/gen-factory-config --from-pad > flydigi/factory_config.py
+
+Without `--from-pad` the Apex 5's committed blob is reused as-is, so refreshing
+the Vader's needs no hardware.
 """
 import argparse
 import os
@@ -28,20 +39,143 @@ import sys
 import textwrap
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from flydigi import identity, mapping, registry
+import mapping_bean
+from flydigi import factory_config, identity, mapping, registry
+
+# Where a Wine-installed Space Station keeps them. Only ever read.
+DEFAULT_CONFIGS = os.path.expanduser(
+    "~/.local/share/wineprefixes/flydigi/drive_c/Program Files/"
+    "Flydigi Space Station/Configs/Controller")
+
+# The DeviceType whose file stands for a model. Any of a code's SKUs would do
+# for the k5 -- all six emit the same 840 bytes but for byte 154 -- and the base
+# SKU is the one to name.
+BASE_DEVICE_TYPE = {"k5": 128, "f5": 130}
+
+# Where the translated k5 file and the k5 blob read off the pad disagree, and
+# why. **None of these is a translation error**, and each was established by
+# running all six k5 SKU files through the translator rather than by reasoning:
+#
+#   142  The gyro's second sensitivity axis. The pad ships (25, 20) and
+#        `MotionMapTypeJoystick` holds a *single* `Sensitivity`, read as
+#        `Math.Max(data[4], data[5])` and written back to both axes. So no
+#        version of their file can express what the pad holds, and a round trip
+#        through Space Station flattens the two axes to 25. Structural, not
+#        stale data.
+#   154  The trigger-motor enable byte, for motors an Apex 5 does not have.
+#        Authored rather than read: within one Space Station release, the files
+#        for DeviceType 128, 129, 133 and 134 say "disabled" and those for 135
+#        and 136 say "enabled", for the same model. The pad holds 0.
+#   776  Ten bytes of title padding. The pad zero-fills the title field to 786
+#   ..786 and leaves 786..790 at 0xFF; their emitter copies the title into an
+#        0xFF-filled buffer and pads with nothing at all. A convention, not data
+#        -- and both readers strip both fillers.
+#
+# Kept as a list rather than waved away, because the point of the check is that
+# a byte nobody has explained fails it.
+KNOWN_DIVERGENCES = [142, 154] + list(range(776, 786))
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    registry.add_device_argument(parser)
-    parser.add_argument("--i-know", action="store_true",
-                        help="read even if the slots are not all at factory")
-    args = parser.parse_args()
+def config_path(root, code, device_type):
+    return os.path.join(root, code, "default",
+                        f"default_mapping_{device_type}.dat")
 
+
+def translate(root, code, device_type=None):
+    """The four factory blobs for a model, from the file Space Station ships."""
+    device_type = device_type or BASE_DEVICE_TYPE[code]
+    path = config_path(root, code, device_type)
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError as exc:
+        sys.exit(f"error: {exc}\n"
+                 f"       Point --space-station at an installed Space Station's "
+                 f"Configs/Controller directory.")
+    beans = mapping_bean.beans(data)
+    if len(beans) != mapping.SLOTS:
+        sys.exit(f"error: {path} holds {len(beans)} config beans, not "
+                 f"{mapping.SLOTS}. The file is not the shape this reads.")
+    return [mapping_bean.blob_from_bean(bean) for bean in beans]
+
+
+def check(root, out=sys.stdout):
+    """Run the k5 file through the translator and hold it to the hardware.
+
+    `out` is stderr when this runs as the pre-flight before an emit, because
+    stdout is the module being generated and a report in the middle of it would
+    be a syntax error rather than a warning.
+    """
+    blobs = translate(root, "k5")
+    failures = 0
+    for slot, got in enumerate(blobs):
+        want = factory_config.for_slot(slot, "k5")
+        diff = [i for i in range(len(want)) if got[i] != want[i]]
+        unexplained = [i for i in diff if i not in KNOWN_DIVERGENCES]
+        matched = len(want) - len(diff)
+        status = "ok" if not unexplained else "FAILED"
+        print(f"slot {slot}: {matched}/{len(want)} bytes match the pad, "
+              f"{len(diff)} differ, {len(unexplained)} unexplained -- {status}",
+              file=out)
+        for offset in unexplained:
+            print(f"    [{offset}] translated {got[offset]}, "
+                  f"pad has {want[offset]}", file=out)
+            failures += 1
+    if failures:
+        print("\nThe translator and the hardware disagree somewhere new. Do not "
+              "emit another model's blob until that is understood -- an "
+              "unexplained byte here is an unexplained byte there, on a pad "
+              "nobody can check.", file=sys.stderr)
+        return 1
+    print("\nEvery difference is a known one. The translator is good for "
+          "another model.", file=out)
+    return 0
+
+
+def slot_digits(blobs, what):
+    """The one byte the four slots differ by, refusing anything else.
+
+    The four factory profiles are byte-identical apart from the digit in their
+    titles -- measured on the pad, and true of Flydigi's files too. The Vader's
+    add the data version at 225, which is a per-slot change tag and not part of
+    the profile, so it is normalised rather than treated as a difference.
+    """
+    base = blobs[0]
+    offset = mapping.OFF_TITLE + 4
+    differing = sorted({i for other in blobs[1:]
+                        for i in range(len(base)) if base[i] != other[i]})
+    if differing != [offset]:
+        sys.exit(f"error: {what}'s four slots differ at {differing}, not just "
+                 f"the title digit at {offset}. The one-blob assumption in "
+                 f"factory_config.py no longer holds; look before regenerating.")
+    return [blob[offset] for blob in blobs]
+
+
+def normalise(blobs):
+    """Strip the per-slot change tag, which is not part of a factory profile.
+
+    `DataVersion` at 225 is what `read_status` reports so a caller can tell
+    whether its cached copy of a slot is stale. Flydigi's f5 files carry a
+    different one per slot; the pad's own factory profiles carry 0xFFFF, which
+    is what an untouched slot reads. `reset_config` rolls a fresh tag when it
+    saves, so whatever is stored here is overwritten anyway -- and 0xFFFF is the
+    honest value for bytes that have never been written.
+    """
+    out = []
+    for blob in blobs:
+        blob = bytearray(blob)
+        blob[mapping.OFF_DATA_VERSION : mapping.OFF_DATA_VERSION + 2] = b"\xff\xff"
+        out.append(blob)
+    return out
+
+
+def read_from_pad(args):
+    """The four blobs off a pad that has been factory reset."""
     ctrl = registry.open_pad(args.device)
     with ctrl:
-        identity.require(ctrl, "k5")
+        found = identity.require(ctrl)
         status = mapping.read_status(ctrl)
         if status is None:
             sys.exit("error: the pad did not answer command 161")
@@ -50,20 +184,70 @@ def main():
             sys.exit(f"error: tags are {status['versions']}, so at least one "
                      f"slot has been written since it left the factory. Reset "
                      f"the pad first, or pass --i-know to read it anyway.")
-        blobs = [bytes(mapping.read_config(ctrl, cfg).blob) for cfg in range(4)]
+        blobs = [bytearray(mapping.read_config(ctrl, cfg).blob)
+                 for cfg in range(mapping.SLOTS)]
+    return found["code"], blobs
 
-    base = blobs[0]
-    differing = sorted({i for other in blobs[1:]
-                        for i in range(len(base)) if base[i] != other[i]})
-    if differing != [mapping.OFF_TITLE + 4]:
-        sys.exit(f"error: the four slots differ at {differing}, not just the "
-                 f"title digit at {mapping.OFF_TITLE + 4}. The one-blob "
-                 f"assumption below no longer holds; look before regenerating.")
 
-    digits = [blob[mapping.OFF_TITLE + 4] for blob in blobs]
-    body = "\n".join(f'    "{line}"' for line in textwrap.wrap(base.hex(), 72))
+def hexdump(blob):
+    return "\n".join(f'        "{line}"'
+                     for line in textwrap.wrap(bytes(blob).hex(), 68))
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description=__doc__.split("\n")[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    registry.add_device_argument(parser)
+    parser.add_argument("--check", action="store_true",
+                        help="prove the translator against the committed "
+                             "Apex 5 blob, and emit nothing")
+    parser.add_argument("--from-pad", action="store_true",
+                        help="re-read the connected pad's model from hardware "
+                             "instead of reusing its committed blob")
+    parser.add_argument("--space-station", default=DEFAULT_CONFIGS,
+                        metavar="DIR",
+                        help="an installed Space Station's Configs/Controller")
+    parser.add_argument("--i-know", action="store_true",
+                        help="read a pad whose slots are not all at factory")
+    args = parser.parse_args()
+
+    if args.check:
+        return check(args.space_station)
+
+    if check(args.space_station, out=sys.stderr):
+        sys.exit("\nrefusing to emit while the translator is unproven")
+    print("", file=sys.stderr)
+
+    models = {}
+    digits = None
+    for code in sorted(BASE_DEVICE_TYPE):
+        if args.from_pad and code == "k5":
+            found, blobs = read_from_pad(args)
+            if found != code:
+                sys.exit(f"error: the pad is {found}, not {code}")
+            source = "read off the pad"
+        elif code == "k5":
+            blobs = [factory_config.for_slot(slot, code)
+                     for slot in range(mapping.SLOTS)]
+            source = "read off the pad"
+        else:
+            blobs = normalise(translate(args.space_station, code))
+            source = (f"translated from Flydigi's own "
+                      f"default_mapping_{BASE_DEVICE_TYPE[code]}.dat")
+        found = slot_digits(blobs, code)
+        if digits is not None and found != digits:
+            sys.exit(f"error: {code}'s title digits are {found}, not {digits}")
+        digits = found
+        models[code] = (blobs[0], source)
+        print(f"{code}: {source}", file=sys.stderr)
+
+    blocks = "\n".join(
+        f'    # {identity.PRODUCT_NAMES.get(code, code)} -- {source}.\n'
+        f'    "{code}": bytes.fromhex(\n{hexdump(blob)}\n    ),'
+        for code, (blob, source) in sorted(models.items()))
     print(HEADER.format(digits=digits, offset=mapping.OFF_TITLE + 4,
-                        hexdump=body))
+                        blocks=blocks))
     return 0
 
 
@@ -72,10 +256,9 @@ HEADER = '''\
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""The Apex 5's factory profile, read off the pad. Generated -- see below.
+"""Factory profiles, one blob per model. Generated -- see below.
 
-Regenerate with `tools/gen-factory-config`, which needs a pad whose four slots
-have all been reset. Do not hand-edit.
+Regenerate with `tools/gen-factory-config`. Do not hand-edit.
 
 **Why this is bytes rather than code.** A factory profile is not "every field at
 its default": this project's own reconstruction in `flydigi/mock/pad.py` differs
@@ -85,30 +268,54 @@ whole trigger region from 153 to 224. Writing that reconstruction to a pad and
 calling it "factory" would be a guess with a confident label on it.
 
 **Why one blob covers four slots.** The four factory profiles are byte-identical
-apart from a single byte at {offset}, the digit in their titles -- measured, and
-`gen-factory-config` refuses to regenerate if that stops being true.
+apart from a single byte at {offset}, the digit in their titles -- measured on
+the pad, true of Flydigi's own files as well, and `gen-factory-config` refuses to
+regenerate if it stops being true.
 
 **What this is for.** A per-profile restore. Command 175 resets all four slots
 and ignores the slot it is given, so restoring one means writing the factory
 bytes into it and saving -- which is exactly what Space Station does, from a
-`default_mapping_<DeviceType>` file it ships. This is that file, obtained from
-the hardware instead.
+`default_mapping_<DeviceType>` file it ships.
+
+**The two blobs do not have the same standing, and the difference is worth
+knowing before trusting one.** The Apex 5's came off the hardware here. The
+Vader 5's is that shipped file put through `tools/mapping_bean.py`, so it is
+what Space Station *would write* to restore a slot -- which is not provably what
+a factory Vader 5 holds in flash. Held to the strongest check available: the
+same translator run over the Apex 5's file reproduces the blob below in 828 of
+840 bytes, and each of the twelve that differ has a mechanical explanation in
+`gen-factory-config`'s `KNOWN_DIVERGENCES` -- a gyro axis their format cannot
+represent, one byte for hardware the Apex 5 does not have, and ten bytes of
+title padding. A thirteenth would fail the check.
 """
 
 # One byte per slot, at offset {offset}: the digit in the factory title.
 TITLE_DIGITS = {digits}
+TITLE_DIGIT_OFFSET = {offset}
 
-FACTORY_BLOB = bytes.fromhex(
-{hexdump}
-)
+# By DeviceCode, as `identity.DEVICE_TYPES` names them. A model absent here has
+# no per-slot restore, which `identity.CAPABILITIES` states as
+# `factory_profile` -- writing an Apex 5's key table into a Vader would install
+# a profile with nothing on C and Z and call it factory.
+FACTORY_BLOBS = {{
+{blocks}
+}}
 
 
-def for_slot(cfg_id):
-    """The factory profile for one slot, as a fresh bytearray."""
+def have(code):
+    """Whether this project holds `code`'s factory profile."""
+    return code in FACTORY_BLOBS
+
+
+def for_slot(cfg_id, code="k5"):
+    """The factory profile for one slot of one model, as a fresh bytearray."""
     if not 0 <= cfg_id < len(TITLE_DIGITS):
         raise ValueError(f"no profile slot {{cfg_id}}")
-    blob = bytearray(FACTORY_BLOB)
-    blob[{offset}] = TITLE_DIGITS[cfg_id]
+    if code not in FACTORY_BLOBS:
+        raise ValueError(
+            f"no factory profile for {{code}} -- tools/gen-factory-config adds one")
+    blob = bytearray(FACTORY_BLOBS[code])
+    blob[TITLE_DIGIT_OFFSET] = TITLE_DIGITS[cfg_id]
     return blob
 '''
 

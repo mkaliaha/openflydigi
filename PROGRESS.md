@@ -36,13 +36,30 @@ Station has no framing there at all: their screen page takes the middle of the p
 the whole of it.
 
 **The Vader 5 Pro is driven too, and it has never been tested on one.** It speaks the same
-protocol -- same vendor id, same frame, same 840-byte blob -- so profiles, buttons, macros, sticks,
+protocol -- same vendor id, same frame, same 840-byte blob -- so profiles, buttons, sticks,
 the gyro, vibration, lighting and the pad's own settings are the paths already measured here. What
 it does *not* have is stated rather than discovered: no force triggers and no screen, so the
 Triggers, Screen and Games pages are hidden on it, `identity.require_capability` refuses
 every command that needs hardware it lacks, and the daemon's tier-1 bind skips it. Its two extra
 buttons, C and Z, are in its key list. What it has and the Apex 5 does not is a motor in each
 trigger; `MappingConfig.trigger_motor` reads and writes that block and **no page offers it yet**.
+
+**Macros are the one place a Vader is not on a measured path, and the app says so.** Its profiles
+are protocol **3.2**, where the macros are not in the profile at all: they move to a store of their
+own behind commands 172/173/174, ten of them instead of five, 256 steps instead of 128, and a 1 ms
+clock instead of 10 ms. All of that is built -- `mapping.MacroStore`, and limits read off the
+profile's own `ProtoVersion` rather than hardcoded -- and all of it is a transcription of a
+decompiled parser that has never been sent to hardware. Every other f5 path at least shares a route
+with something measured on the Apex 5; this one is new bytes down a new command, so the Macros page
+carries a warning when the open profile is v3.2 rather than presenting ten slots with the same
+confidence as five.
+
+**It has a factory profile now, so its per-slot restore works.** Translated from the
+`default_mapping_130.dat` Flydigi ship, by a translator held against the Apex 5's blob read off the
+hardware here: 828 of 840 bytes, with each of the other twelve explained rather than waved through.
+That makes it what Space Station *would write* to restore a slot, which is not provably what a
+factory Vader holds -- stated in `factory_config.py` and in [NOTICE](NOTICE), where the decision to
+commit derived bytes is set out.
 **DualSense mode stays available on it**, because only the trigger half of that relay is
 Apex-specific: input, rumble, haptic audio to the motors and the gyro are the same on both pads, so
 a Vader relays usefully and `PadLink.has_triggers` skips the effect translation rather than the
@@ -92,16 +109,6 @@ the settings block" in [docs/device-settings.md](docs/device-settings.md).
 
   * **The cooperative lock** — `AcquireController`, command **28**, with a 20-byte ASCII tag. The
     read half is built as `motion.read_transport`; the write half is not.
-  * **A factory profile for the Vader 5**, so its per-slot restore works. The button is hidden on
-    any model without one — `factory_profile` in `identity.CAPABILITIES`. Flydigi ship a
-    `default_mapping_<DeviceType>.dat` for every model including `f5`; translating one into the wire
-    blob is the job, and the Apex 5's committed blob is the test that proves the translator before
-    the Vader's is emitted. Schema, the 21 real differences and the provenance question are in
-    [docs/findings-profile-blob.md](docs/findings-profile-blob.md).
-  * **Macro limits are version-dependent and this project hardcodes v3.1's.** `MACRO_SLOTS = 5`,
-    `MACRO_STEP_BUDGET` and the 10 ms interval floor are right for an Apex 5 and wrong for a
-    Vader 5, which gets 10 macros, 256 actions and a 1 ms floor from protocol v3.2. The Macros page
-    would offer a Vader half the slots it has. Branch on `ProtoVersion`, as Flydigi do.
   * **Show every profile's name without reading it.** Nothing returns a title but a config read, and
     a config read switches the pad — which is why Space Station keeps a per-device cache file and
     re-reads only the slots whose version tag has moved (`PrepareMappingConfigs`). The same is now
@@ -163,6 +170,8 @@ All command factories are decompiled under `decompiled/Flydigi.ControllerSdk/`.
 | **Devices that are not there** | — | `flydigi/mock/` behind `FLYDIGI_MOCK_BUS` — the fakes moved out of `tests/` so the app, the tools and the daemon can all run against a bus with several pads and docks on it. Off unless the variable is set |
 | Buttons, sticks, vibration, stored triggers | inside the 840-byte profile blob | same module — [detail](docs/findings-profile-blob.md) |
 | Gyro mapped to a stick | the profile's motion block at 137 | `flydigi/mapping.py` (`motion`/`set_motion`), `tools/flydigi-mapping gyro`, GUI — **measured on the pad** with `tools/gyro-map-probe`: it plays the block, both enable keys gate it, Click toggles, and the response curve at 830 is inert — [detail](docs/findings-profile-blob.md) J2 |
+| **Protocol 3.2, and the macro store** | read 172, write 173/174 | `flydigi/mapping.py` (`MacroStore`, `read_macro_store`, `write_macro_store`, `macro_limits`), GUI — from v3.2 the macros leave the profile for a 1620-byte store of their own, with ten slots, 256 steps and a 1 ms clock where v3.1 has five, 128 and 10 ms. A Vader 5 is v3.2 and an Apex 5 is not, so **none of it has been on hardware** and the Macros page says so — [PROTOCOL.md](PROTOCOL.md) §9a |
+| **A factory profile per model** | inside 164/165 | `flydigi/factory_config.py`, `tools/mapping_bean.py`, `tools/gen-factory-config` — the Apex 5's read off the pad, the Vader 5's translated from the file Space Station ships, and the translator proved against the first before it emitted the second: 828 of 840 bytes, with the other twelve explained. `identity.CAPABILITIES` now answers `factory_profile` for both — [detail](docs/findings-profile-blob.md) |
 | **The Switch bank, and restoring a slot** | save-to-slot 171, reset 175 | `flydigi/mapping.py` (`save_switch_config`, `reset_config`, `normalise_for_switch`), `tools/flydigi-mapping to-switch`/`reset` — **both measured on the pad**. The pad stores *eight* profiles: 0..3 XInput, 4..7 Switch. 171 is 166 with a destination, and 175 restores a whole slot including its name — [detail](docs/device-settings.md) |
 | Macros, played by the pad | the profile's macro page at 230, plus 162 to make one live | `flydigi/mapping.py`, `flydigi/macros.py` (the recorder), GUI — [detail](docs/findings-profile-blob.md) |
 | Live trigger effects, all six | 81, 82 | `flydigi/effects.py` — [PROTOCOL.md](PROTOCOL.md) §3a |
@@ -361,7 +370,7 @@ distrobox exists. Setup, the package list and the symbol detail are in
 | Controller | Device (connection, battery level, reload from the pad); Profiles (the four slots — opening one is how you switch the running profile); Selected profile (rename the open profile, back up / restore it to file); Other software (let Steam and similar take the pad over, and who currently holds it) |
 | Device | the pad's own settings, not a profile's: switching profile from the pad with `FN + A/B/X/Y`, sleep time, the mapping switch (sub-id 4, undocumented in every locale Flydigi ships), stick debounce, auto-calibration, the rebound filter, stick resolution and centre sensitivity — plus the polling rate, shown and not offered |
 | Buttons | remap, turbo + hold/toggle, reset all to default |
-| Macros | record a sequence off the pad and bind it to any key, pick once / while held / toggle, set the repeat gap, see every step, delete |
+| Macros | record a sequence off the pad and bind it to any key, pick once / while held / toggle, set the repeat gap, see every step, delete. The slot count, step budget and interval floor come off the open profile's protocol version — five and 128 on an Apex 5, ten and 256 on a v3.2 pad, where the page also warns that the store behind it is untested |
 | Sticks | dead zone, outer dead zone, sensitivity curve presets, circular range |
 | Gyro | map the gyro onto either stick, the button that turns it on and how, sensitivity and the dead-zone offset — plus the motion mode, shown and not offered, because Flydigi derives it from the stick |
 | Vibration | master switch, per-grip enable, min/max window, strength |
@@ -556,6 +565,23 @@ the test files are re-export shims and the tests import them by the old names.
     the pad into upgrade mode.
   * **Steam Input must be off** for either DualSense tier — it masks the pad as an Xbox controller
     and breaks DualSense semantics.
+  * **The package-count byte in a profile is 77, and the profile is 840 bytes.** Measured -- the
+    factory blob read off this pad holds `0x4d` at offset 2. `MappingConfigParser`'s 84 is the
+    packet count of the *transfer*, 84 packets of ten, and the byte in the blob is a different
+    number that happens to look like one. Anything splitting a profile on `blob[2] * 10` cuts
+    seventy bytes off the end of it; `mapping.unpack_config` splits on length instead.
+  * **Restoring a profile to factory does not restore the lighting, and should not.** The LED config
+    is not in the profile blob -- the ten bytes at offset 3 are `OldLedConfig`, a legacy mirror
+    nothing here decodes -- and Space Station's own per-slot restore writes it separately over
+    168/169, from a per-SKU file. Their six Apex 5 files carry six different LED configs, with the
+    base model at brightness 20 and the Eva edition at 100, so a single committed k5 LED blob would
+    put the base model's lighting on every themed pad that restored a slot. The legacy bytes that
+    *are* in the blob are identical across all six, so writing them carries nothing across. The app
+    and the CLI both say lighting is left alone.
+  * **All six Apex 5 SKUs share one factory profile.** DeviceTypes 128, 129, 133 and 134 emit a
+    byte-identical 840-byte blob and 135/136 differ only at 154, the enable byte for trigger motors
+    this pad does not have. So the blob read off a DeviceType 128 here covers every edition, and the
+    2 KB by which the six files differ is almost entirely `LedConfigBean`, which is not in the blob.
   * **A macro is stored by the write and played by the apply** (command 162), independently of the
     save: macros written and not applied sit on the pad and do nothing, and saving only decides
     whether they survive a sleep. `MappingConfig.macro_page` is what a writer compares to know
@@ -782,6 +808,8 @@ do.
 | `flydigi/mock/` | Devices that are not there, behind `FLYDIGI_MOCK_BUS` — the bus (`__init__.py`), the fake pad and the fake dock. Nothing appears unless the variable is set |
 | `flydigi/prefs.py` | Per-game preferences in `$XDG_CONFIG_HOME/flydigi/games.json`, falling back to `~/.config`. Keyed by the gamelist's `id`, which is unique across all 94 entries where names are not, and rewritten atomically because the daemon re-reads it while the app is editing it |
 | `tools/flydigi-run` | Steam launch wrapper — `flydigi-run "<name>" -- %command%` |
+| `tools/gen-factory-config` | Regenerates `flydigi/factory_config.py`. Two sources: a pad that has been factory reset (`--from-pad`), and the `default_mapping_<DeviceType>.dat` Space Station ships, for a model nobody here owns. `--check` proves the translator against the Apex 5 blob read from hardware, and refuses to emit anything if a byte it cannot explain has appeared |
+| `tools/mapping_bean.py` | Flydigi's protobuf config bean turned into the 840-byte wire blob — a schema-free protobuf wire reader with no dependency on `protobuf`, plus `MappingConfigParserV30`/`V31`'s emit paths |
 | `tools/fetch-configs` | Restores everything gitignored — `gamelist.json`, `configs/`, `mods/` |
 | `tools/hid_probe.py` | Passive HID descriptor dump (writes nothing) |
 | `tools/ds5-channel-probe` | Plays a tone into one DualSense audio channel at a time, to map channel index to actuator or speaker (needs `pactl` and `paplay`) |

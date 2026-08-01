@@ -34,6 +34,7 @@ from flydigi import dsmode as ds_backend
 from flydigi import effects, mapping, prefs
 from flydigi import setup as system_setup
 from gui import models
+from flydigi.mock import pad as mock_pad
 from tests.fake_pad import FakePad, blank_blob
 
 PASSED = []
@@ -251,6 +252,92 @@ def test_the_page_stops_offering_more_than_the_pad_holds():
           str(macros.count))
     check("and a sixth is not offered", not macros.canAdd)
     check("the budget is reported", macros.stepsUsed == 10, str(macros.stepsUsed))
+
+
+def _v32_profile():
+    """A profile model holding a v3.2 config and its macro store.
+
+    Loaded through `profileLoaded` with `mapping.pack_config`'s bytes, which is
+    exactly what the worker emits -- so this exercises the packing as well as
+    the model, and a model that dropped the store on the way in would fail here
+    rather than on a pad nobody owns.
+    """
+    profile = models.ProfileModel()
+    profile.setSlotCount(4)
+    profile.setActive(0)
+    profile.select(0)
+    blob = bytearray(blank_blob("Profile 1", mock_pad.PROTO_V32))
+    config = mapping.MappingConfig(blob, 0)
+    config.macro_store = mapping.MacroStore(cfg_id=0)
+    profile.profileLoaded(0, mapping.pack_config(config), "Profile 1")
+    return profile
+
+
+def test_a_v32_profile_is_offered_its_own_limits_and_marked_experimental():
+    """The Macros page used to read three constants, all of them v3.1's.
+
+    A Vader 5 reports v3.2 and gets ten slots, 256 steps and a 1 ms floor. The
+    page offering five was offering half the pad -- and offering it with no
+    warning, on a store this project has never sent to hardware.
+    """
+    profile = _v32_profile()
+    macros = profile.macros
+    check("the store survived the trip through packed bytes",
+          profile.config.macro_store is not None)
+    check("ten slots, not five", macros.slots == 10, str(macros.slots))
+    check("256 steps, not 128", macros.stepBudget == 256, str(macros.stepBudget))
+    check("and the interval ceiling is the 16-bit field's",
+          macros.intervalMax == 0xFFFF, str(macros.intervalMax))
+    check("the page says the path is untested", macros.experimental)
+
+    # And a macro really can be written on that path, through the model rather
+    # than through the backend -- which is the half that used to raise.
+    macros.record(key_index("m1"))
+    macros.recorded(RECORDED)
+    check("a macro lands", macros.count == 1, str(macros.count))
+    check("in the store, not the blob",
+          profile.config.macro_store.macros() and not profile.config.macros_in_blob)
+    check("and six are still offered after five", macros.canAdd)
+
+
+def test_an_apex_5_profile_is_not_marked_experimental():
+    """The other half of the flag: a measured path must not carry the warning."""
+    profile, _ = make_profile()
+    macros = profile.macros
+    check("v3.1 is not experimental", not macros.experimental)
+    check("and keeps the five slots that were measured on the pad",
+          macros.slots == 5 and macros.stepBudget == 128,
+          f"{macros.slots}/{macros.stepBudget}")
+    check("with the 10 ms interval ceiling",
+          macros.intervalMax == mapping.MACRO_INTERVAL_MAX,
+          str(macros.intervalMax))
+
+
+def test_the_limits_move_when_the_open_profile_does():
+    """A notify, not a constant -- the trap this whole change was about.
+
+    `slots` and `stepBudget` were `constant=True`, which caches for the life of
+    the window. Opening a v3.2 profile after a v3.1 one has to move them, and
+    the two profiles may hold identical macro lists (both empty, most obviously)
+    so it cannot ride on the macro list changing.
+    """
+    profile = models.ProfileModel()
+    profile.setSlotCount(4)
+    profile.setActive(0)
+    profile.select(0)
+    profile.profileLoaded(0, bytes(blank_blob("Profile 1")), "Profile 1")
+    macros = profile.macros
+    moved = []
+    macros.limitsChanged.connect(lambda: moved.append(macros.slots))
+    check("starts at the v3.1 numbers", macros.slots == 5, str(macros.slots))
+
+    profile.select(1)
+    config = mapping.MappingConfig(
+        bytearray(blank_blob("Profile 2", mock_pad.PROTO_V32)), 1)
+    config.macro_store = mapping.MacroStore(cfg_id=1)
+    profile.profileLoaded(1, mapping.pack_config(config), "Profile 2")
+    check("opening a v3.2 profile moves them", macros.slots == 10, str(macros.slots))
+    check("and says so exactly once", moved == [10], str(moved))
 
 
 def test_turbo_survives_a_target_change():
@@ -3804,6 +3891,9 @@ def main():
                  test_a_macros_type_and_interval_write_through,
                  test_deleting_a_macro_gives_the_key_back,
                  test_the_page_stops_offering_more_than_the_pad_holds,
+                 test_a_v32_profile_is_offered_its_own_limits_and_marked_experimental,
+                 test_an_apex_5_profile_is_not_marked_experimental,
+                 test_the_limits_move_when_the_open_profile_does,
                  test_turbo_survives_a_target_change,
                  test_write_carries_the_blob_and_the_previous_copy,
                  test_confirming_a_write_clears_dirty,

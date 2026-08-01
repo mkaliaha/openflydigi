@@ -32,7 +32,10 @@ class DeviceWorker(QObject):
     """Runs on its own thread. Slots are invoked queued, signals arrive on the UI thread."""
 
     info_changed = Signal(dict)          # battery, connection
-    profile_loaded = Signal(int, bytes, str)   # cfg_id, blob, title
+    # The blob is `mapping.pack_config`'s -- the profile, and its macro
+    # store behind it where the pad has one. One value, because a signal
+    # with two halves is a signal something reconnects with one.
+    profile_loaded = Signal(int, bytes, str)   # cfg_id, packed config, title
     profile_written = Signal(int, int, bool)   # cfg_id, packets, saved to flash
     vibration_applied = Signal(str, str)       # game name, sides applied
     transport_changed = Signal(dict)     # third-party flag + who holds the pad
@@ -370,7 +373,7 @@ class DeviceWorker(QObject):
         config = self._attempt(work, f"reading profile {cfg_id + 1}")
         if config is None:
             return
-        self.profile_loaded.emit(cfg_id, bytes(config.blob), config.title)
+        self.profile_loaded.emit(cfg_id, mapping.pack_config(config), config.title)
         self.active_changed.emit(cfg_id)
         self.status.emit(f"Profile {cfg_id + 1} read")
 
@@ -396,7 +399,7 @@ class DeviceWorker(QObject):
         if result is None:
             return
         config, saved = result
-        self.profile_loaded.emit(cfg_id, bytes(config.blob), config.title)
+        self.profile_loaded.emit(cfg_id, mapping.pack_config(config), config.title)
         self.active_changed.emit(cfg_id)
         self.status.emit(
             f"Profile {cfg_id + 1} restored to factory — it is called "
@@ -431,7 +434,7 @@ class DeviceWorker(QObject):
             return
         active, config = result
         self.profiles_reset.emit()
-        self.profile_loaded.emit(active, bytes(config.blob), config.title)
+        self.profile_loaded.emit(active, mapping.pack_config(config), config.title)
         self.active_changed.emit(active)
         self.status.emit("Every profile restored to factory")
 
@@ -458,7 +461,7 @@ class DeviceWorker(QObject):
         def work(ctrl):
             with ctrl.claim():
                 config = mapping.read_config(ctrl, cfg_id)
-                original = mapping.MappingConfig(bytes(config.blob), cfg_id)
+                original = config.copy()
                 stripped = config.normalise_for_switch()
                 if stripped:
                     mapping.write_config(ctrl, cfg_id, config, old=original)
@@ -481,7 +484,7 @@ class DeviceWorker(QObject):
         if result is None:
             return
         ok, stripped, config = result
-        self.profile_loaded.emit(cfg_id, bytes(config.blob), config.title)
+        self.profile_loaded.emit(cfg_id, mapping.pack_config(config), config.title)
         self.active_changed.emit(cfg_id)
         if not ok:
             self.status.emit("The pad did not acknowledge the Switch copy")
@@ -538,8 +541,8 @@ class DeviceWorker(QObject):
     def write_profile(self, cfg_id, blob, previous, save):
         """Write a profile, sending only packets that differ from `previous`."""
         self.status.emit(f"Writing profile {cfg_id + 1}…")
-        new = mapping.MappingConfig(blob, cfg_id)
-        old = mapping.MappingConfig(previous, cfg_id) if previous else None
+        new = mapping.unpack_config(blob, cfg_id)
+        old = mapping.unpack_config(previous, cfg_id) if previous else None
 
         def work(ctrl):
             # Write and commit as one exchange: the save command commits
