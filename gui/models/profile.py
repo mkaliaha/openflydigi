@@ -1803,12 +1803,17 @@ class ProfileModel(QObject):
         self._cfg_id = cfg_id
         self._slots.setCurrent(cfg_id)
         self.cfgIdChanged.emit()
-        blob = self._slots.stored(cfg_id)
-        if blob is not None:
-            self._open(blob)
-            return
-        # Not read yet. Reading is expensive and switches the pad, so never ask
-        # twice for the same profile.
+        # Deliberately not served from the cache, however recently the profile
+        # was read. Reading a config is what switches the pad to it, so opening
+        # one from memory would leave the page describing a profile the pad is
+        # not running: the Triggers page would name effects that were never
+        # engaged, and an Apply would land correctly in a slot nothing is
+        # playing. Space Station caches here, and this is exactly where its own
+        # picker comes apart -- switch to a profile it has already read and the
+        # pad stays where it was.
+        #
+        # The cost is real and is the price of the invariant: every switch is a
+        # device read, and the pad audibly re-seats its trigger motors doing it.
         self._replace(None)
         self._recompute_dirty()
         self.loadedChanged.emit()

@@ -82,11 +82,22 @@ def test_selecting_an_unread_profile_requests_it_once():
     check("asking again while pending does not re-request", requested == [0],
           str(requested))
 
-    profile.profileLoaded(0, bytes(blank_blob()), "Profile 1")
+
+def test_revisiting_a_profile_re_reads_it_because_the_read_is_the_switch():
+    """A cache in front of the picker is a pad running the wrong profile.
+
+    Reading a config is what makes the pad play it, so serving a profile from
+    memory shows a page the pad is not running. Space Station caches here and
+    that is the bug: switch to a profile it has already read and the pad stays
+    where it was. Anyone tempted to optimise the re-read away should move the
+    switch onto a command of its own first.
+    """
+    profile, requested = make_profile()
     profile.select(1)
+    profile.profileLoaded(1, bytes(blank_blob("Profile 2")), "Profile 2")
     profile.select(0)
-    check("revisiting a loaded profile does not re-read it", requested == [0, 1],
-          str(requested))
+    check("revisiting a profile already in the cache still reads it",
+          requested == [0, 1, 0], str(requested))
 
 
 def test_a_loaded_profile_is_clean():
