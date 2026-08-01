@@ -424,7 +424,7 @@ def test_live_effect_payloads_match_the_command_builders():
         def __init__(self):
             self.sent = []
 
-        def command(self, cmd_id, payload=b"", wait=0.3):
+        def command(self, cmd_id, payload=b"", wait=0.3, until=None):
             self.sent.append((cmd_id, list(payload)))
             return []
 
@@ -474,7 +474,7 @@ class _Recorder:
     def __init__(self):
         self.sent = []
 
-    def command(self, cmd_id, payload=b"", wait=0.3):
+    def command(self, cmd_id, payload=b"", wait=0.3, until=None):
         self.sent.append((cmd_id, list(payload)))
         return []
 

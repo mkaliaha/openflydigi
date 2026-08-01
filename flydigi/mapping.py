@@ -443,7 +443,8 @@ def read_status(ctrl, wait=1.0, slots=4):
     field, so a caller can tell whether a cached copy is still current without
     reading the config at all. 0xFFFF means the slot has never been written.
     """
-    for body in blobs.replies(ctrl, build(CMD_STATUS, b""), wait):
+    for body in blobs.replies(ctrl, build(CMD_STATUS, b""), wait,
+                              blobs.answers(CMD_STATUS)):
         if body[2] != CMD_STATUS:
             continue
         raw = body[5]
@@ -508,7 +509,8 @@ def read_config_preserving(ctrl, cfg_id, wait=1.5):
 
 def apply_config(ctrl, cfg_id, wait=0.5):
     """Switch the pad to a stored config."""
-    for body in blobs.replies(ctrl, build(CMD_APPLY, bytes([cfg_id])), wait):
+    for body in blobs.replies(ctrl, build(CMD_APPLY, bytes([cfg_id])), wait,
+                              blobs.answers(CMD_APPLY)):
         if body[2] == CMD_APPLY:
             return True
     return False
@@ -530,7 +532,8 @@ def save_config(ctrl, version=0, wait=2.0):
     confirmed what the pad does with the value.
     """
     payload = struct.pack("<H", version & 0xFFFF)
-    for body in blobs.replies(ctrl, build(CMD_SAVE, payload), wait):
+    for body in blobs.replies(ctrl, build(CMD_SAVE, payload), wait,
+                              blobs.answers(CMD_SAVE)):
         if body[2] == CMD_SAVE:
             return True
     return False

@@ -51,7 +51,11 @@ def set_raw_data(ctrl, controller_data=UNCHANGED, raw=UNCHANGED,
     buf[8] = mouse
     buf[9] = third_party
     buf[10] = checksum(buf, 3, 3 + buf[4])
-    replies = ctrl.send(buf, wait=0.4)
+    def acked(seen):
+        reply = seen[-1]
+        return len(reply) > 3 and reply[3] == CMD_ENABLE_RAW
+
+    replies = ctrl.send(buf, wait=0.4, until=acked)
     return any(len(r) > 3 and r[3] == CMD_ENABLE_RAW for r in replies)
 
 
@@ -193,7 +197,10 @@ def read_versions(ctrl, wait=0.6):
     buf = build(CMD_GET_INFO)
     buf[4] = 2
     buf[5] = checksum(buf, 3, 3 + buf[4])
-    for reply in ctrl.send(buf, wait=wait):
+    # `until`, for the same reason `read_info` has one: without it this waits
+    # out the whole timeout however early the pad answers.
+    for reply in ctrl.send(buf, wait=wait,
+                           until=lambda seen: parse_versions(seen[-1]) is not None):
         versions = parse_versions(reply)
         if versions:
             return versions
@@ -274,7 +281,8 @@ def read_transport(ctrl, wait=0.6):
     buf = build(CMD_READ_TRANSPORT)
     buf[4] = 2
     buf[5] = checksum(buf, 3, 3 + buf[4])
-    for reply in ctrl.send(buf, wait=wait):
+    for reply in ctrl.send(buf, wait=wait,
+                           until=lambda seen: parse_transport(seen[-1]) is not None):
         state = parse_transport(reply)
         if state:
             return state

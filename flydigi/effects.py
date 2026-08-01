@@ -253,7 +253,11 @@ def stored(mode, named):
 
 
 def _apply(ctrl, cmd_id, payload):
-    replies = ctrl.command(cmd_id, bytes(payload))
+    # With an `until`, because this is not a bench command: `engage_stored`
+    # runs it once per trigger after every profile read and every profile
+    # write, and without one each of those pairs waits out two full timeouts
+    # after the pad has already answered.
+    replies = ctrl.command(cmd_id, bytes(payload), until=device.acked(cmd_id))
     return any(ctrl.ack_ok(r, cmd_id) for r in replies)
 
 
@@ -344,7 +348,7 @@ def bind_grip(ctrl, side, bind_type, filt, scale, params):
     buf = device.build(CMD_SET_FORCE_TRIGGER_GRIP)
     buf[4] = 11
     buf[5 : 5 + len(payload)] = bytes(payload)
-    replies = ctrl.send(buf)
+    replies = ctrl.send(buf, until=device.acked(CMD_SET_FORCE_TRIGGER_GRIP))
     return any(ctrl.ack_ok(r, CMD_SET_FORCE_TRIGGER_GRIP) for r in replies)
 
 

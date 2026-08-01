@@ -372,7 +372,7 @@ def write_nickname(ctrl, name, wait=0.6, reference=False):
     corrupted form, so the ack is worth nothing at all as evidence.
     """
     buf = nickname_packet(name, reference=reference)
-    replies = ctrl.send(buf, wait=wait)
+    replies = ctrl.send(buf, wait=wait, until=answers(CMD_WRITE_NICKNAME))
     if not any(len(r) > 3 and r[3] == CMD_WRITE_NICKNAME for r in replies):
         raise NicknameRefused(
             f"the pad did not acknowledge the name {name!r} -- which it does "

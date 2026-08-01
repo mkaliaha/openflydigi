@@ -141,8 +141,9 @@ class FakeDock:
         return handler(payload)
 
     def command(self, cmd_id, payload=b"", wait=0.5,
-                size=charger.PACKET_LEN):
-        return self.send(charger.build(cmd_id, payload, size), wait=wait)
+                size=charger.PACKET_LEN, until=None):
+        return self.send(charger.build(cmd_id, payload, size), wait=wait,
+                         until=until)
 
     @staticmethod
     def _reply(cmd, body=b""):

@@ -342,9 +342,9 @@ class FakePad:
         }.get(cmd)
         return handler(payload) if handler else []
 
-    def command(self, cmd_id, payload=b"", wait=0.3):
+    def command(self, cmd_id, payload=b"", wait=0.3, until=None):
         """As `Controller.command` -- build the envelope and send it."""
-        return self.send(device.build(cmd_id, payload), wait=wait)
+        return self.send(device.build(cmd_id, payload), wait=wait, until=until)
 
     # Borrowed rather than reimplemented: a fake that decided for itself what
     # counts as an ACK would let a caller pass here and fail on the pad.

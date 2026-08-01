@@ -39,13 +39,65 @@ def build(cmd_id, payload=b""):
     return buf
 
 
-def replies(ctrl, buf, wait):
-    """Send and return reply bodies with the report-id byte stripped."""
-    return [r[1:] for r in ctrl.send(buf, wait=wait) if len(r) > 7]
+def replies(ctrl, buf, wait, until=None):
+    """Send and return reply bodies with the report-id byte stripped.
+
+    `until` is passed straight through to `Controller.send`, and every caller
+    here should pass one. Without it `send` sits out the whole `wait` however
+    early the answer lands -- and the node is not quiet while it waits, it
+    streams input reports at about 970 Hz, so the cost is not just the delay but
+    several hundred packets appended and tested in Python for one that mattered.
+    """
+    return [r[1:] for r in ctrl.send(buf, wait=wait, until=until) if len(r) > 7]
+
+
+def answers(cmd_id):
+    """`send`'s `until` for a command the pad answers in one packet.
+
+    The command byte is at `reply[3]` with the report id still on, which is the
+    `body[2]` every caller here filters on -- so this stops the collection at
+    exactly the packet the caller was going to use, and the result is the same
+    reply that waiting out the timeout would have produced. Command replies
+    share report id 0x04 with input reports and are told apart by that byte
+    alone; 0xEF marks an input report and no command id collides with it.
+    """
+    def check(replies):
+        reply = replies[-1]
+        return len(reply) > 7 and reply[3] == cmd_id
+    return check
+
+
+def _whole_blob(cmd_id):
+    """`send`'s `until` for a packetised read: stop once the run is complete.
+
+    How many packets to expect is not known in advance -- the pad states it in
+    each packet's `total` field -- so this counts indices as they arrive rather
+    than waiting for a number fixed up front. Stateful, so a caller that retries
+    must build a fresh one per attempt.
+    """
+    seen = set()
+    total = None
+
+    def check(replies):
+        nonlocal total
+        reply = replies[-1]
+        if len(reply) > 7 and reply[3] == cmd_id:
+            total, index = reply[4], reply[5]
+            seen.add(index)
+        return total is not None and len(seen) >= total
+    return check
 
 
 def acked(ctrl, cmd_id, payload, wait):
-    return any(body[2] == cmd_id for body in replies(ctrl, build(cmd_id, payload), wait))
+    """Send one packet and stop as soon as its own answer arrives.
+
+    The early exit is what a write costs or saves. `write_blob` acks every
+    packet one for one, so without it a config write pays the full `wait` per
+    packet -- a mapping profile is 42 of them.
+    """
+    return any(body[2] == cmd_id
+               for body in replies(ctrl, build(cmd_id, payload), wait,
+                                   answers(cmd_id)))
 
 
 def read_blob(ctrl, cmd_id, cfg_id, what, pkg_size=PKG_SIZE, wait=1.5, retries=3):
@@ -53,7 +105,8 @@ def read_blob(ctrl, cmd_id, cfg_id, what, pkg_size=PKG_SIZE, wait=1.5, retries=3
 
     The pad streams the packets back to back, each carrying (total, index,
     cfgId, data), so collect until the last index arrives rather than issuing a
-    request per packet.
+    request per packet. That is what `_whole_blob` makes true: `wait` is the
+    ceiling on a read that goes wrong, not the price of one that goes right.
     """
     last_error = "no reply"
     # Held across the retries as well as the stream: a retry that races another
@@ -62,7 +115,10 @@ def read_blob(ctrl, cmd_id, cfg_id, what, pkg_size=PKG_SIZE, wait=1.5, retries=3
         for _ in range(retries):
             chunks = {}
             total = None
-            for body in replies(ctrl, build(cmd_id, bytes([cfg_id, pkg_size])), wait):
+            # Fresh per attempt: the predicate counts the packets it has seen,
+            # and a retry starts that count again.
+            for body in replies(ctrl, build(cmd_id, bytes([cfg_id, pkg_size])),
+                                wait, _whole_blob(cmd_id)):
                 if body[2] != cmd_id:
                     continue
                 total, index = body[3], body[4]

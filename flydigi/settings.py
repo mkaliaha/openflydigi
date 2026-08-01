@@ -174,7 +174,8 @@ def parse_status(body):
 
 def read_status(ctrl, wait=0.5):
     """The whole settings block, in one exchange."""
-    for body in blobs.replies(ctrl, blobs.build(CMD_STATUS), wait):
+    for body in blobs.replies(ctrl, blobs.build(CMD_STATUS), wait,
+                              blobs.answers(CMD_STATUS)):
         if body[2] == CMD_STATUS:
             return parse_status(body)
     raise SettingsError("no reply to command 3 -- the pad may be asleep")
@@ -190,9 +191,22 @@ def set_feature(ctrl, sub_id, value, wait=0.5):
     `apply` reads the block back, and callers who care should use that.
     """
     wanted = 1 if value else 0
+
+    # Not `blobs.answers`, which stops at the command byte: the condition this
+    # returns on is the byte *and* the echoed value, so the predicate has to
+    # match both or a reply carrying the wrong value would end the collection
+    # and turn a slow success into a reported failure. Stopping on exactly what
+    # the caller was going to accept leaves the answer unchanged and only the
+    # waiting shorter.
+    def echoed(replies):
+        reply = replies[-1]
+        return (len(reply) > 7 and reply[3] == CMD_SETTING
+                and reply[6] == wanted)
+
     return any(body[2] == CMD_SETTING and body[5] == wanted
                for body in blobs.replies(
-                   ctrl, blobs.build(CMD_SETTING, bytes([sub_id, wanted])), wait))
+                   ctrl, blobs.build(CMD_SETTING, bytes([sub_id, wanted])),
+                   wait, echoed))
 
 
 def _standalone(ctrl, cmd_id, value, wait):
@@ -205,7 +219,8 @@ def _standalone(ctrl, cmd_id, value, wait):
     already produced once here.
     """
     return any(body[2] == cmd_id
-               for body in blobs.replies(ctrl, blobs.build(cmd_id, bytes([value & 0xFF])), wait))
+               for body in blobs.replies(ctrl, blobs.build(cmd_id, bytes([value & 0xFF])),
+                                         wait, blobs.answers(cmd_id)))
 
 
 def set_sleep_minutes(ctrl, minutes, wait=0.5):
@@ -250,7 +265,8 @@ def restart(ctrl, wait=0.5):
     reusing one, the same as after a sleep.
     """
     return any(body[2] == CMD_RESTART
-               for body in blobs.replies(ctrl, blobs.build(CMD_RESTART), wait))
+               for body in blobs.replies(ctrl, blobs.build(CMD_RESTART), wait,
+                                         blobs.answers(CMD_RESTART)))
 
 
 # -- write, then find out what really happened -----------------------------

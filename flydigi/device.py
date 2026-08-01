@@ -246,6 +246,20 @@ def build(cmd_id, payload=b""):
     return buf
 
 
+def acked(cmd_id):
+    """`Controller.send`'s `until` for a command its own ACK ends.
+
+    A free function rather than a method so the fakes in `tests/` and
+    `flydigi/mock/` do not have to grow a copy of it: it interprets bytes and
+    needs no handle. `Controller.ack_ok` is what a caller then tests each reply
+    with, so stopping here returns the very reply it was going to accept --
+    the answer is unchanged and only the waiting is shorter.
+    """
+    def check(replies):
+        return Controller.ack_ok(replies[-1], cmd_id)
+    return check
+
+
 class Controller:
     """Open handle to the vendor interface.
 
@@ -408,8 +422,8 @@ class Controller:
                         break
             return replies
 
-    def command(self, cmd_id, payload=b"", wait=0.3):
-        return self.send(build(cmd_id, payload), wait=wait)
+    def command(self, cmd_id, payload=b"", wait=0.3, until=None):
+        return self.send(build(cmd_id, payload), wait=wait, until=until)
 
     @staticmethod
     def ack_ok(reply, cmd_id):

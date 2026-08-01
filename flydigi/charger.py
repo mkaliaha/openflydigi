@@ -419,7 +419,8 @@ def write_nickname(dock, name, wait=0.5):
         raise ValueError(
             f"{name!r} is {len(raw)} bytes and the packet holds "
             f"{PACKET_LEN - 6}")
-    replies = dock.send(build(CMD_WRITE_NICKNAME, raw), wait=wait)
+    replies = dock.send(build(CMD_WRITE_NICKNAME, raw), wait=wait,
+                        until=lambda seen: reply_for(seen[-1], CMD_WRITE_NICKNAME))
     if not any(reply_for(r, CMD_WRITE_NICKNAME) for r in replies):
         raise ProtocolError(f"the dock did not acknowledge the name {name!r}")
     return read_nickname(dock, wait=wait)
@@ -462,7 +463,10 @@ def describe_battery(level):
 
 def read_status(dock, wait=1.5):
     """Wait for one status report. The dock sends them about once a second."""
-    for data in dock.send(build(CMD_HEARTBEAT), wait=wait):
+    # The frame this waits for is 239, not the heartbeat's own reply, so
+    # `Dock.command`'s predicate is the wrong one and this sends directly.
+    for data in dock.send(build(CMD_HEARTBEAT), wait=wait,
+                          until=lambda seen: parse_status(seen[-1]) is not None):
         parsed = parse_status(data)
         if parsed is not None:
             return parsed
