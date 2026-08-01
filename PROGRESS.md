@@ -131,9 +131,7 @@ positive nobody has hit for a false negative on the one route that currently alw
 → [docs/findings-games.md](docs/findings-games.md)
 
 **Unsettled by measurement.** Whether the firmware accepts 164/165 aimed at a slot it is not
-running. What the **Xbox home button** toggle does (19 sub 2): the command is built and gated behind
-`--i-know`, so `tools/flydigi-settings xbox-home off --i-know` and one evdev capture settle it.
-→ [docs/device-settings.md](docs/device-settings.md)
+running.
 
 **Whether a trigger still reads as an analogue axis while it is the gyro's enable key.** The pad
 ships with `Lt` in that byte, and the enable key is *not* swallowed — the probe correlated stick
@@ -645,6 +643,20 @@ the test files are re-export shims and the tests import them by the old names.
   * **`EnableDS5Data` (232) is dead code** — DInput builder only, no callers anywhere in
     `SpaceStationService`. It looks like it would replace the whole virtual-DualSense tier. It would
     not.
+  * **What the Xbox home toggle does: don't know, don't care.** Command 19 sub 2,
+    `EnableXboxHomeButton`. Flydigi ship no control for it on any pad — no key in any of the twelve
+    locale files, and `xboxHomeButtonUsable` never reaches their renderer at all, so their own v4 UI
+    cannot draw one whatever the SDK carries. The SDK guards the write to `ControllerType.XInput`,
+    where it is command **48** sub **10** on / **9** off, and that same XInput read parses eleven
+    fields without ever reading `XboxHomeButtonEnabled` back — so the interface that may write it
+    cannot read it, and the interface that reads it may not write it. `XboxHomeButtonUsable` is
+    hardcoded true for `f4`, `fp3`, `fp4` and DeviceType 102, which are the pads whose Home button
+    is also the power button: measured on the Vader 4 here, a short press is an ordinary Guide and a
+    long one powers the pad off. An Apex 5 has a rear power slider, so its Home is Guide and nothing
+    else, and it reports the flag supported and on. Whether the flag gates the Guide half or the
+    power half would take a write on a pad this project does not drive, for a setting the Apex 5
+    does not have. `tools/flydigi-settings xbox-home` stays behind `--i-know`.
+    → [docs/device-settings.md](docs/device-settings.md)
   * **Usage counters and `DeviceMask`** — XInput and DInput builders only, no NewXInput path, so
     they are unreachable in the mode this project uses.
   * **`TestRecoverFactoryCommand` (253)** is a factory reset with no confirmation flow. Do not send it.

@@ -191,6 +191,30 @@ in any of the twelve languages, and their service forwards only the `Usable`/`En
 UI. This pad reports it supported **and on**, and `19 / 2 / 0` takes the same path as every other
 sub-command; what it does to the Home key is unmeasured.
 
+**And it stays unmeasured** — [ruled out](../PROGRESS.md#ruled-out). Their renderer never receives
+`xboxHomeButtonUsable` at all, only `Enabled`, which it stores and draws nowhere, so no v4 UI can
+offer this however the SDK is built. `XboxHomeButtonUsable` is hardcoded true for `f4`, `fp3`, `fp4`
+and DeviceType 102 (an Apex 4 SKU), and those are the pads whose Home button is also the power
+button — measured on the Vader 4 on this desk: a short press is an ordinary Guide, a long one powers
+the pad off. An Apex 5 has a rear power slider, so its Home is Guide and nothing else, which is why
+there is nothing here to configure and why the flag reads supported and on.
+
+**Command 48 is the XInput dialect's sub-command opcode**, the counterpart of 19's sub-id space:
+`[0]=0xA5, [1]=48, [2]=sub`, fifteen bytes, no checksum, on the transport in
+[findings-other-devices.md](findings-other-devices.md). Every other setting there carries its value
+in `[3]`; Xbox home alone spends two sub-ids and no value byte, which is what an either/or mode flip
+looks like rather than a stored preference.
+
+| sub | function | sub | function |
+|---|---|---|---|
+| 1 | `ExtraInfo` — trigger, screen and switch chip versions | 9 | **Xbox home off** |
+| 2 | read screen setting | 10 | **Xbox home on** |
+| 3 | status bar always on | 11 | upgrade mode: screen chip, and the main chip on WCH |
+| 4 | read auto-sleep period | 12 | upgrade mode: trigger chip |
+| 5 | sleep time | 13 | motion debounce |
+| 6 | force trigger, every mode but the grip bind | 14 | test vibration |
+| 8 | force trigger, the grip bind — and `TestScreen`, which collides with it | | |
+
 Every write goes through `settings.apply(ctrl, name, value)`, the single entry point the CLI and the
 GUI share: it dispatches by setting name to either a command-19 sub-id or one of the four standalone
 commands, writes, and returns the command-3 block as it reads afterwards; an unknown name raises

@@ -40,8 +40,9 @@ What this pad does *not* have: **motion debounce** (sub 3) and **audio**
 (sub 10) both come back unsupported on a k5, so neither is worth a control. The
 **Xbox home button** (sub 2) is a third case and not a dead one -- supported, on,
 and reachable on the wire, with only Flydigi's own wrapper declining to send it.
-It is here, and deliberately not in the app until someone has watched what it
-does to the Home key. See docs/device-settings.md.
+It is here and stays out of the app for good: Flydigi ship no UI for it on any
+pad, and the models their capability list names are the ones whose Home button is
+also the power button, which an Apex 5's is not. See docs/device-settings.md.
 """
 from . import blobs
 

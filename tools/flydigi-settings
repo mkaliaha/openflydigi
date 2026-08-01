@@ -22,10 +22,12 @@ ACK says "a setting was written" and nothing about which one.
 Two settings are on this pad's wire and out of the desktop app on purpose.
 `report-rate` writes a field that reads 0 here, which is not in Flydigi's map,
 and the pad already polls at the 1 ms ceiling its endpoints declare -- nothing
-to gain, a working rate to lose. `xbox-home` is a one-line experiment nobody has
-run: the pad reports it supported and on, Flydigi's own wrapper declines to send
-it, and what it does to the Home key is unknown until someone watches evdev
-while it is off. Both need `--i-know`.
+to gain, a working rate to lose. `xbox-home` is a setting for a pad this is not: the
+models Flydigi name for it are the ones whose Home button is also the power
+button, an Apex 5 has a rear power switch instead, and no version of their own UI
+offers the control on anything. The pad reports it supported and on; it stays
+here because the wire takes it, and unmeasured because nothing turns on the
+answer. Both need `--i-know`.
 """
 import argparse
 import os
