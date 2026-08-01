@@ -27,7 +27,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flydigi import games, mock, prefs, registry     # noqa: E402
+from flydigi import games, identity, mock, prefs, registry   # noqa: E402
 
 PASSED = []
 FAILED = []
@@ -149,6 +149,36 @@ def run():
           str(daemon.driver_argv(game, "telemetry", None)))
     check("the vibration route starts no driver",
           daemon.driver_argv(game, "vibration", "uid:abc123") is None)
+
+    # -- supporting a pad is not the same as it having the hardware --------
+    #
+    # The trap this guards: `drivable_pads` filtered on identity.SUPPORTED
+    # alone, and this fan-out writes command 82, which binds the pad's own
+    # rumble to its *force triggers*. No Vader has ever had those -- the family
+    # is XInput pads with extra buttons, a gyro and adjustable sticks -- so the
+    # day f5 joins SUPPORTED, every game launch would start sending 82 to one.
+    # It would acknowledge it, as pads do for the shape of a command they
+    # cannot act on, and nothing anywhere would say so.
+    #
+    # Asserted by actually putting f5 in SUPPORTED, because the useful question
+    # is what happens *after* that line changes, not before.
+    real_supported = identity.SUPPORTED
+    try:
+        identity.SUPPORTED = ("k5", "f5")
+        for pad in pads.values():
+            pad.live_binds.clear()
+        check("with f5 supported, it is drivable",
+              any(e["code"] == "f5" for e in registry.drivable_pads()))
+        check("but not for a bind its triggers cannot take",
+              not any(e["code"] == "f5" for e in
+                      registry.drivable_pads(capability="adaptive_triggers")))
+        daemon.apply_for(game, "vibration")
+        check("so the bind still reaches the Apex 5",
+              pads["Desk"].live_binds != {}, str(pads["Desk"].live_binds))
+        check("and still does not reach the Vader",
+              pads["Vader"].live_binds == {}, str(pads["Vader"].live_binds))
+    finally:
+        identity.SUPPORTED = real_supported
 
     # -- a driver that dies is restarted, but not for ever -----------------
     #

@@ -121,6 +121,42 @@ PRODUCT_NAMES = {
 # can name it, which is the difference between "wrong device" and "no idea".
 SUPPORTED = ("k5",)
 
+# What each model can do, keyed by DeviceCode. **Driving a pad and being able
+# to ask it for a particular thing are different questions**, and conflating
+# them is a trap with a specific shape: `registry.drivable_pads` filters on
+# SUPPORTED alone, and the daemon fans the tier-1 vibration bind out to every
+# pad it returns. Add a model to SUPPORTED that has no adaptive triggers and
+# the daemon starts sending it command 82 at every game launch -- a command
+# Flydigi's own software never sends to that pad. So the capability is asked
+# for by name rather than inferred from "we support it".
+#
+# Only entries for models in SUPPORTED are load-bearing today. The Vader 5 line
+# is here because the *shape* is what stops the trap, and because these facts
+# are known: the whole Vader family are XInput pads with extra buttons, a gyro
+# and adjustable sticks, and none of them has ever had adaptive triggers. What
+# they have instead is a vibration motor in each trigger, which is the block at
+# blob offset 154 that `MappingConfig.trigger_motor` already reads and writes.
+#
+#   adaptive_triggers -- force triggers: the six live effects, 81 and 82, and
+#                        the stored block. `IsSupportForceTrigger`.
+#   trigger_motors    -- a motor per trigger, blob offset 154.
+#                        `IsSupportTriggerVibration`.
+#   screen            -- the 160x80 panel and its upload.
+CAPABILITIES = {
+    "k5": {"adaptive_triggers": True, "trigger_motors": False, "screen": True},
+    "f5": {"adaptive_triggers": False, "trigger_motors": True, "screen": False},
+}
+
+
+def can(code, capability):
+    """Whether this model has `capability`. Unknown models can nothing.
+
+    Deliberately not "unknown means probably yes": a model nobody has listed is
+    a model nobody has checked, and the failure this exists to prevent is
+    sending a command to a pad that has no such hardware.
+    """
+    return bool(CAPABILITIES.get(code, {}).get(capability))
+
 
 def code_for(device_type):
     """Flydigi's `DeviceCode` for a `DeviceType`, or None if it is not in the table.

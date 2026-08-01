@@ -220,7 +220,7 @@ def list_pads(deep=False):
     return list_devices(KIND_PAD, deep=deep)
 
 
-def drivable_pads(deep=False):
+def drivable_pads(deep=False, capability=None):
     """Every attached pad this project is willing to write to.
 
     The fan-out list, for the one thing that acts on all of them at once: the
@@ -232,8 +232,20 @@ def drivable_pads(deep=False):
 
     `supported` is `identity.SUPPORTED`, so a Vader 5 on the same desk is
     enumerated, named, and left alone rather than written to.
+
+    **`capability` is the second question, and it is not the same one.** "This
+    project drives that pad" does not mean "that pad can do the thing you are
+    about to send". A caller fanning a command out to every pad has to say
+    which hardware the command needs, or the day a model without it joins
+    SUPPORTED every one of those callers starts writing to it -- silently,
+    since a pad acknowledges the shape of a command it cannot act on. Naming
+    the capability is what makes that a filter rather than a bug.
+    See `identity.CAPABILITIES`.
     """
-    return [e for e in list_pads(deep=deep) if e["supported"]]
+    found = [e for e in list_pads(deep=deep) if e["supported"]]
+    if capability is None:
+        return found
+    return [e for e in found if identity.can(e.get("code"), capability)]
 
 
 def list_docks(deep=True):

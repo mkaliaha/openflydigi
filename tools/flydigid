@@ -311,7 +311,10 @@ def apply_for(game, tier=None):
     if tier != "vibration":
         return False
     name = game.get("enGameName")
-    pads = registry.drivable_pads()
+    # Named, not implied: this writes command 82, which binds the pad's own
+    # rumble to its force triggers. A pad without them acknowledges it and does
+    # nothing, so the filter is the only thing that would ever say so.
+    pads = registry.drivable_pads(capability="adaptive_triggers")
     if not pads:
         log("could not apply: no controller this project drives is attached")
         return False
@@ -421,7 +424,9 @@ def clear_triggers():
     trigger effect for a game that has exited.
     """
     cleared = []
-    for entry in registry.drivable_pads():
+    # Same filter as applying: clearing a trigger effect is only meaningful on
+    # a pad that has trigger effects to clear.
+    for entry in registry.drivable_pads(capability="adaptive_triggers"):
         try:
             with registry.open_device(entry["path"], registry.KIND_PAD) as ctrl:
                 effects.clear_all(ctrl)
