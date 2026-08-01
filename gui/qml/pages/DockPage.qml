@@ -325,6 +325,8 @@ Kirigami.ScrollablePage {
                         stepSize: 1
                         value: App.dock.brightness
                         onMoved: App.dock.brightness = value
+
+                        SliderWheelGuard {}
                     }
 
                     Controls.Label {
@@ -361,6 +363,8 @@ Kirigami.ScrollablePage {
                         stepSize: 1
                         value: App.dock.period
                         onMoved: App.dock.period = value
+
+                        SliderWheelGuard {}
                     }
 
                     Controls.Label {

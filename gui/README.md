@@ -55,10 +55,20 @@ kirigami-addons delegate — it is private and no version aliases the property
 out. `tests/qml/tst_wheel.qml` sends real wheel events and asserts both halves:
 the model did not move and the page did.
 
-Sliders are not covered and still take the wheel: `org.kde.desktop`'s
-`Slider.qml` implements scrolling in its own `MouseArea` — to snap to tick
-marks, which `wheelEnabled` does not — so setting the property has no effect on
-one. `RangeSlider` already lets the wheel through.
+Sliders need a third mechanism, because `wheelEnabled` genuinely has no effect
+on one: `org.kde.desktop`'s `Slider.qml` does not use the property at all, it
+puts a `MouseArea` in its own background and calls `increase()`/`decrease()` and
+then `moved()` from there, to snap to tick marks. Every slider here writes
+`moved` into the model, so a notch over one moved a trigger's travel window or
+the dock's brightness. `components/SliderWheelGuard.qml` is declared inside the
+slider, where it sits above that background and is offered the event first;
+taking it means the page scroll is done by hand, since anything passed on would
+be picked up by the MouseArea being defeated. `RangeSlider` already lets the
+wheel through and needs nothing.
+
+The crop stage's zoom is the deliberate exception: scrolling a picture's zoom is
+what a person means by it, so that slider keeps the wheel and settles on a timer
+instead of on a release it never gets.
 
 ## Runtime
 

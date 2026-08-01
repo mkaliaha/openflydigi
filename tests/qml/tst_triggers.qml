@@ -105,10 +105,44 @@ TestCase {
         compare(side.paramValue("frequency"), 120, "frequency was lost");
     }
 
+    function test_a_knob_follows_the_model_after_being_dragged() {
+        // The other half of a working control, and the one the file's own
+        // comment promises: "the model is allowed to answer a move with a
+        // different number ... and the control has to follow it rather than
+        // fight it". Surviving the drag is not enough if the handle then stops
+        // listening -- and dragging a QQC2 Slider assigns its `value`, which is
+        // exactly what breaks a declarative binding to it.
+        //
+        // Asserted by moving the knob from underneath: the model is written to
+        // directly, with no pointer involved, and the control has to arrive at
+        // the same number.
+        pick("left", 2);                         // sniper
+        tryVerify(() => findChild(page, "param_start_leftSlider"), 2000);
+        waitForRendering(page);
+
+        let slider = findChild(page, "param_start_leftSlider");
+        const y = slider.height / 2;
+        mousePress(slider, 2, y, Qt.LeftButton);
+        for (let x = 4; x < slider.width - 2; x += Math.max(2, slider.width / 12))
+            mouseMove(slider, x, y, 1, Qt.LeftButton);
+        mouseRelease(slider, slider.width - 2, y, Qt.LeftButton);
+
+        const side = App.profile.triggers.left;
+        compare(slider.value, side.paramValue("start"),
+                "the handle and the model disagree right after a drag");
+
+        // Now move it from the model's side. Nothing touches the pointer.
+        side.setEffectParam("start", 12);
+        tryCompare(App.profile.triggers.left, "effect", 2);
+        compare(side.paramValue("start"), 12, "the model did not take the write");
+        tryCompare(slider, "value", 12, 2000,
+                   "the knob stopped following the model after it was dragged");
+    }
+
     function test_a_knob_survives_being_dragged() {
         // The case the two above cannot make. They call `moved()` on the
-        // control, which reports a move that never involved the pointer -- and
-        // for months that hid the fact that these knobs could not be dragged at
+        // control, which reports a move that never involved the pointer -- so
+        // they passed throughout while these knobs could not be dragged at
         // all. `effectParams` was a list rebuilt on every read and notified by
         // the signal a knob move emits, so the first move replaced the
         // Repeater's model, destroyed the delegate under the cursor, and took

@@ -49,6 +49,14 @@ TestCase {
     // that fits in the window has nothing to scroll, and "the page moved" is
     // half of what these cases are for.
     Component {
+        id: triggersComponent
+        TriggersPage {
+            width: 600
+            height: 220
+        }
+    }
+
+    Component {
         id: gyroComponent
         GyroPage {
             width: 600
@@ -160,6 +168,40 @@ TestCase {
                "scrolling over the row turned the gyro on");
         compare(combo.currentIndex, before, "the picker moved under the wheel");
         verify(!App.profile.dirty, "scrolling is not an edit");
+        tryVerify(() => flickable.contentY > from, 2000,
+                  "the wheel never reached the page");
+    }
+
+    // The knobs, which were left out of the first pass on the strength of
+    // `wheelEnabled` having no effect on a Slider under this style. It does
+    // not -- and the conclusion drawn from that, that nothing could be done,
+    // was wrong: the value moves, the profile changes, and the page stays put.
+    function test_a_scroll_over_a_trigger_knob_moves_the_page_not_the_effect() {
+        let page = createTemporaryObject(triggersComponent, suite);
+        verify(page, "the triggers page did not load");
+        waitForRendering(page);
+
+        let flickable = page.flickable;
+        verify(flickable, "the triggers page has no flickable");
+        verify(flickable.contentHeight > flickable.height,
+               "the triggers page is not long enough to scroll");
+
+        let slider = findChild(page, "strokeStart_leftSlider");
+        verify(slider, "no travel-start knob on the triggers page");
+        const before = App.profile.triggers.left.strokeStart;
+        // Downwards, so the value has somewhere to go: the knob starts at the
+        // bottom of its range and scrolling it further would clamp and pass
+        // whatever the style does.
+        App.profile.triggers.left.strokeStart = 40;
+        App.profile.resetAll();
+        tryCompare(slider, "value", 40, 2000);
+
+        let from = flickable.contentY;
+        scrollOver(slider, flickable, -120);
+
+        compare(App.profile.triggers.left.strokeStart, 40,
+                "scrolling over the knob moved the trigger's travel window");
+        compare(slider.value, 40, "the knob moved under the wheel");
         tryVerify(() => flickable.contentY > from, 2000,
                   "the wheel never reached the page");
     }

@@ -67,6 +67,11 @@ FormCard.AbstractFormDelegate {
             snapMode: Controls.Slider.SnapAlways
             Layout.fillWidth: true
             onMoved: root.moved(value)
+
+            // A scroll over a knob edited the profile, and the property that
+            // would normally stop it does nothing to a slider -- see
+            // SliderWheelGuard.
+            SliderWheelGuard {}
         }
 
         Controls.Label {
