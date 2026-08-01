@@ -493,8 +493,10 @@ the test files are re-export shims and the tests import them by the old names.
     node that never sends a gamepad event.
   * **A key bound to "keyboard" is not inert on the pad — it is a keystroke with no key.** Measured
     with `tools/keyboard-target-probe`: writing 254 into A's target byte stops A arriving as
-    `BTN_SOUTH` anywhere, so the firmware recognises the sentinel and suppresses its own gamepad
-    output for it. It types nothing, and could not: the key code is discarded by Flydigi's own
+    `BTN_SOUTH` anywhere, while **200 in the same byte leaves it reporting normally** — so this is
+    not a firmware dropping targets it cannot resolve, it recognises that one value. (And an
+    unrecognised target being identity is itself measured there, which is what `mapping()` had
+    always assumed.) It types nothing, and could not: the key code is discarded by Flydigi's own
     serialiser on the branch that writes 254, and candidate codes poked into the entry's two spare
     bytes — HID usage, Windows virtual key, the pad's own key id, either position — produced no
     keystroke. On Windows a pair of kernel filter drivers supplies the other half. **What the pad's

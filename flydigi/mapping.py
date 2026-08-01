@@ -1270,9 +1270,12 @@ class MappingConfig:
         pad.** This used to say "a bare sentinel", which was half right and
         misleading about the half that matters. Measured with
         `tools/keyboard-target-probe`: with A's target byte set to 254 the pad
-        stops reporting `BTN_SOUTH` at all, so the firmware recognises the
-        sentinel and suppresses its own gamepad output for it. What it does not
-        do is type -- there is no code to type, in the blob or anywhere else,
+        stops reporting `BTN_SOUTH` at all, and with the same byte set to 200 --
+        just as undefined -- it goes on reporting normally. So this is not a
+        firmware discarding targets it cannot resolve; it recognises the keyboard
+        sentinel in particular and suppresses its own gamepad output for that one
+        value. What it does not do is type -- there is no code to type, in the
+        blob or anywhere else,
         and `MappingConfigParser` zeroes both companion bytes on the very branch
         that writes 254. That is the whole feature on Windows: the pad stops
         sending the button and Flydigi's own kernel filter driver puts a
@@ -1332,7 +1335,12 @@ class MappingConfig:
             return KEY_NAMES.get(target, target), mode, frequency
         if target == TARGET_KEYBOARD:
             return "keyboard", TURBO_OFF, 0
-        # Anything above the key range means "unchanged", stored as 255.
+        # Anything above the key range means "unchanged", stored as 255 -- and
+        # that is the firmware's rule and not merely this reader's, which
+        # nothing had checked. Measured with `tools/keyboard-target-probe`:
+        # A with a target byte of 200, undefined in every table, goes on
+        # arriving as `BTN_SOUTH`. So an unrecognised target is identity on the
+        # pad exactly as it is decoded here.
         if target > TARGET_MACRO:
             target = key_id
         return KEY_NAMES.get(target, target), TURBO_OFF, 0

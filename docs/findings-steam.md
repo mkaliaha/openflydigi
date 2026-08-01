@@ -232,6 +232,14 @@ never asks for; nothing here has found a way to ask.
   * Set A's key-table target byte to 254 and A stops arriving as `BTN_SOUTH` — on the gamepad node,
     the keyboard node and the mouse node alike. Suppressing its own gamepad output is a decision only
     the firmware can make, so the sentinel is understood rather than ignored.
+  * **And 254 in particular, not "anything I do not recognise".** The control that separates those
+    two was run in the same session: A with a target byte of **200** — undefined in every table,
+    neither a key id nor a sentinel — goes on reporting `BTN_SOUTH` normally. A firmware that dropped
+    unresolvable targets would have silenced that one too. Without this window the paragraph above
+    would have been a sentence about invalid targets and nothing else.
+  * A second thing falls out of the same window, which nothing had checked: **an unrecognised target
+    is identity on the pad**, which is exactly what `mapping()` assumes when it decodes
+    (`target > TARGET_MACRO` → the key's own id). The reader's rule is the firmware's rule.
   * Nothing is typed, and nothing was ever going to be: a key-table entry is three bytes and
     `MappingConfigParser.cs:619-635` zeroes both companion bytes on the same branch that writes 254,
     with the key code (`MapTypeKey.MapKeyboardKeyId`) in scope and discarded. Candidate codes written
