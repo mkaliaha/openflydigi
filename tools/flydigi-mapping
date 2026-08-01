@@ -211,6 +211,15 @@ def main():
     p.add_argument("key")
     p.add_argument("--save", action="store_true")
 
+    p = sub.add_parser("reset", help="restore a profile to factory, name included")
+    p.add_argument("cfg", type=int)
+    p.add_argument("--yes", action="store_true",
+                   help="do not ask; the slot is overwritten in flash")
+
+    p = sub.add_parser("to-switch",
+                       help="copy a profile into the matching Switch slot")
+    p.add_argument("cfg", type=int)
+
     p = sub.add_parser("rename", help="rename a profile")
     p.add_argument("cfg", type=int)
     p.add_argument("title")
@@ -300,6 +309,47 @@ def main():
             in effects.engage_stored(ctrl, mapping.read_config(ctrl, args.cfg))
             if ok)
         print(f"engaged the stored trigger effect on: {engaged or 'neither trigger'}")
+        return
+
+    if args.cmd == "reset":
+        # Asked about rather than just done, and the prompt names the casualty
+        # nobody expects: the title lives in the blob, so factory settings come
+        # back with the factory *name*, which on this pad is Chinese. There is
+        # no undo -- 175 is a flash write.
+        if not args.yes:
+            print(f"Profile {args.cfg} goes back to factory: every mapping, the "
+                  f"sticks, the triggers, the macros -- and its name.")
+            if input("Type yes to continue: ").strip().lower() != "yes":
+                print("nothing sent")
+                return
+        if mapping.reset_config(ctrl, args.cfg):
+            print(f"profile {args.cfg} restored to factory")
+        else:
+            print("no reply -- the pad may be asleep")
+        return
+
+    if args.cmd == "to-switch":
+        target = mapping.switch_cfg_id(args.cfg)
+        # Reading is what makes this profile the running one, which 171 needs:
+        # the command names the destination and copies whatever is live.
+        config = read(ctrl, args.cfg)
+        stripped = config.normalise_for_switch()
+        for note in stripped:
+            print(f"dropped for the Switch: {note}")
+        if stripped:
+            # The normalised copy has to actually be running before it can be
+            # committed, so it goes back to the source slot first -- to working
+            # memory only, exactly as Space Station does it. No 166 here, so
+            # the source profile's saved copy is untouched.
+            sent = mapping.write_config(ctrl, args.cfg, config, old=None)
+            print(f"wrote {sent} packet(s) back to profile {args.cfg} "
+                  f"(working memory only, not saved)")
+        version = mapping.next_data_version(config.data_version)
+        if mapping.save_switch_config(ctrl, target, version):
+            print(f"profile {args.cfg} copied into Switch slot {target} "
+                  f"(tag {version})")
+        else:
+            print("no reply -- the pad may be asleep")
         return
 
     config = read(ctrl, args.cfg)

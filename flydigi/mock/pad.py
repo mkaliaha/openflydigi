@@ -52,6 +52,15 @@ UNCHECKSUMMED = frozenset((device.CMD_SET_FORCE_TRIGGER,
 # because the payload slicing is the checksummed kind -- see `send`.
 UNVERIFIED = frozenset((identity.CMD_WRITE_NICKNAME,))
 
+# Command 171 carries three payload bytes under a length byte of 4: the version,
+# then the target slot at offset 7 -- where command 166, which has the same
+# length byte and two payload bytes, puts its checksum. 171's checksum lands at
+# 8 instead, computed over `Crc(3, 3 + length)`, a range that stops at 6 and so
+# never covers the slot id. Flydigi's own builder writes it that way and the pad
+# answers it, so a fake that insisted on the arithmetic would refuse the one
+# frame Space Station is known to get an ACK for.
+SLOT_PAST_THE_CHECKSUM = frozenset((mapping.CMD_SAVE_SWITCH,))
+
 
 def blank_blob(title="Profile"):
     """A config with every key at its default, laid out like the real thing."""
@@ -187,6 +196,15 @@ class FakePad:
         # the answer to a question the app asks. A fake that swallowed the
         # payload could not tell a correct save from that one.
         self.saved_version = None
+        # The Switch bank: four more slots at 4..7 that the pad plays in Switch
+        # mode. Command 171 commits the *running* config into one of them, so
+        # what is recorded here is a copy plus the tag it was saved under, which
+        # is the pair a test has to check -- writing the blob and forgetting the
+        # tag is exactly the bug that made saves invisible on the XInput side.
+        self.switch_saved = {}
+        # Which slots command 175 has restored, oldest first. A list rather than
+        # a set because resetting the same slot twice is a thing worth seeing.
+        self.reset_slots = []
         self.packets_received = 0
         self.bad_checksums = 0
         self.claims = 0
@@ -296,7 +314,14 @@ class FakePad:
         # takes them anyway. Checking every command here counted those as
         # corrupt and answered nothing, which reads exactly like a pad that
         # refused the effect.
-        if cmd not in UNCHECKSUMMED and cmd not in UNVERIFIED:
+        if cmd in SLOT_PAST_THE_CHECKSUM:
+            # See SLOT_PAST_THE_CHECKSUM: the checksum is a byte further along
+            # than the length says, and covers a range that stops short of the
+            # slot id sitting where it would otherwise have gone.
+            if buf[4 + length] != device.checksum(buf, 3, 3 + length):
+                self.bad_checksums += 1
+                return []
+        elif cmd not in UNCHECKSUMMED and cmd not in UNVERIFIED:
             if buf[3 + length] != device.checksum(buf, 3, 3 + length):
                 self.bad_checksums += 1
                 return []              # the real pad simply does not answer
@@ -316,6 +341,9 @@ class FakePad:
         # nicknames at all.
         if cmd in UNVERIFIED:
             payload = buf[5 : 4 + length]
+        # And a fourth, also for one command -- see SLOT_PAST_THE_CHECKSUM.
+        if cmd in SLOT_PAST_THE_CHECKSUM:
+            payload = buf[5 : 4 + length]
         handler = {
             device.CMD_GET_INFO: self._info,
             identity.CMD_READ_NICKNAME: self._read_nickname,
@@ -330,6 +358,8 @@ class FakePad:
             mapping.CMD_STATUS: self._status,
             mapping.CMD_APPLY: self._apply,
             mapping.CMD_SAVE: self._save,
+            mapping.CMD_SAVE_SWITCH: self._save_switch,
+            mapping.CMD_RESET: self._reset,
             mapping.CMD_WRITE_START: self._write_start,
             mapping.CMD_WRITE_PACK: self._write_pack,
             screen.CMD_UPLOAD_START: self._upload_start,
@@ -578,6 +608,34 @@ class FakePad:
         self.saved = {k: bytes(v) for k, v in self.blobs.items()}
         self.saved_version = payload[0] | (payload[1] << 8) if len(payload) > 1 else 0
         return [self._ack(mapping.CMD_SAVE)]
+
+    def _reset(self, payload):
+        """Command 175: put one slot back to factory, name included.
+
+        The name matters and is the whole reason this is modelled rather than
+        stubbed: the title lives in the blob, so a reset restores it along with
+        everything else, and a UI that says "restore defaults" without saying
+        the name goes with them is lying to whoever presses it.
+        """
+        cfg_id = payload[0]
+        if cfg_id not in self.blobs:
+            return []
+        self.blobs[cfg_id] = blank_blob(f"Profile {cfg_id + 1}")
+        self.saved[cfg_id] = bytes(self.blobs[cfg_id])
+        self.reset_slots.append(cfg_id)
+        return [self._ack(mapping.CMD_RESET)]
+
+    def _save_switch(self, payload):
+        """Command 171: commit the *running* config into a Switch slot.
+
+        Not the slot named in the packet -- that is the destination. Which is
+        the difference from 166, and the reason a caller has to have the profile
+        it means open before calling this.
+        """
+        version = payload[0] | (payload[1] << 8)
+        cfg_id = payload[2]
+        self.switch_saved[cfg_id] = (bytes(self.blobs[self.active]), version)
+        return [self._ack(mapping.CMD_SAVE_SWITCH)]
 
     def _write_start(self, payload):
         cfg_id, start, count, _size = payload[0], payload[1], payload[2], payload[3]

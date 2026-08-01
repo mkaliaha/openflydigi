@@ -46,7 +46,7 @@ writing a config back cannot disturb settings it does not understand.
 import random
 import struct
 
-from . import blobs
+from . import blobs, device
 from .blobs import PKG_SIZE, ProtocolError, build   # re-exported for callers
 
 CMD_STATUS = 161
@@ -55,6 +55,17 @@ CMD_READ = 163
 CMD_WRITE_START = 164
 CMD_WRITE_PACK = 165
 CMD_SAVE = 166
+CMD_SAVE_SWITCH = 171
+CMD_RESET = 175
+
+# The pad keeps **two** banks of four profiles, not four profiles. 0..3 are the
+# XInput ones every other command in this module addresses; 4..7 are the
+# Nintendo Switch ones, which the pad plays when it is in Switch mode and which
+# nothing here used to touch. `ApplySwitchConfigAsync` in Flydigi's service is
+# the tell -- it refuses any id outside `> 3 && < 8` -- and their `SaveConfig`
+# accepts a live slot anywhere in 0..7.
+SLOTS = 4
+SWITCH_BANK = 4
 
 OFF_PROTO_VERSION = 0
 OFF_PACKAGE_COUNT = 2
@@ -599,6 +610,82 @@ def save_config(ctrl, version=0, wait=2.0):
     return False
 
 
+def switch_cfg_id(cfg_id):
+    """The Switch-bank id for one of the four XInput slots."""
+    if not 0 <= cfg_id < SLOTS:
+        raise ValueError(f"no profile slot {cfg_id}; there are {SLOTS}")
+    return cfg_id + SWITCH_BANK
+
+
+def reset_config(ctrl, cfg_id, wait=10.0):
+    """Restore one slot to the pad's factory profile. Slow -- a flash write.
+
+    Command 175, `ResetMappingConfigByCfgIdCommandFactory`, which Flydigi give a
+    10 second timeout where almost everything else gets 500 ms. This is the
+    stock app's "Restore default", and it resets the *whole* slot -- the key
+    table, the sticks, the trigger blocks, the macro page and **the profile's
+    name**, since the name is a field of the blob at OFF_TITLE like any other.
+    Observed through Space Station on the pad here: a slot renamed out of its
+    factory name came back carrying that name again.
+
+    Destructive and not undoable. Anything offering it has to say that the name
+    goes too, because "restore defaults" does not describe losing it.
+    """
+    for body in blobs.replies(ctrl, build(CMD_RESET, bytes([cfg_id])), wait,
+                              blobs.answers(CMD_RESET)):
+        if body[2] == CMD_RESET:
+            return True
+    return False
+
+
+def _build_save_switch(cfg_id, version):
+    """171's frame, which Flydigi's own builder writes inconsistently.
+
+    The length byte says 4, exactly as command 166's does -- and 166 carries two
+    payload bytes with its checksum at 7. 171 carries *three*: the version, then
+    the target slot at offset 7, where 166 puts the checksum. The checksum then
+    lands at 8, over `Crc(3, 3 + length)` -- a range that stops at 6 and so
+    excludes the slot id it is supposed to protect.
+
+    Reproduced literally rather than corrected. The pad answers the bytes it is
+    sent and not the arithmetic behind them, and a frame this module built
+    "properly" -- length 5, checksum covering the slot -- would be a different
+    packet from the one Space Station is known to get an ACK for.
+    """
+    buf = device.build(CMD_SAVE_SWITCH)
+    buf[4] = 4
+    buf[5] = version & 0xFF
+    buf[6] = (version >> 8) & 0xFF
+    buf[7] = cfg_id
+    buf[8] = device.checksum(buf, 3, 7)
+    return buf
+
+
+def save_switch_config(ctrl, cfg_id, version, wait=10.0):
+    """Commit the running config into a Switch-bank slot. Slow -- a flash write.
+
+    Command 171, `SaveCurrentSwitchMappingConfigCommandFactory`. It is command
+    166 with a target: 166 commits whichever profile the pad is running into the
+    slot it came from, while 171 commits it into the slot you name. Flydigi only
+    ever aim it at the Switch bank -- `ApplySwitchConfigAsync` refuses anything
+    outside 4..7 -- and `cfg_id` here is checked the same way, because what the
+    firmware does with 171 aimed at an XInput slot is unmeasured and the failure
+    mode would be a profile silently overwritten.
+
+    `version` is the slot's change tag, as for `save_config`; roll a fresh one
+    with `next_data_version`.
+    """
+    if not SWITCH_BANK <= cfg_id < SWITCH_BANK + SLOTS:
+        raise ValueError(
+            f"cfg_id {cfg_id} is not a Switch slot; use switch_cfg_id() to get "
+            f"one of {SWITCH_BANK}..{SWITCH_BANK + SLOTS - 1}")
+    for body in blobs.replies(ctrl, _build_save_switch(cfg_id, version), wait,
+                              blobs.answers(CMD_SAVE_SWITCH)):
+        if body[2] == CMD_SAVE_SWITCH:
+            return True
+    return False
+
+
 def write_config(ctrl, cfg_id, config, old=None, wait=0.5):
     """Write a config to the pad, sending only the packets that changed.
 
@@ -644,6 +731,40 @@ class MappingConfig:
         # Kept in step with what command 166 was told, so a caller's own copy
         # agrees with what `read_status` will report for the slot afterwards.
         struct.pack_into("<H", self.blob, OFF_DATA_VERSION, int(value) & 0xFFFF)
+
+    def normalise_for_switch(self):
+        """Strip what a Switch cannot run, and say what was stripped.
+
+        Copied from what Flydigi's own `SaveSwitchConfig` does to a config
+        before it writes one: every key bound to a keyboard key goes back to
+        sending itself, and both sticks are forced to act as sticks. Neither
+        binding means anything to a Switch -- the keyboard half is host-side
+        injection this project does not do at all (`TARGET_KEYBOARD` is a bare
+        sentinel with no key code anywhere in the blob), and a stick set to
+        something that is not a stick carries `CENTER_NOT_A_STICK` where its
+        dead zone belongs.
+
+        So this matters for profiles that came from Space Station rather than
+        for ones made here, which is exactly why it is not optional: the slot
+        being copied is whatever the pad is running.
+
+        Returns the list of things changed, so a caller can tell the user what
+        their Switch profile will not have. Edits in place.
+        """
+        stripped = []
+        for name in KEY_NAMES.values():
+            try:
+                offset, key_id = self._entry(name)
+            except KeyError:
+                continue
+            if self.blob[offset] == TARGET_KEYBOARD:
+                self.set_mapping(name, None)
+                stripped.append(f"{name} was bound to a keyboard key")
+        for side in ("left", "right"):
+            if not self.stick(side)["is_stick"]:
+                self.set_stick(side, center=0)
+                stripped.append(f"the {side} stick was not acting as a stick")
+        return stripped
 
     @property
     def title(self):

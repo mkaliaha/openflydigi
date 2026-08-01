@@ -1212,6 +1212,121 @@ def test_lighting_effects_write_frames():
           str(config.loop))
 
 
+def test_resetting_a_slot_takes_its_name_with_it():
+    """175 restores the whole slot, and the title is part of the slot.
+
+    Worth asserting rather than assuming, because it is the half a UI has to
+    warn about: "restore defaults" reads as settings, and the name goes too.
+    """
+    pad = FakePad()
+    config = mapping.read_config(pad, 1)
+    config.title = "Racing"
+    mapping.write_config(pad, 1, config, old=None)
+    check("the rename landed first", mapping.read_config(pad, 1).title == "Racing")
+
+    check("reset is acknowledged", mapping.reset_config(pad, 1) is True)
+    check("the slot was reset", pad.reset_slots == [1], str(pad.reset_slots))
+    check("and the name went back to factory",
+          mapping.read_config(pad, 1).title == "Profile 2",
+          mapping.read_config(pad, 1).title)
+
+
+def test_a_switch_save_is_aimed_at_the_second_bank():
+    pad = FakePad()
+    check("the four XInput slots map onto 4..7",
+          [mapping.switch_cfg_id(i) for i in range(4)] == [4, 5, 6, 7])
+
+    for bad in (-1, 4):
+        try:
+            mapping.switch_cfg_id(bad)
+        except ValueError:
+            pass
+        else:
+            check(f"switch_cfg_id({bad}) should be refused", False)
+
+    # An XInput slot is refused outright rather than sent: what the firmware
+    # does with 171 aimed at 0..3 is unmeasured, and the failure mode would be
+    # a profile quietly overwritten.
+    try:
+        mapping.save_switch_config(pad, 2, 1234)
+    except ValueError:
+        pass
+    else:
+        check("171 aimed at an XInput slot should be refused", False)
+
+
+def test_a_switch_save_commits_the_running_profile_under_a_new_tag():
+    """171 is 166 with a destination -- the *source* is whatever is running."""
+    pad = FakePad()
+    config = mapping.read_config(pad, 2)          # reading switches the pad
+    config.title = "Switch"
+    mapping.write_config(pad, 2, config, old=None)
+
+    version = mapping.next_data_version(config.data_version)
+    check("the switch save is acknowledged",
+          mapping.save_switch_config(pad, mapping.switch_cfg_id(2), version)
+          is True)
+
+    saved = pad.switch_saved.get(6)
+    check("it landed in the matching Switch slot", saved is not None,
+          str(sorted(pad.switch_saved)))
+    blob, tag = saved
+    check("it carries the running profile, not the destination's",
+          mapping.MappingConfig(blob, 6).title == "Switch",
+          mapping.MappingConfig(blob, 6).title)
+    check("and the tag it was told to use", tag == version,
+          f"{tag} vs {version}")
+
+
+def test_the_switch_save_frame_is_flydigis_own_odd_one():
+    """Byte-exact, because the arithmetic and the bytes disagree.
+
+    The length byte says 4 -- as 166's does, carrying two payload bytes with
+    its checksum at 7 -- while 171 puts the target slot at 7 and its checksum
+    at 8, over a range that stops at 6 and never covers the slot. Building it
+    "properly" would be a different packet from the one the pad answers.
+    """
+    buf = mapping._build_save_switch(5, 0x5321)
+    check("command id", buf[3] == mapping.CMD_SAVE_SWITCH, str(buf[3]))
+    check("the length byte still says 4", buf[4] == 4, str(buf[4]))
+    check("version little-endian at 5", (buf[5], buf[6]) == (0x21, 0x53),
+          f"{buf[5]:#04x} {buf[6]:#04x}")
+    check("the slot sits where 166 keeps its checksum", buf[7] == 5, str(buf[7]))
+    check("the checksum is one further along, and excludes the slot",
+          buf[8] == sum(buf[3:7]) & 0xFF, f"{buf[8]} vs {sum(buf[3:7]) & 0xFF}")
+
+
+def test_a_switch_profile_drops_what_a_switch_cannot_run():
+    """Flydigi normalise before writing a Switch slot; so do we.
+
+    Nothing made in this project can produce either of these -- keyboard
+    binding is host-side and unimplemented here -- but the config being copied
+    is whatever the pad is running, which may well have come from theirs.
+    """
+    pad = FakePad()
+    config = mapping.read_config(pad, 0)
+    offset, _key_id = config._entry("a")
+    config.blob[offset] = mapping.TARGET_KEYBOARD
+    # Written straight into the blob: the setter refuses anything above
+    # BIPOLAR_MAX, and the sentinel is deliberately outside that range. Only
+    # Flydigi's app puts it there, which is the point of the fixture.
+    left = mapping.OFF_JOYSTICK_CURVE + mapping.CURVE_ENTRY * 0
+    config.blob[left + 1] = mapping.CENTER_NOT_A_STICK
+    check("the fixture really is unrunnable on a Switch",
+          config.mapping("a")[0] == "keyboard" and not config.stick("left")["is_stick"])
+
+    stripped = mapping.MappingConfig(config.blob, 0)
+    notes = stripped.normalise_for_switch()
+
+    check("the keyboard binding went back to sending its own key",
+          stripped.mapping("a")[0] == "a", str(stripped.mapping("a")))
+    check("the stick acts as a stick again",
+          stripped.stick("left")["is_stick"])
+    check("and both were reported to the caller", len(notes) == 2, str(notes))
+    check("a clean profile needs no stripping",
+          mapping.read_config(pad, 0).normalise_for_switch() == [])
+
+
 def test_effects_by_id_and_colours():
     config = lighting.read_config(FakePad())
     for effect in (lighting.EFFECT_OFF, lighting.EFFECT_STREAMING,
@@ -1521,6 +1636,11 @@ def main():
                  test_a_models_keys_are_its_own,
                  test_a_save_carries_the_version_it_is_given,
                  test_nothing_saves_a_profile_without_its_version,
+                 test_resetting_a_slot_takes_its_name_with_it,
+                 test_a_switch_save_is_aimed_at_the_second_bank,
+                 test_a_switch_save_commits_the_running_profile_under_a_new_tag,
+                 test_the_switch_save_frame_is_flydigis_own_odd_one,
+                 test_a_switch_profile_drops_what_a_switch_cannot_run,
                  test_effects_by_id_and_colours, test_suggested_colours_differ):
         test()
     total = len(PASSED) + len(FAILED)
