@@ -72,10 +72,19 @@ start as soon as any process matches, and vibration starts nothing. `comm` count
 since native Linux games have no PE to look for.
 
 The daemon clears the triggers (`effects.clear_all`) when the game exits, when a driver exits on its
-own, and on Ctrl-C. A driver that exits by itself is reported once, with a pointer to running it by
-hand, and not restarted: a config whose offsets a game patch broke would otherwise fail identically
-every second. Drivers get SIGINT and are killed only after 5 s, because they put the triggers back
-on SIGINT.
+own, and on Ctrl-C. Drivers get SIGINT and are killed only after 5 s, because they put the triggers
+back on SIGINT.
+
+**A driver that exits by itself is restarted, up to `DRIVER_RESTARTS` times per game.** This
+document previously said it was never restarted and the log line said so too, and neither was true:
+nothing recorded the death, so the next poll found the same game running with auto on and started
+the driver again — every second, for as long as the game ran. The budget is the honest version of
+what both meant to say. It has to be a budget rather than a refusal because the commonest reason a
+driver dies is the pad going to sleep mid-game, which recovers by itself, while the case the refusal
+was written for — a config whose offsets a game patch broke — fails identically every time.
+`DRIVER_SETTLED_SECONDS` separates them without needing to know why it exited: a driver that ran a
+minute before stopping was working, so its budget resets, and a config that cannot work spends the
+whole budget in three polls. Quitting the game returns the budget, so a later launch tries again.
 
 **The daemon runs on the host.** It has to see the host's process table, which a Flatpak build never
 will. **And the memory route cannot run in a container at all**: from inside the distrobox,

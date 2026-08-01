@@ -150,6 +150,35 @@ def run():
     check("the vibration route starts no driver",
           daemon.driver_argv(game, "vibration", "uid:abc123") is None)
 
+    # -- a driver that dies is restarted, but not for ever -----------------
+    #
+    # The loop used to log "not restarting it" and then restart it on the next
+    # poll, every poll, because nothing recorded the death. Both halves are
+    # asserted here: that it does try again, and that it stops.
+    deaths = {}
+    spent, again = daemon.spend_restart(deaths, "g", game, ran_for=0.0)
+    check("a driver that dies at once is started again", again and spent == 1)
+    check("and is not refused yet", not daemon.refused(deaths, "g"))
+
+    for _ in range(daemon.DRIVER_RESTARTS - 1):
+        _spent, again = daemon.spend_restart(deaths, "g", game, ran_for=0.0)
+    check("the whole budget is spendable", again)
+    spent, again = daemon.spend_restart(deaths, "g", game, ran_for=0.0)
+    check("the one past it is not", not again, f"spent={spent}")
+    check("and the game is refused thereafter", daemon.refused(deaths, "g"))
+
+    # The pad sleeping mid-game looks exactly like a driver dying, and it comes
+    # back by itself -- so a driver that had been running is not spending the
+    # same budget as a config that cannot work.
+    spent, again = daemon.spend_restart(
+        deaths, "g", game, ran_for=daemon.DRIVER_SETTLED_SECONDS)
+    check("a driver that settled first is forgiven", again and spent == 1,
+          f"spent={spent}")
+    check("and is startable again", not daemon.refused(deaths, "g"))
+
+    check("a game nobody has lost a driver for is never refused",
+          not daemon.refused({}, "unheard-of"))
+
     # -- and the choice comes from the file the app writes ------------------
     settings = prefs.Prefs(os.path.join(tempfile.mkdtemp(), "games.json"))
     check("nothing is chosen to begin with", settings.primary_pad() is None)

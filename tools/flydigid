@@ -157,8 +157,8 @@ class Scanner:
         mapped the executable, because one route cares: `flydigi-monitor` looks
         the game up itself and gives up if the PE is not there yet. Started
         while only wrappers are up, it exits immediately -- and a driver that
-        exits on its own is deliberately not restarted, so auto mode would give
-        up on a game that was merely still loading.
+        exits on its own only gets DRIVER_RESTARTS attempts, so auto mode would
+        spend them all on a game that was merely still loading.
         """
         if not self.matches:
             return None, None
@@ -189,6 +189,47 @@ class Scanner:
 # Routes whose driver looks the game up itself, so starting it before the game
 # has really launched makes it exit rather than wait.
 NEEDS_GAME_PROCESS = ("monitor",)
+
+# How often a driver may be restarted for one game before the daemon stops
+# trying, and how long it has to survive for that count to be forgiven.
+#
+# **Neither extreme is right, which is why there is a budget at all.** Never
+# restarting -- what the log line here used to claim, while the loop restarted
+# anyway -- leaves the route dead for the rest of the session the first time
+# anything disturbs it, and the thing that disturbs it most is the pad going to
+# sleep, which is ordinary and recovers by itself. Restarting forever respawns
+# a driver whose config a game patch broke once every poll for as long as the
+# game runs.
+#
+# `SETTLED` is what tells those apart without knowing why the driver exited: a
+# driver that ran for a minute and then stopped was working, so its failure is
+# a fresh one and the budget resets. A config that cannot work fails in the
+# same second every time and spends the budget in three polls.
+DRIVER_RESTARTS = 3
+DRIVER_SETTLED_SECONDS = 60.0
+
+
+def spend_restart(deaths, key, game, ran_for):
+    """Account for one driver death. Returns (attempts spent, start it again?).
+
+    `deaths` maps a game key to `(attempts, game)` and is updated in place. The
+    game is kept so the caller can drop the entry once that game stops running,
+    which is what gives a later launch a fresh budget.
+
+    A separate function because it is the only judgement in the loop, and a
+    policy nobody can run is a policy nobody can check.
+    """
+    spent, _ = deaths.get(key, (0, game))
+    if ran_for >= DRIVER_SETTLED_SECONDS:
+        spent = 0
+    spent += 1
+    deaths[key] = (spent, game)
+    return spent, spent <= DRIVER_RESTARTS
+
+
+def refused(deaths, key):
+    """Whether this game's driver has spent its restart budget."""
+    return deaths.get(key, (0, None))[0] > DRIVER_RESTARTS
 
 TOOLS = os.path.join(ROOT, "tools")
 MONITOR_CONFIGS = os.path.join(ROOT, "configs", "monitor")
@@ -305,6 +346,11 @@ class Driver:
     def __init__(self):
         self.proc = None
         self.name = ""
+        self.started_at = 0.0
+        # How long the last driver to exit had been running. What separates a
+        # config that cannot work -- which fails in the same second every time
+        # -- from a session that was fine until something disturbed it.
+        self.last_run_seconds = 0.0
 
     def start(self, game, argv):
         self.stop()
@@ -315,6 +361,7 @@ class Driver:
             log(f"{self.name}: could not start {os.path.basename(argv[1])}: {exc}")
             self.proc = None
             return False
+        self.started_at = time.monotonic()
         log(f"{self.name}: started {os.path.basename(argv[1])} (pid {self.proc.pid})")
         return True
 
@@ -336,7 +383,9 @@ class Driver:
         """True once, when the driver has exited on its own."""
         if self.proc is not None and self.proc.poll() is not None:
             code = self.proc.returncode
-            log(f"{self.name}: driver exited on its own (status {code})")
+            self.last_run_seconds = time.monotonic() - self.started_at
+            log(f"{self.name}: driver exited on its own (status {code}) "
+                f"after {self.last_run_seconds:.0f}s")
             self.proc = None
             return True
         return False
@@ -420,6 +469,11 @@ def main():
     ignored = set()
     unsupported = set()
     waiting = set()
+    # key -> (restarts spent, the game) for drivers that exited on their own.
+    # The game is kept so the entry can be dropped once it stops running, which
+    # is what gives a relaunch a fresh budget instead of a verdict inherited
+    # from the last session.
+    deaths = {}
 
     while True:
         # The app edits this file while we run, so a toggle takes effect on the
@@ -430,10 +484,18 @@ def main():
             ignored.clear()
             unsupported.clear()
             waiting.clear()
+            deaths.clear()
             scanner.reset()
             log("preferences reloaded")
 
         scanner.refresh()
+
+        # A game that has stopped running gets its restart budget back. Without
+        # this a driver that spent the budget once would stay refused until the
+        # daemon or the preferences file was touched, across every later launch
+        # of that game.
+        for gone in [k for k, (_, g) in deaths.items() if not scanner.is_running(g)]:
+            del deaths[gone]
 
         if active is not None and not scanner.is_running(active):
             log(f"{active.get('enGameName')} exited")
@@ -455,6 +517,10 @@ def main():
                 if key not in ignored:
                     ignored.add(key)
                     log(f"{game.get('enGameName')}: auto mode off, leaving it alone")
+            elif refused(deaths, key):
+                # Given up on above, and said so there. Silent here, or it
+                # would repeat that line every poll until the game exits.
+                pass
             else:
                 route = settings.route(game)
                 argv = driver_argv(game, route, primary())
@@ -489,11 +555,23 @@ def main():
         else:
             route = settings.route(active)
             if driver.died():
-                # The driver is gone but the game is not: do not restart it in
-                # a loop, since a config whose offsets a patch broke would fail
-                # the same way every second.
-                log(f"{active.get('enGameName')}: not restarting it — "
-                    "run the driver by hand to see why")
+                # The driver is gone but the game is not. Restart it, but not
+                # without end: a config whose offsets a game patch broke fails
+                # the same way every poll, and respawning it for the length of
+                # a session helps nobody. See DRIVER_RESTARTS.
+                # A driver that ran a while before stopping was working, and
+                # the commonest reason for that -- the pad sleeping mid-game --
+                # comes back on its own, so `spend_restart` forgives the count.
+                spent, again = spend_restart(
+                    deaths, prefs.key(active), active, driver.last_run_seconds)
+                name = active.get("enGameName")
+                if again:
+                    log(f"{name}: restarting its driver "
+                        f"({spent} of {DRIVER_RESTARTS})")
+                else:
+                    log(f"{name}: driver has died {spent} times without "
+                        f"settling — not starting it again this session. Run "
+                        f"it by hand to see why")
                 clear_triggers()
                 active = None
             else:
