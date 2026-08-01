@@ -49,7 +49,25 @@ LOG_PATH = os.path.join(
 
 # What a game has to be told, because nothing here can hide the physical pad
 # from a game that enumerates it. Both pads are present with DS mode on.
-IGNORE_DEVICES = "SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501"
+#
+# **Both spellings, because SDL renamed the hint.** SDL2 reads
+# `SDL_GAMECONTROLLER_IGNORE_DEVICES`; SDL3 dropped the GameController API for
+# the Gamepad one and the environment variable behind
+# `SDL_HINT_JOYSTICK_IGNORE_DEVICES` is `SDL_JOYSTICK_IGNORE_DEVICES`. A game
+# built against the version that does not know a name simply ignores it, so
+# setting both costs nothing and neither is safe to drop: a launch option
+# carrying only the SDL2 name stops hiding the pad the day a title moves to
+# SDL3, and the failure is silent. The game binds the real Apex 5, the triggers
+# and the haptics never happen, and the pad goes on working -- so nothing looks
+# broken. `outputReports` staying at 0 on the DualSense page is the only tell.
+#
+# Which spelling the one validated run used (Deathloop, docs/findings-games.md)
+# was not recorded, and this host has no SDL to interrogate, so this is
+# insurance against a decay path rather than a fix for a measured break.
+IGNORE_VALUE = "0x37d7/0x2501"
+IGNORE_VARS = ("SDL_GAMECONTROLLER_IGNORE_DEVICES",   # SDL2
+               "SDL_JOYSTICK_IGNORE_DEVICES")         # SDL3
+IGNORE_DEVICES = " ".join(f"{var}={IGNORE_VALUE}" for var in IGNORE_VARS)
 
 # The relay's own status lines, as `key=value` pairs. Parsed rather than shown
 # raw so a view can pick out the two numbers that answer "is this working":

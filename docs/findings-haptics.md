@@ -486,7 +486,13 @@ when the relay is run by hand. `tools/flydigi-ds5`, the uhid relay, takes the in
     Restart the game.
   * **A game sees both pads.** `SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501`, on the launch
     command or set globally in Steam, makes SDL ignore the Apex 5; it cannot hide a real
-    *DualSense*, whose `054c:0ce6` the virtual pad shares.
+    *DualSense*, whose `054c:0ce6` the virtual pad shares. **SDL3 spells it
+    `SDL_JOYSTICK_IGNORE_DEVICES`** — the GameController API became the Gamepad one and the
+    variable behind `SDL_HINT_JOYSTICK_IGNORE_DEVICES` was renamed with it — so `dsmode.IGNORE_VARS`
+    carries both and everything the user is told to paste sets both. A game ignores the name it
+    does not know, so this costs nothing and neither can be dropped: a launch option carrying only
+    the SDL2 name stops working the day a title moves to SDL3, silently, with the pad still
+    functioning and only `outputReports` stuck at 0 to say so.
   * **Steam Input must be off** for that game: it masks the pad as an Xbox controller, which breaks
     DualSense semantics and the four-channel audio the haptics arrive on.
   * **Third-party mode must be off.** It switches `controller_data` off, which silences the evdev

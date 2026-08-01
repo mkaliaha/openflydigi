@@ -20,8 +20,10 @@ tree.
     tools/flydigi-ds5              # run
     tools/flydigi-ds5 --dump       # decode effects, do not drive the pad
 
-Tell games to ignore the physical pad so they bind to the virtual one:
-    SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501 %command%
+Tell games to ignore the physical pad so they bind to the virtual one. Both
+spellings, because SDL3 renamed the hint and a game ignores the name it does
+not know:
+    SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501 SDL_JOYSTICK_IGNORE_DEVICES=0x37d7/0x2501 %command%
 """
 import argparse
 import os
@@ -32,7 +34,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flydigi import ds5, ds5_usb, effects, motion, registry, relay, uhid  # noqa: E402
+from flydigi import (ds5, ds5_usb, dsmode, effects, motion, registry, relay,  # noqa: E402
+                     uhid)
 
 
 def log(msg):
@@ -98,7 +101,7 @@ def main():
         feature_reports={rid: bytes([rid]) + body
                          for rid, body in ds5_usb.FEATURE_REPORTS.items()})
     log("virtual DualSense created")
-    log("games: set SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501")
+    log(f"games: set {dsmode.IGNORE_DEVICES}")
 
     state = ds5.InputState()
     applied = {}

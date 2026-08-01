@@ -87,6 +87,21 @@ def main():
         finally:
             usbip.VHCI_SYSFS = real_sysfs
 
+    # -- the launch option --------------------------------------------------
+    # Both spellings or the feature decays silently: SDL3 renamed the hint, and
+    # a game told only SDL2's name binds the physical pad while the pad keeps
+    # working, so nothing looks wrong. One assertion per name, because a test
+    # that only counted them would pass on two copies of the same one.
+    results.append(check("the launch option carries SDL2's name",
+                         "SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501"
+                         in dsmode.IGNORE_DEVICES, dsmode.IGNORE_DEVICES))
+    results.append(check("and SDL3's",
+                         "SDL_JOYSTICK_IGNORE_DEVICES=0x37d7/0x2501"
+                         in dsmode.IGNORE_DEVICES, dsmode.IGNORE_DEVICES))
+    results.append(check("every name gets the vendor/product pair",
+                         all(f"{var}={dsmode.IGNORE_VALUE}" in dsmode.IGNORE_DEVICES
+                             for var in dsmode.IGNORE_VARS), dsmode.IGNORE_DEVICES))
+
     # -- the command line ---------------------------------------------------
     argv = dsmode.relay_argv(haptics=True, motors=True, quiet=True)
     results.append(check("the relay is the first word", argv[0] == dsmode.RELAY))

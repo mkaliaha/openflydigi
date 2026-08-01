@@ -94,7 +94,12 @@ TestCase {
         // pad from a game that enumerates it, so a game sees two pads.
         let row = findChild(page, "dsLaunchOption");
         verify(row, "no launch-option row");
+        // Both spellings. SDL3 renamed the hint, and a launch option carrying
+        // only SDL2's name stops hiding the pad the day a title moves over --
+        // silently, because the pad goes on working.
         verify(row.description.indexOf("SDL_GAMECONTROLLER_IGNORE_DEVICES") >= 0,
+               row.description);
+        verify(row.description.indexOf("SDL_JOYSTICK_IGNORE_DEVICES") >= 0,
                row.description);
         verify(row.description.indexOf("0x37d7/0x2501") >= 0, row.description);
         verify(row.description.indexOf("%command%") >= 0, row.description);

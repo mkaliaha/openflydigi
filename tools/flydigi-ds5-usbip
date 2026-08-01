@@ -37,8 +37,10 @@ game keeps its controller, sees every input released, and gets the pad back --
 with its trigger effects sent again, since the pad forgets those when it sleeps
 -- as soon as a button press brings it round. See `flydigi.relay.PadLink`.
 
-Tell games to ignore the physical pad so they bind to the virtual one:
-    SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501 %command%
+Tell games to ignore the physical pad so they bind to the virtual one. Both
+spellings, because SDL3 renamed the hint and a game ignores the name it does
+not know:
+    SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501 SDL_JOYSTICK_IGNORE_DEVICES=0x37d7/0x2501 %command%
 """
 
 import argparse

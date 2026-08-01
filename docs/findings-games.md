@@ -258,8 +258,10 @@ rumble/haptics outcome — are in [findings-haptics.md](findings-haptics.md).
    `python3 tools/hid_probe.py` should show the vendor node (`usage pages 0xffa0`), and
    `/dev/input/by-id/` should list `...-event-joystick`.
 2. Steam launch options for Deathloop:
-   `SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501 %command%`
-   Without this the game may bind the real Apex 5 instead of the virtual DualSense.
+   `SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501 SDL_JOYSTICK_IGNORE_DEVICES=0x37d7/0x2501 %command%`
+   Without this the game may bind the real Apex 5 instead of the virtual DualSense. Both
+   spellings because SDL3 renamed the hint — this run predates the second name and which SDL
+   Deathloop used was not recorded, so it is not known which of the two did the work here.
 3. Run `tools/flydigi-ds5` before launching the game. It logs each decoded DS5 effect and what
    it translated to.
 4. In game, check the button prompts show PlayStation glyphs — that confirms it bound the virtual pad.

@@ -141,7 +141,8 @@ tools/flydigi-monitor configs/monitor/<game>.json
 # -- the desktop app's DualSense switch does the same behind one authentication
 sudo tools/flydigi-ds5-usbip --haptics --motors
 #   root is given back as soon as the USB attach is done
-#   set per-game: SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501 %command%
+#   set per-game: SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501 SDL_JOYSTICK_IGNORE_DEVICES=0x37d7/0x2501 %command%
+#   both spellings: SDL3 renamed the hint, and a game ignores the one it does not know
 #   start the game *after* this
 #   the Apex 5 may sleep and wake as it likes: it leaves the USB bus when it
 #   sleeps, but the virtual DualSense stays attached, so the game should keep
