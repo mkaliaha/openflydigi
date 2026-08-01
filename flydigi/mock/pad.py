@@ -180,6 +180,13 @@ class FakePad:
             self.led_blob[i] = 0
         self.active = 0
         self.saved = {}
+        # The version tag the last save carried. Recorded because command 166
+        # writes whatever it is given into the slot's version id, and
+        # `read_status` reports that back as how a caller tells whether its
+        # cached copy is stale -- so a caller saving with the default 0 wipes
+        # the answer to a question the app asks. A fake that swallowed the
+        # payload could not tell a correct save from that one.
+        self.saved_version = None
         self.packets_received = 0
         self.bad_checksums = 0
         self.claims = 0
@@ -567,8 +574,9 @@ class FakePad:
         self.active = payload[0]
         return [self._ack(mapping.CMD_APPLY)]
 
-    def _save(self, _payload):
+    def _save(self, payload):
         self.saved = {k: bytes(v) for k, v in self.blobs.items()}
+        self.saved_version = payload[0] | (payload[1] << 8) if len(payload) > 1 else 0
         return [self._ack(mapping.CMD_SAVE)]
 
     def _write_start(self, payload):

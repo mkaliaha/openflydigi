@@ -494,10 +494,26 @@ class DeviceWorker(QObject):
             with ctrl.claim():
                 sent = lighting.write_config(ctrl, new, old=old)
                 # Lighting shares the mapping save command; the pad commits the
-                # working set, not one config at a time. The lighting blob has no
-                # version tag of its own, so this leaves the field at zero -- which
-                # is one reason saving lighting is still unverified on hardware.
-                saved = mapping.save_config(ctrl) if save else False
+                # working set, not one config at a time. The lighting blob has
+                # no version tag of its own, so the id this sends belongs to the
+                # mapping profile that is going to be committed alongside it --
+                # asked for here rather than assumed, because command 166 writes
+                # whatever it is given into that slot's tag and `read_status`
+                # reports the tag back as how anything knows its cached copy is
+                # still current. Sending 0, which is what this did, saved the
+                # lighting and silently told every later reader that the profile
+                # had changed.
+                #
+                # Command 161 is the right way to ask: it reports the active
+                # slot and a version per slot with no side effect at all, unlike
+                # a config read, which pages the profile in. One exchange, on an
+                # operation that already takes the pad seconds.
+                saved = False
+                if save:
+                    status = mapping.read_status(ctrl)
+                    version = (status["versions"][status["active"]]
+                               if status else 0)
+                    saved = mapping.save_config(ctrl, version)
             return sent, saved
 
         result = self._attempt(work, "writing lighting")

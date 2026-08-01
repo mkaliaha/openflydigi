@@ -125,6 +125,64 @@ def test_apply_and_save():
     check("save captures every slot", len(pad.saved) == 4)
 
 
+def test_a_save_carries_the_version_it_is_given():
+    """Command 166 writes its argument into the slot's version tag.
+
+    `read_status` reports that tag, and it is how a caller tells whether a
+    cached copy of a config is still current. So the argument is not
+    decoration: saving with the default 0 answers "has this changed?" with a
+    lie, for every later reader.
+    """
+    pad = FakePad()
+    config = mapping.read_config(pad, 0)
+    mapping.save_config(pad, config.data_version)
+    check("the config's own id reaches the pad",
+          pad.saved_version == config.data_version,
+          f"{pad.saved_version} vs {config.data_version}")
+
+    mapping.save_config(pad)
+    check("and the default really does overwrite it with zero",
+          pad.saved_version == 0, str(pad.saved_version))
+
+
+def test_nothing_saves_a_profile_without_its_version():
+    """The defect this pair exists to catch, across the whole repository.
+
+    `tools/flydigi-mapping --save` passed no version while `gui/worker.py`
+    passed one, so the same operation left a correct tag from the app and a
+    zeroed one from the command line. Two call sites and one of them wrong is
+    not something a unit test of `save_config` can see, so this reads the
+    callers.
+
+    The lighting write is the one that looks like an exception and is not. It
+    shares this command because the pad commits its working set rather than one
+    config at a time, and a lighting blob carries no version of its own -- so it
+    asks command 161 for the running profile's tag and commits that, rather than
+    zeroing a field that belongs to something it is not editing.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    offenders = []
+    for folder in ("flydigi", "gui", "tools"):
+        for dirpath, _dirs, files in os.walk(os.path.join(root, folder)):
+            if "__pycache__" in dirpath:
+                continue
+            for name in files:
+                path = os.path.join(dirpath, name)
+                try:
+                    with open(path) as fh:
+                        body = fh.read()
+                except (OSError, UnicodeDecodeError):
+                    continue
+                if "def save_config" in body:
+                    continue        # the definition itself
+                for line in body.splitlines():
+                    if "save_config(ctrl)" in line or "save_config(pad)" in line:
+                        offenders.append(f"{os.path.relpath(path, root)}: "
+                                         f"{line.strip()}")
+    check("every caller says which version it is committing",
+          not offenders, "; ".join(offenders))
+
+
 def test_reading_switches_the_pad():
     """The fact the rest of this file's behaviour hangs off."""
     pad = FakePad()
@@ -1423,6 +1481,8 @@ def main():
                  test_a_newer_protocol_keeps_its_macros_elsewhere,
                  test_lighting_round_trip, test_lighting_brightness_is_clamped,
                  test_lighting_effects_write_frames, test_cycle_time_is_a_duration,
+                 test_a_save_carries_the_version_it_is_given,
+                 test_nothing_saves_a_profile_without_its_version,
                  test_effects_by_id_and_colours, test_suggested_colours_differ):
         test()
     total = len(PASSED) + len(FAILED)
