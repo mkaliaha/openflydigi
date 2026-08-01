@@ -239,6 +239,12 @@ two coincide, at sub 1 written to 1; match on `data[2] == 19 && data[5] == value
 `ResetAllMappingUsable`, which the SDK sets unconditionally in the NewXInput branch — this pad's
 mode. This is the stock app's "Restore default". Destructive: test on slot 4 or the fake pad first.
 
+**Both paths are verified on the pad.** The per-slot restore -- write the factory blob, commit with
+166 -- was run from the app's own button and read back: profile 3 came back titled `配置3` with no
+remaps, no macros and the gyro off, its tag moved off 0xFFFF to a fresh value, and **the other three
+slots were untouched at 0xFFFF**. Which is the whole reason that path exists: command 175 in the
+same situation takes all four.
+
 **It works on this pad, and it takes the profile's name with it.** Observed through Space Station's
 own "Restore default" on the Apex 5 here: a slot renamed out of its factory name came back carrying
 that factory name again — which on this pad is Chinese. That follows from where a name lives: blob
