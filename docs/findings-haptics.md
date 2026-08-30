@@ -1,10 +1,9 @@
 # DualSense relay and haptic audio
 
 Reference for presenting a Flydigi pad as a virtual DualSense and translating
-DualSense output to the physical controller. Verified against the repository on
-2026-08-23.
+DualSense output to the physical controller.
 
-## Relay choices
+## Relay selection
 
 | Relay | Virtual device | Haptic audio | Privilege |
 |---|---|---|---|
@@ -32,7 +31,7 @@ desktop switch currently does not pass its saved primary-pad selector; on a
 multi-pad system, start the relay manually with `--device` when deterministic
 selection is required.
 
-## Capabilities
+## Capability matrix
 
 | Capability | USB/IP | uhid | Notes |
 |---|:---:|:---:|---|
@@ -85,7 +84,7 @@ Granting unattended permission to attach arbitrary USB devices would be a local
 security risk because a process could emulate input devices such as a keyboard.
 The game daemon therefore never enables DualSense mode automatically.
 
-## Game setup
+## Game configuration
 
 1. Start DualSense mode before the game. Games commonly enumerate the audio
    endpoint only at launch; enabling the relay later can give working input and
@@ -188,7 +187,7 @@ Because stick, trigger, and gyro probes can change live controller state or the
 active profile, leave only the intended pad attached unless the selected probe
 explicitly accepts `--device`.
 
-## Reconnection and status
+## Reconnection behavior and status counters
 
 The virtual DualSense remains attached when the physical pad sleeps or is
 unplugged. `PadLink` retries missing evdev and vendor nodes, re-enables motion,

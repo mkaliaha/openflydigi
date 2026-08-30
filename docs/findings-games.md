@@ -1,12 +1,12 @@
 # Game detection and adaptive-trigger routes
 
 Reference for game detection, automatic route selection, controller targeting,
-and validated integrations. Counts were verified against the local game-list
-snapshot on 2026-08-23.
+integration status, and validation evidence. Counts were verified against the
+local game-list snapshot on 2026-08-23.
 
 ## Route inventory
 
-The current list contains 94 games:
+The verified snapshot contains 94 games:
 
 | Route | Games | Mechanism |
 |---|---:|---|
@@ -25,9 +25,9 @@ they appear in Flydigi's list.
 endpoint. `tools/fetch-configs` refreshes it before downloading configs or mod
 archives, so counts and route availability may change with a later snapshot.
 
-Only Fallout 4 currently exposes more than one daemon route: its bespoke mod
-and a vibration preset. A stored route that is no longer offered by a refreshed
-game list is ignored.
+In this snapshot, only Fallout 4 exposes more than one daemon route: its bespoke
+mod and a vibration preset. A stored route that is no longer offered by a
+refreshed game list is ignored.
 
 ## Automatic daemon
 
@@ -48,12 +48,17 @@ The saved selector is stored as top-level `primary_pad` in
 `$XDG_CONFIG_HOME/flydigi/games.json`, normally
 `~/.config/flydigi/games.json`.
 
+Monitor, telemetry, and bespoke helpers require the selected pad to advertise
+`adaptive_triggers`; selection alone does not authorize a helper to drive an
+incompatible pad. The vibration route applies the same capability gate to each
+attached pad independently.
+
 The vibration route deliberately ignores `--device`: command 82 is pad-local
 and needs no host-side session, so the daemon writes it to every attached pad
 that advertises `adaptive_triggers`. Other routes hold and update one pad for
 the game session.
 
-On detection the daemon performs the following action:
+For a detected game, the daemon performs the following action:
 
 | Route | Action |
 |---|---|
@@ -144,8 +149,9 @@ matching process because they do not require a game PID.
 
 All 94 entries provide at least one process name. The index claims singular
 `processGameName` values first and adds plural aliases second, so a plural alias
-cannot displace another title's authoritative executable name. This resolves
-the overlapping Uncharted and erroneous OVERWATCH aliases deterministically.
+cannot displace another title's authoritative executable name. This ordering
+gives deterministic ownership to the overlapping Uncharted aliases and rejects
+the unrelated aliases in OVERWATCH's plural list.
 
 A game remains active while any matching process in its Proton wrapper chain
 remains alive. Candidates are ranked as:
@@ -173,19 +179,22 @@ bf6  ds2  nfs14  re9  tll  wrc  wrc7  wrc8  wrc9  wrc10  wwm  yysls
 This policy gives vibration effects as soon as a Proton wrapper appears, before
 the game executable is mapped, but permits false positives. Treat `wrc` and
 similarly short path basenames with particular care. Disable Auto for an
-affected game if such a name is used by an unrelated program. A future policy
-change could require confidence 1 or ignore short confidence-0 basenames.
+affected game if such a name is used by an unrelated program.
 
 ## Reconnection and reassertion
 
 A vibration bind is live controller state and is lost when a pad leaves the USB
-bus. While a vibration game is active, `flydigid` checks for controller nodes
-without opening hidraw, detects a reconnect, and retries the bind until a write
-succeeds. This is independent of `--reassert`, which periodically counters
-other software overwriting controller state.
+bus. The daemon's reconnect detector is bus-wide: it reapplies the active bind
+when the system goes from no Flydigi pad nodes to at least one, retrying while
+no compatible pad can be opened. It does not track individual pad reconnects or
+command acknowledgements. If one pad remains attached while another reconnects,
+use a nonzero `--reassert` interval to refresh every compatible attached pad.
+Periodic reassertion also counters other software overwriting controller state.
 
-Single-pad helpers fail more visibly when their selected pad disappears. Their
-normal reconnect and restart behavior is documented with the relevant tool.
+Monitor, telemetry, and bespoke helpers have no internal pad-reconnect path. A
+later write through a vanished controller handle makes a manually started helper
+exit. When `flydigid` manages the helper, it clears the triggers and restarts the
+helper subject to the restart policy above.
 
 ## DualSense mode
 
@@ -198,7 +207,7 @@ sudo tools/flydigi-ds5-usbip --haptics --motors [--device SELECTOR]
 Use `tools/flydigi-ds5 [--device SELECTOR]` only as the uhid fallback when
 USB/IP is unavailable. Steam Input must be disabled for native DualSense
 semantics. To keep SDL games from binding the physical Flydigi pad as a second
-controller, set both current spellings:
+controller, set both SDL variables:
 
 ```text
 SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501
@@ -211,15 +220,15 @@ needed for haptic audio; uhid cannot. The Apex has no touch surface, so touch
 position and gestures have no source. See
 [DualSense relay](findings-haptics.md).
 
-## Validated integrations
+## Integration status
 
-| Integration | Current result | Required setup or limitation |
+| Integration | Supported behavior or evidence | Required setup or limitation |
 |---|---|---|
-| Vibration bind | Automated for 33 entries; live-state reconnect handling is implemented. | May false-positive at confidence 0; affects every compatible attached pad. |
+| Vibration bind | Automated for 33 entries; a whole-bus reconnect reapplies the bind. | May false-positive at confidence 0; affects every compatible attached pad. Use `--reassert` when individual pads may reconnect while another remains attached. |
 | Forza telemetry | 311-byte and 324-byte Data Out formats supported; four game entries use the same rule set. | Enable Data Out to `127.0.0.1:5300`. Other lengths require `--accept LEN:OFFSET`. |
-| XGameMonitor | Validated with Dark Souls: Remastered using the downloaded config and Wine module base. | Requires `kernel.yama.ptrace_scope=0` or `CAP_SYS_PTRACE`; pointer chains are build-specific. |
+| XGameMonitor | Dark Souls: Remastered is the validated configuration, using its downloaded config and Wine module base. | Requires `kernel.yama.ptrace_scope=0` or `CAP_SYS_PTRACE`; pointer chains are build-specific. |
 | DSX listener | Accepts DSX-compatible local JSON commands. | Listener and external game mod are required; see [third-party mods](third-party-mods.md). |
-| DualSense relay | Input, triggers, rumble, gyro, battery, and USB/IP haptic audio are implemented. | Relay must exist before the game starts; Steam Input must be off. |
+| DualSense relay | Provides input, triggers, rumble, gyro, battery, and USB/IP haptic audio. | Relay must exist before the game starts; Steam Input must be off. |
 
 ### Monitor bring-up
 
@@ -241,8 +250,8 @@ entries are skipped. Game updates can invalidate offsets.
 
 - Vibration binds every adaptive-trigger pad independently.
 - Monitor and telemetry data describe one player and drive one selected pad.
-- DSX packets contain a controller-index field, but the current listener
-  ignores it and drives one selected pad.
+- DSX packets contain a controller-index field, but the listener ignores it and
+  drives one selected pad.
 - Each DualSense relay represents one physical pad. Haptic audio is also
   single-device per relay session.
 

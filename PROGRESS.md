@@ -26,7 +26,7 @@ Detailed evidence lives in [PROTOCOL.md](PROTOCOL.md) and
 | Flydigi Apex 5 | Hardware-validated | Reference controller. Profiles, mappings, macros, sticks, gyro-to-stick, vibration, adaptive triggers, lighting, settings, display, game routes, and virtual-DualSense relays are implemented. |
 | Flydigi Vader 5 Pro | Experimental and partial | Identity, capability gating, profiles, mappings, sticks, gyro, vibration, lighting, settings, v3.2 macro-store handling, and a derived factory profile are implemented. No Vader 5 hardware has been tested. |
 | Flydigi CD2 dock | Hardware-validated with one noted gap | Device identity, four settings, generated lighting, and picture/GIF sampling are hardware-validated. Nickname read/write is implemented, but nickname writing is not hardware-verified. |
-| Other Flydigi hardware | Unsupported | It may be discovered by the shared transport, but configuration writes are refused unless the model is explicitly supported. |
+| Other Flydigi hardware | Unsupported | It may be discovered by the shared transport. Normal configuration commands refuse unsupported models; explicitly ungated developer bench tools are outside that guarantee. |
 
 ### Vader 5 boundaries
 
@@ -60,7 +60,7 @@ it.
 | Device discovery and identity | Hardware-validated | Experimental | Hardware-validated | Supported pads are `k5` and `f5`. Selection is separate from model/capability permission. |
 | UID, nickname, and registry selection | Hardware-validated | Simulated | Hardware-validated except nickname write | Standard selectors accept node, UID/prefix, MAC, or nickname. Dock nickname writing is implemented but not hardware-verified. Not every tool uses the registry selector. |
 | Multiple devices in desktop/daemon | Simulated plus one real pad/dock | Simulated | Simulated plus one real dock | Mock buses cover multiple pads and docks. Full multi-physical-device testing remains outstanding. |
-| Profile read/write/apply/save | Hardware-validated | Experimental | Not applicable | Reading a profile switches the running slot. Unsaved changes are volatile. |
+| Profile read/write/apply/save | Hardware-validated | Experimental | Not applicable | Reading a profile switches the running slot. Unsaved changes are volatile. Desktop apply is available for Vader; CLI `apply` switches the slot and then exits nonzero because it attempts Apex-only force-trigger engagement. |
 | Profile backup/restore | Hardware-validated | Partial | Not applicable | Desktop packed backup includes a v3.2 macro store. The CLI raw-blob format does not. |
 | Single-slot factory restore | Hardware-validated | Experimental | Not applicable | Writes the model-specific factory profile and saves it. It is not command 175. |
 | All-slot reset | Hardware-validated | Unverified | Not applicable | Command 175 resets every profile and name, ignoring the requested slot. |
@@ -145,17 +145,10 @@ Two backend tests currently violate the hardware-free contract:
 | `tests/test_device.py` | Its wrapper calls `Controller.__new__` without a path, which searches for a real pad | Construct the wrapper without invoking device resolution |
 | `tests/test_waits.py` | `ChattyDock()` inherits the dock/controller allocator and searches for a real dock | Construct the fake subclass without inherited device resolution |
 
-Run the discovered backend set rather than maintaining a hand-written filename
-list:
-
-~~~bash
-for t in tests/test_*.py; do
-    case "$t" in
-        tests/test_models.py|tests/test_qml.py|tests/test_shell.py) continue ;;
-    esac
-    python3 "$t" || break
-done
-~~~
+Run the [discovered backend set](README.md#tests) rather than maintaining a
+hand-written filename list. The documented loop continues after failures so
+the known `test_device.py` failure does not hide later results, and returns
+nonzero if any script fails.
 
 Run Qt checks in an environment where distribution PySide6 and Kirigami are
 installed:
@@ -197,7 +190,9 @@ These constraints should remain true through future changes:
 - A configuration write is preceded by identity/capability validation unless
   the tool is explicitly documented as an ungated bench tool.
 - Command 175 is always described as an all-profile reset.
-- A screen upload checks for a wired controller before entering bootloader mode.
+- The normal screen-upload path checks for a wired controller before entering
+  bootloader mode. The explicit `--i-know` escape hatch skips this check and is
+  documented as potentially stranding a wireless pad until it is power-cycled.
 - Firmware update for controller program chips is not implemented.
 - A profile save commits the currently running slot; the UI refuses to imply
   that another slot can be saved in place.

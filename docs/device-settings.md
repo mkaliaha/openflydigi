@@ -66,14 +66,14 @@ Sleep time is a byte of minutes, readable as well as writable. 0 is Flydigi's "n
 `settings.set_sleep_minutes` clamps to 60, which is their own picker's ceiling rather than the
 byte's.
 
-`audio` is unsupported, which matches `AudioUsable` being gated — so the audio sub-command is dead
-on this pad. `motion debounce` is unsupported too, so sub-id 3 needs no UI. And **report rate
-reads 0**, which is not in the Hz map `{1000=1, 500=2, 250=4, 125=8}` — the enum's only other member
-is `ReportRate_None = 0`, so 0 reads as "default/unset". Do not write that field until a read on a
-pad whose rate has actually been set confirms that.
+`audio` is unsupported, which matches `AudioUsable` being gated, and `motion debounce` is also
+unsupported. Neither sub-command should be exposed for this pad. The **report-rate field reads
+0**, outside the known wire-value map `{1=1000, 2=500, 4=250, 8=125}`. The reference enum names
+0 `ReportRate_None`; this project represents it as the observed `None`/default marker. Its semantic
+rate is unknown, so it must not be mapped to 1000 Hz or written without hardware validation.
 
-**The endpoint descriptors argue for "default".** All three IN endpoints poll at the USB minimum;
-the two OUT endpoints are at 4 ms:
+The endpoint descriptors advertise 1 ms intervals for all three IN endpoints and 4 ms intervals
+for both OUT endpoints:
 
 ```
 3-4:1.0  xpad    ep_81 IN   interrupt  1 ms    the Xbox-compatible gamepad
@@ -83,13 +83,13 @@ the two OUT endpoints are at 4 ms:
                  ep_03 OUT  interrupt  4 ms
 ```
 
-The pad is full-speed (12 Mbit/s), where 1 ms is the shortest frame, so 1000 Hz is the ceiling for
-all three and the pad is already at it: a setting of 0 alongside a 1 ms endpoint reads as "default =
-1000" rather than "unset". The 4 ms OUT interval bounds how fast commands can be written. The two
-input paths differ in *delivery*, not in rate — evdev is event-driven and emits nothing while a
-stick is still, whereas the vendor stream sends regardless, ~970 Hz wired. Interface 1.1's
-keyboard/mouse descriptor is what exposes the `Flydigi Flydigi APEX5  Keyboard` and `… Mouse` evdev
-devices; 1.2 is the vendor node this project opens.
+The pad is full-speed (12 Mbit/s), where 1 ms is the shortest USB frame, so the IN descriptors set
+a 1000-polls/s ceiling. They do not establish the semantic mapping of report-rate value 0. The
+vendor stream was measured separately at approximately 970 reports/s while wired. The 4 ms OUT
+interval bounds command writes. Evdev is event-driven and emits nothing while a stick is still,
+whereas the vendor stream continues to send reports. Interface 1.1's keyboard/mouse descriptor
+exposes the `Flydigi Flydigi APEX5  Keyboard` and `… Mouse` evdev devices; interface 1.2 is the
+vendor node this project opens.
 
 Both numeric fields are enums in `Flydigi.SharedResources`, and neither is the number it looks like:
 
@@ -99,11 +99,10 @@ JoystickSensitivity None=0, Highest=14, High=15, MiddleHigh=16,
                     Middle=17, LowMiddle=18, Low=19, Lowest=20
 ```
 
-`JoystickPrecision` is ordered as it was **written**, not by bit depth: 9-bit and 11-bit were added
-after 8/10/12, and 14/16 later still. So this pad's `precision = 2` is **10 bit**, and any mapping
-that assumes the value climbs with resolution is wrong. `sensitivity = 17` is **Middle** — the
-"Center sensitivity: Fast / Medium / Slow" control, which has seven wire values behind three UI
-choices.
+`JoystickPrecision` uses the enum declaration index, not the bit depth. The wire values therefore
+do not increase monotonically with resolution: `precision = 2` is **10 bit**.
+`sensitivity = 17` is **Middle** — the "Center sensitivity: Fast / Medium / Slow" control, which
+has seven wire values behind three UI choices.
 
 Three settings look alike, and only two exist on a k5:
 
@@ -196,7 +195,7 @@ in any of the twelve languages, and their service forwards only the `Usable`/`En
 UI. This pad reports it supported **and on**, and `19 / 2 / 0` takes the same path as every other
 sub-command; what it does to the Home key is unmeasured.
 
-**Status: not exposed or measured** — [ruled out](../PROGRESS.md#ruled-out). Their renderer never receives
+**Status: not exposed or measured.** Their renderer never receives
 `xboxHomeButtonUsable` at all, only `Enabled`, which it stores and draws nowhere, so no v4 UI can
 offer this however the SDK is built. `XboxHomeButtonUsable` is hardcoded true for `f4`, `fp3`, `fp4`
 and DeviceType 102 (an Apex 4 SKU), and those are the pads whose Home button is also the power
@@ -253,9 +252,12 @@ match the identified model. Its title at offset **770** is twenty bytes of UTF-1
 restore also restores the factory name. A UI confirmation must state that the mapping, macros,
 gyro, and name are replaced. The title field holds at most ten UTF-16 code units.
 
-**Controller nickname** — write `UpdateNicknameCommandFactory` **24**, read
-`ReadNicknameCommandFactory` **2**. The decompiled writer puts the CRC at `[6]`, which would
-overwrite the second name byte — assume it belongs at `5 + len`.
+**Controller nickname** — read command **2**; write command **24**. The hardware-backed project
+writer accepts 1–26 UTF-8 bytes and appends no checksum. The pad stores one byte beyond the name
+length, so a checksum placed after the name becomes part of the stored nickname. The Space Station
+4.2.0.9 reference builder instead writes its checksum at fixed index `[6]`, overwriting the second
+byte of every multi-byte name. That fixed-index form is a reference-builder bug, not the project
+write format; `identity.nickname_packet(..., reference=True)` exists only to reproduce it.
 
 **Cooperative lock** — `AcquireControllerCommandFactory` **28**, `[4]=23, [5]=acquire, [6..25]` an
 ASCII tag truncated at 20 bytes, `[26]=crc`; the reply carries the grant in `data[5]`. Advisory
@@ -393,7 +395,7 @@ Measured at brightness 80, the same left-grip-only rumble run twice with only by
 | byte 9 | what the ring did while the motor ran |
 |---|---|
 | 0 | nothing at all |
-| 1 | **a segment of the bar dimmed**, and came back when the rumble stopped |
+| 1 | **a segment of the bar dimmed**, then returned when the rumble stopped |
 
 The same dimming appears at brightness 20. Which segment dims did not reproduce between runs — left
 in one, right in another, not obviously following the motor that was running — so the side mapping
@@ -413,23 +415,23 @@ Feedback, 0 for On).
 picker. Whether it means anything beyond the latch below can only be answered on a Vader 4 Pro,
 where it is offered; none of the twelve locales describes it, just the bare word.
 
-**Byte 2 drives no input feedback on this pad.** Written as a one-packet diff over the pad's stock
-Default frames and read back as 1, it produced no reaction to face buttons, shoulders, triggers,
-paddles, the LM/RM shoulder pair, D-pad, stick clicks, stick movement or motion — with third-party control **on, and
-again with it off** so the gamepad report was definitely live. Rumble and a live trigger-vibration
-effect produced only the byte-9 dimming above. Space Station's whole Feedback write — undiffed
-42-packet mapping write, RGB config with mode 4, byte 2 set, one colour in frame 0 and every other
-frame black, `loop_end = 1`, then 171, 250 ms, 166 — renders the colour and holds it, with no
-reaction to any of those inputs either.
+**Byte 2 drives no input feedback on this pad.** Hardware validation used a one-packet diff over
+the stock Default frames and confirmed the value by read-back. Face buttons, shoulders, triggers,
+paddles, LM/RM, D-pad, stick clicks, stick movement and motion produced no response with
+third-party control either on or off. Rumble and a live trigger-vibration effect produced only the
+byte-9 dimming above. A captured Feedback transaction — an undiffed 42-packet mapping write,
+mode-4 RGB config with byte 2 set, one colour in frame 0, later frames black, `loop_end = 1`, an
+observed command 171, 250 ms, then command 166 — likewise rendered and held its colour without
+reacting to those inputs.
 
-**What byte 2 does on a k5 is latch the display.** With it set the ring freezes on the frame it is
-showing and later frame writes do not appear — blue and white frames written while it was set left
-the panel on the previous red, clearing the byte alone made the new frames appear at once, and
-setting it again froze them. `write_config` sends packet 0 first, and byte 2 lives there, so setting
-it in the same write freezes the pad **before its own frames arrive**. Saving with 166 re-renders
-past the latch.
+**On a k5, byte 2 latches the displayed frame.** While set, later frame writes do not appear.
+In hardware validation, red remained visible while blue and white frames were written; clearing
+byte 2 displayed the pending frames immediately, and setting it again froze the displayed frame.
+Because `write_config` sends packet 0 first and byte 2 is in that packet, enabling it in the same
+transfer latches the display **before that transfer's frames arrive**. Command 166 re-renders past
+the latch.
 
-**Current normative lighting sequence:**
+**Project lighting write sequence:**
 
 | # | call | wire | note |
 |---|---|---|---|
@@ -444,13 +446,13 @@ change that did not occur.
 old config, sending all 42 mapping packets, then writes the LED blob with 168/169 and ends in plain
 166. The current project does not repeat the unchanged mapping blob.
 
-**Reference-only observation: command 171 traffic captured during a lighting change.** Decompiled
-call sites identify 171 as `SaveSwitchConfig`, not as part of either lighting write flow. Treat the
-captured packet as concurrent or otherwise unexplained traffic, not a required lighting step. Its
-builder is internally inconsistent: a length byte of 4 puts `cfgId` where command 166 puts the
-checksum, followed by a checksum at offset 8 over a range that excludes that id.
+**Command 171 is not a lighting step.** Reference call sites identify it as `SaveSwitchConfig`, not
+as part of either lighting write flow. Its builder is internally inconsistent: a length byte of 4
+puts `cfgId` where command 166 puts the checksum, followed by a checksum at offset 8 over a range
+that excludes that id.
+
 `mapping._build_save_switch` reproduces the reference bytes because those exact bytes ACKed; it does
-not imply that 171 belongs in the lighting sequence.
+not include 171 in the lighting sequence.
 
 ## The Switch bank: four more profiles the host can write and never read
 
@@ -473,21 +475,18 @@ All of the following is **measured on an Apex 5**.
     nothing else. So the Switch bank is **write-only from any host**: configured in XInput mode,
     observable only on a Switch. That is why their UI offers "apply to Switch configuration" rather
     than an editor for those profiles — there is no way to fetch one.
-  * **171 verified, with its control in the same run.** Profile 3 was read, given `m1 → start` and
-    `y → select` in working memory, written back unsaved, and committed to slot 6. Since 171 is a
-    flash write, an aliasing implementation would have changed profile 3's stored copy; it did not —
-    the slot paged back in from flash as `m1 → m1, y → y`, tag unchanged at 43586. In Switch mode
-    the pad then sent **Minus for Y and Plus for M1**. So the bank is real, distinct, and plays what
-    171 puts in it.
-  * **The paddles work in Switch mode**, which is the part worth having. A Pro Controller has no
-    paddles at all, and M1 fired its remap regardless — so M1..M6 are four buttons a Switch cannot
-    otherwise offer. An unmapped M1 sends nothing in either mode, which is what made it a clean
-    probe once a second one on a button the Pro Controller really has removed the ambiguity.
+  * **Command 171 writes distinct Switch-bank storage.** Validation modified profile 3 in working
+    memory (`m1 → start`, `y → select`) and committed it to slot 6. Profile 3's flash copy retained
+    `m1 → m1`, `y → y` and tag 43586; Switch mode emitted **Minus for Y and Plus for M1**. The
+    destination bank is therefore distinct and executes the profile written by 171.
+  * **Paddle remaps work in Switch mode.** M1 emitted its configured Pro Controller button, while
+    an unmapped M1 emitted nothing. M1..M6 can therefore provide inputs absent from the physical
+    Pro Controller layout.
 
-`mapping.normalise_for_switch` copies what Flydigi do to a config before writing one: keyboard-bound
-keys go back to sending themselves and both sticks are forced to be sticks, since a Switch runs
-neither. Nothing made here can produce either, but the profile being copied is whatever the pad is
-running, which may have come from theirs.
+`mapping.normalise_for_switch` applies the reference normalization before writing a config:
+keyboard-bound keys revert to their controller inputs and both sticks revert to stick output,
+because Switch mode supports neither keyboard bindings nor alternate stick roles. This remains
+necessary when copying a profile created outside this project.
 
 **`OldLedConfig` is mapping-profile bytes 3..13**, ten bytes `flydigi/mapping.py` skips entirely —
 it goes from offset 2 straight to the key table at 13. The measured Apex 5 reads
@@ -497,8 +496,8 @@ looks like a colour, so it is probably a stale mirror of the older LED format. N
 
 ## Command inventory, by feature
 
-What a full Space Station replacement needs, and the command factories already recovered for
-each (all in `decompiled/`).
+The following inventory groups the transcribed Space Station command factories by feature. The
+local `decompiled/` sources are not part of the public repository.
 
 | Feature | Commands |
 |---|---|

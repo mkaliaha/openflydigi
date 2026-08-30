@@ -17,7 +17,7 @@ application adds PySide6, Qt, Kirigami, and Kirigami Addons.
 | Flydigi Apex 5 | Hardware-validated | All controller features, adaptive triggers, display, game routes, and both virtual-DualSense relays | Display uploads require a wired connection. Steam Input must be disabled for virtual-DualSense games. |
 | Flydigi Vader 5 Pro | Experimental, partially implemented | Identity, profiles, buttons, sticks, gyro, vibration, lighting, settings, the v3.2 macro-store implementation, and a derived factory profile | No Vader 5 has been tested. It has trigger motors rather than force triggers and has no display. The trigger-motor editor is not built. The v3.2 macro store is unverified on hardware. The DualSense relay, evdev discovery, permissions, and SDL ignore identifier are not validated end to end. |
 | Flydigi CD2 charging dock | Hardware-validated with one noted gap | Identity, four settings, eight generated lighting effects, and picture/GIF sampling onto 162 LEDs; nickname read/write is implemented | Nickname writing is not hardware-verified. The dock is a separate USB device and uses its own selector. |
-| Other Flydigi controllers and accessories | Not driven | Devices may be discovered and identified when they use the current transport | Configuration writes, including nickname writes, are refused unless the model is explicitly supported. |
+| Other Flydigi controllers and accessories | Not driven | Devices may be discovered and identified when they use the current transport | Normal configuration commands, including nickname writes, refuse unsupported models. Developer bench tools explicitly documented as ungated can send raw commands. |
 
 The Apex 5 is the reference hardware. Treat Vader 5 support as an invitation to
 test and report results, not as a hardware-validated compatibility claim.
@@ -195,6 +195,11 @@ macros live in a separate v3.2 macro store, so CLI backup/restore does **not**
 back up or restore those macros. Use the desktop application's packed profile
 backup for the complete v3.2 profile until the CLI adopts the same format.
 
+`tools/flydigi-mapping apply SLOT` is not a usable success-status command for a
+Vader 5: it switches the profile, then exits nonzero when it reaches the
+Apex-only force-trigger engagement step. Use the desktop profile switch for a
+Vader 5 until the CLI separates profile switching from trigger engagement.
+
 Safety-sensitive reset commands are deliberately separate:
 
 ~~~bash
@@ -367,16 +372,19 @@ Tests are plain Python scripts rather than a single test-runner suite.
 Run every backend test, including newly added files, with:
 
 ~~~bash
+status=0
 for t in tests/test_*.py; do
     case "$t" in
         tests/test_models.py|tests/test_qml.py|tests/test_shell.py) continue ;;
     esac
-    python3 "$t" || break
+    python3 "$t" || status=1
 done
+test "$status" -eq 0
 ~~~
 
-There are currently 18 backend scripts. Two do not yet satisfy the intended
-hardware-free contract:
+The loop continues after a failure so every backend script runs, then returns a
+nonzero status if any script failed. Two backend scripts do not yet satisfy the
+intended hardware-free contract:
 
 - `tests/test_device.py` searches for a real controller while constructing its
   lock-test wrapper.
@@ -392,7 +400,7 @@ The Qt-dependent tests are:
 - `tests/test_models.py`: distribution PySide6;
 - `tests/test_shell.py` and `tests/test_qml.py`: PySide6 and Kirigami.
 
-`tests/test_qml.py` drives 13 `tests/qml/tst_*.qml` cases. Exact commands,
+`tests/test_qml.py` discovers the `tests/qml/tst_*.qml` cases. Exact commands,
 `tools/generate-qmltypes`, and qmllint setup are documented in
 [gui/README.md](gui/README.md).
 

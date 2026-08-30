@@ -6,10 +6,10 @@ commands.
 
 **Reference provenance.** The vendor behavior was reverse-engineered from **Flydigi Space Station
 4.2.0.9** (Windows installer, run under Wine), primarily from decompiled .NET assemblies in the
-`SpaceStationService.exe` single-file bundle. Those derived sources are not distributed in the
-public repository; reproduce them with the process in `README.md`. Statements labelled measured
-were observed on the named hardware and firmware. Statements labelled transcribed describe the
-4.2.0.9 reference implementation and are not hardware validation.
+`SpaceStationService.exe` single-file bundle. Those local derived artifacts are not distributed in
+the public repository. Statements labelled measured were observed on the named hardware and
+firmware. Statements labelled transcribed describe the 4.2.0.9 reference implementation and are
+not hardware validation.
 
 Accepted and physically effective on a wired Apex 5 over Linux hidraw: `0x01`, `81`, `82`, `0x12`,
 the stored-config families `161`–`166` and `167`–`169` (§9), the screen settings `19`/`242` (§8c)
@@ -318,8 +318,8 @@ the pad rather than on the wire:
 [10..19] effect params
 ```
 
-**Storing an effect does not engage it.** Measured by putting `Lock` into the blob, applying, and
-finding the triggers loose.
+**Storing an effect does not engage it.** In hardware validation, applying a blob containing
+`Lock` left both triggers loose.
 The effect starts when a live command 81 (or 82 for stored type 5) carries the stored bytes back
 out: Space Station's applied-config path sends it after 500 ms, and `effects.engage_stored` is the
 same. Write the blob first
@@ -442,12 +442,14 @@ on Linux (§1). [PROGRESS.md](PROGRESS.md) is the status index.
 
 ## 7. Apex 5 behaviour on the wire
 
-Tested on a wired Apex 5 (`37d7:2501`) via `/dev/hidraw4`, using `python3 tools/flydigi_cmd.py
-<subcommand>`. Subcommands: `info, listen, normal, race, sniper, recoil, lock, vibrate, k6mode,
+Hardware validation used a wired Apex 5 (`37d7:2501`) and its vendor hidraw interface.
+`python3 tools/flydigi_cmd.py <subcommand>` provides `info, listen, normal, race, sniper, recoil,
+lock, vibrate, k6mode,
 k6realtime, bind, rumble, game, raw`, with `--device` and `--report-id` as globals and
 `raw --sum-range start,end,pos` for placing a checksum by hand.
 
 **Transport.**
+
 - Vendor interface is the hidraw node whose descriptor starts `06 a0 ff` (usage page `0xffa0`).
   Wired Apex 5 exposes two nodes; `hidraw3` is the keyboard/mouse composite, **`hidraw4`** is
   the command interface (`report 0x03: output 31B`, `report 0x04: input 31B`, `report 0x08: output 12B`).
@@ -486,7 +488,8 @@ events with no effect. That is why the profile's travel window (§3c) does nothi
 there is no analogue reading to rescale — while under `Race` the same window works normally, 2
 distinct values against a control's 29 in the same run.
 
-**Additional findings.**
+**Transport and state constraints.**
+
 - **Replies are broadcast to every reader of the hidraw node**, so anything that matches replies by
   command id can pick up another process's answer: a `Get info` ACK belonging to the desktop app's
   30-second poll was read by a second process that had sent nothing of the sort. Arbitration is
@@ -541,10 +544,10 @@ picker carries `ICF_TRUE_COLOR_ARGB8332 / 8565 / 8565_RBSWAP / 8888` and `CF_RAW
 
 ### 8b. Picture upload — the SDK's HID path, which puts no picture on the panel
 
-**All four commands are live on an Apex 5 and no picture reaches the panel.** Two complete uploads
-went out over this family — 9623 packets, no errors, every field echoed back — **and the display
-never changed**. Stored state is another matter: 211 commits metadata (below), and the two uploads
-left the status-bar flag on, which `19` sub `8` puts back (§8c).
+**All four commands are live on an Apex 5 and no picture reaches the panel.** Across two complete
+uploads, 9623 packets completed without errors and every varied field was echoed, but **the display
+never changed**. Command 211 does commit metadata (below), and these uploads left the status-bar
+flag enabled; command `19` sub `8` restores it (§8c).
 
 Why Flydigi split the two screen models — the k5 on serial, every other screen pad on HID — is
 unexplained: the k2 has the *same* separate `ChipScreen`/`ChipType.Freq`, so "separate screen chip"
@@ -642,13 +645,13 @@ reports the command-3 bits as `always_on_usable`/`always_on`.
 **An ACK to command 19 does not say which sub-setting was written** — the reply carries the command
 id, not the sub-id, so read command 3 back if you need to know what landed.
 
-**242 is confirmed on a wired Apex 5.** Sent with the length-6 reading it ACKed and the screen went
-solid orange immediately. Two things the SDK does not say:
+**242 is confirmed on a wired Apex 5.** With a length byte of 6, it ACKs and immediately floods the
+screen with the requested colour. Additional measured behavior:
 
   * **it floods the RGB LEDs as well as the screen.** This is a whole-device indicator test, not a
     screen test; Space Station keeps it in `data.command.test` beside the factory-line commands.
-  * **`on=0` does not clear it.** The command ACKs, the pad stays flooded, and the only exit found
-    was the pad's own power switch.
+  * **`on=0` does not clear it.** The command ACKs and the pad remains flooded; recovery requires
+    cycling the pad's power switch.
 
 **Flydigi's 242 builder disagrees with itself.**
 It writes four payload bytes (on, R, G, B), sets the length byte to **5**, then puts the checksum at
@@ -682,13 +685,12 @@ same arithmetic.
 telling the chip there are 44. The check exists only in the dead HID path (`screen.upload` raises
 above 255) and in the GUI (`MAX_FRAMES = 255`, which truncates and says so).
 
-**Measured behavior: command 31 adds the screen tty without removing the HID nodes.** Observed
-mid-upload: with the bootloader tty live, the pad's
-own `37d7:2501` hidraw nodes were still enumerated and `find_device` resolved normally. So command
-31 for the screen *adds* a CDC interface beside the gamepad rather than replacing the device with a
-bootloader — the main firmware keeps running throughout. (Only the nodes were checked, not whether
-input still flowed.) The upload worker drops its HID handle because a successful upload later
-reboots the pad, not because command 31 immediately removes those nodes.
+**Measured behavior: command 31 adds the screen tty without removing the HID nodes.** With the
+bootloader tty active during an upload, the pad's `37d7:2501` hidraw nodes remained enumerated and
+`find_device` continued to resolve them. Command 31 therefore adds a CDC interface beside the
+gamepad rather than replacing the device with a bootloader. This validation covered node presence,
+not continued input-report delivery. The upload worker drops its HID handle for the reboot after a
+successful upload, not because command 31 immediately removes those nodes.
 
 The reference worker and older project comments call this a re-enumeration and wait five seconds
 for it. That wording is inconsistent with the measured USB state; the operational requirement is
@@ -699,7 +701,7 @@ far as finding the port and then cannot open it — with the pad already switche
 `udev/72-flydigi-apex5.rules`; `flydigi/setup.py` fails an absent rules file even when every other
 device is already reachable.
 
-#### How Space Station does it
+#### Space Station updater selection
 
 `FirmwareConsole.exe` is a .NET single-file bundle (`sfextract`, then `ilspycmd`), and the screen
 work is all managed code in `FirmwareLibrary.dll`. The firmware console chooses the updater by
@@ -930,14 +932,14 @@ the only parser for it and declares 81 whatever version it is handed.
                                      key id, event
 ```
 
-Three things differ from the v3.1 page, and each is a way to get a v3.2 pad quietly wrong:
+The v3.2 store differs from the v3.1 profile page in three relevant ways:
 
   * **A step's time is in milliseconds, not 10 ms ticks.** `GetMinMacroInterval` is the multiplier
     and it is 1 from 770 on. Writing ticks here plays every macro ten times too slow.
   * **The repeat interval belongs to the macro, not to the slot** — a field of the body, where v3.1
-    keeps five bytes at blob offset 820. It is **milliseconds in both**, which is settled rather than
-    assumed: `MappingConfigParserV31` scales that byte by ten going into the bean and by ten coming
-    out, and this store reads and writes it raw.
+    keeps five bytes at blob offset 820. It is **milliseconds in both**: `MappingConfigParserV31`
+    scales that byte by ten going into the bean and by ten coming out, while this store reads and
+    writes it raw.
   * **A macro can be named**, twenty bytes, which the v3.1 page has no room for.
 
 The capability limits move with the same version test:
@@ -952,10 +954,9 @@ The capability limits move with the same version test:
 `WriteMappingConfigPartial`, then `WriteMacroConfigPartial` from its completion handler, gated on
 `ProtoVersion >= 770`, then `SaveConfig`.
 
-**None of this section has been sent to hardware.** It is transcribed from `MacroConfigParser` and
-`WriteMarcoConfigCommandFactory`, and the only pad that speaks it is one nobody here owns — so the
-layout is on the footing this project has found the decompile reliable for, and nothing about the
-firmware's *behaviour* is claimed. The desktop app marks the page experimental for that reason.
+**This section is not hardware-validated.** The layout is transcribed from `MacroConfigParser` and
+`WriteMarcoConfigCommandFactory`; no v3.2-capable pad was available for testing. No firmware
+behavior is claimed, and the desktop app marks the page experimental.
 
 ---
 
@@ -1059,10 +1060,10 @@ anyone: Space Station uploads a file its installer ships.
 
 ---
 
-## 11. Identity — telling one pad from another
+## 11. Identity — address, UID and nickname
 
-Three names, and only one of them is worth keying anything on. All measured on the Apex 5 here,
-firmware 7.0.4.5, on its 2.4 GHz dongle.
+The Apex 5 exposes three identity fields with different stability and suitability. The behavior
+below was measured on firmware 7.0.4.5 over the 2.4 GHz dongle.
 
 **Command 1 carries a four-byte address at raw 8..11, and this pad reports zeroes.**
 `HeartBeatControllerCommandNewXInput.ParseAckData` reads them least-significant last and reverses:
@@ -1078,8 +1079,8 @@ seven firmware components — so the field is empty rather than misplaced. Wheth
 in is untested. `motion.parse_mac` answers None for all-zero, the same convention Flydigi already
 use for an absent firmware version.
 
-**Command 4 is the uid: 13 bytes at raw 6.** One exchange, and the only per-unit identifier this
-pad actually gives up.
+**Command 4 is the UID: 13 bytes at raw 6.** It is the only measured per-unit identifier exposed by
+this pad.
 
 ```
 TX  03 5a a5 04 02 4a …
@@ -1090,12 +1091,10 @@ RX  04 5a a5 04 01 00 | 14 20 6e 7a 1c 00 00 00 00 dc ba 3e 00 | 00 …
 byte kept — the same slot as every other single-frame payload. The dock's uid read is the same
 command with the same shape (§10b).
 
-**Command 2 is the nickname, at raw 6 like every other single-frame payload.**
-`ReadNickNameControllerCommandNewXInput` slices `data.Slice(4, data.Length - 6)`
-where `Flydigi.ChargerSdk`'s equivalent slices from its own data[6], and an unnamed pad seemed to
-side with the earlier one — it answers 0x00 at raw 5, which is Flydigi's own test for an erased
-name. That was the index byte, zero in every single-frame reply. Writing a name and reading it back
-is what settled it:
+**Command 2 returns the nickname at raw 6, like other single-frame payloads.** The reference
+implementations disagree: `ReadNickNameControllerCommandNewXInput` slices from its own data[4],
+while the charger implementation slices from raw 6. Hardware read-back confirms raw 6; raw 5 is
+the index byte and remains zero in single-frame replies:
 
 ```
 TX  03 5a a5 18 06 44 65 73 6b …          ("Desk")
@@ -1103,18 +1102,18 @@ RX  04 5a a5 02 01 00 44 65 73 6b 00 …
                        ^^ raw 6
 ```
 
-**A pad that has never been named does not answer with zeroes.** This one shipped with
-`01 01 09 09 09 64 04 5e` in the field, which passes Flydigi's emptiness test — so Space Station
-shows a factory-fresh pad as having a name. `identity.read_nickname` keeps their test and adds
-one: a field that does not decode as printable UTF-8 is not a name either.
+**A pad that has never been named does not necessarily answer with zeroes.** A measured
+factory-fresh unit returned `01 01 09 09 09 64 04 5e`, which passes Flydigi's emptiness test and is
+therefore displayed by Space Station as a nickname. `identity.read_nickname` also rejects fields
+that do not decode as printable UTF-8.
 
-**Command 24 writes a nickname. Three things about it are not what the SDK implies**, and all
-three were measured by writing names and reading them back.
+**Command 24 writes a nickname.** The hardware-backed project writer accepts 1–26 UTF-8 bytes and
+does not append a checksum. These constraints were measured by writing names and reading them back.
 
-*It is not checksum-validated.* A packet with the checksum slot left at zero is acknowledged and
-stored, where a mapping packet with a bad checksum draws no reply at all (§7).
+The command is not checksum-validated. A packet with the checksum slot left at zero is
+acknowledged and stored, where a mapping packet with a bad checksum draws no reply at all (§7).
 
-*The pad stores `buf[4] - 1` bytes from buf[5]* — one more than the name — so anything sitting in
+The pad stores `buf[4] - 1` bytes from buf[5] — one more than the name — so anything sitting in
 the slot after the name is stored **as part of the name**:
 
 ```
@@ -1125,12 +1124,11 @@ TX  03 5a a5 18 06 44 65 73 6b 00 …       (no checksum)
 RX  04 5a a5 02 01 00 44 65 73 6b 00 …    -> "Desk"
 ```
 
-So `identity.nickname_packet` writes no checksum at all. The same rule fixes the length: 27 bytes
-fit after buf[5], but the pad reads one past the name, so **26 bytes is the limit** — 27 and 28
-both came back truncated to 26. UTF-8 round-trips; Cyrillic and CJK names were written and read
-back intact, so the limit is bytes rather than characters.
+`identity.nickname_packet` therefore writes no checksum. The same storage rule sets a **26-byte
+limit**: 27- and 28-byte names are truncated to 26 bytes because the pad reads one byte past the
+name. The limit is encoded UTF-8 bytes rather than characters; Cyrillic and CJK names round-trip.
 
-*Flydigi's own builder is broken for every name but a one-letter one*:
+The Space Station 4.2.0.9 reference builder writes the checksum at fixed index 6:
 
 ```csharp
 array[4] = (byte)(2 + bytes.Length);
@@ -1138,13 +1136,13 @@ Array.Copy(bytes, 0, array, 5, bytes.Length);
 array[6] = array.Crc(3, 3 + array[4]);     // fixed index, not 3 + array[4]
 ```
 
-Index 6 is the right slot only when the name is one byte. For anything longer the checksum
-overwrites the name's second character, and the pad stores that:
+Index 6 is the checksum slot only for a one-byte name. For longer names it overwrites the second
+name byte, and the pad stores the corrupted value:
 
 ```
 TX  03 5a a5 18 06 44 a5 73 6b 00 …       (their bytes for "Desk")
 RX  04 5a a5 02 01 00 44 a5 73 6b 00 …    -> b"D\xa5sk"
 ```
 
-Space Station's rename has never worked past one character, and the pad was never the reason.
-`nickname_packet(..., reference=True)` reproduces their packet, which is how this was established.
+`nickname_packet(..., reference=True)` reproduces this fixed-index reference-builder bug for
+protocol comparison only; normal writes use the hardware-backed no-checksum format above.

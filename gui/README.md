@@ -31,11 +31,10 @@ PySide6"`) rather than importing it.
 
 PySide6 (LGPLv3), not PyQt6 (GPL-only). Avoid the Qt add-ons that ship
 GPL-3.0-only under the open-source licence — Charts, Data Visualization,
-Virtual Keyboard. A response curve is what would otherwise pull in Qt Charts;
-`gui/qml/components/StickSide.qml` draws one with `QtQuick.Shapes` instead,
-plotting the nine-point bank the pad actually plays for a stick. A `Canvas`
-would do it too and did: it is a texture painted in JavaScript on the GUI
-thread, and this plot is recompiled on every step of a slider drag.
+Virtual Keyboard. `gui/qml/components/StickSide.qml` draws response curves with
+`QtQuick.Shapes`, plotting the nine-point bank the pad plays for a stick. Do not
+replace it with a `Canvas`: that path paints a texture in JavaScript on the GUI
+thread and recompiles the plot on every slider step.
 
 The interface is QML on Kirigami, and no file under `gui/` imports `QtWidgets`.
 `QQuickStyle.setStyle("org.kde.desktop")` must run before the first
@@ -43,41 +42,33 @@ The interface is QML on Kirigami, and no file under `gui/` imports `QtWidgets`.
 in the default style. `tests/test_shell.py` and `tests/test_qml.py` set the same
 style, so a page that only lays out under the Basic style fails in the tests.
 
-**Every combo box and spin box has to be told to leave the wheel alone.** That
-style sets `wheelEnabled: true` in its own `ComboBox.qml` and `SpinBox.qml`;
-Qt's default is `false` and the Basic style leaves it there. Since every such
-control here is bound to a model and writes back on `activated`, a scroll with
-the pointer over one is swallowed and *edits the profile* — one notch over the B
-row on Buttons remaps B to A, with no confirmation and no undo. So bare
-`Controls.ComboBox` and `Controls.SpinBox` carry `wheelEnabled: false`, and the
-FormCard rows go through `components/FormComboBox.qml` and
+**Every combo box and spin box must ignore the wheel.** The desktop style sets
+`wheelEnabled: true` in its own `ComboBox.qml` and `SpinBox.qml`. Because these
+controls write their activated value to a model, an ordinary page scroll would
+otherwise edit controller state. Bare `Controls.ComboBox` and
+`Controls.SpinBox` therefore carry `wheelEnabled: false`, and FormCard rows use
+`components/FormComboBox.qml` and
 `components/FormSpinBox.qml`, which exist only to reach the control inside the
 kirigami-addons delegate — it is private and no version aliases the property
 out. `tests/qml/tst_wheel.qml` sends real wheel events and asserts both halves:
 the model did not move and the page did.
 
-Sliders need a third mechanism, because `wheelEnabled` genuinely has no effect
-on one: `org.kde.desktop`'s `Slider.qml` does not use the property at all, it
-puts a `MouseArea` in its own background and calls `increase()`/`decrease()` and
-then `moved()` from there, to snap to tick marks. Every slider here writes
-`moved` into the model, so a notch over one moved a trigger's travel window or
-the dock's brightness. `components/SliderWheelGuard.qml` is declared inside the
-slider, where it sits above that background and is offered the event first;
-taking it means the page scroll is done by hand, since anything passed on would
-be picked up by the MouseArea being defeated. `RangeSlider` already lets the
-wheel through and needs nothing.
+Sliders require a separate mechanism because the desktop style's `Slider.qml`
+does not use `wheelEnabled`; its background `MouseArea` changes the value and
+emits `moved()`. Every slider writes `moved` into its model.
+`components/SliderWheelGuard.qml` must therefore remain inside each slider,
+above that background, and perform the page scroll itself after accepting the
+event. `RangeSlider` already passes wheel events through and needs no guard.
 
-**And a control that has been clicked stops following its model.** Clicking a
-QQC2 switch assigns its own `checked`, which is how a declarative binding to it
-is broken — so `checked: someModel.thing` is a local variable from the first
-click onwards. That is invisible while every write succeeds and is precisely
-what makes a failure unreportable: a setting the pad refuses is put back in the
-model and the switch goes on showing what the click put there, so the page
-claims a write that never happened. `components/ModelSwitch.qml` re-applies the
-binding through a `Binding` element, which survives being overwritten;
+**Interactive controls must preserve their model bindings.** Clicking a QQC2
+switch assigns its own `checked` property and breaks a direct
+`checked: someModel.thing` binding. A failed device write can then restore the
+model while the control continues to show the clicked value.
+`components/ModelSwitch.qml` applies the binding through a `Binding` element,
+which survives the control's assignment;
 `tst_device.qml::test_a_switch_still_follows_the_model_after_it_is_clicked`
-fails against a plain binding. The same trap is why `components/SliderRow.qml`
-says its `value` must never be assigned from a handler.
+guards this behavior. For the same reason, handlers must not assign
+`components/SliderRow.qml`'s `value`.
 
 The crop stage's zoom is the deliberate exception: scrolling a picture's zoom is
 what a person means by it, so that slider keeps the wheel and settles on a timer
@@ -88,7 +79,7 @@ instead of on a release it never gets.
 **PySide6 must come from wherever Kirigami comes from — a distribution package,
 or `io.qt.PySide.BaseApp//6.11` on `org.kde.Platform//6.11` — never from pip.**
 A PyPI wheel bundles its own Qt build, and Kirigami's plugin will not link
-against it; the symbol versions and the failed workarounds are in
+against it; the ABI incompatibility details are documented in
 [requirements.txt](requirements.txt).
 
 On an immutable system, a container avoids layering anything:
@@ -114,12 +105,11 @@ resolves without an import-path environment variable; the only environment
 variable any module under `gui/` reads is the stall watchdog's, below.
 `tests/qml_harness.py` repeats the same list.
 
-The application identifies itself as application and organisation
-`openflydigi`, display name "OpenFlydigi", desktop file `openflydigi`, window
-icon from the theme name `input-gaming`. It shipped as `flydigi-apex5` before
-the project took the repository's own name, so `flydigi.setup.STALE_DESKTOP` is
-the old menu entry and installing removes it — otherwise an upgraded checkout
-leaves two entries that start the same window.
+The application and organisation identifiers are `openflydigi`; the display
+name is "OpenFlydigi", the desktop file is `openflydigi`, and the window icon is
+the theme icon `input-gaming`. `flydigi.setup.STALE_DESKTOP` identifies the
+legacy `flydigi-apex5` menu entry, which setup removes to prevent duplicate
+launchers after an upgrade.
 
 `flydigi.setup` refuses to write the application-menu entry from the host when
 the host's `python3` cannot import PySide6, since the launcher would point at an
@@ -167,7 +157,7 @@ smooth.
     watchdog.py       off by default: what the GUI thread is in when a frame is late
     i18n.py           the i18n*() shim the engine needs -- PySide6 has no KLocalizedContext
     models/           view-agnostic state -- no QtWidgets, no QtQuick
-    qml/              Main.qml, pages/ (fifteen), components/ (fourteen)
+    qml/              Main.qml, pages/, components/
     requirements.txt  what the runtime must provide -- documentation, not a pip file
 
 QML constructs `App`, so opening the device is a separate `start()`, and
@@ -180,14 +170,12 @@ not (`SEARCH_INTERVAL_MS`, looking for it, since a sleeping pad leaves the USB
 bus and so is missing rather than silent). It is stopped for the duration of a
 screen upload.
 
-**The poll is also how the window fills.** There is no separate first read:
-`beginPolling` asks how the pad is doing, and the pad going from missing to
-answering is what reads the rest — profile, lighting, transport, settings. A pad
-that was there at launch and a pad plugged in ten minutes later come down the
-same path, so the second one cannot quietly stop working. The re-read keeps
-unsaved edits (`_read_the_rest(keep_edits=True)`): the pad sleeps in minutes and
-an editing session never touches it, so waking it must not cost a half-finished
-remap. Pressing **Reload from pad** is the deliberate version and discards them.
+**Polling also performs initial and reconnect reads.** There is no separate
+startup read: when `beginPolling` observes a pad change from missing to
+answering, it reads the profile, lighting, transport, and settings. Devices
+present at launch and devices attached later therefore follow the same
+initialization path. Reconnect reads retain unsaved edits through
+`_read_the_rest(keep_edits=True)`; **Reload from pad** explicitly discards them.
 `PROFILE_COUNT` is 4.
 
 Requests reach the worker as signals rather than direct calls: calling a slot on
@@ -219,19 +207,19 @@ a short delay. Page-local state therefore does not survive navigation; state
 that must survive belongs in a model.
 
 `Kirigami.GlobalDrawer.actions` is a list of `Action` objects and cannot be
-filled by a `Repeater`, so the drawer's actions are written out one per section,
-in the same order, with nothing keeping them in step: adding a page means adding
-both the `sections` entry and its `Kirigami.Action`, or every label after it
-shifts by one and the last section becomes unreachable from the sidebar.
-`test_the_drawer_offers_every_section` asserts the pairing.
+filled by a `Repeater`. `Component.onCompleted` therefore creates one
+`Kirigami.Action` per `sections` entry from a shared `Component` and assigns the
+resulting list to `actions`. Add, remove, or reorder pages only in `sections`;
+the drawer follows that list. `test_the_drawer_offers_every_section` verifies
+the resulting order.
 
 **A section belongs to a device kind and may require a capability.** `kinds` is
 `["pad"]`, `["dock"]`, or null for an installation-wide section. The optional
 `needs` field names a hardware capability. `sectionVisible()` checks both
 `App.devices.currentKind` and the selected device's capabilities: Triggers and
 Games require `adaptive_triggers`, and Screen requires `screen`. Hidden actions
-remain in the fixed action list, while `drawerActions` exposes only the visible
-ones to the drawer and tests.
+remain in the generated action list, while `drawerActions` exposes only the
+visible ones to the drawer and tests.
 
 Only a change of *kind* moves the page: `onDeviceKindChanged` opens Controller
 or Dock, so picking a dock takes you to it and picking a pad brings you back,
@@ -294,14 +282,13 @@ Rules for these:
 
   * `Property` with a notify signal for everything a view shows, or
     `constant=True` where it cannot change. camelCase names, as QML expects.
-  * `roleNames()` returns **bytes** keys.
+  * `roleNames()` maps integer role IDs to byte-string role names.
   * No `QtWidgets` and no `QtQuick` anywhere under `models/`;
     `tests/test_models.py` asserts it. `models/screen.py`, `models/dock.py` and
     `models/imaging.py` are the ones that import a Qt GUI module — `QImage`,
     `QImageReader`, `QPainter`, for image decoding — which the rule allows.
-    That is also why the dock's LED preview is a QML `Repeater` fed a list of
-    colour strings rather than a `QQuickPaintedItem`: the painting has to live
-    in the view, and the model may not reach it.
+    The dock's LED preview remains a QML `Repeater` fed a list of colour strings
+    rather than a `QQuickPaintedItem`, keeping painting in the view.
   * Dirty tracking lives here, not in the view. `ProfileModel.dirty` is a byte
     comparison, `bytes(self._edited.blob) != self._slots.stored(self._cfg_id)`.
     `canSaveToFlash` is a separate gate, because command 166 carries no slot id
@@ -344,38 +331,52 @@ their `main()` functions: a test not added to its tuple never runs, and the
 count still reads `N/N passed`. The QML suite is handed the `tests/qml`
 directory instead and finds its own cases.
 
+Test lifecycle rules:
+
+- Wait on a model property or fixture counter, not a JavaScript closure around
+  a control property with no notify signal.
+- A case that starts an asynchronous profile read must wait for the matching
+  fixture read counter before ending.
+- Stop every worker thread during cleanup; destroying a running `QThread`
+  aborts the process.
+- Create test objects with `createTemporaryObject()` inside the QtQuickTest
+  `TestCase`; synthetic clicks are dropped by a separate offscreen window.
+- From PySide, use supported `findChild`/`findChildren` paths rather than
+  recursing through QML objects with `QObject.children()`.
+- Stub `dsmode.stop` in model tests. The real operation searches the process
+  table and can stop a relay outside the test. `tests/test_dsmode.py` is safe
+  because it passes only a relay PID that the test started.
+
 Every interactive element carries an `objectName`: QtQuickTest addresses items
 with `findChild(page, "name")`, and there is no other handle on an item a
 delegate created.
 
-**Anything inside a `Kirigami.Dialog` is reached through `contentItem`.**
+**Reach content inside a `Kirigami.Dialog` through `contentItem`.**
 `findChild(dialog, "…")` finds nothing, and neither does `findChild(page, …)` or
 `findChild(suite, …)` — the dialog keeps its content in a control that is not a
 QObject child of the dialog, so the recursion never reaches it.
-`findChild(dialog.contentItem, "…")` is the one that works. Measured against the
-Macros page's step editor, after the other three had each been tried.
+Use `findChild(dialog.contentItem, "…")`.
 
-**And `opened` never becomes true** under the offscreen platform, because
-nothing activates the window — while the content is built and laid out anyway.
+**Do not wait for `opened` under the offscreen platform.** It remains false
+because nothing activates the window, although the content is built and laid
+out.
 So `tryVerify(() => dialog.opened, …)` waits forever on a dialog that is
 demonstrably there; wait on `visible`, or on a delegate appearing.
 
-**A modal dialog eats clicks aimed at the page behind it**, including the
-footer's Apply. Close it before clicking through, or the click lands on the
-overlay and the test fails as "the write never completed".
+**Close modal dialogs before clicking the page behind them.** The overlay
+intercepts those clicks, including clicks on the footer's Apply action.
 
-`tests/fake_pad.py` is shared with the backend tests and stays MIT and Qt-free,
-which is why the two commands only the desktop app asks for — device info and
-the live trigger bind — live in `tests/qml_harness.py`'s `TestPad` subclass
-instead. The harness wraps that in `Pad`, a `PadProbe` exposing what QML has no
-other way to see — packets received, saved count, bad checksums, the reads and
-switches, the binds and the effect live on each trigger, and `failReads` to make
-config reads go unanswered as a sleeping pad does. `Fixture` adds per-family read
-counters, `seedGames`, `testImage` and `shell()`, the real window built the way
-`main.py` builds it; `Setup` is the QtQuickTest entry point, and its
-`qmlEngineAvailable()` installs the import paths and the i18n shim.
+`tests/fake_pad.py` is shared with the backend tests and stays MIT and Qt-free.
+The desktop-only device-info and live-trigger-bind commands therefore live in
+`tests/qml_harness.py`'s `TestPad` subclass. The harness wraps that in `Pad`, a
+`PadProbe` exposing packets received, saved count, bad checksums, reads,
+switches, trigger binds and effects, and `failReads` for unanswered config
+reads. `Fixture` adds per-family read counters, `seedGames`, `testImage`, and
+`shell()`, the real window built through the same path as `main.py`; `Setup` is
+the QtQuickTest entry point, and its `qmlEngineAvailable()` installs the import
+paths and the i18n shim.
 
-The QML cases, the traps they hit, and what apply and save mean to the pad are in
+Desktop apply/save semantics and additional QML behavior are documented in
 [../docs/findings-desktop-app.md](../docs/findings-desktop-app.md).
 
 ## Static checking
@@ -394,13 +395,12 @@ anything a view binds to. `collect()` discovers QObject subclasses exported by
 `gui.models.__all__`, so a new QML model must be imported and listed in
 `gui/models/__init__.py`; there is no second hand-maintained generator list.
 
-`pyside6-project build --qml-module` is the framework's own route and is
-deliberately not used: `pyside6-metaobjectdump` parses the Python source, so it
-cannot see `constant=True`. Every constant property then reaches qmllint looking
-merely read-only, and every use of one is reported as "binding might not update
-when the property changes" — 99 warnings across `gui/qml`, all of them wrong.
-`tools/generate-qmltypes` dumps the live `QMetaObject` instead, where the flag is
-correct, and hands the result to Qt's own `qmltyperegistrar` unchanged.
+`pyside6-project build --qml-module` is not the supported static-checking route:
+`pyside6-metaobjectdump` parses Python source and cannot see `constant=True`.
+Constant properties consequently reach qmllint as merely read-only and produce
+false "binding might not update when the property changes" warnings.
+`tools/generate-qmltypes` instead dumps the live `QMetaObject`, where the flag is
+correct, and passes the result to Qt's own `qmltyperegistrar` unchanged.
 
 The repository root's `pyproject.toml` describes `gui/` to `pyside6-project`
 (`build`, `qmllint`, `run`) and pins `requires-python = ">=3.9"`. Its explicit

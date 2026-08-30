@@ -9,7 +9,7 @@ repository. Unless stated otherwise, byte ranges below are half-open: `109..123`
 does not interpret. The `J`-numbers in the headings are the keys [PROGRESS.md](../PROGRESS.md)
 cross-references by.
 
-**Where this is edited.** The CLI is `tools/flydigi-mapping`; use `--help` for the authoritative
+**Interfaces and tests.** The CLI is `tools/flydigi-mapping`; use `--help` for the authoritative
 command list. It currently includes `list`, `show`, `set`, `clear`, `reset`, `reset-all`,
 `to-switch`, `rename`, `apply`, `backup`, `restore`, `macros`, `macro-record`, `macro-set`,
 `macro-clear`, and `gyro`, plus a global `--profiles N` (default 4).
@@ -159,7 +159,7 @@ from**, not leftovers: the renderer builds a four-node polyline out of them and 
 the lighting config, the host computes and the pad plays. Space Station writes both blocks
 unconditionally, so nothing in the app reveals which one the pad reads.
 
-**The compiler, straight out of `index-DM6mSbRo.js`** (constants `Pe=127, Ie=100, ze=50, V=9,
+**Reference curve compiler from `index-DM6mSbRo.js`** (constants `Pe=127, Ie=100, ze=50, V=9,
 ce=-50`):
 
 ```js
@@ -227,7 +227,7 @@ a trade-off rather than a neutral preference. A true square output region would 
 **1.41**, but the stick's own gate is octagonal and never reaches it, so a probe must threshold
 between 1.00 and 1.19 to separate the modes; 1.25 reports both as circular.
 
-So: **bank and `isRound` reach the firmware; the core polyline, the type byte, `center` and `edge`
+**Only the bank and `isRound` reach the firmware; the core polyline, type byte, `center`, and `edge`
 do not.** The type byte is written into **both** blocks anyway, because the SDK regenerates the
 extra block's copy from the core one on every write and a blob where they disagree is a state no
 vendor tool produces.
@@ -314,7 +314,7 @@ claims (`effect_travel_range`: "Sets the physical actuation range of the trigger
 the upper and lower limits of the trigger data in-game."). Bringing `end` in is a software hair
 trigger.
 
-**And the neighbouring candidate is inert.** The same probe wrote the same window into `Param[0]`/
+**The force-trigger parameter candidate is inert.** The same probe wrote the same window into `Param[0]`/
 `Param[1]` of the force-trigger block — 195/196 and 215/216, the `AdapterTriggerTypeNormal
 { Start, End }` record — and got **238 against 239**: no difference at all.
 
@@ -364,11 +364,12 @@ The struct's field names are the firmware's; what they carry is
 
 The mapping runs on the pad, so it works in any game with nothing running on the host — which on
 Linux is otherwise Steam Input only. The pad's own UI warns that enabling it lowers the polling
-rate. `MotionMapType.Mouse` is not a pad feature — see *Ruled out* in [PROGRESS.md](../PROGRESS.md)
-— but it is written here like any other value: refusing it in a byte layout would leave a profile
-brought over from Windows uneditable, so it is the *app* that does not offer it.
+rate. `MotionMapType.Mouse` is not a pad feature; Space Station implements keyboard/mouse mappings
+through [host-side Windows injection](findings-steam.md#space-station-behavior). The value is still
+preserved in the blob so a profile imported from Windows remains editable, but the app does not
+offer it.
 
-### Measured on the pad
+### Hardware measurements
 
 `tools/gyro-map-probe` writes the block, then reads both sticks and the enable key off evdev while
 the pad's own motion stream counts how far it was actually tilted. The mapped stick is the reading
@@ -383,25 +384,23 @@ is scored spoilt. Five windows, on a wired Apex 5, firmware 7.0.3.0:
 | 4 | right stick, **Click**, key LB | 2.9 s driven · 2.7 s quiet · 4.6 s driven · 3.8 s quiet · 1.9 s driven |
 | 5 | window 2 again, **curve at 830 flattened to zero output** | peak 1.10, driven — unchanged from window 2 |
 
-So: **the pad plays the block, the enable key gates it, byte 7 is honoured by itself, Click toggles,
-and the response curve at 830 is inert.** Window 4 is the weakest of these as a finding — Click is
-the antithesis of Hold and was never really in doubt — and it is here because the harness made it
-nearly free once the other four existed.
+**The pad plays the block, the enable key gates it, byte 7 is honoured by itself, Click toggles, and
+the response curve at 830 is inert.** Window 4 is confirmatory rather than discriminating evidence,
+because the enum already defines Click as the opposite of Hold.
 
-Three things came out of the runs that matter more than the table does:
+Additional measurement constraints:
 
   * **Releasing the enable key does not re-centre the stick.** It parks wherever the gyro last put
     it — 0.27 of full travel in window 2, 0.26 in window 3 — and stays exactly there: both post-
     release samples were identical and the axis sent nothing more. A game goes on reading a stick
     held a quarter over until the gyro is switched back on and tilted back.
-  * **The block at 830 is a feature Flydigi never finished** — see its own section below. Not
-    merely unmeasured, and not waiting for an interface to be written for it.
-  * **An off-stretch is invisible to anything that counts events.** evdev only reports a changing
-    axis, so a gyro that has been switched off produces *no samples at all* — a 3.8 s silence
-    arrives as one event. Two verdicts in the probe were wrong before this was accounted for: a
-    parked stick read as "still driven" because it sat far from centre, and Click read as "not a
-    toggle" because its off-stretches were discarded as too short. Stretches are measured in
-    seconds and liveness as mean step between samples, never as a count.
+  * **The reference feature represented by block 830 is incomplete** — see its own section below.
+    The block is inert, not merely unmeasured or waiting for a user interface.
+  * **An off-stretch is invisible to event-count analysis.** evdev reports only a changing axis, so
+    a disabled gyro produces no samples and a 3.8 s silence arrives as one event. A parked stick can
+    remain far from centre without being actively driven, and Click off-stretches can contain no
+    events. Measure stretch duration in seconds and liveness by mean time between samples, never by
+    event count.
 
 **The two sensitivity bytes ship different.** 25 and 20 at the factory, which their own software
 cannot produce: `ParseMotionConfigToArray` assigns `Sensitivity` to both, and their reader collapses
@@ -422,16 +421,16 @@ rule rather than overriding it: byte 1 is written unconditionally, byte 7 only u
 the app does differently is show what is really stored — a key stranded in byte 7 is named on the
 page instead of reading as "none".
 
-## The response curve at 830 is a feature Flydigi never finished
+## Motion response curve at 830: inert
 
 The block is the joystick core block with its type byte removed — `zero, p1.x, p1.y, p2.x, p2.y,
 end` on the same 0..127 scale — and it ships as the same identity line, `0 63 63 127 127 127`. Two
 independent lines of evidence say nothing plays it.
 
-**The firmware does not read it.** Measured with `tools/gyro-map-probe --window 5`: the curve
+**The firmware does not read it.** `tools/gyro-map-probe --window 5` measured the curve
 written flat to zero output, with the mapping otherwise byte-identical to a window that drove the
 stick to 0.97 of full travel, and the stick still reached **1.10**. Three things rule out the
-obvious ways to be wrong about a null result:
+main false-null explanations:
 
   * **The bytes arrive.** Written, applied and read straight back off the pad: `830..836` returns
     `0 0 0 127 0 0`, exactly what was sent.
@@ -444,8 +443,8 @@ obvious ways to be wrong about a null result:
     companion for it anywhere in the blob. The unclaimed ranges are 227..230, 768..770, 814..820 and
     825..830, none of them nine points.
 
-**And Space Station never authors it.** `Smoothness` occurs **five times in the whole application**,
-which is the entire evidence and worth listing: the child component reads `i.smoothness` and emits
+**Space Station never authors it.** `Smoothness` occurs **five times in the whole application**:
+the child component reads `i.smoothness` and emits
 `callback("smoothness", …)`; the parent's read handler stores `O.mappingTypeJoystick.smoothness`;
 its callback updates that state; and its render passes the value back down as `Smoothness`. The
 round trip is fully wired — and then:
@@ -459,14 +458,13 @@ round trip is fully wired — and then:
   * the save path never assigns the field, writing `sensitivity`, `deadZone`, `enableType` and the
     enable keys and nothing else.
 
-Their slider is also a 0..255 scalar over a field that is a four-node curve —
+The reference slider is also a 0..255 scalar over a field that is a four-node curve —
 `MotionSmoothnessConfig {Zero, Point1, Point2, End}`, not an int. So this is not three bugs in a
-working feature; it is a feature abandoned partway through wiring, left in the struct and
-round-tripped by `MappingConfigParserV31` ever since, which re-emits all six bytes on every write
-from whatever its reader put there.
+working feature. The evidence indicates an incompletely wired reference feature that remains in the
+struct and is byte-preserved by `MappingConfigParserV31`, which re-emits all six values read.
 
-`set_motion_curve` stays because the block is real and its layout is confirmed against that writer.
-Nothing should offer a control for it.
+`set_motion_curve` remains available for low-level byte editing because the block and layout are
+confirmed against the reference writer. User interfaces must not expose it as a working control.
 
 ## Grip vibration, at offset 145
 
@@ -559,28 +557,24 @@ The repeat interval byte is `0xFF` where a slot has never been written — `MACR
 carried through as "unset" rather than reported as 2550 ms — and the settable range is
 `MACRO_INTERVAL_MAX = 2540` ms.
 
-**The interval belongs to the slot and the macro does not, which is a bug waiting for an editor.**
+**Repeat intervals are slot-indexed and vacated slots must be cleared after list compaction.**
 `set_macros` writes each macro's interval by list position and treats `None` as "leave this slot's
-byte alone", which is right for a slot nobody has set — a factory 30 ms survives it — and wrong for
-one a macro has just vacated. `clear_macro` shortens the list and shifts every later macro down a
-slot, leaving the tail holding a number that belonged to a macro that is gone. Traced on the factory
-blob: `set_macro("m1", interval=100)`, `set_macro("m2", interval=2000)`, `clear_macro("m1")` leaves
-`[200, 200, 3, 3, 3]`, and a following `set_macro("m3", steps)` with no interval reports **2000 ms
-nobody set**. Nothing reached it while the app could only record and delete one macro at a time; a
-step editor makes it reachable on every delete. `set_macros` now blanks the slots past the end of
-the list to `MACRO_INTERVAL_UNSET`, which is the one place here that deliberately does not reproduce
-what Flydigi's writer emits — the alternative being a byte that is provably wrong about the macro
-reading it. The 0xFF fill that *is* byte-for-byte parity is the macro page at 230; this is the cycle
-block at 820 and a different question.
+byte alone", preserving an existing factory 30 ms value. `clear_macro` shortens the list and shifts
+later macros down a slot. Without clearing the vacated tail,
+`set_macro("m1", interval=100)`, `set_macro("m2", interval=2000)`, and `clear_macro("m1")` leave
+`[200, 200, 3, 3, 3]`; a subsequent `set_macro("m3", steps)` with no interval then reports an
+unrequested **2000 ms**. `set_macros` clears slots past the list end to `MACRO_INTERVAL_UNSET` to
+prevent this stale association. This deliberate divergence from Flydigi's writer applies to the
+cycle block at 820; the macro page at 230 retains the reference's byte-for-byte 0xFF fill.
 
 `MacroEnableType` is `None=0, Once=1, Press=2, Click=3` — 2 repeats while the key is held and 3
 toggles, which `mapping.MACRO_WHILE_HELD` and `MACRO_TOGGLE` name by behaviour. `MacroActionEvent`
 is `Release=0, Press=1, LeftJoystick=2, RightJoystick=3, Hold=5` — the enum **skips 4**, and
 guessing it from position would write an event the firmware does not know.
 
-**Where this lives depends on the protocol version.** From v3.2 macros move out of the blob into
+**Macro storage depends on the protocol version.** From v3.2 macros move out of the blob into
 their own store behind commands 172/173/174, ten of them at 1 ms resolution. An Apex 5 reports
-v3.1 and keeps them here. Confirmed twice over: `MappingConfigParser` branches on
+v3.1 and keeps them here. Evidence: `MappingConfigParser` branches on
 `(ProtoVersion & 0xF) < 2`, and the hardware holds five cycle bytes at 820.
 `MappingConfig.macros_in_blob` is the guard that refuses to write this region from 3.2 on.
 
@@ -588,8 +582,8 @@ v3.1 and keeps them here. Confirmed twice over: `MappingConfigParser` branches o
 off and leaves the evdev node present and silent, so a capture in that state cannot tell a firmware
 that will not play a macro from a pad that is not reporting. `motion.read_transport` reports it.
 
-Measured on hardware, with four paddles each given a signature no finger can produce — three taps of
-one letter in 300 ms:
+Hardware measurements used four paddles, each assigned a three-tap signature that cannot be produced
+accidentally by hand:
 
   * **They play.** `M1` produced `a a a` at exactly the 40/60 ms gaps written, `M3` held down
     produced `x x x` seven times over. The stored timings come back to the millisecond.
@@ -625,30 +619,30 @@ On the CLI, `macro-set` takes steps as `press:<key>`, `release:<key>` or `wait:<
 also takes `--seconds` (default 10). In the app, `MacrosPage.qml` records a sequence off the pad,
 sets its type and repeat gap, edits every step, builds a macro from nothing, and deletes it.
 
-**Where the editor parts company with Space Station**, since the two were compared closely enough
-that the differences are choices rather than gaps:
+**Editor behavior compared with Space Station:**
 
-  * **Theirs is key-centric and this one is macro-centric.** `mapping_config_key_map_type_macro` sits
+  * **Space Station is key-centric; OpenFlydigi is macro-centric.** `mapping_config_key_map_type_macro` sits
     beside Click, Turbo and Special as one of a key's *mapping types*, and their editor is scoped to
     a key — 正在为 {{keyName}} 键设置宏, "Macro is being set for {{keyName}}". So they have no notion
     of rebinding a macro: moving one is setting a macro on the other button. This app lists macros
     instead, which is what makes the shared step budget visible, and the Buttons page names a key
     that runs one.
-  * **Their action is a press/release pair; these are the raw steps.** `macro_edit_output_key` /
+  * **Space Station exposes press/release pairs; OpenFlydigi exposes raw steps.** `macro_edit_output_key` /
     `macro_edit_duration` / `macro_edit_interval_time` — output key, how long it is held, and the gap
     after — which their encoder expands into the two events the wire actually stores. Editing the
     events directly is what lets a macro hold one key across another, which a list of pairs cannot
     express. "Add a tap" inserts a balanced pair, so the common case costs the same one action.
-  * **They refuse an unbalanced macro and this warns about one.** 该宏中缺少某按键的抬起或按下,
+  * **Space Station refuses an unbalanced macro; OpenFlydigi warns instead.** 该宏中缺少某按键的抬起或按下,
     "this macro is missing a press or release for some key, cannot be applied". Refusing on save
     would make building one a step at a time impossible — every half-finished macro is unbalanced —
     and would cost the user the macro rather than the mistake. The pad only sees it on Apply.
-  * **Neither offers reorder**, and theirs has no Hold either: `MacroActionEvent`'s hold and the two
+  * **Neither editor offers reordering**, and Space Station has no Hold action either:
+    `MacroActionEvent`'s hold and the two
     stick pseudo-events never reach the wire from their editor.
 
 `set_macro()` already accepts arbitrary steps; the editor behavior above is implemented in the GUI.
 
-## Protocol versions, and what a v3.2 profile is
+## Protocol-version differences
 
 `ProtoVersion` at blob offset 0 is Flydigi's own *profile format* version, not protobuf's. An
 Apex 5 reports **769 = v3.1**; a Vader 5's factory profile is **770 = v3.2**. This matters because
@@ -701,12 +695,13 @@ them.
 paths, it uses new command bytes rather than only a shared v3.1 route measured on the Apex 5. The
 Macros page displays this warning for a v3.2 profile.
 
-## The bean behind the blob, for translating a factory profile
+## Factory-profile protobuf translation
 
 Space Station's per-slot restore writes a bundled `Configs/Controller/<code>/default/
 default_mapping_<DeviceType>.dat`, which is a protobuf `ControllerMappingConfigBeans` -- four
-`ControllerMappingConfigBean`s under repeated field 1. Translating one into the wire blob is how a
-model nobody owns gets a factory profile: the files ship for every model, `f5` included.
+`ControllerMappingConfigBean`s under repeated field 1. Translating one into the wire blob provides a
+factory profile for a model without available hardware; the files ship for every model, including
+`f5`.
 
 Top-level `ControllerMappingConfigBean` field numbers against the measured blob regions:
 
@@ -731,8 +726,8 @@ so it cannot be quietly wrong. `tools/mapping_bean.py` is the translator -- a sc
 wire reader plus `MappingConfigParserV30` and `V31`'s emit paths -- and `tools/gen-factory-config
 --check` is the gate.
 
-**828 of 840 bytes match, and the twelve that do not are Flydigi's own, not the translator's.** Each
-was pinned down by running all six k5 SKU files rather than by reasoning about one:
+**Translator result: 828 of 840 bytes match.** The remaining twelve bytes are source-representation
+differences, established by comparing all six k5 SKU files:
 
 | Bytes | What | Why it differs |
 |---|---|---|
@@ -752,22 +747,20 @@ one LED blob per model, and a single k5 one would put the base model's lighting 
 that restored a slot. The ten legacy LED bytes that *are* in the blob, at offset 3, are identical
 across all six.
 
-**How far apart the two models actually are.** Comparing the k5 and f5 beans field by field: 494
+**k5/f5 bean differences.** Comparing the k5 and f5 beans field by field yields 494
 leaf fields, of which 336 are inside `LedConfigBean` and irrelevant, and **21 differ** among the
 rest -- a different factory stick bank (`2d 3a 47 54 ...` against the Apex's `4b 57 64 70 ...`),
 different trigger values (51/114 against 30/80), an extra key-table entry at index 20, the
 `ProtoVersion` and `DataVersion`, and the macro-cycle block replaced by a single field, which is
 the 3.2 move showing up in the bean.
 
-**Provenance was the open question, and it is settled: the derived bytes are committed as device
-state.** The k5 blob came off the hardware and is on the same footing as `flydigi/ds5_usb.py`; the
-f5 blob is `default_mapping_130.dat` put through the translator above. They do not have equal
-standing and `factory_config.py` says so -- the Vader's is what Space Station *would write* to
-restore a slot, which is not provably what a factory Vader holds in flash. It is also the same bytes
-their own restore sends, which is the standard the feature has to meet rather than a lower one. The
-reasoning, and the fact that neither blob is claimed as this project's work, is in
-[NOTICE](../NOTICE); the translator is committed beside them so the derivation can be re-run rather
-than trusted.
+**Factory-blob provenance.** The k5 blob was read from hardware and has the same measured-device-state
+standing as `flydigi/ds5_usb.py`; the f5 blob is `default_mapping_130.dat` processed by the translator
+above. They therefore have different evidence status: the Vader blob is exactly the state Space
+Station writes during a slot restore, not a measurement of factory Vader flash. Matching that
+reference restore is the implementation standard. `factory_config.py` records this distinction.
+[NOTICE](../NOTICE) documents the source and the fact that neither blob is claimed as original
+project work; the committed translator makes the f5 derivation reproducible.
 
 The f5 blob differs from the k5's in 37 bytes: `ProtoVersion` 770, a different stick bank
 (`45 58 71 84 ...` against `50 62 75 87 ...`), different trigger travel and trigger-motor values,

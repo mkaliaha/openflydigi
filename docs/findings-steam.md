@@ -1,4 +1,4 @@
-# Sharing the pad with Steam and SDL
+# Steam/SDL arbitration and device handover
 
 Arbitration on the vendor hidraw node, the pad-side toggle that hands the device to another driver,
 Steam's identity assignment, and SDL's own Flydigi driver with its unfilled trigger stub.
@@ -7,10 +7,11 @@ Index: [PROGRESS.md](../PROGRESS.md).
 
 **Status and provenance.** Local arbitration and command-16/17 behavior are implemented and tested
 in this project. Hardware and Steam-log observations below describe the captured Apex 5 setup.
-Space Station statements refer to version 4.2.0.9. Upstream SDL behavior is volatile and must be
-read against a named source revision rather than inferred from this document indefinitely.
+Space Station statements refer to version 4.2.0.9. The SDL evidence came from an unpinned `main`
+snapshot and is not durable upstream status; re-verify it against a named revision before relying
+on that inventory.
 
-## Several writers on one hidraw node
+## Concurrent access to one hidraw node
 
 Several of this project's processes can write the selected vendor hidraw node at once
 (`/dev/hidraw4` in the captured setup). The desktop app holds it open and
@@ -59,8 +60,9 @@ kernel when the holder's file closes, crash included, so a wait cannot be on a c
 everything reaches the node through `flydigi/device.py` except `tools/flydigi_cmd.py`, which opens
 it itself and takes the same `flock` by hand.
 Steam and SDL **must not be shut out**: the vendor interface keeps working with Steam Input on, which
-is what lets trigger effects run in games Steam has taken the pad for ([What works and what stops
-with the flag on](#what-works-and-what-stops-with-the-flag-on)). Steam's writes can still land
+is what lets trigger effects run in games Steam has taken the pad for
+([Feature availability with third-party control](#feature-availability-with-third-party-control)).
+Steam's writes can still land
 mid-sequence: harmless for effects, which the next frame overwrites, and a risk only for a config
 write, a deliberate action rather than something a game triggers.
 
@@ -88,14 +90,14 @@ open file description: two threads on one handle would both be granted it.
 `python3 tests/test_device.py` covers the locking without hardware: cross-process exclusion,
 re-entrancy, stale-reply rejection, release-then-grant, and two threads on one Controller.
 
-## "Allow third-party apps to take over mappings"
+## Third-party mapping handover
 
-Command 16 reads this flag, command 17 writes it, and the switch is on the Controller page behind
-the firmware gate. A pad-side setting, not Steam's. **Necessary for Steam to recognise the pad, and
-on its own not sufficient**: whether Steam then actually *names* the pad depends on a second thing
-entirely — see [Recognition depends on *which identity* the pad lands
-on](#recognition-depends-on-which-identity-the-pad-lands-on-not-just-on-the-flag) below. Space
-Station's own words:
+The Controller-page switch labelled "Allow third-party apps to take over mappings" controls a
+pad-side setting, not a Steam setting. Command 16 reads the flag and command 17 writes it; the UI
+switch is firmware-gated. The flag is **necessary but not sufficient** for Steam to recognise and
+name the pad. Naming also depends on the assigned identity; see
+[Identity assignment and Steam recognition](#identity-assignment-and-steam-recognition). Space
+Station describes the setting as follows:
 
 > When the switch is turned on and a third-party application (such as Steam, reWASD, etc.) is
 > opened, the controller mapping will be taken over, and all Space Station settings will be invalid
@@ -145,7 +147,8 @@ seven-component command-1 reply. **Known code defect:** the GUI currently applie
 threshold whichever supported pad answered. Model and QML tests cover threshold behavior, but not
 selection of the f5 minimum.
 
-**Version comparison here is numeric, and that is a deliberate divergence.** Flydigi's
+**The project's version comparison is numeric, a deliberate divergence from Space Station.**
+Flydigi's
 `DeviceUtil.CompareVersion` is `string.Compare(new, old, Ordinal) >= 0`, an ordinal *string*
 comparison, so their own gate rejects firmware **7.0.10.0** against a 7.0.3.0 minimum — "1" sorts
 below "3". `motion.version_at_least` parses the fields as integers, which differs from Space Station
@@ -160,7 +163,7 @@ Two commands that are **not** this feature:
     the host. It is a different packet from the NewXInput command 16 above, which is built with
     `CreateSimpleCommand(isNewProtocol: true)` and `[4]=2`.
 
-### What the flag actually does
+### Transport handover behavior
 
 Despite the wording, what the flag gates is whether the pad will **hand itself to another driver at
 all**. Reading command 16 before and after flipping it:
@@ -187,9 +190,9 @@ Three consequences:
     recognition comes from the acquire, not from any change of USB identity — nothing to do with
     descriptors or double-remapping.
 
-### What Space Station sends
+### Space Station behavior
 
-**The switch here is byte for byte what Space Station's is:**
+**The project's switch command matches Space Station byte for byte:**
 
   * Space Station's toggle reaches `ControllerRepository.EnableThirdPartyAppControl`, which calls
     `EnableRawDataInput(controller, null, null, null, null, enable, ...)` — command 17 with the
@@ -219,36 +222,36 @@ Neither re-asserts the flag. **Space Station's connect handler only reads it** �
 `OnDeviceUpdateImpl` calls `StartThirdPartyMonitor` and nothing else third-party related,
 and the config-apply path (`PrepareMappingConfigs`) deals only with mapping blobs.
 
-### The keyboard/mouse composite
+### Persistent keyboard/mouse composite
 
-**A separate, persistent pad mode.** Observed here with the pad presenting `if01-event-kbd`,
+**A separate, persistent pad mode.** In the captured state, the pad presented `if01-event-kbd`,
 `if01-event-mouse` and `if02-hidraw` while command 16 read `keyboard: False, mouse: False,
 third_party: False` — so the extra HID nodes coexist with the flag off and with both transport flags
 off. Whatever puts the pad into that composite, it is not command 17 and not this switch.
 
-**Nothing drives them, and that stays unexplained.** Worth stating as a hole rather than leaving it
-to be rediscovered. `ControllerHidManager.FindSpecialHidDevice` accepts, for vendor 0x37D7, only
+**No identified command drives the extra interfaces.** This remains an open protocol question.
+`ControllerHidManager.FindSpecialHidDevice` accepts, for vendor 0x37D7, only
 `UsagePage == 0xFFA0` — the vendor collection — so Flydigi's own software never opens these two
 interfaces at all. The pad's self-advertised capability bitmap (command 3,
 `ReadHardwareFunctionStatusCommandFactory.ParseAckData`) lists ten features and keyboard emulation
-is not among them. So the firmware may be able to do something with them that Flydigi's software
-never asks for; nothing here has found a way to ask.
+is not among them. The firmware may support behavior that Flydigi's software never requests, but no
+request mechanism has been identified.
 
-### What a keyboard binding actually is, measured
+### Measured keyboard-target behavior
 
-**The pad acts on `TARGET_KEYBOARD` and does not type.** Both halves measured here with
-`tools/keyboard-target-probe`, against a long-standing claim in this project that 254 was inert.
+**The pad acts on `TARGET_KEYBOARD` and does not type.** `tools/keyboard-target-probe` measured both
+behaviors and establishes that 254 is an active sentinel.
 
   * Set A's key-table target byte to 254 and A stops arriving as `BTN_SOUTH` — on the gamepad node,
     the keyboard node and the mouse node alike. Suppressing its own gamepad output is a decision only
     the firmware can make, so the sentinel is understood rather than ignored.
-  * **And 254 in particular, not "anything I do not recognise".** The control that separates those
-    two was run in the same session: A with a target byte of **200** — undefined in every table,
+  * **The behavior is specific to 254, not to every unrecognised target.** A same-session control set
+    A's target byte to **200** — undefined in every table,
     neither a key id nor a sentinel — goes on reporting `BTN_SOUTH` normally. A firmware that dropped
-    unresolvable targets would have silenced that one too. Without this window the paragraph above
-    would have been a sentence about invalid targets and nothing else.
-  * A second thing falls out of the same window, which nothing had checked: **an unrecognised target
-    is identity on the pad**, which is exactly what `mapping()` assumes when it decodes
+    unresolvable targets would have silenced that control too; this comparison establishes that 254
+    is a recognised sentinel.
+  * The same control establishes that **an unrecognised target is identity on the pad**, which is
+    exactly what `mapping()` assumes when it decodes
     (`target > TARGET_MACRO` → the key's own id). The reader's rule is the firmware's rule.
   * Nothing is typed: a key-table entry is three bytes and `MappingConfigParser` zeroes both
     companion bytes on the same branch that writes 254,
@@ -260,21 +263,21 @@ never asks for; nothing here has found a way to ask.
     bindings from the host's own file after every read. A feature whose configuration cannot be read
     back from the device is not stored on the device.
 
-So on Windows the two halves meet: the pad suppresses the button, and the filter driver above puts a
-keystroke in its place. On Linux only the first half happens, which makes a key left on 254 a key
-that does nothing — and is why `mapping.normalise_for_switch` strips them.
+On Windows, the pad suppresses the button and the filter driver emits a keystroke in its place. On
+Linux only the suppression occurs, so a key left on 254 does nothing; consequently,
+`mapping.normalise_for_switch` strips these targets.
 
 **A macro step cannot carry a keyboard key either.** `m_fdg_macro_step_struct_t` is
 `{time_l, time_h, btn, event}` and `MacroConfigParser` parses `btn` as a `ControllerKey`, on
 the v3.1 page and in the v3.2 store alike. That is why the app's macro editor offers only
 `XINPUT_TARGETS` as a step's output key — a measured constraint rather than a cautious one.
 
-### Steam's duplicate listing
+### Duplicate Steam listing
 
 **Steam lists the pad twice** when the flag is toggled on while Steam is already running. A reconnect
-with the flag already on produces **one** entry, the HIDAPI one; see the identity section below for
-why. Reported on Windows as well as here. Both paths are legitimately supported and Steam does not
-merge them:
+with the flag already on produces **one** entry, the HIDAPI one; the identity-assignment section
+below explains the difference. This behavior was reproduced in the captured Linux setup and has
+also been reported on Windows. Both paths are legitimately supported and Steam does not merge them:
 
 ```
 xpad on 3-4:1.0  -> event-joystick -> "generic XInput controller"
@@ -284,7 +287,7 @@ Steam hidapi     -> hidraw4        -> "Apex 5"
 `steamwebhelper` holds both hidraw nodes open while this is on. No command merges the two entries;
 the toggle only makes the second path exist.
 
-**The duplicate is deliberate, and upstream SDL says why.** `HIDAPI_IsDevicePresent`
+**Upstream SDL deliberately preserves the duplicate.** `HIDAPI_IsDevicePresent`
 (`src/joystick/hidapi/SDL_hidapijoystick.c`) is what the Linux evdev backend calls, via
 `SDL_JoystickHandledByAnotherDriver`, to decide whether a raw joystick duplicates a HIDAPI-handled
 one. Every other claimed device gets its evdev twin suppressed. The Flydigi V2 is skipped on purpose:
@@ -301,9 +304,10 @@ if (device->vendor_id == USB_VENDOR_FLYDIGI_V2 && device->driver == &SDL_HIDAPI_
 }
 ```
 
-So the double listing is designed, and the dead XInput entry is an accepted cost — exactly the
-`controller_data = False` behaviour measured below. The comment also states that **SDL cannot react
-to the flag changing**, which is what the identity section turns on.
+The double listing is therefore intentional, and the dead XInput entry is an accepted cost —
+exactly the `controller_data = False` behavior measured below. The comment also states that **SDL
+cannot react to the flag changing**; that limitation produces the enumeration behavior documented
+in the identity-assignment section.
 
 Enabling Steam Input for the pad makes Steam grab the physical device and hand the game a single
 virtual controller, so the duplicate is visible in Steam's settings list and not to anything launched
@@ -312,11 +316,11 @@ through Steam. It matters for games started outside Steam, and with Steam Input 
 
 If it does need removing, unbinding xpad is the local fix
 (`echo -n "3-4:1.0" | sudo tee /sys/bus/usb/drivers/xpad/unbind`), and it does not survive a wake
-since re-enumeration rebinds. **Do not make it permanent with a udev rule**: the evdev node is where
-everything else here reads sticks and buttons — the full list is under [What works and what stops
-with the flag on](#what-works-and-what-stops-with-the-flag-on) below.
+since re-enumeration rebinds. **Do not make it permanent with a udev rule**: the evdev node supplies
+sticks and buttons to the project features listed under
+[Feature availability with third-party control](#feature-availability-with-third-party-control).
 
-### What works and what stops with the flag on
+### Feature availability with third-party control
 
 Measured on hardware, with the flag on:
 
@@ -360,9 +364,9 @@ and the Controller and DualSense pages each warn when the other is active.
 
 ### Sticks, triggers and buttons in the vendor report
 
-In the exact state above — third-party on, `controller_data` off — the vendor operator-data stream
-was still delivering **3870 reports in 4 seconds** (~970 Hz), decoding to gyro ≈ 0 at rest and
-accel Z ≈ 4096, the 1 g already verified: it stays alive precisely when evdev dies.
+With third-party control on and `controller_data` off, the vendor operator-data stream still
+delivered **3870 reports in 4 seconds** (~970 Hz), decoding to gyro ≈ 0 at rest and accel Z ≈
+4096, consistent with the verified 1 g value. The stream remains active while evdev is silent.
 
 Offsets from `OperatorDataParser`, NewXInput branch, **+1 for the report-id byte this code keeps**:
 
@@ -392,12 +396,13 @@ against the `00 80` = -32768 extreme; subtract 65536, or unpack as signed.
 | 15 | Menu 0x01, Turbo 0x02, Home 0x08, Back 0x10 |
 
 `flydigi.motion` records the stick offsets as `STICK_OFFSETS = (4, 6, 8, 10)` and nothing reads
-them. Sourcing sticks here rather than from evdev would not free Tier 4 from the third-party toggle:
+them. Sourcing sticks from the vendor stream rather than evdev would not free Tier 4 from the
+third-party toggle:
 Tier 4 requires Steam Input *off* and the toggle exists to let Steam take over, so the two conflict a
 level above the input source. M1-M6 are already remapped onto real XInput buttons onboard with
 nothing running; only a pad button the game never sees — a host-side hotkey — would need this path.
 
-## Recognition depends on *which identity* the pad lands on, not just on the flag
+## Identity assignment and Steam recognition
 
 Whether Steam shows "Apex 5" depends on which of two synthetic identities the HIDAPI device gets,
 and that is decided by a race at enumeration.
@@ -426,9 +431,9 @@ The config set an identity binds to is a file on disk:
 
 with `configset_controller_generic.vdf` beside it in the same directory.
 
-**Two orderings, two results.** The two representations are distinguishable in the log by mapping
-GUID — `...086804` with `paddle1-4`/`misc2`/`misc3` and a `Controller using HIDAPI driver` line is
-the native path; `...080000` named `Flydigi Apex 5` with no driver line is xpad:
+**Enumeration order produces two outcomes.** The two representations are distinguishable in the
+log by mapping GUID — `...086804` with `paddle1-4`/`misc2`/`misc3` and a `Controller using HIDAPI
+driver` line is the native path; `...080000` named `Flydigi Apex 5` with no driver line is xpad:
 
 ```
 toggle off -> on, Steam already running
@@ -452,7 +457,7 @@ reconnect with the flag already on
 registers first, takes the base identity, and inherits `configset_37d7-2501-79acb62.vdf` — the config
 set that belongs to the xpad representation.
 
-**The identity is wrong in this state; the driver is not.** It is the native Flydigi HIDAPI driver in
+**The driver remains correct while the inherited identity is wrong.** It is the native Flydigi HIDAPI driver in
 every case — `Controller using HIDAPI driver, vid=0x37d7, pid=0x2501` in `controller.txt`, `Type: 30`
 in `controller_ui.txt`, mapping GUID `...086804` with the paddles and `misc2`/`misc3` that only the
 native path exposes. Verified on hardware while in this state:
@@ -462,58 +467,58 @@ native path exposes. Verified on hardware while in this state:
   * **SDL is live on it**, sending its 30-second acquire heartbeat — command 28 and command 1 ACKs
     seen on the vendor stream;
   * **everything this project drives over the vendor interface keeps working** — adaptive triggers,
-    profiles, lighting, curves, the motion stream. Same as the trade table above.
+    profiles, lighting, curves, and the motion stream, as listed in the feature-availability table.
 
 What is lost is the name plus one real consequence: the entry is not *labelled* Apex 5, and because
 it inherits the other identity's config set, Steam Input bindings saved under the `...62g` identity
 are not the ones applied. Re-toggling restores both.
 
-**This is what the disable/re-enable ritual does.** Reported on Windows and reproduced here: toggling
-off and on reverses the order, letting xpad claim the base identity so the HIDAPI device is pushed
-onto `...62g` and its own config set. It is the only way to force the second ordering, on either
-platform. It also lines up with SDL's own admission above that it cannot re-trigger device changes
+**Disabling and re-enabling the flag reverses registration order.** This was reproduced in the
+captured setup and has been reported on Windows: xpad claims the base identity and the HIDAPI device
+is pushed onto `...62g` and its own config set. This is the only known way to force the second
+ordering on either platform. It also aligns with SDL's statement above that it cannot re-trigger
+device changes
 when the flag moves: a command-17 ACK crossing the wire is the only thing that makes
-`HandleStatusUpdate` re-query status. SDL's `0x10`/`0x11` are our commands 16 and 17 —
+`HandleStatusUpdate` re-query status. SDL's `0x10`/`0x11` map to project commands 16 and 17 —
 `case FLYDIGI_V2_SET_STATUS_COMMAND: HIDAPI_DriverFlydigi_HandleStatusUpdate(...)`, and
 `HandleStatusUpdate` calls `SDL_HIDAPI_Flydigi_SendStatusRequest`.
 
-**Space Station does not solve this either.** Its connect handler only polls, so on Windows the same
+**Space Station does not correct the identity assignment.** Its connect handler only polls, so on Windows the same
 reconnect produces the same wrong identity. Re-asserting the flag on connect — read command 16 and,
 if it is on, send off then on after SDL has enumerated — is not implemented here. The fixes are
 upstream: a stable serial for the device, or Steam not reusing one config set across both
 representations.
 
-**The stable serial is a small patch, and the pad already carries the id it needs.**
+**Potential upstream improvement: derive a stable serial from the pad UID.**
 `identity.read_uid` is command **4** — one exchange, thirteen bytes, measured on this pad — and
 `registry.key` prefers it precisely because the free identifier, command 1's address field, reads
-all zeroes here. SDL's driver never asks for it: its command vocabulary is `0x01` info, `0x10`/`0x11`
+all zeroes on the captured pad. SDL's driver never asks for it: its command vocabulary is `0x01` info, `0x10`/`0x11`
 status, `0x12` haptic and `0x1C` acquire, with no command 4 anywhere, which is why the device
 presents no serial for Steam to use. Reading the uid at init and setting the device serial from it
 would give the HIDAPI representation a stable identity of its own — so it would stop colliding with
-the xpad one, keep its own config set, and hold its label across a reconnect, with no ritual. Two
-things are untested and both bear on whether it is worth doing: that Steam honours a supplied serial
-at all — the log line says "Invalid or missing", which implies a valid one is used, but nothing here
-has tried it — and how long an upstream merge would take to reach Steam Input, which carries its own
-SDL. Parked rather than attempted; the label is cosmetic and the bindings are recoverable by
-re-toggling.
+the xpad one, keep its own config set, and hold its label across a reconnect without re-toggling. Two
+unknowns bear on whether the patch is worthwhile: whether Steam honours a supplied serial at all —
+the log line says "Invalid or missing", which implies a valid one is used, but this has not been
+tested — and how long an upstream merge would take to reach Steam Input, which carries its own SDL.
+No patch has been attempted; the label is cosmetic and bindings are recoverable by re-toggling.
 
-**HIDAPI and xpad blocks never share a timestamp.** Across the whole log the two never appear at the
+**HIDAPI and xpad blocks never share a timestamp.** Across the captured log the two never appear at the
 same timestamp for `37d7/2501`, though both can be live at once (01:24:30 and 01:24:37 above). That
-sits awkwardly with a carve-out whose stated purpose is to make the XInput interface *always* show
-up; the evdev node is still there (`usb-Flydigi_Flydigi_APEX5-event-joystick`, xpad bound to
-`3-4:1.0`, Steam holding `/dev/input/event16` open). Unexplained.
+does not match the carve-out's stated purpose of making the XInput interface *always* show up; the
+evdev node is still present (`usb-Flydigi_Flydigi_APEX5-event-joystick`, xpad bound to `3-4:1.0`,
+Steam holding `/dev/input/event16` open). The discrepancy remains unexplained.
 
-## SDL's own Flydigi driver and its unfilled trigger stub
+## SDL Flydigi driver output support
 
-**Upstream reference status.** In `src/joystick/hidapi/SDL_hidapi_flydigi.c` on SDL `main` when this
-section was reviewed, device ids **128, 129, 133 and 134** are
+**Upstream evidence status: unpinned SDL `main` snapshot.** In the examined
+`src/joystick/hidapi/SDL_hidapi_flydigi.c`, device ids **128, 129, 133 and 134** are
 recognised there as the Apex 5 (this pad's full set is 128, 129, 133-136 — see
 [docs/findings-other-devices.md](findings-other-devices.md)), and its sensor rates (**970 Hz
 wired**, 295 Hz dongle) are the same stream at two transports — the ~300 Hz in `flydigi/motion.py`,
 which the DS5 relay's sensor-timestamp arithmetic is derived from, is the dongle figure. The wired
-number matches what was measured here independently. `FLYDIGI_V2_ACQUIRE_CONTROLLER_COMMAND 0x1C`,
-resent on `FLYDIGI_ACQUIRE_CONTROLLER_HEARTBEAT_TIME` (30 s), is our command 28 — the `0x1C` traffic
-on the shared node.
+number matches the independent hardware measurement. `FLYDIGI_V2_ACQUIRE_CONTROLLER_COMMAND 0x1C`,
+resent on `FLYDIGI_ACQUIRE_CONTROLLER_HEARTBEAT_TIME` (30 s), maps to project command 28 — the
+`0x1C` traffic on the shared node.
 
 **Input is complete but for two button bits; every output beyond rumble is a stub.**
 `SetJoystickLED`, `RumbleJoystickTriggers` and `SendJoystickEffect` all return `SDL_Unsupported()`,

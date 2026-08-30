@@ -1,10 +1,13 @@
 # Desktop application behavior
 
-Current write semantics, model registration, and GUI test coverage. Verified
-against the repository on 2026-08-23.
+Reference for write semantics, model registration, and empty-state behavior.
 
 Related documentation: [GUI development](../gui/README.md),
 [project status](../PROGRESS.md).
+
+Implementation sources: [profile model](../gui/models/profile.py),
+[device worker](../gui/worker.py), and
+[mapping protocol](../flydigi/mapping.py).
 
 ## Apply and save
 
@@ -12,10 +15,10 @@ Profile changes have two persistence levels:
 
 | Action | Commands | Result |
 |---|---|---|
-| **Apply** | 164/165 and, when needed, 162 | Updates the controller's working state immediately. The change is lost when the pad sleeps or powers off. |
+| **Apply** | 164/165; 173/174 for v3.2 macro-store changes; 162 when changed macros require a profile reload | Updates the controller's working state immediately. The change is lost when the pad sleeps or powers off. |
 | **Apply and save** | Apply sequence followed by 166 | Commits the controller's current working configuration to flash. `mapping.save_config()` waits up to 2 seconds for the acknowledgement. |
 
-The buttons deliberately use different gates:
+Button gates:
 
 - **Apply** is enabled while the model is dirty.
 - **Apply and save** is enabled while the model is dirty or `saveNeeded` is
@@ -42,10 +45,10 @@ verification of lighting persistence remains open.
 
 ### Hardware safety
 
-Saving changes flash state. Validation confirmed that command 166 persists a
-profile across a physical power cycle, including when the target was a factory
-slot. Do not use factory slots for destructive write tests unless overwriting
-them is intentional.
+Saving changes flash state. Command 166 is hardware-validated on Apex 5 to
+persist a profile across a physical power cycle, including when the target is a
+factory slot. Do not use factory slots for destructive write tests unless
+overwriting them is intentional.
 
 The per-slot version reported by status is the cache-invalidation key. Before a
 flash save, the profile writer generates a fresh value with
@@ -65,49 +68,10 @@ generated module is derived from QObject subclasses exported through
 `pageStack.currentItem` is statically a `QQuickItem`; `Main.qml` casts it to
 `Kirigami.Page` before accessing `title`.
 
-## Test coverage
+## Test guidance
 
-The Python model and shell suites are described in
-[gui/README.md](../gui/README.md). The QML suite currently contains 13
-`tests/qml/tst_*.qml` cases:
-
-- 12 page-oriented cases: Buttons, Controller, Device Settings, DualSense,
-  Games, Gyro, Lighting, Macros, Screen, Sticks, Triggers, and Vibration.
-- `tst_wheel.qml`, which checks wheel behavior across controls and pages.
-
-`DevicesPage`, `DockPage`, and `SetupPage` do not yet have dedicated QML cases.
-Shell tests verify that the pages can be opened.
-
-`tests/qml_harness.py` registers the models, installs the QML import paths and
-i18n shim, and exposes `Pad`, `Fixture`, and `QmlDir`. `App.start(False)` keeps
-the normal polling timer stopped while a fake pad is installed. QML cases then
-request their own reads; the shell suite uses `beginPolling()` because polling
-is the application's startup read path.
-
-### Test constraints
-
-- Wait on a model property or fixture counter, not a JavaScript closure around
-  `button.enabled`; the latter has no notify signal for `tryVerify()`.
-- A case that initiates an asynchronous profile read must wait for the matching
-  fixture read counter before it ends.
-- Always stop worker threads during cleanup. Destroying a running `QThread`
-  aborts the test process instead of reporting a normal failure.
-- Use `createTemporaryObject()` inside the QtQuickTest `TestCase`. A separate
-  offscreen window does not become active, so synthetic clicks into it are
-  dropped.
-- Do not recurse through QML objects with `QObject.children()` from PySide;
-  use the supported `findChild`/`findChildren` paths.
-- Stub `dsmode.stop` in model tests. The real stop operation searches the
-  process table because the relay may outlive the app, and can stop a relay
-  outside the test. `tests/test_dsmode.py` is safe because it passes only a
-  relay PID started by that test.
-
-Dialogs require two additional rules:
-
-- Search through `dialog.contentItem`; dialog content is not a QObject child of
-  the dialog itself.
-- Under the offscreen platform, wait on `visible` or a child delegate rather
-  than `opened`. Close modal dialogs before clicking the page behind them.
+Test commands, harness architecture, and QML lifecycle constraints are
+maintained in [gui/README.md](../gui/README.md#tests).
 
 ## Empty and hidden states
 
