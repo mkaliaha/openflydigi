@@ -80,7 +80,7 @@ class FakeNode:
 
 def _wrap(fd, path):
     """A Controller around an already-open fd, skipping the hardware search."""
-    ctrl = device.Controller.__new__(device.Controller)
+    ctrl = object.__new__(device.Controller)
     ctrl.path = path
     ctrl.fd = fd
     ctrl._threads = threading.RLock()

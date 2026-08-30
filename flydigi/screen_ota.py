@@ -14,7 +14,7 @@ sends every other screen pad down the HID route.
 The shape of it, traced through all four of their layers:
 
     1. convert the frames to the 25604-byte LVGL images of `screen.py`
-    2. HID command 31, chipModule = CHIP_SCREEN -- the pad re-enumerates
+    2. HID command 31, chipModule = CHIP_SCREEN -- the bootloader tty appears
     3. wait for a USB CDC serial device, VID FFAA PID 5555
     4. talk the UART OTA below at 921600 8N1
     5. the pad syncs for ~15 s and reboots itself
@@ -137,22 +137,22 @@ def checksum(data):
 
 
 def enter_upgrade_mode(ctrl, wait=0.5):
-    """HID command 31 for the **screen chip only**. The pad then re-enumerates.
+    """HID command 31 for the **screen chip only**. A bootloader tty appears.
 
     Takes no chip argument on purpose. Command 31 is a one-way door for chips we
     have no flashing protocol for; this module has one for exactly the screen,
     so this function can reach exactly the screen.
 
-    Returns True if the pad acknowledged. It usually will not have time to --
-    it is leaving the bus -- so a False here is not a failure, and the real
-    check is whether the serial port turns up.
+    Returns True if the pad acknowledged. A False return is not conclusive: the
+    measured Apex 5 can add the tty without sending an ACK, while its HID nodes
+    remain enumerated. The decisive check is whether the serial port appears.
     """
     payload = bytes([CHIP_SCREEN])
     try:
         replies = [r[1:] for r in ctrl.send(blobs.build(CMD_SWITCH_USB, payload), wait=wait)
                    if len(r) > 7]
     except OSError:
-        return False           # the node can vanish mid-write, which is the point
+        return False
     return any(body[2] == CMD_SWITCH_USB for body in replies)
 
 
@@ -364,10 +364,10 @@ def upload_picture(ctrl, frames, interval_ms=100, restore_default=False,
                    progress=None, settle=SWITCH_SETTLE, port=None):
     """The whole thing: switch the pad, find the port, write, let it reboot.
 
-    `ctrl` is a live `device.Controller`; it is unusable afterwards, since the
-    pad leaves the HID bus. Pass `port` to skip the switch when the pad is
-    already in upgrade mode -- which is what to do after a failed attempt,
-    rather than sending 31 to a pad that is already across.
+    The measured Apex 5 keeps its HID nodes while adding the bootloader tty, but
+    the upload eventually reboots the pad, so callers must not retain `ctrl`
+    after this operation. Pass `port` to skip the switch when the screen chip is
+    already in upgrade mode after a failed attempt.
     """
     if port is None:
         enter_upgrade_mode(ctrl)

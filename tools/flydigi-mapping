@@ -193,6 +193,30 @@ def commit(ctrl, cfg_id, new, old, save):
         print(f"engaged the stored trigger effect on: {engaged or 'neither trigger'}")
 
 
+def apply_profile(ctrl, cfg_id):
+    """Switch profiles and replay stored effects when the hardware has them."""
+    if not mapping.apply_config(ctrl, cfg_id):
+        print("no reply -- the pad may be asleep")
+        return False
+    print("switched")
+
+    code = getattr(ctrl, "device_code", None)
+    if not identity.can(code, "adaptive_triggers"):
+        print("no force triggers on this model; skipped stored effect engagement")
+        return True
+
+    # Switching to a profile is not enough to start the trigger effects it
+    # stores -- they need a live command 81 each. Reading the slot back is
+    # what supplies the bytes to build those from; it is already the active
+    # one, so the read costs a round trip and switches nothing.
+    engaged = ", ".join(
+        name for name, ok
+        in effects.engage_stored(ctrl, mapping.read_config(ctrl, cfg_id), code)
+        if ok)
+    print(f"engaged the stored trigger effect on: {engaged or 'neither trigger'}")
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--profiles", type=int, default=4,
@@ -309,25 +333,7 @@ def main():
         return
 
     if args.cmd == "apply":
-        if not mapping.apply_config(ctrl, args.cfg):
-            print("no reply -- the pad may be asleep")
-            return
-        print("switched")
-        # Switching to a profile is not enough to start the trigger effects it
-        # stores -- they need a live command 81 each. Reading the slot back is
-        # what supplies the bytes to build those from; it is already the active
-        # one, so the read costs a round trip and switches nothing.
-        code = getattr(ctrl, "device_code", None)
-        if not identity.can(code, "adaptive_triggers"):
-            sys.exit("error: this model has no force triggers, so there is no "
-                     "stored effect to engage. Its trigger motors are a "
-                     "different feature and ride the rumble command.")
-        engaged = ", ".join(
-            name for name, ok
-            in effects.engage_stored(ctrl, mapping.read_config(ctrl, args.cfg),
-                                     code)
-            if ok)
-        print(f"engaged the stored trigger effect on: {engaged or 'neither trigger'}")
+        apply_profile(ctrl, args.cfg)
         return
 
     if args.cmd == "reset":

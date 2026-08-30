@@ -5,6 +5,10 @@
 # SPDX-License-Identifier: MIT
 
 """Self-test for mapping profiles. No controller required -- see fake_pad.py."""
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
 import os
 import sys
 
@@ -124,6 +128,29 @@ def test_apply_and_save():
     check("apply switches the pad", pad.active == 2)
     check("save is acknowledged", mapping.save_config(pad) is True)
     check("save captures every slot", len(pad.saved) == 4)
+
+
+def test_cli_apply_skips_force_trigger_replay_on_vader():
+    path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                        "tools", "flydigi-mapping")
+    loader = importlib.machinery.SourceFileLoader("flydigi_mapping_tool", path)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    tool = importlib.util.module_from_spec(spec)
+    loader.exec_module(tool)
+
+    pad = FakePad(device_type=130)
+    pad.device_code = "f5"
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        applied = tool.apply_profile(pad, 2)
+
+    check("Vader CLI apply succeeds", applied is True)
+    check("Vader CLI apply switches the pad", pad.active == 2)
+    check("Vader CLI apply does not read back an adaptive-trigger profile",
+          pad.reads_answered == 0, str(pad.reads_answered))
+    check("Vader CLI apply reports the skipped trigger replay",
+          "skipped stored effect engagement" in output.getvalue(),
+          output.getvalue().strip())
 
 
 def test_a_models_keys_are_its_own():
@@ -1916,6 +1943,7 @@ def main():
                  test_title, test_read_write_round_trip,
                  test_write_without_baseline_sends_everything,
                  test_unchanged_write_sends_nothing, test_apply_and_save,
+                 test_cli_apply_skips_force_trigger_replay_on_vader,
                  test_reading_switches_the_pad, test_browsing_puts_the_pad_back,
                  test_browsing_the_running_profile_restores_nothing,
                  test_a_failed_browse_still_puts_the_pad_back,

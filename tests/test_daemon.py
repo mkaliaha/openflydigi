@@ -35,11 +35,14 @@ FAILED = []
 SPEC = {
     "hide_real": True,
     "devices": [
-        {"kind": "pad", "code": "k5", "nickname": "Desk"},
-        {"kind": "pad", "code": "k5", "nickname": "Couch"},
+        {"kind": "pad", "code": "k5", "nickname": "Desk",
+         "mac": "02:00:00:01"},
+        {"kind": "pad", "code": "k5", "nickname": "Couch",
+         "mac": "02:00:00:02"},
         # On the same desk and not driven by this project. It must be
         # enumerated, named, and left alone.
-        {"kind": "pad", "code": "f5", "nickname": "Vader"},
+        {"kind": "pad", "code": "f5", "nickname": "Vader",
+         "mac": "02:00:00:03"},
         {"kind": "dock", "type": 0},
     ],
 }
@@ -138,6 +141,87 @@ def run():
     check("even though a Vader is attached", daemon.pad_present())
     spec["devices"][0]["present"] = True
     spec["devices"][1]["present"] = True
+
+    # -- reconnects are per pad, even if another stays attached ------------
+    bound = set()
+    check("initial refresh records acknowledged pad identities",
+          daemon.refresh_bindings(game, bound), str(bound))
+    desk_id = "mac:02:00:00:01"
+    couch_id = "mac:02:00:00:02"
+    check("both attached pads are recorded", bound == {desk_id, couch_id},
+          str(bound))
+
+    spec["devices"][1]["present"] = False
+    daemon.refresh_bindings(game, bound)
+    check("only the disconnected pad is forgotten", bound == {desk_id},
+          str(bound))
+    pads["Couch"].live_binds.clear()
+
+    calls = []
+    real_apply_game = daemon.effects.apply_game
+
+    def recording_apply(ctrl, selected_game):
+        calls.append(ctrl.path)
+        return real_apply_game(ctrl, selected_game)
+
+    daemon.effects.apply_game = recording_apply
+    try:
+        spec["devices"][1]["present"] = True
+        daemon.refresh_bindings(game, bound)
+    finally:
+        daemon.effects.apply_game = real_apply_game
+    check("the reconnected pad is rebound", pads["Couch"].live_binds != {},
+          str(pads["Couch"].live_binds))
+    check("the pad that stayed present is not rewritten",
+          calls == [pads["Couch"].path], str(calls))
+
+    calls.clear()
+    daemon.effects.apply_game = recording_apply
+    try:
+        daemon.refresh_bindings(game, bound, reassert=True)
+    finally:
+        daemon.effects.apply_game = real_apply_game
+    check("reassert still rewrites every attached compatible pad",
+          set(calls) == {pads["Desk"].path, pads["Couch"].path}, str(calls))
+
+    # -- a partial or missing ACK stays eligible for the next poll ----------
+    bound = set()
+    attempts = 0
+
+    def one_no_ack(ctrl, selected_game):
+        nonlocal attempts
+        if ctrl.path == pads["Couch"].path:
+            attempts += 1
+            if attempts == 1:
+                return [("left", True), ("right", False)]
+        return real_apply_game(ctrl, selected_game)
+
+    daemon.effects.apply_game = one_no_ack
+    try:
+        daemon.refresh_bindings(game, bound)
+        check("a partially acknowledged pad is not marked bound",
+              couch_id not in bound, str(bound))
+        check("another pad can remain bound", desk_id in bound, str(bound))
+        daemon.refresh_bindings(game, bound)
+    finally:
+        daemon.effects.apply_game = real_apply_game
+    check("the no-ACK pad is retried on the next poll", attempts == 2,
+          f"attempts={attempts}")
+    check("the retry records it after complete ACKs", couch_id in bound,
+          str(bound))
+
+    check("a skipped side is allowed when another side ACKs",
+          daemon._binding_succeeded([("left", True), ("right", None)]))
+    check("at least one side must be attempted",
+          not daemon._binding_succeeded([("left", None), ("right", None)]))
+
+    daemon.effects.apply_game = lambda _ctrl, _game: [
+        ("left", False), ("right", None)]
+    try:
+        check("apply_for remains boolean and false without a complete ACK",
+              daemon.apply_for(game, "vibration") is False)
+    finally:
+        daemon.effects.apply_game = real_apply_game
 
     # -- every other tier acts on one pad ----------------------------------
     argv = daemon.driver_argv(game, "telemetry", "uid:abc123")

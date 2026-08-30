@@ -184,12 +184,18 @@ affected game if such a name is used by an unrelated program.
 ## Reconnection and reassertion
 
 A vibration bind is live controller state and is lost when a pad leaves the USB
-bus. The daemon's reconnect detector is bus-wide: it reapplies the active bind
-when the system goes from no Flydigi pad nodes to at least one, retrying while
-no compatible pad can be opened. It does not track individual pad reconnects or
-command acknowledgements. If one pad remains attached while another reconnects,
-use a nonzero `--reassert` interval to refresh every compatible attached pad.
-Periodic reassertion also counters other software overwriting controller state.
+bus. The daemon tracks each compatible pad independently by the MAC returned by
+the shallow registry probe. A newly present or reconnected pad receives the
+active bind even while another compatible pad remains present. The daemon marks
+a pad bound only after every configured side it attempted acknowledges command
+82; a side without configured vibration parameters is skipped, and a pad with
+no attempted sides is not marked bound. A no-ACK result remains unbound and is
+retried on later polls.
+
+A nonzero `--reassert` interval periodically reapplies the preset to every
+compatible attached pad, including pads already marked bound. This counters
+other software overwriting live controller state. A failed periodic reassertion
+also leaves that pad eligible for the next ordinary poll.
 
 Monitor, telemetry, and bespoke helpers have no internal pad-reconnect path. A
 later write through a vanished controller handle makes a manually started helper
@@ -224,7 +230,7 @@ position and gestures have no source. See
 
 | Integration | Supported behavior or evidence | Required setup or limitation |
 |---|---|---|
-| Vibration bind | Automated for 33 entries; a whole-bus reconnect reapplies the bind. | May false-positive at confidence 0; affects every compatible attached pad. Use `--reassert` when individual pads may reconnect while another remains attached. |
+| Vibration bind | Automated for 33 entries; compatible pads are tracked and rebound independently after reconnect. | May false-positive at confidence 0; affects every compatible attached pad. `--reassert` periodically refreshes live state that other software may overwrite. |
 | Forza telemetry | 311-byte and 324-byte Data Out formats supported; four game entries use the same rule set. | Enable Data Out to `127.0.0.1:5300`. Other lengths require `--accept LEN:OFFSET`. |
 | XGameMonitor | Dark Souls: Remastered is the validated configuration, using its downloaded config and Wine module base. | Requires `kernel.yama.ptrace_scope=0` or `CAP_SYS_PTRACE`; pointer chains are build-specific. |
 | DSX listener | Accepts DSX-compatible local JSON commands. | Listener and external game mod are required; see [third-party mods](third-party-mods.md). |

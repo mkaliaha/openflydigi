@@ -233,7 +233,7 @@ def test_engaging_the_stored_effects_stops_at_each_ack():
 # -- the dock --------------------------------------------------------------
 
 
-class ChattyDock(charger.Dock):
+class ChattyDock:
     """The dock's fake, with the same treatment.
 
     A dock is quieter than a pad -- it volunteers a status frame about once a

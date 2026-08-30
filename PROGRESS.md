@@ -60,7 +60,7 @@ it.
 | Device discovery and identity | Hardware-validated | Experimental | Hardware-validated | Supported pads are `k5` and `f5`. Selection is separate from model/capability permission. |
 | UID, nickname, and registry selection | Hardware-validated | Simulated | Hardware-validated except nickname write | Standard selectors accept node, UID/prefix, MAC, or nickname. Dock nickname writing is implemented but not hardware-verified. Not every tool uses the registry selector. |
 | Multiple devices in desktop/daemon | Simulated plus one real pad/dock | Simulated | Simulated plus one real dock | Mock buses cover multiple pads and docks. Full multi-physical-device testing remains outstanding. |
-| Profile read/write/apply/save | Hardware-validated | Experimental | Not applicable | Reading a profile switches the running slot. Unsaved changes are volatile. Desktop apply is available for Vader; CLI `apply` switches the slot and then exits nonzero because it attempts Apex-only force-trigger engagement. |
+| Profile read/write/apply/save | Hardware-validated | Experimental | Not applicable | Reading a profile switches the running slot. Unsaved changes are volatile. CLI `apply` skips stored force-trigger engagement on models without adaptive triggers. |
 | Profile backup/restore | Hardware-validated | Partial | Not applicable | Desktop packed backup includes a v3.2 macro store. The CLI raw-blob format does not. |
 | Single-slot factory restore | Hardware-validated | Experimental | Not applicable | Writes the model-specific factory profile and saves it. It is not command 175. |
 | All-slot reset | Hardware-validated | Unverified | Not applicable | Command 175 resets every profile and name, ignoring the requested slot. |
@@ -138,17 +138,10 @@ Current inventory:
   `test_qml.py`;
 - 13 QML cases under `tests/qml/tst_*.qml`.
 
-Two backend tests currently violate the hardware-free contract:
-
-| Test | Failure without hardware | Required fix |
-|---|---|---|
-| `tests/test_device.py` | Its wrapper calls `Controller.__new__` without a path, which searches for a real pad | Construct the wrapper without invoking device resolution |
-| `tests/test_waits.py` | `ChattyDock()` inherits the dock/controller allocator and searches for a real dock | Construct the fake subclass without inherited device resolution |
-
 Run the [discovered backend set](README.md#tests) rather than maintaining a
-hand-written filename list. The documented loop continues after failures so
-the known `test_device.py` failure does not hide later results, and returns
-nonzero if any script fails.
+hand-written filename list. All 18 backend scripts are hardware-free. The
+documented loop continues after failures and returns nonzero if any script
+fails.
 
 Run Qt checks in an environment where distribution PySide6 and Kirigami are
 installed:
@@ -169,7 +162,6 @@ See [gui/README.md](gui/README.md) for distribution-specific Qt setup.
 | Priority | Work | Completion criterion |
 |---|---|---|
 | P0 | Complete CLI v3.2 backup/restore | `flydigi-mapping backup` uses packed profile + macro-store data and remains compatible with legacy raw files |
-| P0 | Restore the hardware-free test contract | Every backend test passes with no pad or dock present |
 | P0 | Resolve selector gaps in Apex-specific tools | `flydigi-haptics` and `flydigi-run` find the first compatible Apex rather than failing when a Vader sorts first; probes either select explicitly or document their exact gate |
 | P1 | Validate Vader 5 on hardware | Identity, permissions, profile/settings I/O, macros, factory restore, lighting, motion, rumble, and reconnect paths have recorded results |
 | P1 | Generalize and validate Vader DualSense mode | Real evdev discovery, model-specific ignore ID, udev access, input, gyro, rumble, and haptic audio pass end to end |

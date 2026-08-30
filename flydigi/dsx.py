@@ -25,7 +25,9 @@ Games under Proton reach a host listener on 127.0.0.1 unchanged -- Wine shares
 the host network stack.
 """
 import json
+import math
 import socket
+from decimal import Decimal, InvalidOperation
 
 DSX_PORT = 7878
 FORWARD_PORT = 8787
@@ -53,10 +55,10 @@ SIDE_RIGHT = 2
 
 
 def _as_type(value):
-    """Accept both numeric and named instruction types.
+    """Accept integer, integer-string and named instruction types.
 
     Flydigi deserialises with Newtonsoft, which takes either form, so mods in
-    the wild use both.
+    the wild use both. JSON booleans and floats are not enum values.
     """
     if isinstance(value, bool):
         return None
@@ -64,21 +66,43 @@ def _as_type(value):
         return value
     if isinstance(value, str):
         text = value.strip()
-        if text.isdigit():
-            return int(text)
+        digits = text[1:] if text[:1] in ("+", "-") else text
+        if digits and all("0" <= char <= "9" for char in digits):
+            try:
+                return int(text)
+            except ValueError:
+                return None
         return _TYPE_NAMES.get(text.lower().replace("_", ""))
     return None
 
 
-def _as_int(value):
-    try:
-        if isinstance(value, bool):
-            return int(value)
-        if isinstance(value, str):
-            return int(float(value.strip()))
-        return int(value)
-    except (TypeError, ValueError):
+def _as_byte(value):
+    """Return an exact byte value, or None when coercion would lose data."""
+    if isinstance(value, bool):
         return None
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, float):
+        if (not math.isfinite(value) or not value.is_integer()
+                or not 0 <= value <= 255):
+            return None
+        number = int(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if (not text
+                or any(char not in "+-0123456789.eE" for char in text)):
+            return None
+        try:
+            decimal = Decimal(text)
+        except InvalidOperation:
+            return None
+        if (not decimal.is_finite() or decimal != decimal.to_integral_value()
+                or not 0 <= decimal <= 255):
+            return None
+        number = int(decimal)
+    else:
+        return None
+    return number if 0 <= number <= 255 else None
 
 
 def parse(payload):
@@ -111,10 +135,10 @@ def parse(payload):
         params = instruction.get("parameters")
         if not isinstance(params, list) or len(params) < 4:
             continue
-        side = _as_int(params[1])
+        side = _as_byte(params[1])
         if side not in (SIDE_LEFT, SIDE_RIGHT):
             continue
-        rest = [_as_int(p) for p in params[3:]]
+        rest = [_as_byte(p) for p in params[3:]]
         if any(v is None for v in rest):
             continue
         mode, values = rest[0], rest[1:]

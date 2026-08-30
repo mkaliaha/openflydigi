@@ -289,36 +289,23 @@ def driver_argv(game, route, pad=None):
     return None
 
 
-def apply_for(game, tier=None):
-    """Write a game's rumble-to-trigger bind into **every** pad that takes one.
+def _pad_identity(entry):
+    """Stable identity for reconnect tracking, from the shallow pad probe."""
+    mac = entry.get("mac")
+    return f"mac:{str(mac).lower()}" if mac else None
 
-    Tier 1 is the one route that scales for free. The bind is command 82 and
-    nothing else: a pad-side setting, driven by the pad's own rumble, with no
-    host process in the loop once it is written. So two pads in a local co-op
-    game both get adaptive triggers, and neither has to be chosen. Every other
-    route holds one pad -- a driver rewriting effects at 20 Hz, a relay
-    presenting one DualSense -- and acts on the primary one instead.
 
-    True when at least one pad took it. A desk with two pads where one is
-    asleep is the ordinary case, not a failure, so a pad that is not there is
-    simply not written to; `registry.drivable_pads` only lists what answered.
+def _binding_succeeded(results):
+    """Whether every side that was attempted acknowledged its bind."""
+    attempted = [ok for _side, ok in results if ok is not None]
+    return bool(attempted) and all(ok is True for ok in attempted)
 
-    One pad refusing does not stop the others: they are separate devices, and
-    the failure worth avoiding is the second pad going unbound because the
-    first one had gone to sleep between the enumeration and the write.
-    """
-    tier = tier or games.tier(game)
-    if tier != "vibration":
-        return False
+
+def _apply_bindings(game, pads):
+    """Apply to `pads`; return (any fully acknowledged, stable bound ids)."""
     name = game.get("enGameName")
-    # Named, not implied: this writes command 82, which binds the pad's own
-    # rumble to its force triggers. A pad without them acknowledges it and does
-    # nothing, so the filter is the only thing that would ever say so.
-    pads = registry.drivable_pads(capability="adaptive_triggers")
-    if not pads:
-        log("could not apply: no controller this project drives is attached")
-        return False
-    applied = 0
+    acknowledged = False
+    bound = set()
     for entry in pads:
         # The node too: with two pads and no nicknames set, "Apex 5" twice
         # is a log nobody can act on.
@@ -329,11 +316,80 @@ def apply_for(game, tier=None):
         except (DeviceNotFound, OSError) as exc:
             log(f"could not apply to {label}: {exc}")
             continue
-        applied += 1
-        log(f"applied {name} to {label}: " + ", ".join(
+        complete = _binding_succeeded(results)
+        acknowledged = acknowledged or complete
+        identity = _pad_identity(entry)
+        if complete and identity is not None:
+            bound.add(identity)
+        outcome = "applied" if complete else "bind incomplete"
+        log(f"{outcome} for {name} on {label}: " + ", ".join(
             f"{s}={'ok' if ok else 'no-ack' if ok is False else 'skip'}"
             for s, ok in results))
-    return applied > 0
+    return acknowledged, bound
+
+
+def apply_for(game, tier=None):
+    """Write a game's rumble-to-trigger bind into **every** pad that takes one.
+
+    Tier 1 is the one route that scales for free. The bind is command 82 and
+    nothing else: a pad-side setting, driven by the pad's own rumble, with no
+    host process in the loop once it is written. So two pads in a local co-op
+    game both get adaptive triggers, and neither has to be chosen. Every other
+    route holds one pad -- a driver rewriting effects at 20 Hz, a relay
+    presenting one DualSense -- and acts on the primary one instead.
+
+    True when at least one pad acknowledged every side attempted for it. A
+    skipped side is not a failure, but a game with no configured sides did not
+    apply anything. A desk with two pads where one is asleep is the ordinary
+    case, not a failure, so a pad that is not there is simply not written to;
+    `registry.drivable_pads` only lists what answered.
+
+    One pad refusing does not stop the others: they are separate devices, and
+    the failure worth avoiding is the second pad going unbound because the
+    first one had gone to sleep between the enumeration and the write.
+    """
+    tier = tier or games.tier(game)
+    if tier != "vibration":
+        return False
+    # Named, not implied: this writes command 82, which binds the pad's own
+    # rumble to its force triggers. A pad without them acknowledges it and does
+    # nothing, so the filter is the only thing that would ever say so.
+    pads = registry.drivable_pads(capability="adaptive_triggers")
+    if not pads:
+        log("could not apply: no controller this project drives is attached")
+        return False
+    applied, _bound = _apply_bindings(game, pads)
+    return applied
+
+
+def refresh_bindings(game, bound, reassert=False):
+    """Reconcile acknowledged vibration binds with the attached pad set.
+
+    `bound` is mutated in place and contains shallow-probe MAC identities. A
+    pad that disappears is removed immediately. A present pad not in the set
+    is attempted on every call until all of its configured sides acknowledge.
+    `reassert` attempts every compatible attached pad, including bound ones.
+
+    Returns whether at least one attached pad is currently marked bound.
+    """
+    pads = registry.drivable_pads(capability="adaptive_triggers")
+    present = {_pad_identity(entry) for entry in pads}
+    present.discard(None)
+    bound.intersection_update(present)
+
+    if reassert:
+        targets = pads
+        # Reassertion is also a fresh observation: a pad that does not
+        # acknowledge now remains eligible for the next ordinary poll.
+        bound.difference_update(present)
+    else:
+        targets = [entry for entry in pads
+                   if _pad_identity(entry) not in bound]
+
+    if targets:
+        _acknowledged, newly_bound = _apply_bindings(game, targets)
+        bound.update(newly_bound)
+    return bool(bound)
 
 
 class Driver:
@@ -403,12 +459,8 @@ def pad_present():
 
     A sleeping Apex 5 leaves USB entirely, so this is also how "the pad went
     to sleep mid-game" looks. Costs two small reads per hidraw node and opens
-    nothing, so it is cheap enough for the poll loop.
-
-    Deliberately "any" rather than "all". What it guards is the re-apply after
-    a reconnect, and `apply_for` writes to whatever is attached when it runs --
-    so one pad coming back is reason enough to run it, and a second still
-    asleep is not reason to hold off.
+    nothing. Reconnect binding uses `refresh_bindings`, which needs the stable
+    identity from each compatible pad's shallow registry probe instead.
     """
     # `find_nodes` is a generator: truth-testing it would be true even for an
     # empty bus, which reads as "the pad is always here" and would have quietly
@@ -469,8 +521,7 @@ def main():
     driver = Driver()
     active = None
     last_assert = 0.0
-    pad_up = True
-    armed = True
+    bound_pads = set()
     ignored = set()
     unsupported = set()
     waiting = set()
@@ -507,6 +558,7 @@ def main():
             driver.stop()
             clear_triggers()
             active = None
+            bound_pads.clear()
 
         if active is None:
             game, game_pid = scanner.candidate()
@@ -532,10 +584,10 @@ def main():
                 if route == "vibration":
                     # Nothing to start by design: the pad drives itself once
                     # the preset is written.
-                    if apply_for(game, route):
+                    bound_pads.clear()
+                    if refresh_bindings(game, bound_pads):
                         active = game
                         last_assert = time.time()
-                        pad_up = armed = True
                 elif argv is not None:
                     if route in NEEDS_GAME_PROCESS and game_pid is None:
                         # Only the launcher chain is up so far. Starting the
@@ -548,7 +600,6 @@ def main():
                     elif driver.start(game, argv):
                         active = game
                         waiting.discard(key)
-                        pad_up = armed = True
                 elif key not in unsupported:
                     unsupported.add(key)
                     # Says which part is missing. The drivers themselves are
@@ -580,31 +631,18 @@ def main():
                 clear_triggers()
                 active = None
             else:
-                # The vibration route leaves nothing running, so nothing would
-                # notice the pad sleeping mid-game. A bind is live state --
-                # command 82, not something the profile carries -- so it does
-                # not come back with the pad, and the game plays on with loose
-                # triggers. Space Station re-sends its own bind after every
-                # reconnect; this is that, narrowed to the route that needs it.
-                # The other routes have a driver holding the pad, which is a
-                # louder failure and its own problem.
+                # The vibration route leaves nothing running. A bind is live
+                # state -- command 82, not something the profile carries -- so
+                # each compatible pad is tracked independently and rebound
+                # after its own reconnect. The other routes have a driver
+                # holding one pad, which is a louder failure and its own
+                # problem.
                 if route == "vibration":
-                    present = pad_present()
-                    if present != pad_up:
-                        pad_up = present
-                        log(f"{active.get('enGameName')}: pad " + (
-                            "is back — re-applying the bind" if present
-                            else "left the bus (asleep, or unplugged)"))
-                        armed = armed and present
-                    # Retried each poll until it takes: a pad that has just
-                    # re-enumerated can still refuse the first write.
-                    if present and not armed and apply_for(active, route):
-                        armed = True
+                    reassert = bool(args.reassert and (
+                        time.time() - last_assert >= args.reassert))
+                    refresh_bindings(active, bound_pads, reassert=reassert)
+                    if reassert:
                         last_assert = time.time()
-                if args.reassert and pad_up and (
-                        time.time() - last_assert >= args.reassert):
-                    apply_for(active, route)
-                    last_assert = time.time()
 
         time.sleep(args.interval)
 

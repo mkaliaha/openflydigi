@@ -195,10 +195,9 @@ macros live in a separate v3.2 macro store, so CLI backup/restore does **not**
 back up or restore those macros. Use the desktop application's packed profile
 backup for the complete v3.2 profile until the CLI adopts the same format.
 
-`tools/flydigi-mapping apply SLOT` is not a usable success-status command for a
-Vader 5: it switches the profile, then exits nonzero when it reaches the
-Apex-only force-trigger engagement step. Use the desktop profile switch for a
-Vader 5 until the CLI separates profile switching from trigger engagement.
+`tools/flydigi-mapping apply SLOT` switches profiles on both supported pad
+models. On a Vader 5 it reports that stored force-trigger engagement was
+skipped because the hardware has no adaptive triggers.
 
 Safety-sensitive reset commands are deliberately separate:
 
@@ -383,17 +382,8 @@ test "$status" -eq 0
 ~~~
 
 The loop continues after a failure so every backend script runs, then returns a
-nonzero status if any script failed. Two backend scripts do not yet satisfy the
-intended hardware-free contract:
-
-- `tests/test_device.py` searches for a real controller while constructing its
-  lock-test wrapper.
-- `tests/test_waits.py` searches for a real dock while constructing its fake
-  dock subclass.
-
-They fail on a machine with neither device attached. This is a test-harness
-defect, not a runtime hardware requirement. The remaining backend tests use
-Python only.
+nonzero status if any script failed. Backend tests use Python only and require
+no controller or dock.
 
 The Qt-dependent tests are:
 

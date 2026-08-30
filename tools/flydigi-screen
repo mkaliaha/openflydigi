@@ -340,8 +340,8 @@ def upload_over_serial(args, frames, interval):
                          "relay the bootloader's serial device. That strands "
                          "the pad until you power-cycle it at its own switch. "
                          "Plug it in, or pass --i-know to do it anyway.")
-        print("switching the screen chip into upgrade mode (command 31) -- the "
-              "pad will leave the HID bus and come back as a serial device")
+        print("switching the screen chip into upgrade mode (command 31) -- a "
+              "bootloader serial interface should appear alongside the pad")
         try:
             screen_ota.enter_upgrade_mode(pad)
         except device.DeviceNotFound as exc:

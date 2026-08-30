@@ -55,6 +55,41 @@ def main():
     results.append(check("accepts named instruction types",
                          got == [(1, 1, [0, 1, 0, 0])], f"got {got}"))
 
+    got = dsx.parse(packet(instr("1", [0, 2, 19, 2, 50, 1, 200, 1])))
+    results.append(check("accepts numeric-string instruction types",
+                         got == [(2, 2, [50, 1, 200, 1])], f"got {got}"))
+
+    got = dsx.parse(packet(instr(1, [0, "2", 19, "2.0", "50", "+1", "200", "1"])))
+    results.append(check("accepts exact numeric-string parameters",
+                         got == [(2, 2, [50, 1, 200, 1])], f"got {got}"))
+
+    got = dsx.parse(packet(instr(1, [0, 2.0, 19, 2.0, 50.0, 1.0, 200.0, 1.0])))
+    results.append(check("accepts integral finite JSON-float parameters",
+                         got == [(2, 2, [50, 1, 200, 1])], f"got {got}"))
+
+    invalid_types = [
+        True, False, 1.0, 1.5, float("nan"), float("inf"), float("-inf"),
+    ]
+    got = [dsx.parse(packet(instr(type_, [0, 1, 19, 1, 0, 1, 0, 0])))
+           for type_ in invalid_types]
+    results.append(check("rejects boolean and JSON-float instruction types",
+                         got == [[] for _ in invalid_types], f"got {got}"))
+
+    invalid_parameters = [
+        True, False, 1.5, -1.0, 256.0,
+        float("nan"), float("inf"), float("-inf"),
+        "1.5", "NaN", "Infinity", "not-a-number", "1_0", "0x1",
+        -1, 256, "-1", "256",
+    ]
+    got = [dsx.parse(packet(instr(1, [0, 1, 19, value, 7, 8, 9])))
+           for value in invalid_parameters]
+    results.append(check("rejects lossy or non-byte parameter coercions",
+                         got == [[] for _ in invalid_parameters], f"got {got}"))
+
+    got = dsx.parse(packet(instr(1, [0, 1, 19, 0, 0, 255, "255", "0.0"])))
+    results.append(check("accepts inclusive byte boundaries",
+                         got == [(1, 0, [0, 255, 255, 0])], f"got {got}"))
+
     # Non-trigger instruction types are ignored, not misread.
     got = dsx.parse(packet(instr(2, [0, 255, 0, 0]), instr(3, [0, 1])))
     results.append(check("ignores RGB and PlayerLED instructions",

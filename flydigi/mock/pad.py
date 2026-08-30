@@ -934,9 +934,9 @@ class FakeScreenChip:
     """Quacks like `screen_ota.OtaLink` -- the UART bootloader, not the pad.
 
     Separate from FakePad on purpose: this is a different chip on a different
-    transport, reachable only after the pad has left the HID bus. Modelling it
-    as its own thing is what lets a test cover the upload without a pad that has
-    been switched into upgrade mode.
+    transport, exposed after command 31 adds the bootloader tty. Modelling it as
+    its own thing lets a test cover the upload without switching a pad into
+    upgrade mode.
 
     Erase is enforced. A real flash cell cannot be written back to 1, so a write
     into a block nobody erased is refused here rather than quietly accepted --
