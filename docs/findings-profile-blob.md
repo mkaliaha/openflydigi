@@ -1,23 +1,29 @@
 # The 840-byte profile blob
 
 What the mapping profile carries, block by block, and which of it the firmware actually reads.
-Offsets from `MappingConfigParser.cs`, struct names from `data.model.config/`.
+Offsets come from the Space Station 4.2.0.9 `MappingConfigParser`; struct names come from
+`data.model.config/`. The decompiled reference sources are not distributed in the public
+repository. Unless stated otherwise, byte ranges below are half-open: `109..123` means bytes
+109 through 122.
 `flydigi/mapping.py` reads and writes the whole blob, carrying through byte-for-byte everything it
 does not interpret. The `J`-numbers in the headings are the keys [PROGRESS.md](../PROGRESS.md)
 cross-references by.
 
-**Where this is edited.** The CLI is `tools/flydigi-mapping`, with subcommands `list`, `show`,
-`set`, `clear`, `rename`, `apply`, `backup`, `restore`, `macros`, `macro-record`, `macro-set` and
-`macro-clear`, plus a global `--profiles N` (default 4); `set` also takes `--turbo N` and
-`--turbo-toggle`. `backup` writes the bare 840-byte blob with no header, and `restore` accepts a
-file only if its length matches the pad's. Stick and trigger curves have no CLI — they are edited
+**Where this is edited.** The CLI is `tools/flydigi-mapping`; use `--help` for the authoritative
+command list. It currently includes `list`, `show`, `set`, `clear`, `reset`, `reset-all`,
+`to-switch`, `rename`, `apply`, `backup`, `restore`, `macros`, `macro-record`, `macro-set`,
+`macro-clear`, and `gyro`, plus a global `--profiles N` (default 4).
+
+The CLI `backup` and `restore` commands operate on the bare 840-byte profile blob. On protocol v3.2
+that is **not a complete profile backup**, because the external 1620-byte macro store is omitted and
+restore leaves the pad's existing store in place. The desktop app instead uses
+`mapping.pack_config`, writing 2460 bytes for a v3.2 profile and accepting both packed and legacy
+840-byte files. Stick and trigger curves have no CLI — they are edited
 in the app, on `gui/qml/pages/SticksPage.qml` and `TriggersPage.qml` over `gui/models/profile.py`.
 The tests are `python3 tests/test_mapping.py` and `python3 tests/test_macros.py`; neither needs
 hardware. The bench probes used below — `tools/joystick-curve-probe`, `tools/trigger-stroke-probe`
 and `tools/stick-feel` — write into whichever profile the pad reports as active, never call
-`save_config`, and put the original back before exit, so nothing they measure reaches flash
-(`tools/joystick-curve-probe:257-305`, `tools/trigger-stroke-probe:369-415`,
-`tools/stick-feel:115-135`).
+`save_config`, and put the original back before exit, so nothing they measure reaches flash.
 
 ## Blob layout
 
@@ -32,12 +38,12 @@ Mapping profile, 840 bytes (42 packets of 20), protocol v3.1:
 770..790 title UTF-16LE       790..840 joystick extra, macro cycle, motion curve
 ```
 
-The package count at offset 2 is **84** on v3.1 (79 on v3.0);
-`MappingConfigParser.ParseConfigToArray` picks it from `ProtoVersion & 0xF`. It is not the
-transfer's packet count — the NewXInput transfer moves 20 bytes per packet (`blobs.PKG_SIZE`) and
-the pad streams back 42 of them for the 840. Read as 10-byte units it is exactly the blob length on
-both versions, 840 and 790, but Flydigi's own writer allocates `PackageCount × perPkgCount` with a
-`perPkgCount` of 20 on NewXInput, so do not size a buffer from it.
+**Do not size the blob from byte 2.** The Apex 5 factory blob and hardware read carry **77** at
+offset 2 even though the profile is 840 bytes. Separately, `MappingConfigParser.ParseConfigToArray`
+selects an allocation count of 84 for v3.1/v3.2 and 79 for v3.0 from `ProtoVersion & 0xF`. That
+parser value is not the serialized byte and is not the NewXInput transfer count: NewXInput moves 20
+bytes per packet and returns 42 packets for an 840-byte profile. The profile's known length or the
+completed transfer determines its size.
 
 Four ranges are unaccounted for and nothing here reads or writes them: **227..230**, between the data
 version and the macro page; **768..770**, between the macro page and the title; and **814..820** and
@@ -45,12 +51,13 @@ version and the macro page; **768..770**, between the macro page and the title; 
 
 Lighting is a separate 380-byte config with its own command family (167/168/169); its layout and
 measurements are in [docs/device-settings.md](device-settings.md). Its bytes **10..20** are a
-deliberate 0xFF fill written by `RgbConfigParserV30.ParseConfigBeanToArray`
-(`LedConfigParser.cs:159-161`) rather than merely reserved.
+deliberate 0xFF fill written by `RgbConfigParserV30.ParseConfigBeanToArray`, rather than merely
+reserved.
 
 ## Factory defaults, read off the pad
 
-All four slots of an untouched Apex 5, byte for byte, and identical across all four.
+The four untouched Apex 5 slots are identical except for byte 774, the digit in each factory title.
+The data blocks listed below are byte-identical across all four.
 `tests/fake_pad.py` takes the curve blocks and the macro page from these bytes rather than leaving
 them at its `0xFF` fill, and cites this document for them.
 
@@ -84,8 +91,8 @@ From those bytes:
     p1.y, p2.x, p2.y, end`, carrying the identical `0 63 63 127 127 127`.
   * **The trigger-motor gears are two 7-byte structs per side**, and their lead bytes differ: the
     first gear's `type` is **1**, the micro gear's **255**. Neither is an enable byte — the block's
-    own switch at 154 is written 0 for on and **1** for off by Flydigi's writer
-    (`MappingConfigParser.cs:392`), unlike the grip block at 145, which uses 0 and 0xFF, and
+    own switch at 154 is written 0 for on and **1** for off by `MappingConfigParser`, unlike the
+    grip block at 145, which uses 0 and 0xFF, and
     `set_trigger_motor` writes 0xFF for off.
   * **The force-trigger bind is populated at rest**: `bind.Filter = 10, bind.Scale = 10,
     bind.Param = [100, 1, 255, 70, 0]` with `Type = 0` and `bind.Type = 0`.
@@ -103,7 +110,7 @@ multi-function) — and turbo modes are `TURBO_OFF/WHILE_HELD/TOGGLE = 0/1/2`.
 The frequency byte is what turns turbo on. At 0 the entry is written `[target, 0, 0]` and the mode
 byte is dropped, so a mode with no frequency does nothing — `--turbo-toggle` on its own is a no-op.
 A non-zero frequency needs a real target id, so `set_mapping` replaces the identity and keyboard
-sentinels with the key's own id and clamps the frequency to 255 (`flydigi/mapping.py:546-553`).
+sentinels with the key's own id and clamps the frequency to 255.
 
 The table takes effect as the packet lands, unlike the macro page beside it. M1–M6 are
 remap *sources* only: they have no XInput id, so `APEX5_KEYS` is what may be remapped and
@@ -247,8 +254,8 @@ Four traps in these two blocks:
     `"deadzone": "Dead zone"` and `"compensastion": "Offset"` (their typo).
 
     So there is no negative dead zone. **Only the positive half is written**, because the SDK's
-    reader folds a byte over 127 to `127 - byte` at four sites (`MappingConfigParser.cs:475, 476,
-    689, 700`) while every one of its writers emits a plain two's-complement cast: −20 is written as
+    `MappingConfigParser` reader folds a byte over 127 to `127 - byte` while every one of its
+    writers emits a plain two's-complement cast: −20 is written as
     236 and reads back as −109. Positive values encode identically under both readings, so
     `set_joystick_curve` accepts 0..100 and raises on the rest rather than picking one of two
     incompatible encodings. Neither byte reaches the firmware, so the encoding decides only what
@@ -288,8 +295,8 @@ and with no sign convention at all — the parser reads `zero` and `end` raw whe
 them.
 
 Writing `zero` and `end` alone leaves the two control points where they were, stranding the
-breakpoints outside the window they are meant to bound. Flydigi writes six bytes from two numbers —
-`Point1 = (Start, Start)`, `Point2 = (End, End)` in `ControllerRepository.cs:885-890` — and the
+breakpoints outside the window they are meant to bound. `ControllerRepository` writes six bytes
+from two numbers — `Point1 = (Start, Start)`, `Point2 = (End, End)` — and the
 factory blob agrees exactly: `0 0 0 0 255 255 255`. `set_trigger_curve()` mirrors by default, sorts
 the pair, and allows them to be equal, since Space Station's range slider passes neither `pushable`
 nor `allowCross` and dragging one handle onto the other is reachable. `mirror_points=False` is there
@@ -502,8 +509,8 @@ pad that has the hardware.
 
 **The stored bind is the same structure as live command 82.** `ParseTriggerConfigToArray` writes, at
 offset 185 + 20 per side:
-`Type, bind.Type, bind.Filter, bind.Scale, bind.Param[5], MixedBorder, Param[10]`
-(`MappingConfigParser.cs:376-386`). Live 82 takes 3 + 4 parameters; the stored form is 3 + **5** —
+`Type, bind.Type, bind.Filter, bind.Scale, bind.Param[5], MixedBorder, Param[10]`.
+Live 82 takes 3 + 4 parameters; the stored form is 3 + **5** —
 the same structure with one spare byte. The writer sets `bind.Type = (Type == 5) ? 2 : 0`, so bind
 type 2 appears exactly when the stored effect is `Vibration`.
 
@@ -519,8 +526,8 @@ form and the stored form cannot drift.
 
 **Lock, Recoil and Sniper are felt on hardware** at their default settings, and a stored
 `Vibration` leaves as command 82, which is physically confirmed; the runs are in PROTOCOL.md §7.
-Live mode **5** is the one nothing in Flydigi's stack ever sends: `ForceTriggerConfigVibration`
-(`SetForceTriggerCommandFactory.cs:197`) is defined and never constructed, the config path turns
+Live mode **5** is the one nothing in Flydigi's stack ever sends: `ForceTriggerConfigVibration` in
+`SetForceTriggerCommandFactory` is defined and never constructed, the config path turns
 stored type 5 into command 82, `relay.translate_ds5` emits only modes 0-3, and pads with real
 trigger motors use command **18**. What the firmware does with a mode-5 command is not settled;
 PROTOCOL.md §3a has the runs and the rules for testing an effect here without a stale bind
@@ -597,7 +604,7 @@ one letter in 300 ms:
     X taps produced `press a`, `x x x`, then `release a` when the paddle came up — three times
     across two runs, identical every time. With the same key on both they coalesce into what looks
     like the macro alone. Neither application produces the state: Space Station drops the macro when
-    the key is remapped away from Macro (`ControllerRepository.cs:765-773`) and `set_mapping` does
+    the key is remapped away from Macro (`ControllerRepository`) and `set_mapping` does
     the same, while their follow-up `WriteMacroConfigPartial` is gated on `ProtoVersion >= 770`,
     below which — this pad — the removal rides along inside the mapping blob write. Nothing in the
     firmware cleans it up.
@@ -639,8 +646,7 @@ that the differences are choices rather than gaps:
   * **Neither offers reorder**, and theirs has no Hold either: `MacroActionEvent`'s hold and the two
     stick pseudo-events never reach the wire from their editor.
 
-`set_macro()` took arbitrary steps before any of this, so the whole editor is GUI work. The one
-backend change it forced was a bug of its own — see the repeat interval below.
+`set_macro()` already accepts arbitrary steps; the editor behavior above is implemented in the GUI.
 
 ## Protocol versions, and what a v3.2 profile is
 
@@ -648,7 +654,7 @@ backend change it forced was a bug of its own — see the repeat interval below.
 Apex 5 reports **769 = v3.1**; a Vader 5's factory profile is **770 = v3.2**. This matters because
 restoring a single slot means writing a factory profile, and that means writing the right shape.
 
-**The blob is built in layers**, `MappingConfigParser.cs:866`:
+**The blob is built in layers** by `MappingConfigParser`:
 
 ```csharp
 int num = config.ProtoVersion & 0xF;
@@ -658,15 +664,15 @@ if (num >= 1) MappingConfigParserV31.ParseConfigToArray(config, array);
 if (num >= 2) MappingConfigParserV32.ParseConfigToArray(config, array);
 ```
 
-  * **84 packets of 10 bytes is the 840 this project reads**, and 79 is the 790 recorded from the
-    Vader 4 in [findings-other-devices.md](findings-other-devices.md). v3.1 and v3.2 are both 840,
-    so a Vader 5 profile is the same size as an Apex 5 one.
+  * **The reference parser allocates 84 ten-byte units for v3.1/v3.2** and 79 for the 790-byte
+    Vader 4 record in [findings-other-devices.md](findings-other-devices.md). A new-protocol host
+    transfers the resulting 840-byte v3.1/v3.2 profile as 42 packets of 20 bytes.
   * **`MappingConfigParserV32` is empty** -- both `ParseDataToConfig` and `ParseConfigToArray` are
     no-op bodies. So v3.2 *adds* nothing to the blob.
   * **V31 is what writes 790, 820 and 830**, and its 820 write is gated on `ProtoVersion < 770`. So
     the only layout difference at v3.2 is that the macro-cycle block at 820 is absent.
 
-**What v3.2 really changes is macro capability, not layout** (`:780`):
+**Implemented status: v3.2 changes macro capability and storage, not profile-blob length.**
 
 | | v3.1 | v3.2 |
 |---|---|---|
@@ -674,33 +680,26 @@ if (num >= 2) MappingConfigParserV32.ParseConfigToArray(config, array);
 | `GetMaxMacroActionCount` | 128 | **256** |
 | `GetMinMacroInterval` | 10 ms | **1 ms** |
 
-and the bodies move out of the blob into commands 172/173/174, which nothing here implements.
-`MappingConfig.macros_in_blob` already refuses to write 230..768 from 3.2 on.
+The bodies move out of the profile blob into commands 172/173/174. `mapping.MacroStore` implements
+that store, laid out in [PROTOCOL.md](../PROTOCOL.md) §9a, and `MappingConfig.macro_store` attaches it
+to the profile abstraction. Reading a v3.2 profile fetches both transfers; writing sends the profile
+first and the macro store second, matching the reference order. `MappingConfig.macros_in_blob`
+refuses to write the v3.1 page at 230..768 for v3.2.
 
-**Built.** `mapping.macro_limits(proto_version)` is that table, `MappingConfig.macro_limits` reads
-it off the profile's own version, and the Macros page takes its slot count, step budget and interval
-ceiling from there rather than from a constant. Versioned off `ProtoVersion` rather than off the
-model, since that is what Flydigi branch on -- a pad that gains v3.2 in a firmware update needs
-nothing changed here.
+`mapping.macro_limits(proto_version)` and `MappingConfig.macro_limits` provide the versioned limits;
+the Macros page does not hard-code the v3.1 values. The desktop app carries a profile and its store
+through `mapping.pack_config`, including in app-created backup files. The CLI's `backup` command is
+the documented exception: it still writes only the bare profile blob.
 
-The bodies moving out of the blob is built too: `mapping.MacroStore` is the store behind commands
-172/173/174, laid out in [PROTOCOL.md](../PROTOCOL.md) §9a, and `MappingConfig.macro_store` carries
-one so that `macros()` and `set_macros()` mean the same thing on either protocol version. Reading a
-v3.2 profile fetches it; writing one writes it back, profile first, as Space Station do. A profile
-and its store travel as a single value through `mapping.pack_config` -- which is what lets the
-desktop app's worker signals, its per-slot cache, its dirty compare and its backup files carry a
-v3.2 profile without each of them growing a second argument to forget.
-
-**The split point is not the package-count byte**, which is the obvious rule and is wrong: the Apex 5
-here reports **77** at blob offset 2 while its profile is 840 bytes, so `blob[2] * 10` is 770 and
+**The split point is not the package-count byte.** The measured Apex 5 reports **77** at blob offset
+2 while its profile is 840 bytes, so `blob[2] * 10` is 770 and
 would cut seventy bytes off the end of every profile. `MappingConfigParser`'s 84 is the packet count
 of the *transfer*. The store is a fixed 1620 bytes and a profile is smaller, so length alone splits
 them.
 
-**Untested on hardware, and marked as such in the app.** No Vader 5 exists here, and unlike the rest
-of the f5 support this path does not share a code route with anything measured -- it is new bytes
-down a new command, where every macro measurement in this project was made against the v3.1 page.
-The Macros page says so when the open profile is v3.2.
+**Hardware status: unverified.** The v3.2 store has not been sent to a Vader 5. Unlike the other f5
+paths, it uses new command bytes rather than only a shared v3.1 route measured on the Apex 5. The
+Macros page displays this warning for a v3.2 profile.
 
 ## The bean behind the blob, for translating a factory profile
 
@@ -709,8 +708,7 @@ default_mapping_<DeviceType>.dat`, which is a protobuf `ControllerMappingConfigB
 `ControllerMappingConfigBean`s under repeated field 1. Translating one into the wire blob is how a
 model nobody owns gets a factory profile: the files ship for every model, `f5` included.
 
-Top-level field numbers (`Flydigi.SharedResources.decompiled.cs:7882`) against the blob regions
-this document already measures:
+Top-level `ControllerMappingConfigBean` field numbers against the measured blob regions:
 
 | # | field | where it lands |
 |---|---|---|
@@ -726,8 +724,8 @@ this document already measures:
 | 13 | `OldLedConfig` | 3..13, the ten bytes this project skips |
 | 14 | `Lunpan` | 183..185, the wheel block |
 
-**The k5 file is the test, and it is committed.** `flydigi/factory_config.py` holds the Apex 5's
-factory blob as read off the pad, so the translator is checked by running it over
+**Translator validation.** `flydigi/factory_config.py` holds the Apex 5 factory blob read from the
+pad. The translator is checked by running it over
 `default_mapping_128.dat` and comparing: every field mapped wrongly shows up as a byte mismatch,
 so it cannot be quietly wrong. `tools/mapping_bean.py` is the translator -- a schema-free protobuf
 wire reader plus `MappingConfigParserV30` and `V31`'s emit paths -- and `tools/gen-factory-config
@@ -742,7 +740,7 @@ was pinned down by running all six k5 SKU files rather than by reasoning about o
 | 154 | the trigger-motor enable, for motors an Apex 5 has none of | **Authored, not read.** Within one Space Station release the files for DeviceType 128, 129, 133 and 134 say "disabled" and those for 135 and 136 say "enabled" — same model. The pad holds 0 |
 | 776..786 | ten bytes of title padding | The pad zero-fills the title field to 786 and leaves 786..790 at 0xFF; their emitter copies the title into an 0xFF-filled buffer and pads with nothing. A convention, and both readers strip both fillers |
 
-A *thirteenth* fails the check, which is what makes the gate worth having.
+A further mismatch is intentionally treated as a validation failure:
 
 **All six Apex 5 SKUs are one profile.** 128, 129, 133 and 134 emit a byte-identical blob and
 135/136 differ only at 154 -- so one k5 factory blob covers every edition, and the one committed

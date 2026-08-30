@@ -1,9 +1,15 @@
 # Other Flydigi hardware
 
-How a device is told from another one of the same kind, what is gated on a device this project does
-not drive, the charging dock, and what command 31 may and may not be aimed at.
+Model identity, capability gates, multi-device selection, the CD2 charging dock, and the devices at
+which command 31 may safely be aimed.
 
 Index: [PROGRESS.md](../PROGRESS.md).
+
+**Status and provenance.** The project currently accepts Apex 5 (`k5`) and Vader 5 Pro (`f5`). The
+f5 path is implemented from the shared protocol and the Space Station 4.2.0.9 reference but has not
+been tested on Vader 5 hardware. Older-pad, Apex 6, cooler, keyboard, and unused dock command facts
+are reference transcriptions unless explicitly labelled measured. Decompiled sources are not
+distributed in the public repository.
 
 ## Device codes: what `k5`, `k6` and `f4` mean
 
@@ -18,7 +24,7 @@ model and the Eva edition.
 | `k1` | `GenerateControllerApex3` | Apex 3 | 24, plus 26 / 29 special editions |
 | `k2` | `GenerateControllerApex4` | **Apex 4** — not the Apex 2 | 84, 86, 87, 92, 93, 102, 103, 104 |
 | `k5` | `GenerateControllerApex5` | **Apex 5 — this pad** | 128, 129, 133, 134, 135, 136 |
-| `k6` | `GenerateControllerApex6` | Apex 6 — not shipped as of July 2026 | 149, 150 (`K6Pro`) |
+| `k6` | `GenerateControllerApex6` | Apex 6 | 149, 150 (`K6Pro`) |
 | `f3` | `GenerateControllerVader3` | Vader 3 | 28 |
 | `f3p` | `GenerateControllerVader3` | Vader 3 Pro | 80, 81, 88 |
 | `f4` | `GenerateControllerVader4` | Vader 4 | 85, 91 |
@@ -34,10 +40,8 @@ The code column and the number column are not in step. `GetDeviceCodeById` maps 
 or "DireWolf" plus a digit. `Fp3PNaruto = 97` is mapped by neither, and is put with `fp3` here on
 its enum name.
 
-**Four rows of that table were wrong until this was checked against the dispatch.** The three
-Vader 3 Pro SKUs are `f3p`, not `f3`; and the whole Direwolf family collapsed onto `fp1`, so a
-Direwolf 4 would have been refused under the name of a Direwolf 1. The table exists so a refusal
-can say what it found, which makes a wrong name the one defect that defeats its purpose.
+The dispatch distinguishes the Vader 3 Pro SKUs as `f3p` and the four Direwolf generations as
+`fp1`..`fp4`; this table follows that dispatch rather than inferring codes from family names.
 
 ## Which pads speak `5a a5`, and how to tell without one in hand
 
@@ -66,8 +70,8 @@ else Flydigi drive is `0x37D7` and NewXInput. Apex 3 and Direwolf 1/2 are in nei
 is why `GetDeviceCodeById` never returns `fp1` or `fp2` — Space Station cannot find those at all.
 (`"VADER3"` is tested twice in that condition, a harmless slip.)
 
-**A `DeviceType` in the high band does not mean the new protocol, and this nearly went in the
-docs as though it did.** `FP4` is 132, above the Apex 5's 128, and the Direwolf 4 is still old —
+**A `DeviceType` in the high band does not identify the new protocol.** `FP4` is 132, above the
+Apex 5's 128, and the Direwolf 4 is still old —
 its two model-specific code paths, the `DockSmartStopUsable` flag and the `Serial != 3` carve-out,
 sit in the XInput and DInput classes and appear nowhere in the NewXInput one. The number band
 tracks release order, not dialect.
@@ -101,8 +105,14 @@ gates nothing and implies nothing about how gyro is driven.
 
 Two consequences worth having before any per-model work:
 
-  * **PS5 mode is gated on force triggers in Flydigi's own code** — `if (controller.IsSupportForceTrigger && EnablePs5)`. A pad without them has nothing for a virtual DualSense to translate, so DualSense mode is an Apex feature rather than a general one. Everything in [findings-games.md](findings-games.md)'s tier table is trigger-effect delivery and follows the same flag.
-  * **`IsSupportTriggerVibration` changes a live command**, not just a page: `SetVibration` sends `VibrationType.Both` where it is set and `VibrationType.Grip` where it is not. A Vader 5's vibration addresses trigger motors as well as grips.
+  * **Space Station gates its PS5 mode on force triggers** —
+    `if (controller.IsSupportForceTrigger && EnablePs5)`. This project deliberately differs:
+    `PadLink` accepts both supported models and uses `has_triggers` to skip only adaptive-effect
+    translation on f5. Input, ordinary grip rumble, haptic audio, and motion still relay.
+  * **Reference behavior:** `IsSupportTriggerVibration` changes the vendor `SetVibration` command,
+    sending `VibrationType.Both` rather than `VibrationType.Grip`. This would address a Vader 5's
+    trigger motors as well as its grips. The current `effects.rumble` implementation sends only the
+    two grip levels; live trigger-motor behavior remains hardware-unverified and unimplemented.
 
 **Gyro does not distinguish anything.** It reaches a host two ways and neither is protocol-specific:
 the profile blob's motion block at offset 137 maps it onto a stick pad-side, and
@@ -111,8 +121,8 @@ the profile blob's motion block at offset 137 maps it onto a stick pad-side, and
 
 ## Multiple pads
 
-Nothing here drives a Vader 4 Pro, and after measuring what that would take, nothing will. The SDK
-gives it 26 keys to the Apex 5's 27 over an
+**Vader 4 Pro is outside the project's supported-device scope.** The SDK gives it 26 keys to the
+Apex 5's 27 over an
 identical 20-key standard core; beyond that core only M1-M4 are common to both, the Vader adds C
 and Z, the Apex 5 adds Turbo, M5 and M6.
 
@@ -160,26 +170,23 @@ GenerateControllerVader4 ("f4")        GenerateControllerApex5 ("k5")
 
 Impulse-style trigger vibration on one, adaptive force resistance plus a screen on the other. Both
 have trigger haptics; the Apex 5 reaches them *through* the force-trigger subsystem (command 82's
-`SyncWithGrip`), so the commands differ even where the capability overlaps. Scope is **config
-only** — writing settings to the pad; driving impulse triggers during a game is explicitly not
-wanted, since on Linux there is no XInput to carry it and almost nothing but Forza uses it.
+`SyncWithGrip`), so the commands differ even where the capability overlaps. The trigger-motor block
+described here is currently **config-only**. No GUI page exposes it and the live rumble path does not
+emit the extra trigger levels.
 
 The device-type guard is `flydigi/identity.py`. It exists because `flydigi/device.py` matches on
 vendor id, the product id's top nibble and the `06 a0 ff` report-descriptor prefix — which
 together pick out *a Flydigi pad of the `5a a5` generation* and say nothing about which one, so
 an Apex 5 config would otherwise go into a **Vader 5 or an Apex 6**. Not into anything older:
 those carry no Flydigi vendor id in either transport and never reach this code at all. The
-module is `DEVICE_TYPES` (the table above,
-asserted by `tests/test_identity.py:50-60`), `PRODUCT_NAMES`, `code_for`, `name_for`,
+module provides `DEVICE_TYPES` (the table above), `PRODUCT_NAMES`, `code_for`, `name_for`,
 `identify(ctrl)` (one command-1 read, raising `WrongDevice` when the pad does not answer at all),
-`require(ctrl, *codes)` raising `WrongDevice`, and `SUPPORTED = ("k5",)`. Writes are gated; reads
-deliberately are not, since asking an unknown pad what it is cannot damage it. Driving another
-model deliberately means naming its code: `identity.require(ctrl, "f4")`. Three call sites gate —
-`tools/flydigi-mapping:51`, `tools/flydigi-settings:136` and `gui/worker.py:91` — one check per
-connection rather than per write; `flydigi-settings` gates its read-only `show` too, because
-another pad's settings block printed under this one's field names would mislead.
-`tools/flydigi-screen`, `tools/flydigi-haptics`, `tools/flydigid` and `tools/flydigi_cmd.py` do
-not call `identity.require` at all.
+`require(ctrl, *codes)` raising `WrongDevice`, and `SUPPORTED = ("k5", "f5")`. `CAPABILITIES`
+separately records adaptive triggers, trigger motors, screen, and available factory-profile data.
+Normal writes identify once per connection; feature-specific tools use `require_capability` so a
+supported pad cannot receive a command for hardware it lacks. Read-only discovery remains able to
+identify unsupported models. `flydigid` filters through the registry and capabilities rather than
+calling `identity.require` at its top level.
 
 The guard refuses; `flydigi/registry.py` chooses. That split is deliberate — "which device" and
 "may this be written to" are different questions, and a tool may quite legitimately point itself
@@ -196,9 +203,8 @@ at a Vader.
 | uid | command 4, 13 bytes at raw 6 | one exchange | yes | **yes, on the pad and the dock** |
 | nickname | command 2 to read, 24 to write | one exchange | until renamed | **yes, both** |
 
-The address was going to be the cheap answer, since it rides the same command-1 reply as the
-battery that anything holding a pad already polls. It is not one. Measured on this pad, on its
-dongle, firmware 7.0.4.5:
+**Address status: unusable on the measured pad.** The field rides the same command-1 reply as the
+battery, but the Apex 5 on firmware 7.0.4.5 returned zeroes while connected through its dongle:
 
 ```
 04 5a a5 01 01 00 80 02 | 00 00 00 00 | 05 45 01 00 70 45 21 31 45 25 ...
@@ -217,7 +223,7 @@ Command 4 works and is the one to use:
 04 5a a5 04 01 00 | 14 20 6e 7a 1c 00 00 00 00 dc ba 3e 00 | 00 00 ...
 ```
 
-**The nickname is at raw 6, like every other payload, and finding that out took writing one.**
+**The nickname is at raw 6, like every other payload.**
 `ReadNickNameControllerCommandNewXInput` slices `data.Slice(4, data.Length - 6)` — raw 5 with the
 report-id byte kept — where `Flydigi.ChargerSdk`'s slices from its own data[6], and an unnamed pad
 appeared to confirm the earlier offset by answering 0x00 there, which is Flydigi's own test for an
@@ -252,7 +258,7 @@ writing names to the pad here and reading them back:
     Index 6 is the right slot only for a one-byte name; for anything longer the checksum overwrites
     the name's second character. Their "Desk" is stored by the pad as `44 a5 73 6b`. Space
     Station's rename has never worked past one character, and the pad was never the reason.
-    `nickname_packet(..., reference=True)` reproduces their packet, which is how this was found.
+    `nickname_packet(..., reference=True)` reproduces the reference packet for comparison.
 
 **The dock's nickname read is one byte long, and this project shortens it.** Flydigi slice
 `data[6 : 6 + data[3] - 3]`, and the measured framing says that runs onto the checksum: the unset
@@ -273,10 +279,18 @@ caller that has only ever seen one device passes.
 `registry.key()` writes the best available name in `uid:`/`mac:`/`path:` form, which is what goes
 in a config file: `prefs.primary_pad` is the daemon's, written by the app's picker.
 
-Every tool takes `--device` with the same meaning, from `registry.add_device_argument`, and
-`tools/flydigi-devices list` prints all four names. `flydigi-charger --uid` still exists and now
-accepts anything `--device` does. `list_docks` and `open_dock` are thin wrappers over the shared
-layer, so pads and docks are chosen the same way.
+Managed multi-device tools use `registry.add_device_argument`, and `tools/flydigi-devices list`
+prints all four names. `flydigi-charger --uid` accepts anything its `--device` selector accepts;
+`list_docks` and `open_dock` are thin wrappers over the shared layer.
+
+**Exceptions and current limitation.** `tools/flydigi_cmd.py --device` takes a literal hidraw path.
+Several Apex-exclusive utilities, including `flydigi-haptics`, `flydigi-run`, and bench probes, have
+no shared selector and open a bare `Controller()` before applying any model/capability gate. That
+does not mean "first compatible Apex": it selects the first new-protocol Flydigi node. If a Vader
+enumerates first, the later capability check can refuse it without trying a connected Apex; with
+multiple Apex pads, the intended one cannot be selected. Probes that do not gate are limited more
+strictly still. These are selection limitations in Apex-specific utilities, not evidence that their
+commands support every model.
 
 **The daemon splits by tier, and the split is a property of the routes rather than a preference.**
 The tier-1 vibration bind is command 82 and nothing else — a pad-side setting driven by the pad's
@@ -294,8 +308,8 @@ its name, and `find_device(usb_root=...)` accepts only input nodes under it.
 
 ### Mock devices
 
-There is one pad and one dock on this desk, so every path above is exercised against
-`flydigi/mock/`, behind `FLYDIGI_MOCK_BUS`. It hooks `device.find_nodes`, which is the one place
+Multi-pad, multi-dock, and unowned-model paths are exercised against `flydigi/mock/`, behind
+`FLYDIGI_MOCK_BUS`. It hooks `device.find_nodes`, which is the one place
 the tools, the daemon and the app all ask what is attached, and `Controller.__new__` hands back an
 in-process fake for a `mock:` path. Nothing appears unless the variable is set, and everything
 that does is marked `mock` everywhere a person can see it. The JSON form is re-read on every
@@ -318,7 +332,7 @@ Measured on a Vader 4 Pro, `DeviceType 85`, firmware 6.9.3.3, on its 2.4 GHz don
     configuring it there costs no XInput. `xpad` synthesises nothing. String descriptor `0xEE`
     STALLs, so this is not a pad hiding a second personality from Linux. **Nor is a cable the
     difference.** Every pad of this generation is an XInput device wired or wireless — measured
-    both ways on this desk, `045e:028e` each time — which follows from `IsOldProtocol()` being
+    over both transports as `045e:028e` — which follows from `IsOldProtocol()` being
     `VendorId != 0x37D7`: an old pad does not carry the Flydigi vendor id in either mode, so
     `find_device` cannot match one however it is attached.
 
@@ -352,7 +366,7 @@ Measured on a Vader 4 Pro, `DeviceType 85`, firmware 6.9.3.3, on its 2.4 GHz don
     and macro pages carry over, and `blobs.py` already takes a `pkg_size`. Writes over this dialect
     were not tried and are unverified.
 
-**What rules it out is the pad, not the work.** The dialect is transcription rather than discovery:
+**Support decision.** The dialect is largely transcribed already:
 of the SDK's 81 command files, 61 carry a legacy class — 58 an XInput one, 58 a DInput one — against
 49 carrying a NewXInput one, and 36 carry both a NewXInput and an XInput. So most of the old dialect
 is already written out beside the new one, and 24 legacy files have no new twin at all. But a Vader 4 has neither adaptive triggers nor a screen, so the two features that
@@ -361,8 +375,8 @@ Reaching it also means taking interface 0 from `xpad` for every read and write, 
 gamepad for as long as the app holds it. Serving its input from a virtual pad in the meantime is
 exactly what tiers 4 and 4b do here, and is explicitly not wanted.
 
-**Only an Apex 5 and a Vader 4 Pro are available to test with**, so everything above about the Vader
-is measured and everything said here about any other model is read out of the SDK.
+**Hardware coverage:** the old-protocol observations above are measured on a Vader 4 Pro; claims
+about other old-protocol models are reference transcriptions.
 
 ## Features that belong to other models
 
@@ -383,13 +397,11 @@ is measured and everything said here about any other model is read out of the SD
 
 ## The CD2 charging dock
 
-**Driven, and measured.** `flydigi/charger.py` and `tools/flydigi-charger`. The SDK came from
-`~/.dotnet/tools/ilspycmd -o decompiled/Flydigi.ChargerSdk bundle/Flydigi.ChargerSdk.dll` in the
-`wine-arch` distrobox; everything below marked *measured* came off the dock on this desk,
-firmware **0.0.3.9**, charger type 0, uid `1960f0f1f2cdab52efe7bc0658`.
+**Implemented and measured.** `flydigi/charger.py` and `tools/flydigi-charger` implement the CD2
+path. Measurements below used firmware **0.0.3.9**, charger type 0.
 
-The Vader 4's older dock is a different device. It has never been on this bus, nothing here
-describes it, and it must not be assumed to speak the `cd2` protocol —
+The Vader 4's older dock is a different, unmeasured device. This section does not describe it and
+it must not be assumed to speak the `cd2` protocol —
 see [Telling a CD2 from something else](#telling-a-cd2-from-something-else).
 
 ### On the bus
@@ -445,8 +457,9 @@ are transcribed and deliberately unwrapped: Space Station's own "restore default
 no documented recovery.
 
 Flydigi's own `UpdateNicknameCommand` writes its checksum at a fixed index `[6]` rather than
-`[3 + len]`, so it corrupts any nickname longer than one character. Nothing here writes a
-nickname; worth remembering if anything ever does.
+`[3 + len]`, so it corrupts any nickname longer than one character. `charger.write_nickname`
+implements the corrected packet and `tools/flydigi-devices name` exposes it for docks. The write has
+not been sent to dock hardware, so read-back behavior for a set name remains unverified.
 
 ### The dock plays frames; it does not generate effects
 
@@ -618,9 +631,10 @@ mean whenever a GIF's frames run back to back; `_mean_delay` takes the mean of
 not the *longest* delay — a GIF that holds its final frame would otherwise play the whole
 animation at the speed of its pause.
 
-Not tried on the dock yet. What is checked is that the sampler reads the pixels Space Station
-reads, that both grids describe a 162-LED wedge with the dock's own row lengths, and that a
-picture becomes the config their page sends — `tests/test_charger.py` and `tests/test_models.py`.
+**Hardware status: exercised as an end-to-end picture path.** A real animation was uploaded and its
+pace and sampled output were compared with Space Station's output as described above. Automated
+tests separately verify the sampler pixels, the 162-LED wedge geometry, and conversion from a
+picture to the transmitted config (`tests/test_charger.py` and `tests/test_models.py`).
 
 ### The four switches, and what the dock says on its own
 
@@ -641,16 +655,15 @@ battery byte has not been seen with a pad actually seated.
 
 ### The dock's switches interact
 
-**"Intelligent start" turns the lighting off on both devices.** Observed on the hardware here:
+**"Intelligent start" turns the lighting off on both devices.** In the measured dock test,
 with `sleep_when_charging` on, docking a pad takes the lighting down on the pad *and* on the dock
 for as long as it sits there. That makes it exclusive in practice with the other two lighting
 switches — `led_sync` has nothing to keep in step and `show_animation_when_charging` has nothing
 to play, during exactly the window either of them is for.
 
 Space Station forces `sleep_when_charging` and `show_animation_when_charging` apart in its own UI,
-forcing one off whenever the other goes on. That was written up here as a house style, on the
-grounds that nothing in the SDK enforces it. It is not: their UI is enforcing something the
-firmware does. Nothing in `flydigi/charger.py` enforces it either — a library that quietly turned
+matching the measured firmware interaction. Nothing in `flydigi/charger.py` enforces it — a
+library that quietly turned
 off a switch its caller did not mention would be worse than one that sets both and says what
 happens — so the app shows which one wins and the CLI says so in its help. The app also calls it
 "Sleep while docked", since Flydigi's own label describes none of this.
@@ -662,16 +675,17 @@ is inferred — but a bare number would repeat the bug that reported a full pad 
 worse: a docked pad is charging, so the value it is most likely to carry is the one that renders
 as "battery 6".
 
-The rest of the work is almost entirely in `flydigi/`: per-model key tables, offsets and capability
-flags. `gui/models/` only knows `mapping.APEX5_KEYS`.
+**Current per-model implementation.** `mapping.MODEL_KEYS` contains Apex 5 and Vader 5 key lists;
+`ProfileModel` resolves them through `mapping.keys_for(model_code)`, so the f5 UI includes C and Z.
+The remaining CLI limitation is narrower: `tools/flydigi-mapping` still uses `APEX5_KEYS` in its
+`set` help and `show` loop even when an f5 passed the identity guard.
 
-The udev rules would have to become per-model too. They serve three things and none is universal:
-the pad's own vendor hidraw node (`37d7:2501`, already model-specific), DualSense emulation
-(`/dev/uhid` plus the DualSense input nodes), which applies to the Apex 4 and 5, and the screen
-chip's bootloader tty (`ffaa:5555`) for the Apex 5 alone — the Apex 4 declares the same
-`ChipScreen`/`ChipType.Freq`, but Space Station sends it down the HID picture route instead, so
-only a `k5` ever produces the tty. A Vader or a Direwolf needs none of it, yet `setup.checks()`
-fails an absent rules file unconditionally.
+**Known installation limitation.** The shipped udev file is still Apex-specific. It covers the
+Apex 5 vendor node (`37d7:2501`), CD2, `/dev/uhid` and DualSense input access, and the Apex 5 screen
+tty (`ffaa:5555`). A Vader needs neither the screen tty nor adaptive-trigger/DualSense setup, but on
+a strict distribution it may need its own vendor-hidraw access rule. `setup.checks()` still fails an
+absent rules file unconditionally and its source comment still assumes one supported model. Setup
+and rule requirements must be selected by model/capability now that f5 is accepted.
 
 **Mode switch (27)** — `[4]=3, [5]=mode, [6]=Crc(3, 3+3)`, with
 `BluetoothMode {Switch=1, Xbox=2, Flashplay=3, DInput=4}`; the enum starts at `None = 0`, which is
@@ -700,8 +714,8 @@ guarded against. It goes in the refusal message instead.
 
 `cfgId` is host bookkeeping and never reaches the wire: no charger command carries an index, and
 the dock stores exactly one LED config. Two docks are told apart by uid — `flydigi-charger
---device`, the app's picker, or `registry.find` — and only one has ever been on this bus, so every
-multi-dock path is covered by `flydigi/mock/dock.py` and by nothing else.
+--device`, the app's picker, or `registry.find`. Multi-dock behavior is covered by
+`flydigi/mock/dock.py` but has not been hardware-verified.
 
 ### The pad's own dock setting, and the cooler
 
@@ -729,15 +743,15 @@ NewXInput id and sends the chip module alone; the same operation is **48** on le
 varies on `ChipType.{Telink, Wch}`, and **245** on DInput, which varies on
 `ChipId.{WCH_582 = 130, WCH_547 = 71, WCH_571 = 113}`.
 
-**The rule is: send 31 for `ChipScreen`, and for no other chip.** This project does send it, as
-step 2 of a picture upload — `flydigi/screen_ota.py:45-46` defines `CMD_SWITCH_USB = 31` and
-`CHIP_SCREEN = 4`, `:139-156` sends it — and `enter_upgrade_mode` **takes no chip argument**, so no
+**The rule is: send 31 for `ChipScreen`, and for no other chip.** This project sends it as
+step 2 of a picture upload: `screen_ota.CMD_SWITCH_USB = 31`, `CHIP_SCREEN = 4`, and
+`enter_upgrade_mode` **takes no chip argument**, so no
 other chip is reachable through it. The argument for that one case is in
 [findings-screen.md](findings-screen.md).
 
-What has no way back is aiming 31 at a program chip. Flashing a program image is one updater per
-`ChipType`, chosen in `decompiled/FirmwareConsole/FirmwareConsole.decompiled.cs:151-186` and
-implemented in `FirmwareLibrary.dll`: `Megahunt` shells out to `tool/mhtool/hid_boot_command.exe`,
+What has no way back is aiming 31 at a program chip. The firmware console selects one updater per
+`ChipType`, implemented in `FirmwareLibrary.dll`: `Megahunt` shells out to
+`tool/mhtool/hid_boot_command.exe`,
 `NearLink` to `tool/hsh_tool/BurnTool.exe`, `Jieli` runs the downloaded file itself with
 `Process.Start` unless it is a `.ufw` (a managed `JieLiUpdater`), `Telink` is a managed HID updater
 and `Wch` P/Invokes `CH375DLL64.dll`. `ChipType.Freq` is `OtaNewUpdater` — the screen, and the one
@@ -749,9 +763,8 @@ Only `Freq` is implemented here, and only for pictures, so the other four module
 reimplementing three third-party bootloader protocols with no recovery when wrong.
 `GenerateControllerVader4` shares not one of those vendors: ChipMain/Telink, ChipDongle/Telink,
 ChipAdc/Puya, ChipSi/Krly — four modules, three vendors. It multiplies per device as well as per
-chip: four entry points call `SwitchToFirmwareUpgradeMode`, one per SDK plus the console —
-`…/Flydigi.ControllerService.data/ControllerRepository.cs:2192`, `ChargerRepository.cs:635`,
-`CoolerRepository.cs:1083` and `decompiled/FirmwareConsole/FirmwareConsole.decompiled.cs:445` —
+chip: four entry points call `SwitchToFirmwareUpgradeMode`, one in each of
+`ControllerRepository`, `ChargerRepository`, `CoolerRepository`, and the firmware console —
 times two pads with different silicon, times their dongles, times two dock generations.
 
 **If a firmware update is genuinely needed, use real Windows hardware — not a VM.** Flashing drops

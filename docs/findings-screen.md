@@ -1,169 +1,165 @@
-# The 160x80 screen
+# Apex 5 screen
 
-How the panel is driven. The wire protocol — image format, both upload families, the settings and
-the OTA state machine — is [PROTOCOL.md](../PROTOCOL.md) §8.
+Reference for the 160×80 display, uploads, safety gates, and settings. The wire
+format and protocol state machines are documented in
+[PROTOCOL.md](../PROTOCOL.md) §8. Verified against the repository on
+2026-08-23.
 
-Index: [PROGRESS.md](../PROGRESS.md).
+## Safety requirements
 
-## Uploading a picture
+### Upload only over a wired connection
 
-`flydigi/screen.py` (image format, the HID picture family, command 242 and the two settings),
-`flydigi/screen_ota.py` (the serial upload that works), `tools/flydigi-screen`, the GUI's Screen
-page, and `tests/test_screen.py` + `tests/test_screen_ota.py`, whose `FakeScreenChip` in
-`tests/fake_pad.py` stands in for `OtaLink` and the bootloader tty.
+The working serial upload is **wired only**. Over the dongle, command 31 can put
+the screen controller into upgrade mode, but the bootloader's USB CDC interface
+cannot appear through the wireless transport. The upload then waits for a tty
+that will never arrive.
 
-An upload runs at ~19 exchanges a second, ~25 s a frame. PROTOCOL.md §8d has the full timings, the
-base address and the hardware runs; §8a has the 25604-byte LVGL frame that
-`tools/flydigi-screen check` round-trips against Flydigi's own files. An upload is **wired only**, and that is
-the pad's own behaviour rather than a house rule of Space Station's — theirs refuses a wireless one
-before the request reaches the device, and **measured here, the reason they do is real**: on the
-dongle the pad accepts command 31 and switches its screen chip into upgrade mode, and nothing
-appears on the PC at all. The dongle does not relay the bootloader's USB CDC device and has no
-notion that there is one, so the tty the upload waits for cannot arrive. What is left is a pad in
-upgrade mode, a timeout for a diagnosis, and its own power switch for a fix.
+The GUI refuses an upload unless the current connection is wired:
 
-So the refusal has to come **before** command 31, and it does, in three places: `canUpload` and
-`upload()` in `gui/models/screen.py`, the connection re-read in `worker.upload_screen` — which also
-catches a cable pulled between pressing the button and the command going out — and
-`tools/flydigi-screen`, where `--i-know` sends it regardless. This was a real bug: every one of
-those gates was missing, and sending a picture on the dongle was a supported-looking way to strand
-the pad.
+- `ScreenModel.canUpload` disables the action.
+- `ScreenModel.upload()` repeats the gate for non-UI callers.
+- `DeviceWorker.upload_screen()` re-reads connection state immediately before
+  command 31, covering a cable removed after the button was pressed.
 
-### The command line
+When it needs to send command 31, the CLI applies the same refusal. `--i-know`
+bypasses it for serial `show`, `animate`, and `send`; use that flag only for
+protocol recovery or development with the consequences understood. `--port`
+means the pad is already switched and therefore skips both the check and
+command 31.
 
-`tools/flydigi-screen` needs Pillow for `show`, `animate`, `convert` and `preview`; `check` is pure
-backend and needs nothing.
+If a pad was switched while wireless, power-cycle it with its physical switch
+and reconnect by cable.
 
-| Subcommand | What it does |
+### Do not interrupt resource synchronization
+
+After a successful write, allow approximately 15 seconds for resource
+synchronization and automatic restart. Do not cut controller power during this
+stage.
+
+### Serial uploads over 255 frames are unsafe
+
+The picture count is one byte. HID uploads reject more than 255 frames and the
+GUI truncates to 255 with a warning. The current serial backend does **not**
+enforce the limit: it sends `len(frames) & 0xff`, while CLI `animate` and `send`
+can pass every frame. For example, 300 frames are announced as 44 while all 300
+frame payloads are written.
+
+Do not send more than 255 frames through the serial CLI. This is a current
+validation gap, not a supported wraparound format.
+
+### Command 242 is not a harmless screen test
+
+Command 242 also floods the controller RGB LEDs. `test off` does not reliably
+clear the state; the known recovery is a physical power cycle. Use the `test`
+subcommand only on hardware that can be safely restarted.
+
+## CLI reference
+
+`tools/flydigi-screen` uses Pillow for `show`, `animate`, `convert`, and
+`preview`. `check` is backend-only.
+
+| Subcommand | Behavior |
 |---|---|
-| `check FILE` | decode and re-encode every frame of a `.bin`, byte for byte |
-| `preview FILE OUT.png` | frames back to a PNG — all of them stacked into one sheet 160 wide and 80×N tall, or one with `--frame N` |
-| `convert IMAGE OUT.bin` | turn an image into a `.bin` offline, `--mode fill\|fit\|stretch` |
-| `status` | the screen bits out of command 3, read-only — the only free probe here |
-| `on` / `off` | 19 sub 9, the always-on display |
-| `statusbar on\|off` | 19 sub 8 |
-| `test RRGGBB` / `test off` | command 242; `--faithful` sends Flydigi's own byte layout |
-| `probe` | ask each envelope whether the pad knows 208 — announces a frame it never sends |
-| `show IMAGE` | upload **only the first frame** of whatever file it is given, always at 100 ms |
-| `animate IMAGE` | every frame, at the file's own longest delay unless `--interval` overrides it |
-| `send FILE.bin` | a `.bin` unchanged, at `--interval` or 100 ms |
+| `check FILE` | Decode and re-encode every frame of a `.bin` and compare bytes. |
+| `preview FILE OUT.png` | Decode a `.bin` to a vertical frame sheet, or one frame with `--frame N`. |
+| `convert IMAGE OUT.bin` | Convert offline with `--mode fill|fit|stretch`. |
+| `status` | Read screen-related command-3 flags. |
+| `on` / `off` | Set the always-on-display behavior through command 19/9. |
+| `statusbar on|off` | Set the status-bar flag through command 19/8. |
+| `test RRGGBB` / `test off` | Send command 242; see the safety warning above. `--faithful` reproduces Flydigi's byte layout. |
+| `probe` | Send only the HID-family start envelope for command 208. |
+| `show IMAGE` | Upload the first source frame at a 100 ms frame interval. |
+| `animate IMAGE` | Upload up to the caller-supplied frame set using the source delay or `--interval`. Keep it at 255 frames or fewer. |
+| `send FILE.bin` | Upload encoded frames unchanged at `--interval` or 100 ms. Keep it at 255 frames or fewer. |
 
-`convert` resamples with Pillow's Lanczos. `flydigi/screen.fit` is the pure-Python resampler behind
-the same three modes — box averaging down, nearest up — for a caller with no imaging library.
+Controller-facing subcommands accept `--device SELECTOR` and `--wait`; a
+selector may be a node path, UID or UID prefix, MAC address, or nickname.
+`show`, `animate`, and `send` also accept:
 
-`show`, `animate` and `send` share `--via serial|hid`, `--port`, `--restore-default` and
-`--dialect`, and `show`/`animate` take `--mode` as well; `serial` is the default and the route that
-works. `--wait` (seconds to wait for each reply, default 0.5) is on every subcommand that talks to
-the pad.
+| Option | Meaning |
+|---|---|
+| `--via serial|hid` | Upload backend. Serial is the default and the working display path. |
+| `--port PATH` | Use an already-switched bootloader tty. This skips the connection check and command 31. |
+| `--restore-default` | Restore the stock display resource after upload; CLI only. |
+| `--dialect new|a5|bare` | HID command envelope. `new` is the default. |
+| `--i-know` | Bypass the serial wired-connection refusal. |
 
-### Driving the serial route
+`show` and `animate` additionally accept `--mode fill|fit|stretch`. Pillow uses
+Lanczos resampling; `flydigi.screen.fit` provides a dependency-free box-down /
+nearest-up implementation for backend callers.
 
-`k5` is the one device code Space Station's `upload_pic2screen` sends over serial rather than over
-the HID picture family (`IpcCommandEnum_UploadPic`, the branch every other pad takes), and this
-project takes the same route: `flydigi/screen_ota.py` sends command 31 as `CMD_SWITCH_USB` /
-`enter_upgrade_mode` and then writes the frames over the bootloader tty (PROTOCOL.md §8d), reached
-from `tools/flydigi-screen` and the GUI's Screen page.
+## Serial upload path
 
-`screen_ota.upload_picture(ctrl, frames, interval_ms, restore_default, progress, settle, port)` is
-the one-call entry point that switches the pad, waits, finds the port and writes; the CLI and the
-GUI worker both open-code the same sequence instead. `find_port()` resolves the bootloader by
-reading `idVendor`/`idProduct` under `/sys/class/tty/ttyACM*/device/../` (and `ttyUSB*`) and
-`wait_for_port()` polls it, so `--port` is unnecessary on a retry — the tool finds an
-already-switched pad by itself. `OtaLink` opens the tty with termios and asserts DTR and RTS, as
-their `SerialPort` does. Timings: `SWITCH_SETTLE` 5.0 s after command 31, `PORT_TIMEOUT` 30.0 s
-polled every 0.5 s for the tty, `REPLY_TIMEOUT` 18.0 s per exchange. `enter_upgrade_mode` catches
-`OSError` and returns False, and False is not a failure — the pad usually leaves the bus before it
-can ACK, so the real check is whether the tty appears.
+`flydigi/screen_ota.py` implements the working path:
 
-The bootloader tty lands as `root:dialout`: without `udev/72-flydigi-apex5.rules` an upload gets as
-far as finding the port and then cannot open it, with the pad already switched over, so
-`flydigi/setup.py` **fails** an absent rules file rather than skipping it. Recovering costs nothing:
-retry with `--port`, no second command 31 needed.
+1. Re-read connection state.
+2. Send command 31 to put the screen chip into upgrade mode.
+3. Wait 5 seconds for the USB transition.
+4. Find the matching `ttyACM*` or `ttyUSB*` by vendor/product in sysfs, for up
+   to 30 seconds.
+5. Open the port with DTR and RTS asserted and exchange bootloader packets with
+   an 18-second reply timeout.
+6. Synchronize resources and restart.
 
-`--restore-default` sends `isRestoreDefault = 1`, which with the stock
-`default_screen_image_<deviceType>.bin` puts the factory animation back. It is CLI-only —
-`ScreenModel.upload` always emits False, so the GUI never sets it. The other ways back out are
-PROTOCOL.md §8e.
+The controller commonly leaves the bus before acknowledging command 31, so a
+missing ACK is not itself failure; appearance of the bootloader tty is the
+decisive event.
 
-Do not cut power during the **~15 second resource sync** after a successful write: "It will restart
-automatically when done. Please do not turn off the device."
+The tty normally appears as `root:dialout`. Install the project udev rules
+before uploading:
 
-### The 255-frame ceiling and the interval fields
+```bash
+tools/apex5-setup install-rules
+```
 
-**The 255-frame ceiling is a one-byte picture-count field, and the path that works does not enforce
-it.** It is checked in two places only: the HID path (`flydigi/screen.py`,
-`if len(frames) > 255: raise ScreenError`) and the GUI, which truncates at `MAX_FRAMES = 255` and
-says so. `screen_ota.upload` sends `len(frames) & 0xFF` as the count, and `animate`/`send` pass
-frames through uncapped, so a 300-frame GIF writes all 300 frames of data while telling the chip
-there are 44.
+If permission fails after the pad has already switched, correct the rules and
+retry with `--port`; a second command 31 is unnecessary. The normal port finder
+also recognizes an already-switched pad.
 
-The frame interval is a one-byte field too, and the two paths scale it by different divisors: the
-HID start packet uses `interval // 100` (`screen.period_from_interval`), the serial path uses
-`round(interval / 10)` (`screen_ota.frame_rate`), both clamped to 1..255. Only the serial one
-reaches the screen.
+`--restore-default` sets the bootloader restore flag and expects the stock
+`default_screen_image_<deviceType>.bin` resource. The GUI always leaves this
+flag false.
 
-### The GUI page
+Frame interval fields differ between backends: HID stores `interval // 100`,
+while serial stores `round(interval / 10)`; both clamp to one byte. Only the
+serial form has been shown to update the panel.
 
-`gui/models/screen.py` and `gui/qml/pages/ScreenPage.qml` put the frame count and the time estimate
-(`SECONDS_PER_FRAME = 25.0`) beside the upload button: an upload runs for minutes and **cannot be
-cancelled**. **Every** frame is encoded and decoded back to a cached PNG at load time, so the
-preview is what the pad will get rather than a scaled copy of the source, and the page plays the
-frames at the chosen interval — an animation is checked before a multi-minute upload rather than
-after. The interval is clamped to 10..2550 ms and the preview timer runs at `max(20, interval)` ms.
+## GUI behavior
 
-The upload bypasses the worker's `_attempt` retry: a silent second attempt would re-run a
-multi-minute write on a pad already in upgrade mode.
+The Screen page estimates upload time at 25 seconds per frame and does not offer
+cancellation. Image decoding, fitting, encoding, and preview generation run
+asynchronously after the file is opened. Upload remains disabled until the
+encoded frame set matches the current crop and fit settings.
 
-### The HID picture family, which puts no picture on the panel
+Each encoded frame is decoded back into the cached preview so the animation
+shows the bytes the pad will receive rather than a separately scaled source.
+The model clamps animation interval to 10-2550 ms and the preview timer to at
+least 20 ms.
 
-**The HID picture family answers on this pad and puts no picture on the panel**: two complete
-uploads, 9623 packets, no errors, every field echoed back, and no uploaded frame ever appeared
-(PROTOCOL.md §8b). What it does change is stored state — the two uploads left the status-bar flag
-flipped to always-on, which survives a power cycle and needs 19/8 to put back, and 211 commits
-metadata for a frame that was never sent (below).
+Screen upload bypasses the worker's ordinary retry wrapper. Repeating a
+multi-minute upload automatically would be unsafe when the first attempt has
+already switched the pad into bootloader mode.
 
-Nothing is missing from the sequence. The packet order is `UploadPicCommandK2Factory`'s; the chunk
-size is not theirs, since they send `(XInput ? 32 : 64) - 6` bytes where this project sends
-`device.PACKET_LEN - 8` = 24. Nothing wraps it either: `UploadPicAsync` calls the repository with a
-300 s timeout and `AddCommandsToCommunicationManager` queues the list, with no preamble or
-epilogue. And **the family carries no separate commit**: every command id in the SDK was mapped,
-208..211 is the whole of it, and there is no picture equivalent of the mapping family's
-save-to-flash 166. 211 is itself the commit, which is why `probe()` sends only the start — 208
-followed by 211 destroys a stored custom image (§8b), and even the lone start leaves an
-announced-but-unsent frame behind.
+## HID picture family
 
-`--via hid` and `--dialect {new,a5,bare}` are the flags that reach this path. `new` (`5A A5`) is the
-default and the only envelope any working command on this pad uses.
+Commands 208-211 acknowledge and echo correctly on Apex 5 but have not produced
+a visible picture. They can still modify persistent status-bar metadata, and a
+208/211 sequence can replace stored metadata for a frame that was never sent.
+Use `--via hid` only for protocol investigation, not normal uploads.
 
-## Command 242
+`probe` sends command 208 without the later commit for the least invasive
+envelope check. The `new` (`5A A5`) dialect is the only envelope used by working
+commands on this device.
 
-**242 floods the RGB LEDs as well as the screen, and `test off` does not clear it**: the command
-ACKs, the pad stays flooded, and the only exit found is the pad's own power switch — both measured
-on a wired Apex 5. The packet layout, and the length-byte disagreement `--faithful` reproduces, are
-PROTOCOL.md §8c.
+## Display settings
 
-## The two screen settings
+- Command 19 subcommand 9 controls the always-on display. Its wire value is
+  inverted relative to the English `OffScreen` name; the API exposes
+  `set_always_on()` using user-facing meaning.
+- Command 19 subcommand 8 controls the status bar and can restore the flag after
+  an HID-family experiment.
+- Command 31 targets the screen upgrade path used here. The picture uploader
+  never sends the program-chip upgrade type.
 
-`19` sub `9` is an always-on-display switch, not a screen-off switch: Flydigi's name for the bit,
-`OffScreen` (息屏显示, the standard Chinese term for an always-on display), inverts against its
-English reading, and `enabled=False` is **a real screen blank**. The measurement and the wire layout
-are PROTOCOL.md §8c; the rest of the command-19 sub-ids are
-[device-settings.md](device-settings.md).
-
-`flydigi/screen.py` reports the command-3 bits as `always_on_usable`/`always_on` and writes them
-with `set_always_on`, which takes what you mean rather than the wire value. `19` sub `8` is the
-status bar — `set_status_bar_always_on`, which is what puts that flag back after the HID uploads
-flip it.
-
-## Command 31 for the screen chip
-
-Command 31 is `SwitchToFirmwareUpgradeMode` / `SwitchUsb`, and it puts one named chip into upgrade
-mode. `screen_ota.enter_upgrade_mode` takes no chip argument, so the screen is the only chip it can
-reach — [findings-other-devices.md](findings-other-devices.md) has the chip list and why a *program*
-chip has no way back. The bounds on a picture upload — the base address read back from the device,
-`ScreenUpgradeType.PROGRAM` never sent, `--restore-default` as the way home — are PROTOCOL.md §8d.
-
-31 for the screen is milder than the name: the pad keeps its own `37d7:2501` hidraw nodes with the
-bootloader tty live, so it *adds* a CDC interface beside the gamepad rather than replacing the
-device, and the main firmware keeps running (PROTOCOL.md §8d — the nodes were checked, not whether
-input still flowed).
+Tests are in `tests/test_screen.py` and `tests/test_screen_ota.py`; the OTA suite
+uses `FakeScreenChip` from `tests/fake_pad.py`.

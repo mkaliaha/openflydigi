@@ -5,9 +5,15 @@ Steam's identity assignment, and SDL's own Flydigi driver with its unfilled trig
 
 Index: [PROGRESS.md](../PROGRESS.md).
 
+**Status and provenance.** Local arbitration and command-16/17 behavior are implemented and tested
+in this project. Hardware and Steam-log observations below describe the captured Apex 5 setup.
+Space Station statements refer to version 4.2.0.9. Upstream SDL behavior is volatile and must be
+read against a named source revision rather than inferred from this document indefinitely.
+
 ## Several writers on one hidraw node
 
-Several of this project's processes write `/dev/hidraw4` at once. The desktop app holds it open and
+Several of this project's processes can write the selected vendor hidraw node at once
+(`/dev/hidraw4` in the captured setup). The desktop app holds it open and
 polls `Get info` every 30 seconds; a memory-driven route (`flydigi-monitor`, `flydigi-forza`,
 `flydigi-dsx`) rewrites trigger effects as often as every 50 ms; both write whole 32-byte packets and
 then read. Steam and SDL claim the same node and send their own acquire/heartbeat (`0x1C`, our
@@ -28,12 +34,14 @@ Two hazards:
    RX 04 5a a5 01 01 00 80 01 …       ← command 0x01, nobody here asked
    ```
 
-   `Controller.send()` collects every reply for 300 ms and `ack_ok()` matches on the echoed command
+   Without an `until` predicate, `Controller.send()` collects every reply until its 300 ms default
+   ceiling. Current single-reply and blob callers pass predicates and stop once the expected reply
+   or complete packet set arrives. `ack_ok()` matches on the echoed command
    byte and a success flag (`body[2] == cmd_id and body[5] == 1`) — nothing ties a reply to a
    particular request, so an overlapping exchange can hand the wrong answer to the wrong caller: a
    command reported as failed when it worked, or as succeeded when its own reply never came.
 
-`Controller.claim()` (`flydigi/device.py:153`) takes an advisory `flock(2)` on the open node. `send`
+`Controller.claim()` takes an advisory `flock(2)` on the open node. `send`
 takes it for a single packet; `blobs.read_blob` and `blobs.write_blob` hold it across a whole packet
 stream. The app holds it across a write and its commit: `write_profile` spans `mapping.write_config`,
 a conditional `apply_config` when the macro page moved, `save_config` and `effects.engage_stored`,
@@ -55,6 +63,12 @@ is what lets trigger effects run in games Steam has taken the pad for ([What wor
 with the flag on](#what-works-and-what-stops-with-the-flag-on)). Steam's writes can still land
 mid-sequence: harmless for effects, which the next frame overwrites, and a risk only for a config
 write, a deliberate action rather than something a game triggers.
+
+The Apex-exclusive `flydigi-haptics`, `flydigi-run`, and several bench probes do not use the shared
+device selector. They open the first new-protocol Flydigi node and only then apply a capability gate,
+so a Vader enumerated first can block a later Apex and multiple Apex pads cannot be distinguished.
+They still use `Controller` and participate in this project's advisory lock; the limitation is
+selection, not locking.
 
 **Verified on hardware**, with Steam and steamwebhelper holding the node open throughout and
 unaffected:
@@ -89,8 +103,8 @@ Station's own words:
 
 ### Commands 16 and 17
 
-The writer is command **17**, `EnableRawDataTransportInCommandFactory`, reached from Space Station's
-`ControllerRepository.cs:1542` via
+The writer is command **17**, `EnableRawDataTransportInCommandFactory`, reached from
+`ControllerRepository` through
 `ControllerSdk.EnableRawDataInput(..., enableThirdPartyControl, ...)`:
 
 ```
@@ -103,9 +117,8 @@ The writer is command **17**, `EnableRawDataTransportInCommandFactory`, reached 
 [10] = crc over (3, 3 + [4])
 ```
 
-`flydigi/motion.py:43` `set_raw_data(..., third_party=...)` sends it, building the same bytes with
-the same checksum range (`flydigi/motion.py:46-53`); `gui/worker.py:195-203` is what calls it,
-sending only `third_party` and leaving the other four at `0xFF`.
+`motion.set_raw_data(..., third_party=...)` sends the same bytes with the same checksum range;
+`Worker.set_third_party` calls it with only `third_party`, leaving the other four at `0xFF`.
 
 The reader is command **16**, `ReadRawDataReportStatusCommandFactory`. Request `[4]=2`,
 `[5]=crc(3, 3+2)`. The reply decodes as follows, in the SDK's indices and in the raw ones used here —
@@ -120,18 +133,17 @@ the SDK's HID layer strips the report-id byte and this code keeps it, so everyth
 | `data[9]` | 10 | `ThirdPartyAppControlConfig.Enabled` — the third-party flag |
 | `data[10..29]` | 11..30 | `ControlBy`, 20-byte ASCII, NUL-trimmed |
 
-`flydigi/motion.py:201-240` implements both halves as `CMD_READ_TRANSPORT = 16`, `parse_transport`
+`flydigi.motion` implements both halves as `CMD_READ_TRANSPORT = 16`, `parse_transport`
 and `read_transport`; the switch is on the Controller page (`gui/models/device.py`, `thirdParty`).
 
-**The firmware gate is per device code.** `ControllerBusinessService.cs:1129-1145` offers this for
+**The firmware gate is per device code.** `ControllerBusinessService` offers this for
 **`k5` (Apex 5) at 7.0.3.0** and **`f5` (Vader 5) at 7.1.4.1** — both transcribed into
 `motion.THIRD_PARTY_MIN_FIRMWARE`. For any other device code Space Station skips the firmware check
 entirely and gates on vendor id alone (`flag = device != null && device.VendorId == 14295`, 0x37D7).
 Below the threshold, hide the switch. The version compared is the `main` component of the
-seven-component command-1 reply. The GUI applies the `k5` threshold whichever pad answered
-(`gui/models/device.py:214`). Covered by `tests/test_models.py:1233` and by two QML cases against
-the fake pad: `tests/qml/tst_controller.qml:169` drives the toggle, and `:194` checks the switch is
-hidden below the minimum.
+seven-component command-1 reply. **Known code defect:** the GUI currently applies the `k5`
+threshold whichever supported pad answered. Model and QML tests cover threshold behavior, but not
+selection of the f5 minimum.
 
 **Version comparison here is numeric, and that is a deliberate divergence.** Flydigi's
 `DeviceUtil.CompareVersion` is `string.Compare(new, old, Ordinal) >= 0`, an ordinal *string*
@@ -179,34 +191,32 @@ Three consequences:
 
 **The switch here is byte for byte what Space Station's is:**
 
-  * Space Station's toggle reaches `ControllerRepository.EnableThirdPartyAppControl`
-    (`ControllerRepository.cs:1533`), which calls
+  * Space Station's toggle reaches `ControllerRepository.EnableThirdPartyAppControl`, which calls
     `EnableRawDataInput(controller, null, null, null, null, enable, ...)` — command 17 with the
     layout above, the four `null`s becoming `0xFF`, "leave alone".
-  * All **three** `EnableRawDataInput` call sites (`ControllerRepository.cs:1490`, `1542`, `1563`)
-    pass the keyboard and mouse flags as `null`; neither is ever written.
+  * All three `EnableRawDataInput` call sites in `ControllerRepository` pass the keyboard and mouse
+    flags as `null`; neither is ever written.
   * The Electron UI fires exactly one IPC command for the switch, and no second call
     (`case "controlByThirdPartyAppEnabled": IpcCommandEnum_EnableControlByThirdPartyApp`).
   * `KeyboardMouseInjectRunner` is host-side Windows injection for keyboard/mouse *mappings*. It
-    sends nothing to the pad, and `ControllerBusinessService.cs:76` gates it **off** while
-    third-party control is active. **Not `SendInput`**, which this file said for a long time and
-    nobody had checked: `SendInput` and `user32` appear nowhere in `SpaceStationService`. It is a
+    sends nothing to the pad, and `ControllerBusinessService` gates it **off** while third-party
+    control is active. It does not use `SendInput`; `SendInput` and `user32` appear nowhere in
+    `SpaceStationService`. It uses
     pair of kernel filter drivers — `FeizVKB64.sys` and `FeizVMO64.sys`, installed through
     `keyfdo.inf`/`mousefdo.inf` and driven via `FeizVKBComm.dll` with PS/2 set-1 scan codes
-    (`FeizVkeyMouHelper.cs:9-60`, `KeyCodeMapDic.cs:13-38`). Wrong about the mechanism, right about
-    the substance.
+    (`FeizVkeyMouHelper` and `KeyCodeMapDic`).
 
 **What Space Station does in addition:**
 
-  * a read-only 30-second poll after the ACK (`StartThirdPartyMonitor`,
-    `ControllerRepository.cs:147`) that refreshes its own UI via command 16 and writes nothing;
+  * a read-only 30-second `StartThirdPartyMonitor` poll after the ACK that refreshes its own UI via
+    command 16 and writes nothing;
   * on Windows only, `DevconHelper.ExecuteDevconCommand` shells out to
     `devcon.exe enable|disable "USB\VID_37D7&PID_2501&MI_00"` — interface 0, the XInput interface —
     on every device connect and around DS mode. There is no Linux counterpart; the nearest
     equivalent is unbinding xpad, which this project deliberately does not do.
 
-Neither re-asserts the flag. **Space Station's connect handler only reads it** — `OnDeviceUpdateImpl`
-(`ControllerRepository.cs:92`) calls `StartThirdPartyMonitor` and nothing else third-party related,
+Neither re-asserts the flag. **Space Station's connect handler only reads it** —
+`OnDeviceUpdateImpl` calls `StartThirdPartyMonitor` and nothing else third-party related,
 and the config-apply path (`PrepareMappingConfigs`) deals only with mapping blobs.
 
 ### The keyboard/mouse composite
@@ -240,13 +250,13 @@ never asks for; nothing here has found a way to ask.
   * A second thing falls out of the same window, which nothing had checked: **an unrecognised target
     is identity on the pad**, which is exactly what `mapping()` assumes when it decodes
     (`target > TARGET_MACRO` → the key's own id). The reader's rule is the firmware's rule.
-  * Nothing is typed, and nothing was ever going to be: a key-table entry is three bytes and
-    `MappingConfigParser.cs:619-635` zeroes both companion bytes on the same branch that writes 254,
+  * Nothing is typed: a key-table entry is three bytes and `MappingConfigParser` zeroes both
+    companion bytes on the same branch that writes 254,
     with the key code (`MapTypeKey.MapKeyboardKeyId`) in scope and discarded. Candidate codes written
     into those two bytes by hand — HID usage, Windows virtual key, and the pad's own key id, in
     either position — produced no keystroke.
-  * Flydigi's *reader* cannot recover the binding either: `MappingConfigParser.cs:596` collapses
-    anything above 32 to identity, which is why `ControllerRepository.cs:496-506` re-injects keyboard
+  * Flydigi's *reader* cannot recover the binding either: `MappingConfigParser` collapses anything
+    above 32 to identity, which is why `ControllerRepository` re-injects keyboard
     bindings from the host's own file after every read. A feature whose configuration cannot be read
     back from the device is not stored on the device.
 
@@ -255,7 +265,7 @@ keystroke in its place. On Linux only the first half happens, which makes a key 
 that does nothing — and is why `mapping.normalise_for_switch` strips them.
 
 **A macro step cannot carry a keyboard key either.** `m_fdg_macro_step_struct_t` is
-`{time_l, time_h, btn, event}` and `MacroConfigParser.cs:96` parses `btn` as a `ControllerKey`, on
+`{time_l, time_h, btn, event}` and `MacroConfigParser` parses `btn` as a `ControllerKey`, on
 the v3.1 page and in the v3.2 store alike. That is why the app's macro editor offers only
 `XINPUT_TARGETS` as a step's output key — a measured constraint rather than a cautious one.
 
@@ -345,7 +355,7 @@ put them back.
 **The app states the trade and enforces it.** The Controller page presents the switch as a handover:
 Steam drives the pad, the onboard mapping stops being what the host sees, and the ordinary gamepad
 path may give nothing. The Buttons page disables remapping, the Macros page blocks recording, the
-DualSense switch cannot be turned on while the flag is set (`gui/qml/pages/DualSensePage.qml:87`),
+DualSense switch cannot be turned on while the flag is set (`DualSensePage.qml`),
 and the Controller and DualSense pages each warn when the other is active.
 
 ### Sticks, triggers and buttons in the vendor report
@@ -381,7 +391,7 @@ against the `00 80` = -32768 extreme; subtract 65536, or unpack as signed.
 | 14 | C 0x01, Z 0x02, M1 0x04, M2 0x08, M3 0x10, M4 0x20, M5 0x40, M6 0x80 |
 | 15 | Menu 0x01, Turbo 0x02, Home 0x08, Back 0x10 |
 
-`flydigi/motion.py:36` records the stick offsets as `STICK_OFFSETS = (4, 6, 8, 10)` and nothing reads
+`flydigi.motion` records the stick offsets as `STICK_OFFSETS = (4, 6, 8, 10)` and nothing reads
 them. Sourcing sticks here rather than from evdev would not free Tier 4 from the third-party toggle:
 Tier 4 requires Steam Input *off* and the toggle exists to let Steam take over, so the two conflict a
 level above the input source. M1-M6 are already remapped onto real XInput buttons onboard with
@@ -495,7 +505,8 @@ up; the evdev node is still there (`usb-Flydigi_Flydigi_APEX5-event-joystick`, x
 
 ## SDL's own Flydigi driver and its unfilled trigger stub
 
-`src/joystick/hidapi/SDL_hidapi_flydigi.c` upstream. Device ids **128, 129, 133 and 134** are
+**Upstream reference status.** In `src/joystick/hidapi/SDL_hidapi_flydigi.c` on SDL `main` when this
+section was reviewed, device ids **128, 129, 133 and 134** are
 recognised there as the Apex 5 (this pad's full set is 128, 129, 133-136 — see
 [docs/findings-other-devices.md](findings-other-devices.md)), and its sensor rates (**970 Hz
 wired**, 295 Hz dongle) are the same stream at two transports — the ~300 Hz in `flydigi/motion.py`,
@@ -510,7 +521,8 @@ and `GetJoystickCapabilities` reports only `SDL_JOYSTICK_CAP_RUMBLE`. Acquire, s
 per-model gyro rates are all implemented; `HandleStatePacketV2` forwards every button in the report
 except raw 15's `0x02` and `0x10`, Turbo and `Back` in the table above. Its command vocabulary stops
 at `0x01` info, `0x10` get status and `0x11` set status (our commands 16 and 17), `0x12` haptic,
-`0x1C` acquire — 81 and 82 appear nowhere. Twenty-two commits on the file, all input-side.
+`0x1C` acquire — 81 and 82 appear nowhere. Pin the SDL commit when relying on this inventory;
+commit counts are not protocol evidence.
 **"Joystick" in these names is SDL's word for the device, not the analog stick**:
 `SendJoystickEffect` is the backend for `SDL_SendGamepadEffect` and has nothing to do with the
 sticks, which have no actuator anyway.

@@ -1,334 +1,462 @@
 # OpenFlydigi
 
-Native Linux support for the Flydigi Apex 5: **ForceAdapt adaptive triggers**, profiles and
-button remapping, macros, sticks, vibration, lighting, the pad's device settings and its
-160x80 screen — without Flydigi's Windows-only Space Station app. The CD2 charging dock is
-driven too, as a device of its own.
+OpenFlydigi provides native Linux support for the Flydigi Apex 5 controller and
+CD2 charging dock. It replaces the controller-facing parts of Flydigi's
+Windows-only Space Station application: profiles, button remapping, macros,
+sticks, gyro-to-stick mapping, vibration, ForceAdapt adaptive triggers,
+lighting, device settings, the 160×80 display, per-game trigger routes, and the
+dock's settings and lighting.
 
-The Apex 5 is the pad this was built and measured on; the name is the project's, not the
-model's.
+The backend under `flydigi/` uses only the Python standard library. The desktop
+application adds PySide6, Qt, Kirigami, and Kirigami Addons.
 
-`flydigi/` is pure Python with **no dependencies**; only the desktop app needs Qt, and every tool
-that talks to the pad runs on a machine without it.
+## Supported hardware
 
-Force effects and trigger haptics both run over `/dev/hidraw`, verified on hardware. Six routes
-drive them, from a vibration bind the pad plays by itself to a virtual DualSense that carries a
-game's PS5 haptic audio to the pad's motors. The **160x80 screen** takes pictures and animations
-over the same serial route Space Station uses, plus the always-on display and status bar: ~25 s
-a frame, wired connection only.
+| Hardware | Support level | Available features | Important limits |
+|---|---|---|---|
+| Flydigi Apex 5 | Hardware-validated | All controller features, adaptive triggers, display, game routes, and both virtual-DualSense relays | Display uploads require a wired connection. Steam Input must be disabled for virtual-DualSense games. |
+| Flydigi Vader 5 Pro | Experimental, partially implemented | Identity, profiles, buttons, sticks, gyro, vibration, lighting, settings, the v3.2 macro-store implementation, and a derived factory profile | No Vader 5 has been tested. It has trigger motors rather than force triggers and has no display. The trigger-motor editor is not built. The v3.2 macro store is unverified on hardware. The DualSense relay, evdev discovery, permissions, and SDL ignore identifier are not validated end to end. |
+| Flydigi CD2 charging dock | Hardware-validated with one noted gap | Identity, four settings, eight generated lighting effects, and picture/GIF sampling onto 162 LEDs; nickname read/write is implemented | Nickname writing is not hardware-verified. The dock is a separate USB device and uses its own selector. |
+| Other Flydigi controllers and accessories | Not driven | Devices may be discovered and identified when they use the current transport | Configuration writes, including nickname writes, are refused unless the model is explicitly supported. |
 
-[PROTOCOL.md](PROTOCOL.md) has the wire protocol, [PROGRESS.md](PROGRESS.md) the project state
-and the per-route tier table, [docs/](docs/) the long-form findings behind each route.
+The Apex 5 is the reference hardware. Treat Vader 5 support as an invitation to
+test and report results, not as a hardware-validated compatibility claim.
 
 ## Requirements
 
-- Linux with `hidraw` (`/dev/hidraw*` readable — usually already the case)
-- Python 3.9+
-- The udev rules in `udev/`, installed with `tools/apex5-setup install-rules`: they tag the
-  vendor hidraw node (37d7:2501), the screen's `root:dialout` bootloader tty (ffaa:5555),
-  `/dev/uhid`, and the virtual DualSense's input sub-devices. Without the last, touchpad-click
-  is silently dead — that event is reported on the touchpad node, not the gamepad node; without
-  the tty rule a screen upload switches the pad into its bootloader and then cannot open the
-  port. The file must stay numbered below 73, or systemd's `73-seat-late.rules` runs before
-  `TAG+="uaccess"` is set and nothing ever acts on it. `install-rules` also deletes a leftover
-  `99-flydigi-apex5.rules`, which never applied for the same reason; `check` fails while one is
-  present, even with the new file in place.
-- For the memory monitor: `kernel.yama.ptrace_scope = 0`, and a host process — the route cannot
-  run from inside a container at all (see [Desktop app](#desktop-app))
-- For the virtual DualSense with haptics: the `vhci-hcd` module (`=m` on every distribution
-  checked), and one authentication to attach the virtual USB device
-- For the virtual DualSense without haptics: `/dev/uhid` writable
-- For either DualSense route: Steam Input **off** for that game — it masks the pad as an Xbox
-  controller and breaks DS5 semantics
-- For `tools/flydigi-screen show`, `animate`, `convert` and `preview`: Pillow
-  (`pip install pillow`); `check` does not need it, and neither does `flydigi/screen.py`.
-- For `tools/flydigi-haptics`: `parec` and `pactl` from pulseaudio-utils. `pw-record` cannot
-  substitute — it prepends a file header.
-- `pkexec` for `install-rules` and the app's DualSense switch. Inside a Flatpak that runs through
-  `flatpak-spawn --host`, and inside a distrobox through `host-spawn` or `distrobox-host-exec`,
-  since pkexec cannot reach polkit from in there.
+### Base requirements
 
-**Every current Flydigi pad opens the same way.** `find_device` matches on the vendor id, the
-product id's top nibble and the vendor collection's report-descriptor prefix, which every pad of
-the `5a a5` generation shares — a Vader 5 or an Apex 6 would open exactly like an Apex 5.
-Nothing older can reach it at all: `IsOldProtocol()` is `VendorId != 0x37D7`, so an Apex 3/4, a
-Vader 3/4 or a Direwolf is an XInput device with no HID vendor collection, cabled or on its
-dongle alike, and only Windows sees HID there because `xusb22` synthesises it. Profile and
-settings writes are therefore gated on a command-1 `DeviceType` read that refuses anything but an
-Apex 5 (`k5`).
-`flydigi-mapping`, `flydigi-settings` and the app call that gate once per connection, so their
-reads are refused too; the trigger-effect and screen tools are ungated, and `flydigi/` itself
-gates nothing — the caller decides. With two Flydigi pads attached, nothing chooses between
-them by itself: `find_device` returns the first match in sorted-by-name `/dev/hidraw*` order
-(`hidraw10` before `hidraw2`). `Controller(path=...)` takes a node, but of the day-to-day tools
-every tool takes `--device`, which resolves a node, a uid, a mac or a nickname.
+- Linux with hidraw support.
+- Python 3.9 or newer.
+- Read and write access to the controller or dock's vendor hidraw node.
+- The udev rules in `udev/72-flydigi-apex5.rules`. They cover:
+  - the Apex 5 vendor interface (`37d7:2501`);
+  - the CD2 dock (`37d7:6001`);
+  - the display bootloader serial device (`ffaa:5555`);
+  - `/dev/uhid`;
+  - the virtual DualSense input sub-devices.
 
-**The nibble is what keeps the charging dock out.** Flydigi number their device families in the
-top nibble of the product id — controllers `2`, chargers `6`, coolers `1` — and their three
-`HidManager`s key on exactly that. It matters here because the CD2 dock is vendor `37d7` too
-*and* its report descriptor also begins `06 a0 ff`: for as long as those two were the whole
-test, `find_device` returned the dock whenever the dock's node sorted first, which happens
-every time the pad sleeps and leaves the USB bus. Measured on this desk, with the pad asleep,
-it returned the dock. Pad-framed packets carry report id `0x03` where the dock expects `0x00`,
-so the dock ignores them rather than acting on them — the damage was confusion, not corruption,
-but the tools sat there getting silence from a device that was wide awake.
-`tools/flydigi-charger` drives the dock deliberately, and picks between docks with `--device`.
+Install the rules with:
 
-**Two of the same kind are told apart by uid.** `flydigi/registry.py` enumerates every Flydigi
-device on the bus and resolves a selector — a node path, a uid or a prefix of one, a mac, or a
-nickname — to exactly one of them, refusing an ambiguous name rather than guessing;
-`tools/flydigi-devices list` prints all four. The pad's own address field, which would have been
-free, reads all zeroes on this hardware, so the uid (one exchange) is what anything stable is
-keyed on. The desktop app has a picker, and the daemon reads the pad it chose.
+~~~bash
+tools/apex5-setup install-rules
+~~~
 
-## Quick start
+The command escalates through `pkexec` only for the system rules. The rule file
+must sort before systemd's `73-seat-late.rules` so that `TAG+="uaccess"` is
+acted on. The setup command also removes the obsolete
+`99-flydigi-apex5.rules` and reloads udev.
 
-Run from the repository root.
+### Feature-specific requirements
 
-```bash
-# what the controller exposes
+| Feature | Additional requirements |
+|---|---|
+| Desktop application | Distribution PySide6, Kirigami, Kirigami Addons, and the desktop Qt Quick Controls style |
+| Display image/GIF conversion and preview | Pillow |
+| Memory-monitor game route | `kernel.yama.ptrace_scope = 0` and execution on the host, not inside a container |
+| Virtual DualSense over uhid | Writable `/dev/uhid` |
+| Virtual DualSense with USB audio/haptics | The `vhci-hcd` kernel module and one authentication to attach the virtual USB device |
+| Standalone haptic-audio bridge | `parec` and `pactl` from pulseaudio-utils |
+
+Steam Input must be disabled for a game using either virtual-DualSense route.
+It otherwise masks the physical controller as an Xbox controller and breaks
+DualSense semantics.
+
+A packaged Flatpak is not currently supported. Host process discovery, the
+memory-monitor route, and relay-process management need a host-side service
+before that packaging target is viable.
+
+## Setup
+
+Run commands from the repository root.
+
+1. Inspect the current machine:
+
+   ~~~bash
+   tools/apex5-setup
+   ~~~
+
+2. Install or refresh the udev rules:
+
+   ~~~bash
+   tools/apex5-setup install-rules
+   ~~~
+
+3. Optionally install the user service and desktop-menu entry:
+
+   ~~~bash
+   tools/apex5-setup install-unit
+   tools/apex5-setup enable
+   tools/apex5-setup start
+   tools/apex5-setup install-desktop
+   ~~~
+
+The service unit and menu entry contain the absolute path of this checkout.
+Reinstall both after moving the repository. This repository is not currently a
+pip-installable application and does not provide PyPI packaging.
+
+## Fetch game data
+
+Game lists, rule files, monitor configs, and mod archives belong to Flydigi and
+are not committed. A fresh clone must fetch the data before using the daemon,
+`flydigi-auto`, `flydigi-run`, the Forza route, or the populated Games page.
+
+~~~bash
+# gamelist.json and configs/forza.json
+tools/fetch-configs
+
+# also extract the memory-monitor configs
+tools/fetch-configs --monitor-configs
+
+# optionally download every upstream mod archive
+tools/fetch-configs --all-mods
+~~~
+
+The desktop Games page can fetch the current game list with **Update list**.
+Counts in the upstream list are not project constants and may change whenever
+the data is refreshed.
+
+## Select a device
+
+List the bus, then inspect one device in full:
+
+~~~bash
+tools/flydigi-devices list
+tools/flydigi-devices show --device uid:1420
+tools/flydigi-devices show --device Couch
+~~~
+
+`list` prints a stable key, node, display label, firmware, and battery state.
+`show` prints the full model, UID, reported address, nickname, and selector.
+
+The standard registry selector accepts a hidraw path, UID or UID prefix, MAC
+address, or exact nickname. It is supported by the day-to-day multi-device
+commands:
+
+- `flydigi-charger`
+- `flydigi-ds5` and `flydigi-ds5-usbip`
+- `flydigi-dsx`, `flydigi-forza`, and `flydigi-monitor`
+- `flydigi-mapping`, `flydigi-screen`, and `flydigi-settings`
+- `flydigid`
+
+Some Apex-specific tools do not yet select by compatible model:
+
+- `flydigi-haptics` and `flydigi-run` open the first new-protocol controller
+  node and apply their Apex capability gate only afterwards. If a Vader sorts
+  first, it is refused and a later Apex is not tried. They do not support Vader.
+- `flydigi_cmd.py --device` accepts a raw hidraw path only.
+- `hid_probe.py` accepts optional positional hidraw paths.
+- Bench probes vary and some are ungated; use each tool's `--help` before
+  attaching multiple pads.
+
+The desktop application has separate remembered selections for a pad and a
+dock. The daemon reads the selected primary pad for single-pad routes; the
+pad-side vibration-bind route is applied to every compatible pad.
+
+To exercise multi-device paths without hardware:
+
+~~~bash
+FLYDIGI_MOCK_BUS='pad=Desk,pad:f5=Couch,dock:1=Shelf' tools/flydigi-devices list
+~~~
+
+The same environment variable works with the daemon and desktop application.
+No mock devices appear unless it is set.
+
+## Common workflows
+
+### Inspect the controller
+
+~~~bash
 python3 tools/hid_probe.py
+tools/flydigi-devices show
+tools/flydigi-settings show
+tools/flydigi-mapping list
+~~~
 
-# talk to it directly
-python3 tools/flydigi_cmd.py info
-python3 tools/flydigi_cmd.py race right --stroke 40 --resistance 30
-python3 tools/flydigi_cmd.py normal both
+Reading a profile switches the controller to that profile and audibly re-seats
+the Apex 5 trigger motors. A device information read is otherwise non-writing.
 
-# the profiles stored in the pad: remapping, macros, backup/restore
-tools/flydigi-mapping list              # --profiles N, before the subcommand, scans N slots (4)
-tools/flydigi-mapping backup 0 profile0.bin      # back up before writing; this is the only copy
-#   the file is the raw blob, no header; restore only checks its length against the pad's
-tools/flydigi-mapping set 0 m1 a --save          # --save commits to flash
-#   --turbo N repeats the target while the key is held, --turbo-toggle latches it instead
+### Back up and edit an Apex 5 profile
+
+Back up a profile before writing it:
+
+~~~bash
+tools/flydigi-mapping backup 0 profile0.bin
+tools/flydigi-mapping set 0 m1 a --save
 tools/flydigi-mapping macro-record 0 m1 --seconds 8 --save
-tools/flydigi-mapping gyro 0 right --key m1 --sensitivity 60
-#   the pad drives the stick itself, so it works in any game; --key is required because
-#   the factory leaves two buttons in the enable-key bytes and neither was chosen
+tools/flydigi-mapping gyro 0 right --key m1 --sensitivity 60 --save
+~~~
 
-# the pad's own device settings
-tools/flydigi-settings show             # the whole block, one read
-tools/flydigi-settings sleep 30         # minutes, or `never`
-#   report-rate and xbox-home need --i-know
+`--save` commits the change to flash. Without it, the change is working memory
+and is lost when the pad sleeps, changes profile, or powers off.
 
-# auto-apply per-game config when a game starts
-tools/flydigid                          # --interval 1.0 s; --reassert N re-applies every
-#                                         N seconds against Steam Input, 0 (default) is off
-#   it logs to stdout; under its unit that is the user journal, journalctl --user -u flydigid
+The current CLI backup format is the raw 840-byte profile blob. On a Vader 5,
+macros live in a separate v3.2 macro store, so CLI backup/restore does **not**
+back up or restore those macros. Use the desktop application's packed profile
+backup for the complete v3.2 profile until the CLI adopts the same format.
+
+Safety-sensitive reset commands are deliberately separate:
+
+~~~bash
+# restore one slot by writing this model's factory profile
+tools/flydigi-mapping reset 0
+
+# command 175: reset every profile and every profile name
+tools/flydigi-mapping reset-all
+~~~
+
+`reset-all` is destructive, resets all four XInput profiles, removes their
+names, and cannot be undone. Both commands ask for confirmation unless their
+explicit bypass option is supplied. Lighting is not part of a profile restore
+and is left unchanged.
+
+### Device settings
+
+~~~bash
+tools/flydigi-settings sleep 30
+tools/flydigi-settings sleep never
+tools/flydigi-settings show
+~~~
+
+Every settings write except `restart` is followed by a full read-back. The
+`report-rate` and `xbox-home` commands require `--i-know` because their behavior
+is unmeasured or ambiguous on the reference hardware.
+
+### Per-game routes
+
+After fetching game data:
+
+~~~bash
+# daemon and per-game policy
+tools/flydigid
 tools/flydigi-auto on "Death Stranding"
-#   only the vibration route acts by itself; routes that spawn a process, read another
-#   process's memory or take the controller over default to off. State: ~/.config/flydigi/games.json
 
-# per-game via Steam launch options -- vibration-preset games only
+# Steam launch wrapper for vibration-preset games
 /path/to/flydigi-run "DEATH STRANDING 2" -- %command%
 
-# Forza: enable Data Out (127.0.0.1:5300) in game, then
+# Forza Data Out: configure 127.0.0.1:5300 in the game
 tools/flydigi-forza
-tools/flydigi-forza --accept 331:12     # accept a Data Out packet size the parser does not know
-#   yet. Built in: 311 (offset 0) and 324 (offset 12), which covers every shipped Forza.
-#   The packet's field layout is in flydigi/forza.py.
 
-# any DualSenseX-compatible mod, on UDP 127.0.0.1:7878
+# a DualSenseX-compatible mod
 tools/flydigi-dsx
-tools/flydigi-dsx --forward 8787        # also relay onward to the port Flydigi's own software uses
 
-# game-memory driven effects (Dark Souls, Cyberpunk, Elden Ring, ...)
-tools/fetch-configs --monitor-configs
-tools/flydigi-monitor --probe configs/monitor/<game>.json   # check offsets first
+# game-memory route; probe offsets before enabling writes
+tools/flydigi-monitor --probe configs/monitor/<game>.json
 tools/flydigi-monitor configs/monitor/<game>.json
-#   pointer chains are per-build: a game update breaks a config until Flydigi ship new offsets
+~~~
 
-# present the pad to games as a DualSense (triggers, gyro, battery, haptics)
-# -- the desktop app's DualSense switch does the same behind one authentication
+The Forza parser has built-in layouts for 311-byte packets at offset 0 and
+324-byte packets at offset 12. Use `--accept LEN:OFFSET` only after verifying a
+newer packet layout.
+
+Memory-monitor pointer chains are game-build-specific. Probe after a game
+update before allowing the route to write effects.
+
+### Virtual DualSense
+
+The desktop application's DualSense switch starts the USB relay. The equivalent
+manual commands are:
+
+~~~bash
+# USB/IP + vhci-hcd, including haptic audio
 sudo tools/flydigi-ds5-usbip --haptics --motors
-#   root is given back as soon as the USB attach is done
-#   set per-game: SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501 SDL_JOYSTICK_IGNORE_DEVICES=0x37d7/0x2501 %command%
-#   both spellings: SDL3 renamed the hint, and a game ignores the one it does not know
-#   start the game *after* this
-#   the Apex 5 may sleep and wake as it likes: it leaves the USB bus when it
-#   sleeps, but the virtual DualSense stays attached, so the game should keep
-#   it. Covered by tests/test_relay.py against a fake bus; not yet confirmed
-#   in a real game -- see PROGRESS.md
-tools/flydigi-ds5                       # the same without haptics, no root,
-#                                         for a machine with no vhci-hcd
 
-# the 160x80 screen
+# uhid input/effects only, without haptic audio
+tools/flydigi-ds5
+~~~
+
+Start the relay before the game. For the validated Apex 5 path, add both SDL
+ignore-variable spellings to the game's launch options:
+
+~~~bash
+SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501 SDL_JOYSTICK_IGNORE_DEVICES=0x37d7/0x2501 %command%
+~~~
+
+The physical Apex 5 may sleep and leave the USB bus while the virtual DualSense
+stays attached. Reconnection, input recovery, trigger-state recovery, and
+haptic-audio recovery have been confirmed in a real game.
+
+The launch identifier and complete relay path are not validated for Vader 5.
+Do not treat the Apex-specific launch option as a confirmed Vader instruction.
+
+### Display
+
+The Apex 5 display upload must be wired. A wireless upload can switch the
+display chip into bootloader mode without exposing the serial device needed to
+finish the transfer.
+
+~~~bash
 tools/flydigi-screen status
-tools/flydigi-screen show photo.jpg     # ~25s; the pad reboots itself after
-tools/flydigi-screen animate spin.gif   # ~25s per frame, so keep it short
-tools/flydigi-screen off                # blank the panel -- Space Station cannot
+tools/flydigi-screen show photo.jpg
+tools/flydigi-screen animate spin.gif
+tools/flydigi-screen off
+~~~
 
-# the CD2 charging dock -- a separate device, not part of the pad
-tools/flydigi-charger show              # firmware, uid, the four switches, the lighting header
-tools/flydigi-charger light pulse       # 162 LEDs, 50 frames, ~5s to upload
+Encoding and preview require Pillow. Uploads take about 25 seconds per frame,
+and the controller reboots after an upload. Keep animations short.
+
+### CD2 charging dock
+
+~~~bash
+tools/flydigi-charger show
+tools/flydigi-charger light pulse
 tools/flydigi-charger light breath --colour ff0055 --brightness 80
-tools/flydigi-charger light rainbow --direction left
-tools/flydigi-charger lighting-sync on  # keep the dock in step with the pad
-#   the dock has no effect generator: a mode is 24 kB of frames computed here and uploaded,
-#   which is why `light` takes seconds rather than being one write
-#   `default` (the Flydigi logo) is not offered -- Space Station does not compute that one
-#   either, it uploads a file its installer ships and this repository does not have it
-tools/flydigi-charger list              # every dock on the bus; --device picks one
+tools/flydigi-charger lighting-sync on
+tools/flydigi-charger list
+~~~
 
-# every Flydigi device attached, whichever kind
-tools/flydigi-devices list              # node, uid, model, firmware, battery, nickname
-tools/flydigi-devices show --device Couch
-tools/flydigi-devices name "Couch" --device uid:1420   # up to 26 bytes; it asks first
-#   every other tool takes the same --device: a node, a uid or a prefix, a mac, or a nickname
+Dock lighting effects are generated as frame data and uploaded; they are not a
+single firmware mode byte. Uploads therefore take several seconds.
 
-# devices nobody owns, for trying any of the above with more than one attached
-FLYDIGI_MOCK_BUS='pad=Desk,pad:f5=Couch,dock:1=Shelf' tools/flydigi-devices list
-#   the same variable works for the daemon and the desktop app; a JSON file re-read on every
-#   scan lets a device be unplugged mid-session. Nothing appears unless it is set
+## Command reference
 
-# system setup: udev rules, the daemon's unit, autostart, the menu entry
-tools/apex5-setup                       # the checklist
-tools/apex5-setup install-rules         # the one subcommand that needs root
-#   there is no install step: the unit and the menu entry hard-code this checkout's path, so
-#   moving the repository means writing both again
-```
-
-| Tool | What it does |
+| Command | Purpose |
 |---|---|
-| `tools/apex5-setup` | `check` (default), `install-unit`/`remove-unit` (a `flydigid.service` user unit in `~/.config/systemd/user`), `enable`/`disable`/`start`/`stop`, `install-desktop`/`remove-desktop` (`openflydigi.desktop`, and it removes the older `flydigi-apex5.desktop`), `install-rules` — the same functions the app's Setup page drives in-process |
-| `tools/fetch-configs` | Flydigi's game list, the Forza rule config, the monitor configs, the mod archives |
-| `tools/flydigi_cmd.py` | one-off vendor commands: device info, trigger effects, rumble |
-| `tools/flydigi-auto` | which games the daemon may act on by itself, and which route it takes |
-| `tools/flydigi-charger` | the CD2 charging dock: `show`, `list`, its four switches, and `light <mode>` over the eight computable effects |
-| `tools/flydigi-devices` | every device attached: `list`, `show`, and `name` to nickname one (which Space Station cannot do correctly) |
-| `tools/flydigid` | daemon: detect a running game, apply its route, reset on exit |
-| `tools/flydigi-ds5` | virtual DualSense over uhid |
-| `tools/flydigi-ds5-usbip` | virtual DualSense over usbip + vhci, with haptic audio |
-| `tools/flydigi-dsx` | DSX listener, UDP 127.0.0.1:7878 |
-| `tools/flydigi-forza` | Forza Data Out telemetry through the rule engine |
-| `tools/flydigi-haptics` | Apex 5 rumble driven from a DualSense's haptic-audio sink |
-| `tools/flydigi-mapping` | profiles: `list`/`show`/`set`/`clear`/`rename`/`apply`, `backup`/`restore`, macro record and bind, `gyro` |
-| `tools/flydigi-monitor` | trigger effects from game memory, per Flydigi's XGameMonitor configs |
-| `tools/flydigi-run` | Steam launch wrapper for one named game |
-| `tools/flydigi-screen` | the 160x80 screen: pictures, animations, always-on, status bar |
-| `tools/flydigi-settings` | the pad's device settings block: sleep timer, quick-switch, stick debounce/rebound/auto-calibration, precision, sensitivity, status bar, always-on, restart. Every write but `restart` is followed by a read of the whole block |
-| `tools/hid_probe.py` | what the pad exposes on the HID bus |
+| `tools/apex5-setup` | Check and manage udev rules, user service, autostart, and desktop entry |
+| `tools/fetch-configs` | Fetch the current upstream game list and optional configs/mods |
+| `tools/flydigi-devices` | List, inspect, and nickname attached pads and docks |
+| `tools/flydigi-mapping` | Profiles, backup/restore, remapping, macros, gyro mapping, single-slot reset, all-slot reset, and Switch-bank copy |
+| `tools/flydigi-settings` | Read and write device settings |
+| `tools/flydigi-screen` | Inspect, encode, preview, and upload Apex 5 display content |
+| `tools/flydigi-charger` | Read and configure the CD2 dock |
+| `tools/flydigid` / `tools/flydigi-auto` | Per-game detection, route policy, and automatic application |
+| `tools/flydigi-run` | Apex-specific Steam launch wrapper for vibration presets |
+| `tools/flydigi-forza` | Forza Data Out telemetry route |
+| `tools/flydigi-dsx` | DSX UDP listener |
+| `tools/flydigi-monitor` | Game-memory route |
+| `tools/flydigi-ds5` | Virtual DualSense over uhid |
+| `tools/flydigi-ds5-usbip` | Virtual USB DualSense with optional haptic audio |
+| `tools/flydigi-haptics` | Apex-specific bridge from a real DualSense audio sink to grip motors |
+| `tools/flydigi_cmd.py` | Ungated manual vendor-command bench tool; raw node selection only |
 
-The other twelve files in `tools/` are not day-to-day: eight hardware probes, the offline
-simulators `forza-simulate` and `haptics-simulate`, `gen_ds5_usb.py` (regenerates
-`flydigi/ds5_usb.py` from descriptors captured off a real DualSense) and `generate-qmltypes`
-(GUI build tooling). They are listed individually in [PROGRESS.md](PROGRESS.md#repo-contents).
+Developer generators, simulators, and hardware probes also live under `tools/`.
+Their help text is the authoritative command reference; they are not part of
+the normal setup path.
 
-## Desktop app
+## Desktop application
 
-Profiles, remapping, macros — recorded off the pad or built from nothing, then edited step by step —
-sticks, the gyro, vibration, triggers, lighting, device settings, the
-screen and per-game routes — plus a **Devices** page and a picker for every pad and dock attached, a
-**Dock** page for whichever charging dock is selected, a **DualSense** switch that turns the
-virtual-DualSense relay on for the whole system, and a **Setup** page for the daemon's unit,
-autostart, menu entry and udev rules. The sidebar shows the pages of the device you have
-selected. QML on Kirigami:
+Install PySide6 and Kirigami from the same distribution. Do not combine a PyPI
+PySide6 wheel, which bundles its own Qt, with distribution Kirigami libraries.
 
-```bash
-# Fedora / KDE
+For Fedora/KDE:
+
+~~~bash
 sudo dnf install python3-pyside6 kf6-kirigami kf6-kirigami-addons \
                  kf6-qqc2-desktop-style
 python3 -m gui
-```
+~~~
 
-**Not a pip install.** PySide6 from PyPI bundles its own Qt, built with different
-private-symbol versioning from the distribution's, and Kirigami will not load against it — the
-two are mutually incompatible, in both directions. The app needs the distribution's PySide6,
-built against the same Qt as Kirigami. On an immutable system a `distrobox` with those packages
-works without layering anything; see [gui/README.md](gui/README.md).
+The application provides device selection, profiles, remapping, macros, sticks,
+gyro, vibration, triggers, lighting, display, game routes, DualSense mode, dock
+configuration, and system setup. Pages that require adaptive triggers or a
+display are hidden on models without that capability.
 
-Measured from inside the distrobox, every route works except the memory monitor, which needs a
-cross-process read no container grants; the per-route table is in
-[docs/findings-games.md](docs/findings-games.md).
+Vader-specific pages remain experimental. In particular, the trigger-motor
+editor is not implemented and DualSense mode is not hardware-validated.
+
+Development setup, QML architecture, type generation, and static checks are in
+[gui/README.md](gui/README.md). The current `pyproject.toml` is PySide tooling
+metadata, not a complete installable-package definition. Its file list is also
+incomplete and must be synchronized with the current models, pages, components,
+and `gui/i18n.py` before relying on `pyside6-project build` or its static checks.
 
 ## Tests
 
-Plain scripts, no test runner. The backend tests need nothing but Python:
+Tests are plain Python scripts rather than a single test-runner suite.
 
-```bash
-python3 tests/test_device.py       # and every other tests/test_*.py
-```
+Run every backend test, including newly added files, with:
 
-Three are Qt-dependent instead: `tests/test_models.py` needs the distribution's PySide6, and
-`tests/test_shell.py`, `tests/test_qml.py` and the ten `tests/qml/tst_*.qml` cases the last of
-them drives need Kirigami as well, so they run wherever the app does. Their invocations, and
-`tools/generate-qmltypes`, are in [gui/README.md](gui/README.md).
+~~~bash
+for t in tests/test_*.py; do
+    case "$t" in
+        tests/test_models.py|tests/test_qml.py|tests/test_shell.py) continue ;;
+    esac
+    python3 "$t" || break
+done
+~~~
 
-## Flydigi content this repository does not ship
+There are currently 18 backend scripts. Two do not yet satisfy the intended
+hardware-free contract:
 
-No decompiled sources, extracted assemblies, mod binaries or game configs are here (see
-[Disclaimer](#disclaimer)). Everything gitignored is reproducible: `gamelist.json`, `configs/`
-and `mods/` are fetched on demand, and `decompiled/`, `bundle/`, `asar/`, `bin/`,
-`installer-listing.txt` and the `work/` scratch tree are produced locally. To reproduce:
+- `tests/test_device.py` searches for a real controller while constructing its
+  lock-test wrapper.
+- `tests/test_waits.py` searches for a real dock while constructing its fake
+  dock subclass.
 
-1. Fetch the game list, configs and mods from Flydigi's public, unauthenticated API
-   (`GET https://api.flydigi.com/pc/adapter_trigger/list`):
-   ```bash
-   tools/fetch-configs                    # gamelist.json + configs/forza.json
-   tools/fetch-configs --monitor-configs  # those, plus configs/monitor/*.json
-   tools/fetch-configs --all-mods         # those, plus mods/, ~44 MB
-   ```
-2. For protocol work, decompile Space Station yourself; the toolchain and the steps are in
-   [PROGRESS.md](PROGRESS.md).
+They fail on a machine with neither device attached. This is a test-harness
+defect, not a runtime hardware requirement. The remaining backend tests use
+Python only.
+
+The Qt-dependent tests are:
+
+- `tests/test_models.py`: distribution PySide6;
+- `tests/test_shell.py` and `tests/test_qml.py`: PySide6 and Kirigami.
+
+`tests/test_qml.py` drives 13 `tests/qml/tst_*.qml` cases. Exact commands,
+`tools/generate-qmltypes`, and qmllint setup are documented in
+[gui/README.md](gui/README.md).
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [PROGRESS.md](PROGRESS.md) | Current feature status, validation level, limitations, and roadmap |
+| [PROTOCOL.md](PROTOCOL.md) | Wire protocol and hardware-verification results |
+| [docs/findings-profile-blob.md](docs/findings-profile-blob.md) | Profiles, mappings, sticks, gyro, trigger blocks, and macros |
+| [docs/device-settings.md](docs/device-settings.md) | Device settings, battery, vibration bind, lighting config, and command inventory |
+| [docs/findings-steam.md](docs/findings-steam.md) | Steam interaction, device takeover, and locking |
+| [docs/findings-games.md](docs/findings-games.md) | Game detection, routes, and validation notes |
+| [docs/findings-haptics.md](docs/findings-haptics.md) | Virtual DualSense, USB/IP, and haptic audio |
+| [docs/findings-screen.md](docs/findings-screen.md) | Display upload paths, safeguards, and settings |
+| [docs/findings-other-devices.md](docs/findings-other-devices.md) | Device codes, other Flydigi hardware, and dock findings |
+| [docs/findings-desktop-app.md](docs/findings-desktop-app.md) | Apply/save behavior and desktop implementation findings |
+| [docs/third-party-mods.md](docs/third-party-mods.md) | Unsupported third-party-mod route |
+
+## Flydigi content not shipped by this repository
+
+No decompiled source, extracted assemblies, game configs, mod binaries, or
+Flydigi assets are tracked. The following paths are local and ignored:
+
+- `gamelist.json`, `configs/`, and `mods/`, fetched on demand;
+- `decompiled/`, `bundle/`, `asar/`, `bin/`,
+  `installer-listing.txt`, and `work/`, produced during local protocol research.
+
+These are not part of the public repository layout and are not required for
+normal controller use, except for the fetched game data needed by game routes.
 
 ## Disclaimer
 
-This is an independent project. It is **not affiliated with, authorised by, or
-endorsed by Flydigi**. "Flydigi", "Space Station" and "Apex 5" are used only to
-identify the hardware and software this project interoperates with; any
-trademarks belong to their respective owners.
+This is an independent project. It is **not affiliated with, authorized by, or
+endorsed by Flydigi**. “Flydigi,” “Space Station,” and product names are used
+only to identify interoperable hardware and software; their trademarks belong
+to their respective owners.
 
-The protocol was determined by reverse engineering Flydigi's own software for
-the sole purpose of making hardware you already own work on Linux — an
-interoperability purpose expressly permitted in some jurisdictions (in the EU,
-Directive 2009/24/EC Art. 6, which Art. 8 protects from contractual override)
-and treated differently in others. Check what applies where you are.
+The protocol was determined by reverse engineering for interoperability. Laws
+vary by jurisdiction; check what applies where you are.
 
-No Flydigi code, assembly, asset, game config or mod binary is included or
-redistributed here. `tools/fetch-configs` contacts Flydigi's public API only
-when you run it, and stores what it fetches locally without republishing it.
+No Flydigi code, assembly, asset, game config, or mod binary is redistributed.
+`tools/fetch-configs` contacts Flydigi's public API only when a user runs it and
+stores the result locally.
 
-Provided as-is, with no warranty. Writing configuration to a controller carries
-the ordinary risk of writing to any device's flash.
+The software is provided as-is, without warranty. Writing configuration or
+factory data to a controller carries the ordinary risk of writing device flash.
 
 ## Licensing
 
-Per-file, following [REUSE](https://reuse.software/): code carries inline SPDX headers, prose
-and `gui/` are annotated in `REUSE.toml`, full texts are in `LICENSES/`, and `reuse lint`
-verifies it.
+The repository follows [REUSE](https://reuse.software/). Code carries inline
+SPDX headers; prose and generated/non-source files are annotated in
+`REUSE.toml`; complete license texts are under `LICENSES/`.
 
-| | |
+| Paths | License |
 |---|---|
-| `flydigi/`, `tools/`, `tests/` | MIT, except the Qt-dependent files — `tools/generate-qmltypes`, `tests/test_models.py`, `tests/test_qml.py`, `tests/test_shell.py`, `tests/qml_harness.py`, `tests/qml/*.qml` — which are GPL-3.0-or-later. `tests/qml/four-frames.gif` is CC0-1.0 |
-| `README.md`, `PROGRESS.md`, `docs/` | MIT |
+| `flydigi/`, `tools/`, and non-Qt tests | MIT |
+| `gui/`, Qt-dependent tools/tests, QML tests, and `pyproject.toml` | GPL-3.0-or-later |
+| `README.md`, `PROGRESS.md`, and `docs/` | MIT |
 | `PROTOCOL.md` | CC0-1.0 |
-| `udev/`, `pipewire/` | CC0-1.0 |
-| `gui/` | GPL-3.0-or-later |
-| `pyproject.toml` | GPL-3.0-or-later — it describes `gui/` to PySide6's tooling |
-| `.gitignore`, `LICENSE`, `NOTICE`, `REUSE.toml` | CC0-1.0 |
+| `udev/` and `pipewire/` | CC0-1.0 |
+| `tests/qml/four-frames.gif` | CC0-1.0 |
+| Repository metadata listed in `REUSE.toml` | CC0-1.0 |
 
-Copyleft is confined to what links Qt: `gui/` may import `flydigi/` and never the reverse, which
-is what keeps the backend independently reusable and dependency-free. See [LICENSE](LICENSE) for
-the reasoning and [gui/README.md](gui/README.md) for the import rule.
-
-The DualSense report layouts in `flydigi/ds5.py` follow
-[inputtino](https://github.com/games-on-whales/inputtino), MIT licensed, and the
-placeholder Bluetooth addresses in `flydigi/ds5_usb.py` are inputtino's public
-ones. The descriptors and feature-report blobs themselves are read from
-hardware — see [NOTICE](NOTICE).
-
-## Building a release
-
-The GUI adds PySide6, which is LGPLv3 — that only creates obligations if you
-ship Qt yourself.
-
-- **Source / PyPI / AUR / COPR** — you distribute no Qt at all (pip or the
-  distro provides it), so there is nothing to discharge.
-- **AppImage** — bundles Qt, so it is conveyed as a whole under GPL-3.0. Include
-  `LICENSES/` in the image, name the bundled PySide6 and Qt versions in the
-  release notes with a link to their sources, and use PyInstaller `--onedir`
-  rather than `--onefile` so the libraries stay swappable. Corresponding source
-  is satisfied twice over: it is a Python app, so the source is inside the
-  bundle, and the git tag sits next to the download.
-- **Flatpak** — cleanest licensing (Qt comes from `org.kde.Platform`) but the daemon needs the
-  host process table and the memory route needs a host-side cross-process read, which no
-  container grants. Only viable once the GUI talks to a host daemon over D-Bus.
+The Qt-linked desktop layer may import the dependency-free MIT backend; the
+backend does not import the desktop layer. See [LICENSE](LICENSE) for the
+licensing rationale and [NOTICE](NOTICE) for third-party attribution.

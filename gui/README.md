@@ -18,9 +18,10 @@ leaves that library MIT, and anyone can still lift `flydigi/` on its own. An
 import in the other direction would pull GPL code into the backend and destroy
 that property.
 
-It also keeps the backend dependency-free: `tools/flydigi-ds5` runs on any
-machine with Python 3.9 and no Qt installed. PySide6 is imported by this
-directory, by `tools/generate-qmltypes` and by the four GUI test files
+It also keeps the backend dependency-free: `tools/flydigi-ds5` needs no Qt or
+third-party Python package. It still requires Linux, writable `/dev/uhid`, and
+access to the physical controller and its input nodes. PySide6 is imported by
+this directory, by `tools/generate-qmltypes` and by the four GUI test files
 (`tests/test_models.py`, `tests/test_shell.py`, `tests/test_qml.py`,
 `tests/qml_harness.py`), and nowhere else. Code outside `gui/` that needs to
 know whether PySide6 is present asks a subprocess (`python3 -c "import
@@ -130,63 +131,32 @@ icon.
 
 ## Watching for stalls
 
-Scrolling is uneven and `qmlprofiler` cannot say why: it records QML and JS
-ranges only, so Python running in a queued cross-thread slot or a `QTimer`
-timeout is invisible to it. `watchdog.py` answers the one question that leaves
-open — during a stall, what Python frame is the GUI thread in, or is it in none?
+`watchdog.py` records Python thread stacks when the GUI heartbeat is late. It is
+disabled unless `FLYDIGI_STALL_WATCHDOG` is set:
 
 ```bash
 FLYDIGI_STALL_WATCHDOG=30:/tmp/stalls.txt distrobox enter apex-dev -- python3 -m gui
 ```
 
-The GUI thread stamps a heartbeat every few milliseconds and a daemon thread
-dumps every thread's stack the moment one is more than the threshold late — 30
-ms here, which fires for the 40 ms+ frames and not for ordinary jitter. The
-value is `[<milliseconds>][:<path>]`; anything not starting with a number is
-taken as a path and uses the default threshold, and with the variable unset the
-timer and the thread are never created.
+The value is `[<milliseconds>][:<path>]`. A value without a leading number is
+treated as the output path and uses the default threshold. Each detected stall
+writes a `faulthandler` stack dump followed by `=== stall:` and
+`=== stall over:` timing lines.
 
-Each stall writes one `faulthandler` dump, then two lines under it:
+The `Current thread` block is the watchdog. The GUI thread is the block that
+contains `gui/__main__.py`; inspect its deepest frame. If that frame is the
+`qt_app.exec()` call, no Python frame was active on the GUI thread at the sample
+and investigation should include Qt's render loop and the compositor.
 
-    Current thread 0x… [stall-watchdog] (most recent call first):
-      File "…/gui/watchdog.py", line … in _watch
-      …
-    Thread 0x… [python3] (most recent call first):
-      File "…/gui/models/…", line … in …
-      …
-      File "…/gui/main.py", line … in main
-      File "…/gui/__main__.py", line 11 in <module>
-      File "<frozen runpy>", line 88 in _run_code
-      File "<frozen runpy>", line 203 in _run_module_as_main
-    === stall: GUI thread was <n> ms late above ===
-    === stall over: the GUI thread ran again after <n> ms ===
+```bash
+grep -c '^=== stall:' /tmp/stalls.txt
+grep '^=== stall over:' /tmp/stalls.txt
+```
 
-The labels come *after* the dump on purpose: writing anything before it drops the
-GIL, and the stall can end in the time it takes to get back — see the module
-docstring.
-
-**The GUI thread is the block containing `gui/__main__.py`; `Current thread` is
-always the watchdog itself.** Read the deepest frame of that block. If that
-deepest frame is `main.py`'s own `qt_app.exec()` line — Qt's event loop, which
-is a C call and so has no frame of its own — then no Python was running on the
-GUI thread at that instant, and the search moves to `QSGThreadedRenderLoop` and
-the compositor rather than to anything here.
-
-`grep -c '^=== stall:' /tmp/stalls.txt` counts the stalls;
-`grep '^=== stall over:' /tmp/stalls.txt` is their histogram, and it is the
-second number that carries it — the first is the threshold plus a sampling slice
-every time, since how long a stall lasts is not knowable while you are still
-inside it. The module docstring sets out what a dump does and does not prove.
-
-**A file holding only the startup dump is a result, not a failure.** The
-qmlprofiler trace behind this found input events *inside* all 49 slow frames, so
-the GUI thread's event loop was delivering during them — and a loop delivering
-input also delivers the heartbeat, which would keep the watchdog quiet for
-exactly the frames being chased. That silence rules the event loop out and sends
-the search to `QSGThreadedRenderLoop`, `polishAndSync` waiting on the render
-thread's swap, and the compositor. The startup dump is what proves the tool was
-armed rather than mis-parsed. A mock-bus run proves nothing about timing either
-way.
+The second value in each completion line is the observed stall duration. See
+`gui/watchdog.py` for sampling limits and interpretation. A startup-only dump
+confirms that the watchdog was armed but does not prove that rendering was
+smooth.
 
 ## Layout
 
@@ -197,7 +167,7 @@ way.
     watchdog.py       off by default: what the GUI thread is in when a frame is late
     i18n.py           the i18n*() shim the engine needs -- PySide6 has no KLocalizedContext
     models/           view-agnostic state -- no QtWidgets, no QtQuick
-    qml/              Main.qml, pages/ (fifteen), components/ (eleven)
+    qml/              Main.qml, pages/ (fifteen), components/ (fourteen)
     requirements.txt  what the runtime must provide -- documentation, not a pip file
 
 QML constructs `App`, so opening the device is a separate `start()`, and
@@ -240,14 +210,13 @@ still be in `select()` on it. On a timeout the handle is left open deliberately.
 ## The QML shell
 
 `qml/Main.qml` is a `Kirigami.ApplicationWindow` with a persistent global
-drawer and one page per section. Pages are listed in its `sections` array as
-`{name, icon, url, kinds}` and built once by `pageFor()` with
-`Qt.createComponent(url, Component.PreferSynchronous)`, parented to the page
-stack and kept, so a section remembers its scroll position. Handing `pageStack`
-a URL or a `Component` instead creates the page with no visual parent, which the
-engine reports as an object "not placed in the graphics scene".
-`pageStack.replace()` on an empty stack has nothing to replace and drops the
-page silently, so `openSection()` pushes at depth 0 and replaces thereafter.
+drawer and one live section page. Pages are listed in its `sections` array as
+`{name, icon, url, kinds, needs?}` and created by `pageFor()` with
+`Qt.createComponent(url, Component.PreferSynchronous)`. `openSection()` pushes
+at depth 0 and replaces thereafter. Once the replacement is established,
+`releaseSection()` removes the previous page from the cache and destroys it on
+a short delay. Page-local state therefore does not survive navigation; state
+that must survive belongs in a model.
 
 `Kirigami.GlobalDrawer.actions` is a list of `Action` objects and cannot be
 filled by a `Repeater`, so the drawer's actions are written out one per section,
@@ -256,13 +225,13 @@ both the `sections` entry and its `Kirigami.Action`, or every label after it
 shifts by one and the last section becomes unreachable from the sidebar.
 `test_the_drawer_offers_every_section` asserts the pairing.
 
-**A section belongs to a kind of device.** `kinds` is `["pad"]`, `["dock"]`, or
-null for one that belongs to the installation, and `sectionVisible()` hides the
-ones that do not match `App.devices.currentKind` — a sidebar offering Buttons
-and Macros while a dock is selected is offering to edit something that is not on
-screen. Hidden rather than removed, so the list stays the same length and every
-action's index and the page cache stay valid. `drawerActions` filters to the
-visible ones, which is what the tests read and press.
+**A section belongs to a device kind and may require a capability.** `kinds` is
+`["pad"]`, `["dock"]`, or null for an installation-wide section. The optional
+`needs` field names a hardware capability. `sectionVisible()` checks both
+`App.devices.currentKind` and the selected device's capabilities: Triggers and
+Games require `adaptive_triggers`, and Screen requires `screen`. Hidden actions
+remain in the fixed action list, while `drawerActions` exposes only the visible
+ones to the drawer and tests.
 
 Only a change of *kind* moves the page: `onDeviceKindChanged` opens Controller
 or Dock, so picking a dock takes you to it and picking a pad brings you back,
@@ -311,12 +280,12 @@ same, `tests/qml_harness.py` included.
 |---|---|---|
 | `device.py` | `DeviceModel` | connection, battery, and the transient status and error line, for the selected pad |
 | `devices.py` | `DevicesModel` | every Flydigi device attached, and which pad and dock the window is showing. Two selections behind one picker — see below |
-| `dock.py` | `DockModel` | the selected charging dock: its four switches, its lighting, what is sitting in it, and the picture half — a source image framed on the 334x304 window the LEDs are read from, and the 162 colours that come out of it |
+| `dock.py` | `DockModel`, `DockColoursModel` | the selected charging dock: its four switches, its lighting, what is sitting in it, and the picture half — a source image framed on the 334x304 window the LEDs are read from, and the 162 colours that come out of it |
 | `dsmode.py` | `DsModeModel` | the DualSense switch's state |
 | `games.py` | `GameListModel`, `GameFilterModel` | one row per game with its route resolved; the search text and route filter |
 | `lighting.py` | `LightingModel`, `ColourListModel` | one lighting config, edited in memory until written; the up-to-five colours an effect cycles through |
-| `profile.py` | `ProfileModel`, `ProfileListModel`, `KeyMapModel`, `MacroModel`, `MacroStepsModel`, `StickModel`, `StickSideModel`, `TriggerModel`, `TriggerSideModel`, `VibrationModel`, `VibrationSideModel` | the open profile and the edits held against it; the four slots and what was read from each; one row per key, with what it sends and its turbo; the stored macros, and the steps of whichever one is being edited; and per side, a stick's response curve, a trigger's stored effect and travel window, and a grip motor's window |
-| `imaging.py` | — | not a model: the one Qt chore `dock.py` and `screen.py` share, which is getting RGB888 out of a QImage without its row padding |
+| `profile.py` | `ProfileModel`, `ProfileListModel`, `KeyMapModel`, `MacroModel`, `MacroStepsModel`, `StickModel`, `StickSideModel`, `TriggerModel`, `TriggerSideModel`, `VibrationModel`, `VibrationSideModel`, `EffectParamsModel`, `MotionModel` | the open profile and the edits held against it; the four slots and what was read from each; one row per key, with what it sends and its turbo; the stored macros and their steps; per-side stick, trigger and vibration state; effect parameters; and motion settings |
+| `imaging.py` | `CropFrame` | shared QImage-to-RGB888 conversion and crop/framing geometry for dock and screen images |
 | `screen.py` | `ScreenModel` | the picture queued for upload, and the idle display setting |
 | `settings.py` | `SettingsModel` | the command-3 block |
 | `setup.py` | `SetupModel`, `SetupChecksModel` | the Setup page; one row per requirement, in the order a person would fix them |
@@ -362,8 +331,8 @@ python3 tests/test_qml.py -functions   # list the cases
 controller. All three print a message and exit 0 when PySide6 is absent, so a
 backend-only run stays dependency-free. The two window suites set
 `QT_QPA_PLATFORM=offscreen`, `QT_QUICK_BACKEND=software` and
-`QSG_RENDER_LOOP=basic` with `setdefault` (`tests/test_qml.py:28-32`,
-`tests/test_shell.py:24-26`), so a value already exported in the shell wins — an
+`QSG_RENDER_LOOP=basic` with `setdefault` in both test entry points, so a value
+already exported in the shell wins — an
 exported `QT_QPA_PLATFORM` puts the run back on a real display. None of the three
 is optional: an offscreen run has no GPU context to share, and the threaded
 render loop waits for one that never comes. `import QtTest` in the QML cases
@@ -371,9 +340,9 @@ resolves against the distribution's `qt6-qtdeclarative`
 (`/usr/lib64/qt6/qml/QtTest`), not against anything PySide6 ships.
 
 `test_models.py` and `test_shell.py` run a tuple of functions written out in
-`main()` (`tests/test_models.py:1636`, `tests/test_shell.py:428`): a test not
-added to its tuple never runs, and the count still reads `N/N passed`. The QML
-suite is handed the `tests/qml` directory instead and finds its own cases.
+their `main()` functions: a test not added to its tuple never runs, and the
+count still reads `N/N passed`. The QML suite is handed the `tests/qml`
+directory instead and finds its own cases.
 
 Every interactive element carries an `objectName`: QtQuickTest addresses items
 with `findChild(page, "name")`, and there is no other handle on an item a
@@ -421,9 +390,9 @@ qmllint-qt6 -I . -I /usr/lib64/qt6/qml gui/qml/Main.qml gui/qml/*/*.qml
 what `-I .` points at. That directory is gitignored, so a fresh checkout has no
 type information until the script is run, and without it every model reference is
 an unqualified access qmllint cannot check. Re-run it after adding or renaming
-anything a view binds to. A new model class is not picked up automatically:
-`collect()` enumerates the exported types by hand, and a type absent from that
-list is invisible to qmllint however it is decorated.
+anything a view binds to. `collect()` discovers QObject subclasses exported by
+`gui.models.__all__`, so a new QML model must be imported and listed in
+`gui/models/__init__.py`; there is no second hand-maintained generator list.
 
 `pyside6-project build --qml-module` is the framework's own route and is
 deliberately not used: `pyside6-metaobjectdump` parses the Python source, so it
@@ -434,7 +403,7 @@ when the property changes" — 99 warnings across `gui/qml`, all of them wrong.
 correct, and hands the result to Qt's own `qmltyperegistrar` unchanged.
 
 The repository root's `pyproject.toml` describes `gui/` to `pyside6-project`
-(`build`, `qmllint`, `run`) and pins `requires-python = ">=3.9"`. Its `files`
-list omits `gui/i18n.py`, `gui/models/dsmode.py`, `gui/models/settings.py`,
-`gui/qml/components/StickSide.qml` and the DeviceSettings, DualSense and Macros
-pages; the two commands above are the supported route.
+(`build`, `qmllint`, `run`) and pins `requires-python = ">=3.9"`. Its explicit
+`files` list does not cover every current model, component, and page, so it is
+not the source of truth for static checking. The two commands above scan the
+current tree and are the supported route.

@@ -6,6 +6,11 @@ config blob and the sequence that saves it, and the command inventory.
 
 Index: [PROGRESS.md](../PROGRESS.md).
 
+**Status.** Command-3 decoding and the ordinary setting writes are implemented. Claims explicitly
+labelled measured were observed on an Apex 5; command layouts attributed to Space Station are
+transcribed from version 4.2.0.9 and are not by themselves hardware validation. The decompiled
+reference sources are not distributed in the public repository.
+
 `flydigi/settings.py` is the read and every write; `tools/flydigi-settings` is the CLI; the app's
 **Device** page is the UI, with the two screen bits (subs 8 and 9) on its **Screen** page.
 `tests/test_settings.py` runs standalone — `python3 tests/test_settings.py`, no pytest — against
@@ -15,8 +20,8 @@ read-back path, and the fact that the pad ACKs sub-ids it reports unsupported.
 Five write commands are verified on hardware — 19 sub 1 (quick-switch), 19 sub 9 (always-on
 display), 21 (precision), 22 (sensitivity) and 23 (sleep time) — each written and read back through
 command 3. Command 29 (restart) is built and has never been sent; it is the only write with no
-read-back, and any handle open across it has to be reopened (`flydigi/settings.py:246-253`,
-`tools/flydigi-settings:139-147`). Report rate is read and shown; the app offers no control for it,
+read-back, and any handle open across it has to be reopened (`settings.restart`, and the
+`flydigi-settings restart` command). Report rate is read and shown; the app offers no control for it,
 and `tools/flydigi-settings report-rate` sits behind `--i-know`.
 
 The CLI has 16 subcommands: `show`, ten on/off switches (`quick-switch`, `xbox-home`,
@@ -25,10 +30,10 @@ The CLI has 16 subcommands: `show`, ten on/off switches (`quick-switch`, `xbox-h
 `report-rate` and `restart`. The three numeric ones take names, not the wire values below: `8bit`,
 `9bit`, `10bit`, `11bit`, `12bit`, `14bit`, `16bit`; `highest`, `high`, `middlehigh`, `middle`,
 `lowmiddle`, `low`, `lowest`; and a rate in Hz — 125, 250, 500 or 1000 — inverted to the wire value
-on the way out (`tools/flydigi-settings:61-64`, `:160-161`). `report-rate` and `xbox-home` refuse to
+on the way out by `tools/flydigi-settings`. `report-rate` and `xbox-home` refuse to
 run without `--i-know`. Every operation, `show` included, goes through `identity.require(ctrl)`
-first: the pad opens by vendor id alone, so without that guard the tool would write a Vader 4 Pro's
-settings block under this pad's field names.
+first. The guard accepts the project's supported `k5` and `f5` models and refuses other
+new-protocol Flydigi pads; it is a model-support check, not an Apex-only gate.
 
 ## Command 3: the whole settings block in one read
 
@@ -173,7 +178,7 @@ Replies to 20, 21, 22 and 23 are matched on the command byte alone: only command
 been measured, so no success-flag position is asserted for the other four.
 
 **Sub-id 2 is refused by the SDK, not by the pad, and `ControllerType` is not about the host OS.**
-`ControllerHidManager.cs:35` decides the type from the HID device it opened:
+`ControllerHidManager.CreateDeviceFromHid` decides the type from the HID device it opened:
 `ManufacturerString == "Microsoft"` → `XInput`, else `VendorId != 14295` → `DInput`, else
 `NewXInput`. `14295` is `0x37D7`, Flydigi's vendor id — what `flydigi/device.py` matches on. The
 enum records *which interface the SDK talks through*: **XInput** is a pad or dongle enumerating as a
@@ -184,18 +189,18 @@ is composite and is both at once — `1.0` is the Xbox-compatible gamepad `xpad`
 vendor interface.
 
 `EnableXboxHomeButtonCommandFactory` has a full NewXInput branch building command 19 with sub-id 2,
-so the command exists for this mode. The wrapper stops it twice over: `ControllerSdk.cs:780` and
-`EnableXboxHomeButtonImpl` at `:342` both guard the call with
+so the command exists for this mode. Both `ControllerSdk.EnableXboxHomeButton` and
+`EnableXboxHomeButtonImpl` guard the call with
 `if (controller.ControllerType == ControllerType.XInput)`. There is no locale string for the setting
 in any of the twelve languages, and their service forwards only the `Usable`/`Enabled` bits to the
 UI. This pad reports it supported **and on**, and `19 / 2 / 0` takes the same path as every other
 sub-command; what it does to the Home key is unmeasured.
 
-**And it stays unmeasured** — [ruled out](../PROGRESS.md#ruled-out). Their renderer never receives
+**Status: not exposed or measured** — [ruled out](../PROGRESS.md#ruled-out). Their renderer never receives
 `xboxHomeButtonUsable` at all, only `Enabled`, which it stores and draws nowhere, so no v4 UI can
 offer this however the SDK is built. `XboxHomeButtonUsable` is hardcoded true for `f4`, `fp3`, `fp4`
 and DeviceType 102 (an Apex 4 SKU), and those are the pads whose Home button is also the power
-button — measured on the Vader 4 on this desk: a short press is an ordinary Guide, a long one powers
+button. On a measured Vader 4, a short press is an ordinary Guide and a long press powers
 the pad off. An Apex 5 has a rear power slider, so its Home is Guide and nothing else, which is why
 there is nothing here to configure and why the flag reads supported and on.
 
@@ -222,8 +227,8 @@ commands, writes, and returns the command-3 block as it reads afterwards; an unk
 ACK is `5a a5 13 01 00 <value> <crc>`, echoing the value and never the sub-id, so it cannot say
 which setting moved, and the pad acknowledges sub-ids it does not support at all. Flydigi's own
 `data[5] == subId` test therefore compares the value against the sub-id and matches only where the
-two coincide, at sub 1 written to 1; match on `data[2] == 19 && data[5] == value` instead, as
-`flydigi/settings.py:193` does.
+two coincide, at sub 1 written to 1; `settings.apply` instead matches
+`data[2] == 19 && data[5] == value`.
 
 | Command | Written | Read back as |
 |---|---|---|
@@ -234,25 +239,19 @@ two coincide, at sub 1 written to 1; match on `data[2] == 19 && data[5] == value
 
 ## Commands beyond the settings block
 
-**Reset one profile slot to factory** — `ResetMappingConfigByCfgIdCommandFactory`, **175**,
-`[4]=3, [5]=cfgId, [6]=crc`. A 10 s timeout like the save, so it is a flash operation. Gated on
-`ResetAllMappingUsable`, which the SDK sets unconditionally in the NewXInput branch — this pad's
-mode. This is the stock app's "Restore default". Destructive: test on slot 4 or the fake pad first.
+**Reset all profile slots to factory — command 175.** Despite the reference factory name
+`ResetMappingConfigByCfgIdCommandFactory`, the `cfgId` argument is ignored. A measured run sent 175
+with one slot id and all four profiles returned to factory state, including their names and
+`0xFFFF` tags. The command uses the 10 s flash timeout and is gated on the more accurate capability
+name `ResetAllMappingUsable`. Treat it as destructive and global; `mapping.reset_all_configs` sends
+the neutral slot byte 0 and the CLI names the operation `reset-all`.
 
-**Both paths are verified on the pad.** The per-slot restore -- write the factory blob, commit with
-166 -- was run from the app's own button and read back: profile 3 came back titled `配置3` with no
-remaps, no macros and the gyro off, its tag moved off 0xFFFF to a fresh value, and **the other three
-slots were untouched at 0xFFFF**. Which is the whole reason that path exists: command 175 in the
-same situation takes all four.
-
-**It works on this pad, and it takes the profile's name with it.** Observed through Space Station's
-own "Restore default" on the Apex 5 here: a slot renamed out of its factory name came back carrying
-that factory name again — which on this pad is Chinese. That follows from where a name lives: blob
-offset **770**, twenty bytes of UTF-16LE (`MappingConfig.title`), so it is a field of the slot like
-any other and a slot reset restores it along with the rest. Two consequences for a UI offering this.
-The rename on the app's Controller page is undone by it, so the confirmation has to say more than
-"restore defaults". And twenty bytes of UTF-16 is ten characters whichever script they are in, which
-is why ten Chinese ones fit where a longer English name will not.
+**Restore one profile slot — write the factory blob, then commit with 166.** This separate path is
+also hardware-verified. Profile 3 returned as `配置3`, with no remaps or macros and with gyro off;
+its tag changed from `0xFFFF`, while the other three slots remained untouched. The factory blob must
+match the identified model. Its title at offset **770** is twenty bytes of UTF-16LE, so a per-slot
+restore also restores the factory name. A UI confirmation must state that the mapping, macros,
+gyro, and name are replaced. The title field holds at most ten UTF-16 code units.
 
 **Controller nickname** — write `UpdateNicknameCommandFactory` **24**, read
 `ReadNicknameCommandFactory` **2**. The decompiled writer puts the CRC at `[6]`, which would
@@ -274,7 +273,7 @@ The pad reports charge as a level of 0..5 plus a separate charging state — six
 granularity. Nothing in the command set carries a finer figure than that.
 
 Every path resolves to the same 4-bit nibble, at raw index 12 of the command-1 reply: the high
-nibble is 1 while charging, the low nibble is the level (`flydigi/motion.py:115-131`).
+nibble is 1 while charging and the low nibble is the level (`motion.read_versions`).
 `HeartBeatCommandFactory`'s NewXInput branch is `Battery = (data[i] >> 4 == 1) ? 6 : (data[i] & 0xF)`,
 and the XInput and DInput branches do the identical thing at `data[23]` and `data[10]`.
 `ExtraInfoCommandFactory` carries no battery field at all, so a 1% figure exists nowhere in the
@@ -285,7 +284,7 @@ command set; if one exists it is in the dongle or the input report. The only ric
 Space Station ships exactly seven battery icons and picks one as `Power${level <= 6 ? level : 0}.svg`,
 while the SDK turns the charging bit into the literal **6**. So the domain is 0..6 with 6 meaning
 *charging*, leaving **0..5 for charge and 5 as a full pad**. `motion.CHARGING_LEVEL = 6` and
-`motion.MAX_LEVEL = 5` (`flydigi/motion.py:91-92`) are the one source of truth; the GUI reads
+`motion.MAX_LEVEL = 5` are the one source of truth; the GUI reads
 `BATTERY_STEPS = motion.MAX_LEVEL` rather than repeating the number.
 
 Confirmed on hardware: wired, `battery_level: 5, charging: False` — full.
@@ -310,7 +309,7 @@ Tier 1 is one bind — game rumble drives the trigger motors — and each "suppo
 **preset** of numbers for it: `vibType`, `vibFilter`, `pwmScal`, and `vibParams` (stroke, pressure,
 strength, frequency per side). The bind's four numbers — intensity coefficient, vibration threshold,
 travel range and frequency — are the Vibration effect's knobs on the app's **Triggers** page
-(`flydigi/effects.py:139-149`), and are also reachable from `tools/flydigi_cmd.py bind`. Its stored
+(`effects.EFFECTS`), and are also reachable from `tools/flydigi_cmd.py bind`. Its stored
 form is the profile blob's `bind` sub-struct, J4 in
 [findings-profile-blob.md](findings-profile-blob.md).
 
@@ -366,8 +365,7 @@ the end and silently grows the config.
 stored frames, cycling `loop_start`..`loop_end` every `cycle_time`. `mode` only records which of
 Space Station's generators produced the data, so writing a different mode number changes nothing
 visible. Its values are `LedType`: 0 Unknown, 1 Flow, 2 Breath, 3 Gradient, 4 Feedback, 5 On,
-6 Close, 7 Default (`Flydigi.SharedResources.decompiled.cs:29278`, written as
-`configBean.LedMode = (int)config.Mode` at `ControllerDataMapper.cs:185` and parsed back at `:72`).
+6 Close, 7 Default (`LedType`, written and parsed by `ControllerDataMapper`).
 An Apex 5 ships storing 7, `Default`, which is the first config
 `ControllerDataMapper.GetDefaultLedConfigsByDevice` builds for a pad on this protocol.
 
@@ -387,8 +385,8 @@ lightbar is `data[45..47]` of the DualSense output report, R/G/B, in the same in
 
 `LedConfig.grip_sync` writes byte 9; the Lighting page's switch is labelled "Vibration light
 effect", Flydigi's own string for it, described as "There will be a special light effect when the
-grip vibrates". `LedConfigParser`'s v3.0 branch reads it at index 9, and it is set to **1** on the
-pad here.
+grip vibrates". `LedConfigParser`'s v3.0 branch reads it at index 9, and the measured Apex 5 stores
+**1**.
 
 Measured at brightness 80, the same left-grip-only rumble run twice with only byte 9 differing:
 
@@ -428,28 +426,31 @@ reaction to any of those inputs either.
 showing and later frame writes do not appear — blue and white frames written while it was set left
 the panel on the previous red, clearing the byte alone made the new frames appear at once, and
 setting it again froze them. `write_config` sends packet 0 first, and byte 2 lives there, so setting
-it in the same write freezes the pad **before its own frames arrive**. A save (171, then 166)
-re-renders past the latch.
+it in the same write freezes the pad **before its own frames arrive**. Saving with 166 re-renders
+past the latch.
 
-**The full sequence Space Station sends for a lighting change:**
+**Current normative lighting sequence:**
 
 | # | call | wire | note |
 |---|---|---|---|
-| 1 | `WriteMappingConfig` | 164/165 | **undiffed** — passes `null` as the old config, so all 42 packets go every time |
-| 2 | `WriteRgbConfigById` | 168/169 | the LED blob |
-| 3 | `PermanentSaveSwitchMappingConfig` | **171** | `[ver_lo, ver_hi, cfgId]`, 10 s timeout, a fresh random data version |
-| 4 | `SaveConfig` → `PermanentSaveMappingConfig` | **166** | 250 ms later, a *second* new data version |
+| 1 | `WriteRgbConfigById` | 168/169 | write the LED blob; changed packets may be diffed |
+| 2 | `SaveConfig` → `PermanentSaveMappingConfig` | **166** | optional flash commit using the active mapping slot's existing version tag |
 
-171's builder has the same self-contradiction as command 242: a length byte of 4 implies a checksum
-at offset 7, while `cfgId` sits there and the crc goes at 8 over a range that excludes it. The pad
-answers the literal bytes, so their placement wins over their length byte, and
-`mapping._build_save_switch` reproduces them rather than correcting them.
+Lighting has no version tag of its own. A lighting-only save therefore reads command 161 and passes
+the active mapping profile's current tag to 166; rolling a new mapping tag would announce a profile
+change that did not occur.
 
-**What 171 is, which that table gets wrong.** Its only caller anywhere in `SpaceStationService` is
-`SaveSwitchConfig` — not the lighting path, whose two write flows both end in `SaveConfig`, and
-`SaveConfig` discards the cfgId it is handed and sends plain 166. So step 3 above is a Switch save
-observed on the wire during a lighting change, not part of one. Anyone rebuilding the lighting
-sequence from that row should check it again.
+**Space Station 4.2.0.9 reference path:** its lighting flow first calls `WriteMappingConfig` with no
+old config, sending all 42 mapping packets, then writes the LED blob with 168/169 and ends in plain
+166. The current project does not repeat the unchanged mapping blob.
+
+**Reference-only observation: command 171 traffic captured during a lighting change.** Decompiled
+call sites identify 171 as `SaveSwitchConfig`, not as part of either lighting write flow. Treat the
+captured packet as concurrent or otherwise unexplained traffic, not a required lighting step. Its
+builder is internally inconsistent: a length byte of 4 puts `cfgId` where command 166 puts the
+checksum, followed by a checksum at offset 8 over a range that excludes that id.
+`mapping._build_save_switch` reproduces the reference bytes because those exact bytes ACKed; it does
+not imply that 171 belongs in the lighting sequence.
 
 ## The Switch bank: four more profiles the host can write and never read
 
@@ -457,7 +458,7 @@ sequence from that row should check it again.
 addresses; 4..7 are the Nintendo Switch ones, which it plays in Switch mode. Flydigi's
 `ApplySwitchConfigAsync` refuses any id outside `> 3 && < 8`, their `SaveConfig` accepts a live slot
 anywhere in 0..7, and `GenerateControllerApex5` sets `IsSupportNs` — so this is an Apex 5 feature.
-All of the following is **measured on the pad here**.
+All of the following is **measured on an Apex 5**.
 
   * **Command 171 is command 166 with a destination.** 166 commits the running profile into the slot
     it came from; 171 commits it into the slot named in the packet. The source is whatever is
@@ -489,7 +490,7 @@ neither. Nothing made here can produce either, but the profile being copied is w
 running, which may have come from theirs.
 
 **`OldLedConfig` is mapping-profile bytes 3..13**, ten bytes `flydigi/mapping.py` skips entirely —
-it goes from offset 2 straight to the key table at 13. On the pad here it reads
+it goes from offset 2 straight to the key table at 13. The measured Apex 5 reads
 `[32, 4, 40, 160, 0, 0, 255, 0, 0, 0]`; the `4` matches the LED config's `cycle_time` and `255, 0, 0`
 looks like a colour, so it is probably a stale mirror of the older LED format. Nothing outside
 `MappingConfigParser` computes it, and both applications preserve it unchanged.
