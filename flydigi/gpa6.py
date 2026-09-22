@@ -6,16 +6,19 @@
 
 Wire facts come from the pinned web client and xHaptics Engine 5.0.1.4 in
 docs/findings-apex6.md. Hardware timing and actuator behavior remain untested.
-Only identity, motor-map reads and volatile grip output are implemented.
+Identity, bounded configuration reads and volatile grip output are implemented.
 """
 from dataclasses import dataclass
 import math
 import struct
+import zlib
 
 PRODUCT_IDS = (0x2502, 0x2401)
 SKUS = {149: "Apex 6", 150: "Apex 6 Pro", 152: "Apex 6 Pro Phantom Blade Zero"}
 FEATURES = ("imu", "led", "switch", "screen", "trigger_haptic",
             "trigger_vibrate", "audio", "haptic_grip")
+RAM_CHUNK_SIZE = 16
+MAX_RAM_SIZE = 256 * RAM_CHUNK_SIZE  # A3's chunk index occupies one byte
 
 
 class ProtocolError(ValueError):
@@ -119,7 +122,7 @@ def _payload(body, command, size, v21=False):
         return None
     start = 3 if v21 else 5
     error = not v21 and body[3] == 0
-    count = 1 if error else size
+    count = 1 if error else (size(body[start:]) if callable(size) else size)
     end = start + count
     # Both compact web replies and padded engine replies occur in the source.
     # Unlike the web parser, a corrupt checksum is never accepted as an ACK.
@@ -176,10 +179,61 @@ class Protocol:
         return struct.unpack("<3H", self.ask(7, 6))
 
     def slot(self):
-        slot = self.ask(0xa1, 11)[0]
+        return self.config_state()[0]
+
+    def config_state(self):
+        """Active slot, four slot CRC16s and the global CRC16 (command A1)."""
+        state = struct.unpack("<B5H", self.ask(0xa1, 11))
+        slot = state[0]
         if slot > 3:
             raise ProtocolError(f"invalid active slot {slot}")
-        return slot
+        return state
+
+    def ram_info(self, ram_id):
+        """A3 QUERY_RAM: slot, byte length and CRC32 of a current RAM block."""
+        if ram_id not in (1, 4, 5, 6):
+            raise ValueError("unsupported configuration RAM ID")
+        p = self.ask(0xa3, 10, bytes((1, ram_id)), v21=True)
+        if p[:3] != bytes((1, 0, ram_id)) or p[3] > 3:
+            raise ProtocolError("RAM query status, ID or slot mismatch")
+        return struct.unpack("<BHI", p[3:])
+
+    def read_ram(self, ram_id, *, expected=None):
+        """Read a bounded RAM block, verifying every echo and its CRC32.
+
+        Before/after fingerprints detect changes during the transfer. These
+        are consistency checks, not a firmware transaction or flash backup.
+        Never wrap the one-byte index for blocks larger than 4096 bytes.
+        """
+        with self.ctrl.claim():
+            before = self.ram_info(ram_id)
+            if expected is not None and before != expected:
+                raise ProtocolError("RAM fingerprint changed before read")
+            slot, total, crc = before
+            if total > MAX_RAM_SIZE:
+                raise ProtocolError(f"RAM {ram_id} exceeds the {MAX_RAM_SIZE}-byte read limit")
+            data = bytearray()
+
+            def payload_size(p):
+                if len(p) < 8 or p[7] > RAM_CHUNK_SIZE:
+                    raise ProtocolError("invalid RAM chunk header/size")
+                return 8 + p[7]
+
+            for index in range((total + RAM_CHUNK_SIZE - 1) // RAM_CHUNK_SIZE):
+                count = min(RAM_CHUNK_SIZE, total - len(data))
+                p = self.ask(0xa3, payload_size,
+                             bytes((0, ram_id, index, RAM_CHUNK_SIZE)), v21=True)
+                header = struct.pack("<4BHB", 0, 0, ram_id, slot, total, index)
+                # The web reader trims the final chunk to totalLen. Accept
+                # either its meaningful size or a full padded final chunk.
+                if p[:7] != header or p[7] not in (count, RAM_CHUNK_SIZE):
+                    raise ProtocolError("RAM chunk status, ID, slot, length or index mismatch")
+                data.extend(p[8:8 + count])
+            if self.ram_info(ram_id) != before:
+                raise ProtocolError("RAM fingerprint changed during read")
+            if zlib.crc32(data) != crc:
+                raise ProtocolError(f"RAM {ram_id} CRC32 mismatch")
+            return bytes(data)
 
     def motor_map(self):
         slot = self.slot()

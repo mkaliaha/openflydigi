@@ -1,0 +1,68 @@
+#!/usr/bin/env node
+// SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+//
+// SPDX-License-Identifier: MIT
+
+// Offline execution of the pinned vendor's codecs, never the Python reader.
+// Usage: node tools/gen-apex6-config-fixtures > tests/fixtures/apex6-config.json
+// Requires only Node and the ignored web research sources. No vendor code or
+// factory configuration is emitted: the fixtures contain synthetic I/O facts.
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+const crypto = require("node:crypto");
+const base = path.resolve(__dirname, "../work/apex6-research/web");
+const sources = [
+  ["vendor-gpa6-core-D5jdJfEw.js", "c8855e137009540959dda393b4c3c199b036fd970347dba36f67fc3de6532dab"],
+  ["vendor-gpa6-codec-C4fNnifj.js", "6dc78eef4ffbd7f8ba7a878c0116b2f3a8c7d9a5c8c8388dc01c3246f30737de"],
+  ["vendor-gpa6-contract-BEtt2INU.js", "6fff76494840914be89f2bb20be53b5a9f4f1a9862a54358bc933b94357b2107"],
+];
+for (const [file, expected] of sources) {
+  const hash = crypto.createHash("sha256").update(fs.readFileSync(path.join(base, file))).digest("hex");
+  if (hash !== expected) throw new Error(`Pinned source mismatch: ${file}`);
+}
+const read = file => fs.readFileSync(path.join(base, file), "utf8");
+const core = read(sources[0][0]);
+const codec = read(sources[1][0]);
+const contract = read(sources[2][0]);
+const evaluate = (source, result) => vm.runInNewContext(`${source}\n;(${result});`, {
+  Uint8Array, DataView, TextEncoder, TextDecoder, console,
+});
+// Only module declarations are removed; the pinned function bodies execute
+// unchanged in an offline context without a device/browser/network API.
+const unmodule = source => source.replace(/import\s*[\s\S]*?;\s*/g, "")
+  .replace(/export\s*\{[\s\S]*?\};?\s*$/, "");
+const codecs = evaluate(unmodule(codec), "({lighting: Mn, mapping: Oe})");
+const {wrap, crc32} = evaluate(unmodule(core), "({wrap: Ct, crc32: K})");
+const globalDecode = evaluate(contract.slice(contract.indexOf("function ir("), contract.indexOf("const or=")), "ir");
+const hex = b => Buffer.from(b).toString("hex");
+const blob = b => ({hex: hex(b), wrapped_hex: hex(wrap(b)), crc32: crc32(wrap(b))});
+const lighting = [];
+for (const vibration of [false, true]) {
+  for (const mode of [0, 1, 2, 3, 4, 5]) {
+    let config = null;
+    if (mode === 1) config = {color: {r: 13, g: 87, b: 254}, brightness: 67};
+    if (mode === 2 || mode === 3) config = {brightness: 71, speed: 29,
+      colors: Array.from({length: mode === 2 ? 1 : 8}, (_, i) => ({r: i * 31, g: 255 - i * 19, b: i * 13}))};
+    if (mode === 4 || mode === 5) config = {brightness: 41, speed: 73};
+    const input = {version: 2, base: {mode, config}, vibration};
+    lighting.push({input, ...blob(codecs.lighting(input))});
+  }
+}
+const mapping = ["1.8", "1.9"].map(version => {
+  const input = {version, runtime_policies: {long_ms: 513, double_ms: 257},
+    layer_count: 1, layers: [{layer_id: 0, activator_mappings: [], macro_definitions: []}]};
+  return {version, ...blob(codecs.mapping(input))};
+});
+const globalData = new Uint8Array(80);
+globalData[3] = 15;
+for (const i of [4, 39, 40, 47, 52]) globalData[i] = 1;
+globalData.set(new TextEncoder().encode("Synthetic Apex 6"), 7);
+globalData[41] = 244; globalData[42] = 1; globalData[43] = 10;
+const globalExpected = globalDecode(globalData);
+delete globalExpected.rawBlob;
+const globalRam = new Uint8Array(82);
+globalRam[0] = 82; globalRam.set(globalData, 2);
+process.stdout.write(JSON.stringify({source: "Flydigi web Space Station 5.0.1.1; synthetic inputs",
+  sources: sources.map(([file, sha256]) => ({file, sha256})), lighting, mapping,
+  global: {hex: hex(globalRam), expected: globalExpected}}, null, 2) + "\n");

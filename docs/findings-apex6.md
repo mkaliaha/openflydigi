@@ -1,8 +1,9 @@
 # Apex 6 / Apex 6 Pro and xHaptics
 
 Research date: 2026-09-22. **Static analysis and offline encoder verification;
-no Apex 6/6 Pro hardware available.** Opt-in grip-waveform support and a USB
-DualSense audio/HID-rumble relay are implemented with a stateful emulator.
+no Apex 6/6 Pro hardware available.** Opt-in grip-waveform support, a USB
+DualSense audio/HID-rumble relay and read-only configuration snapshots are
+implemented with a stateful emulator.
 They are experimental and emulator-tested, not hardware-validated.
 
 The new haptics are explicitly present in Flydigi's shipping software. Support
@@ -356,7 +357,59 @@ privilege-drop ordering and final restoration. No kernel module, hardware or
 vendor binary is required for these tests.
 
 Adaptive-trigger translation, new motion reports, ordinary-game-audio synthesis
-and persistent profile/lighting codecs remain separate milestones. Bluetooth
+and configuration writing remain separate milestones. Bluetooth
 HID waveform transport is not implemented by this USB relay. Neither the uhid
 relay nor the GUI enables the Apex 6 route. No configuration/UI parity or
 hardware acceptance is implied.
+
+## Implemented read-only configuration snapshots
+
+`tools/flydigi-apex6 snapshot FILE` captures global RAM and the currently active
+slot's mapping, lighting and motor RAM. This is an active-state diagnostic
+snapshot, including unsaved changes, not a backup of all stored profiles.
+It requires a recognized Apex 6 SKU but does not require `hapticGrip`. It never
+selects another slot or sends configuration/write/save commands.
+
+Additional anchors in the pinned web bundles:
+
+| Bundle/function | Recovered behavior |
+|---|---|
+| core `ee` | A3 QUERY_RAM request `[1, ramId]`; response `[1, status, ramId, activeSlot, len:u16le, crc32:u32le]` |
+| core `_t`, `te` | A3 READ_CHUNK request `[0, ramId, index, 16]`; response `[0, status, ramId, activeSlot, total:u16le, index, count, data...]` |
+| core `Zt`, `Je`, `Jt`, `Qe` | RAM IDs 1=global, 4=mapping, 5=lighting, 6=motors |
+| core `vt` | A1 active slot, four slot CRC16s and global CRC16 |
+| core `Ct`, `qt`, `K` | Four-byte length/CRC16 envelope; CRC16-CCITT with initial FFFF; reflected IEEE CRC32 for RAM fingerprints |
+| core `tn`, contract `ir` | Global RAM payload at bytes 2–81, including name/settings offsets |
+| codec `Ne`, `be`, `ge`, `Te` | XMUL versions 8/9, slot header and runtime timing fields |
+| codec `Mn`, `$n`, `wn` | LGHT v2 header/data sums and off/solid/breathing/gradient/streaming/default modes |
+
+`Protocol.read_ram` validates every chunk's status and echoed fields, verifies
+the assembled CRC32, and compares before/after RAM fingerprints. It accepts a
+short or padded final chunk, trimming to the reported total length. Reads are
+limited to 4096 bytes per block: a 16-byte chunk and one-byte index cannot
+address more without wrapping. No unproven paging extension is used.
+
+`flydigi/gpa6_config.py` holds an advisory claim throughout capture, checks all
+four fingerprints again after reading them, compares A1 state and format
+versions, and verifies the full UUID. These checks detect observed changes;
+they do not make the firmware reads atomic or exclude third-party writers.
+The emulator's composition of the A1 CRC16s is a test assumption; the firmware's
+exact checksum coverage has not been recovered.
+
+Snapshots preserve each block's raw bytes and CRC32. Read-only inspectors add
+v22 global settings, XMUL v1.8/v1.9 **header metadata only**, LGHT v2 settings,
+and the known layout-2 grip entries. The remaining mappings, macros, TLVs and
+trigger entries stay opaque. Unknown layouts and failed inner-format checks
+produce a `decode_error` alongside the unmodified bytes. A verified transfer
+therefore does not imply that its contents are understood or safe to restore.
+Files are published atomically after capture and never replace an existing path.
+
+`tests/test_apex6_config.py` covers boundaries, numbered/compact replies,
+short/padded chunks, malformed echoes, corrupt data with valid packet checksums,
+timeouts, profile/UUID/configuration changes, contention and file publication.
+`tests/fixtures/apex6-config.json` contains synthetic inputs and outputs from the
+pinned vendor JavaScript: all six lighting modes, both vibration states,
+v1.8/v1.9 mapping headers, envelope checksums and global settings offsets.
+`node tools/gen-apex6-config-fixtures` regenerates it from SHA-256-checked raw
+research bundles without importing the Python implementation. Ordinary tests
+need neither Node nor the ignored vendor files.

@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Opt-in, emulator-tested Apex 6 / 6 Pro grip-waveform prototype."""
+"""Experimental Apex 6 / 6 Pro identity, read-only snapshots and grip output."""
 import argparse
 import json
 import math
@@ -16,7 +16,7 @@ import wave
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flydigi import device, gpa6, identity, registry, waveform
+from flydigi import device, gpa6, gpa6_config, identity, registry, waveform
 
 
 def open_selected(selector):
@@ -54,6 +54,8 @@ def main():
     parser.add_argument("--reconnect", action="store_true", help="resume only the same UUID after unplug/sleep")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("info", help="read identity, capabilities and format versions")
+    snapshot = sub.add_parser("snapshot", help="export active RAM to a new JSON file (no restore support)")
+    snapshot.add_argument("output", help="new snapshot file; existing files are never overwritten")
     tone = sub.add_parser("tone", help="play a quiet stereo test tone")
     tone.add_argument("--duration", type=float, default=2)
     tone.add_argument("--left", type=float, default=80, help="left frequency in Hz; 0 disables")
@@ -62,7 +64,7 @@ def main():
     play = sub.add_parser("play", help="play 48 kHz s16 PCM WAV; stereo or four-channel DualSense capture")
     play.add_argument("wav")
     args = parser.parse_args()
-    if args.command != "info" and not args.experimental:
+    if args.command in ("tone", "play") and not args.experimental:
         parser.error("grip output requires --experimental (emulator-tested, no hardware validation)")
     if args.command == "tone":
         values = (args.duration, args.left, args.right, args.amplitude)
@@ -73,6 +75,8 @@ def main():
     source = None
     ctrl = session = None
     try:
+        if args.command == "snapshot" and os.path.lexists(args.output):
+            raise FileExistsError(f"snapshot already exists: {args.output}")
         channels = 2
         if args.command == "play":
             source = wave.open(args.wav, "rb")
@@ -89,6 +93,16 @@ def main():
             print(json.dumps({"uid": uid, "info": protocol.info(),
                               "format_versions": protocol.versions(),
                               "experimental": True, "mock": device.is_mock(ctrl.path)}, indent=2))
+            return 0
+        if args.command == "snapshot":
+            data = gpa6_config.snapshot(ctrl, expected_uid=uid)
+            data["mock"] = device.is_mock(ctrl.path)
+            gpa6_config.write_snapshot(args.output, data)
+            print(f"Saved active slot {data['active_slot'] + 1} RAM to {args.output}"
+                  + (" [MOCK]" if data["mock"] else ""))
+            for name, block in data["blocks"].items():
+                if "decode_error" in block:
+                    print(f"{name}: raw bytes retained; {block['decode_error']}", file=sys.stderr)
             return 0
         print(f"{identity.name_for(protocol.info()['device_type'])}: experimental grip output; "
               f"UUID {uid}" + (" [MOCK]" if device.is_mock(ctrl.path) else ""), file=sys.stderr)

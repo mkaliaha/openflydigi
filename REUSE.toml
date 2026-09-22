@@ -32,9 +32,9 @@ precedence = "closest"
 SPDX-FileCopyrightText = "2026 Mikalai Kaliaha"
 SPDX-License-Identifier = "CC0-1.0"
 
-# Native input/output protocol fixtures contain no vendor implementation.
+# Native/web input/output protocol fixtures contain no vendor implementation.
 [[annotations]]
-path = "tests/fixtures/apex6-encoder.json"
+path = ["tests/fixtures/apex6-encoder.json", "tests/fixtures/apex6-config.json"]
 precedence = "closest"
 SPDX-FileCopyrightText = "2026 Mikalai Kaliaha"
 SPDX-License-Identifier = "CC0-1.0"

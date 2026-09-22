@@ -10,9 +10,11 @@ Frames require setup, and the trigger column is intentionally unsupported.
 No claim is made about actuator response, receiver timing or selector routing.
 """
 from collections import deque
+import binascii
 import contextlib
 import struct
 import threading
+import zlib
 
 from ..device import DeviceBusy
 from ..gpa6 import ReportLayout
@@ -37,6 +39,23 @@ class FakeApex6:
             mapping[0] = 2
             mapping[23:27] = bytes((1, 75, 1, 60))
             self.maps.append(mapping)
+        # Synthetic configuration data, not factory/vendor assets. Encoding
+        # here is deliberately independent of the production readers.
+        self.global_data = bytearray(82)
+        self.global_data[0:2] = struct.pack("<H", 82)
+        self.global_data[5:7] = bytes((10, 1))
+        self.global_data[9:18] = b"Mock Apex"
+        self.global_data[43:46] = struct.pack("<HB", 1000, 12)
+        self.configs = []
+        for _ in range(4):
+            mapping = (b"XMUL" + struct.pack("<I", 9) + b"\x01\0\0\0"
+                       + struct.pack("<HHI", 500, 250, 0)
+                       + bytes((0, 0, 0, 0, 1, 0, 0, 0)) + bytes(12))
+            header = b"LGHT" + struct.pack("<HI", 2, 2)
+            lighting = header + struct.pack("<H", sum(header)) + bytes(4)
+            def wrap(data):
+                return struct.pack("<HH", len(data) + 4, binascii.crc_hqx(data, 0xffff)) + data
+            self.configs.append({4: wrap(mapping), 5: wrap(lighting)})
         self.runtime = {0x10: (1, b"\x4b"), 0x11: (1, b"\x3c")}
         self.history = deque(maxlen=256)
         self.frames = deque(maxlen=256)
@@ -69,6 +88,21 @@ class FakeApex6:
         self.runtime = {target: (mapping[offset], bytes(mapping[offset + 1:offset + 2])
                                 if mapping[offset] else b"")
                         for target, offset in ((16, 23), (17, 25))}
+
+    def ram(self, ram_id):
+        if ram_id == 1:
+            return bytes(self.global_data)
+        if ram_id == 6:
+            return bytes(self.maps[self.slot])
+        return bytes(self.configs[self.slot][ram_id])
+
+    def config_state(self):
+        # Fingerprint composition is an emulator assumption. The protocol
+        # exposes these CRC16s without specifying their firmware coverage.
+        crcs = [binascii.crc_hqx(self.configs[slot][4] + self.configs[slot][5]
+                               + self.maps[slot], 0xffff) for slot in range(4)]
+        return struct.pack("<B5H", self.slot, *crcs,
+                           binascii.crc_hqx(self.global_data, 0xffff))
 
     def _reply(self, command, payload, v21=False):
         report = bytearray(32)
@@ -122,15 +156,24 @@ class FakeApex6:
             elif command == 7:
                 reply = self._reply(command, struct.pack("<3H", *self.versions))
             elif command == 0xa1:
-                reply = self._reply(command, bytes([self.slot]) + bytes(10))
+                reply = self._reply(command, self.config_state())
             elif command == 0xa3:
-                if len(payload) != 4 or payload[:2] != b"\x00\x06" or payload[3] != 16:
-                    raise ValueError("only RAM 6 chunk reads are emulated")
-                index = payload[2]
-                if index > 3:
-                    raise ValueError("invalid motor map chunk")
-                reply = self._reply(command, bytes((0, 0, 6, self.slot, 64, 0, index, 16))
-                                    + self.maps[self.slot][index * 16:(index + 1) * 16], v21=True)
+                if len(payload) < 2 or payload[1] not in (1, 4, 5, 6):
+                    raise ValueError("unsupported RAM read")
+                operation, ram_id = payload[:2]
+                data = self.ram(ram_id)
+                if operation == 1 and len(payload) == 2:
+                    reply = self._reply(command, struct.pack("<4BHI", 1, 0, ram_id,
+                                        self.slot, len(data), zlib.crc32(data)), v21=True)
+                elif operation == 0 and len(payload) == 4 and payload[3] == 16:
+                    index = payload[2]
+                    chunk = data[index * 16:(index + 1) * 16]
+                    if not chunk:
+                        raise ValueError("invalid RAM chunk index")
+                    reply = self._reply(command, struct.pack("<4BH2B", 0, 0, ram_id,
+                                        self.slot, len(data), index, len(chunk)) + chunk, v21=True)
+                else:
+                    raise ValueError("unsupported RAM read operation")
             elif command == 0x53:
                 valid = (len(payload) >= 3 and payload[0] == 1
                          and payload[1] in (16, 17, 18))

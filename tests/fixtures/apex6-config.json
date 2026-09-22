@@ -1,0 +1,339 @@
+{
+  "source": "Flydigi web Space Station 5.0.1.1; synthetic inputs",
+  "sources": [
+    {
+      "file": "vendor-gpa6-core-D5jdJfEw.js",
+      "sha256": "c8855e137009540959dda393b4c3c199b036fd970347dba36f67fc3de6532dab"
+    },
+    {
+      "file": "vendor-gpa6-codec-C4fNnifj.js",
+      "sha256": "6dc78eef4ffbd7f8ba7a878c0116b2f3a8c7d9a5c8c8388dc01c3246f30737de"
+    },
+    {
+      "file": "vendor-gpa6-contract-BEtt2INU.js",
+      "sha256": "6fff76494840914be89f2bb20be53b5a9f4f1a9862a54358bc933b94357b2107"
+    }
+  ],
+  "lighting": [
+    {
+      "input": {
+        "version": 2,
+        "base": {
+          "mode": 0,
+          "config": null
+        },
+        "vibration": false
+      },
+      "hex": "4c474854020002000000330100000000",
+      "wrapped_hex": "1400ab3f4c474854020002000000330100000000",
+      "crc32": 1682020632
+    },
+    {
+      "input": {
+        "version": 2,
+        "base": {
+          "mode": 1,
+          "config": {
+            "color": {
+              "r": 13,
+              "g": 87,
+              "b": 254
+            },
+            "brightness": 67
+          }
+        },
+        "vibration": false
+      },
+      "hex": "4c4748540200060000003701010d57fe4300a601",
+      "wrapped_hex": "1800b1524c4748540200060000003701010d57fe4300a601",
+      "crc32": 4140784938
+    },
+    {
+      "input": {
+        "version": 2,
+        "base": {
+          "mode": 2,
+          "config": {
+            "brightness": 71,
+            "speed": 29,
+            "colors": [
+              {
+                "r": 0,
+                "g": 255,
+                "b": 0
+              }
+            ]
+          }
+        },
+        "vibration": false
+      },
+      "hex": "4c474854020008000000390102471d0100ff00006601",
+      "wrapped_hex": "1a00f1684c474854020008000000390102471d0100ff00006601",
+      "crc32": 3420406461
+    },
+    {
+      "input": {
+        "version": 2,
+        "base": {
+          "mode": 3,
+          "config": {
+            "brightness": 71,
+            "speed": 29,
+            "colors": [
+              {
+                "r": 0,
+                "g": 255,
+                "b": 0
+              },
+              {
+                "r": 31,
+                "g": 236,
+                "b": 13
+              },
+              {
+                "r": 62,
+                "g": 217,
+                "b": 26
+              },
+              {
+                "r": 93,
+                "g": 198,
+                "b": 39
+              },
+              {
+                "r": 124,
+                "g": 179,
+                "b": 52
+              },
+              {
+                "r": 155,
+                "g": 160,
+                "b": 65
+              },
+              {
+                "r": 186,
+                "g": 141,
+                "b": 78
+              },
+              {
+                "r": 217,
+                "g": 122,
+                "b": 91
+              }
+            ]
+          }
+        },
+        "vibration": false
+      },
+      "hex": "4c47485402001d0000004e0103471d0800ff001fec0d3ed91a5dc6277cb3349ba041ba8d4ed97a5b00230b",
+      "wrapped_hex": "2f0018774c47485402001d0000004e0103471d0800ff001fec0d3ed91a5dc6277cb3349ba041ba8d4ed97a5b00230b",
+      "crc32": 2881332772
+    },
+    {
+      "input": {
+        "version": 2,
+        "base": {
+          "mode": 4,
+          "config": {
+            "brightness": 41,
+            "speed": 73
+          }
+        },
+        "vibration": false
+      },
+      "hex": "4c4748540200040000003501042949007600",
+      "wrapped_hex": "1600a2034c4748540200040000003501042949007600",
+      "crc32": 2828654281
+    },
+    {
+      "input": {
+        "version": 2,
+        "base": {
+          "mode": 5,
+          "config": {
+            "brightness": 41,
+            "speed": 73
+          }
+        },
+        "vibration": false
+      },
+      "hex": "4c4748540200040000003501052949007700",
+      "wrapped_hex": "160033754c4748540200040000003501052949007700",
+      "crc32": 1906069063
+    },
+    {
+      "input": {
+        "version": 2,
+        "base": {
+          "mode": 0,
+          "config": null
+        },
+        "vibration": true
+      },
+      "hex": "4c474854020002000000330100010100",
+      "wrapped_hex": "1400aa3b4c474854020002000000330100010100",
+      "crc32": 3770831680
+    },
+    {
+      "input": {
+        "version": 2,
+        "base": {
+          "mode": 1,
+          "config": {
+            "color": {
+              "r": 13,
+              "g": 87,
+              "b": 254
+            },
+            "brightness": 67
+          }
+        },
+        "vibration": true
+      },
+      "hex": "4c4748540200060000003701010d57fe4301a701",
+      "wrapped_hex": "1800b0564c4748540200060000003701010d57fe4301a701",
+      "crc32": 3955713575
+    },
+    {
+      "input": {
+        "version": 2,
+        "base": {
+          "mode": 2,
+          "config": {
+            "brightness": 71,
+            "speed": 29,
+            "colors": [
+              {
+                "r": 0,
+                "g": 255,
+                "b": 0
+              }
+            ]
+          }
+        },
+        "vibration": true
+      },
+      "hex": "4c474854020008000000390102471d0100ff00016701",
+      "wrapped_hex": "1a00f06c4c474854020008000000390102471d0100ff00016701",
+      "crc32": 1384111487
+    },
+    {
+      "input": {
+        "version": 2,
+        "base": {
+          "mode": 3,
+          "config": {
+            "brightness": 71,
+            "speed": 29,
+            "colors": [
+              {
+                "r": 0,
+                "g": 255,
+                "b": 0
+              },
+              {
+                "r": 31,
+                "g": 236,
+                "b": 13
+              },
+              {
+                "r": 62,
+                "g": 217,
+                "b": 26
+              },
+              {
+                "r": 93,
+                "g": 198,
+                "b": 39
+              },
+              {
+                "r": 124,
+                "g": 179,
+                "b": 52
+              },
+              {
+                "r": 155,
+                "g": 160,
+                "b": 65
+              },
+              {
+                "r": 186,
+                "g": 141,
+                "b": 78
+              },
+              {
+                "r": 217,
+                "g": 122,
+                "b": 91
+              }
+            ]
+          }
+        },
+        "vibration": true
+      },
+      "hex": "4c47485402001d0000004e0103471d0800ff001fec0d3ed91a5dc6277cb3349ba041ba8d4ed97a5b01240b",
+      "wrapped_hex": "2f00bfd94c47485402001d0000004e0103471d0800ff001fec0d3ed91a5dc6277cb3349ba041ba8d4ed97a5b01240b",
+      "crc32": 2719147736
+    },
+    {
+      "input": {
+        "version": 2,
+        "base": {
+          "mode": 4,
+          "config": {
+            "brightness": 41,
+            "speed": 73
+          }
+        },
+        "vibration": true
+      },
+      "hex": "4c4748540200040000003501042949017700",
+      "wrapped_hex": "1600a3074c4748540200040000003501042949017700",
+      "crc32": 1011858203
+    },
+    {
+      "input": {
+        "version": 2,
+        "base": {
+          "mode": 5,
+          "config": {
+            "brightness": 41,
+            "speed": 73
+          }
+        },
+        "vibration": true
+      },
+      "hex": "4c4748540200040000003501052949017800",
+      "wrapped_hex": "16003d524c4748540200040000003501052949017800",
+      "crc32": 2189725319
+    }
+  ],
+  "mapping": [
+    {
+      "version": "1.8",
+      "hex": "584d554c080000000100000001020101000000000000000001000000000000000000000000000000",
+      "wrapped_hex": "2c002ae2584d554c080000000100000001020101000000000000000001000000000000000000000000000000",
+      "crc32": 4256949653
+    },
+    {
+      "version": "1.9",
+      "hex": "584d554c090000000100000001020101000000000000000001000000000000000000000000000000",
+      "wrapped_hex": "2c006bcb584d554c090000000100000001020101000000000000000001000000000000000000000000000000",
+      "crc32": 4121324747
+    }
+  ],
+  "global": {
+    "hex": "52000000000f01000053796e74686574696320417065782036000000000000000000000000000000000101f4010a000000010000000001000000000000000000000000000000000000000000000000000000",
+    "expected": {
+      "displayName": "Synthetic Apex 6",
+      "enableQuickSwitch": true,
+      "enableJsCenterAutoAdjust": true,
+      "enableLocalMap": true,
+      "allowThirdparty": true,
+      "enableXinputHome": true,
+      "sleepTime": 15,
+      "usbReturnRateHz": 500,
+      "jsResolution": 10
+    }
+  }
+}

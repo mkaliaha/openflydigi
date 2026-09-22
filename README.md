@@ -16,7 +16,7 @@ application adds PySide6, Qt, Kirigami, and Kirigami Addons.
 |---|---|---|---|
 | Flydigi Apex 5 | Hardware-validated | All controller features, adaptive triggers, display, game routes, and both virtual-DualSense relays | Display uploads require a wired connection. Steam Input must be disabled for virtual-DualSense games. |
 | Flydigi Vader 5 Pro | Experimental, partially implemented | Identity, profiles, buttons, sticks, gyro, vibration, lighting, settings, the v3.2 macro-store implementation, and a derived factory profile | No Vader 5 has been tested. It has trigger motors rather than force triggers and has no display. The trigger-motor editor is not built. The v3.2 macro store is unverified on hardware. The DualSense relay, evdev discovery, permissions, and SDL ignore identifier are not validated end to end. |
-| Flydigi Apex 6 / Apex 6 Pro | Experimental, emulator-tested | SKU/UUID/capability discovery, standalone grip waveforms, opt-in USB DualSense input, stereo haptic audio and synthesized HID rumble | Requires reported `hapticGrip` and Xbox-style evdev input for the relay. No hardware validation. Profiles, GUI editing, adaptive-trigger translation and motion remain unavailable. |
+| Flydigi Apex 6 / Apex 6 Pro | Experimental, emulator-tested | SKU/UUID/capability discovery, read-only active-RAM snapshots, standalone grip waveforms, opt-in USB DualSense input, stereo haptic audio and synthesized HID rumble | Requires reported `hapticGrip` and Xbox-style evdev input for the relay. No hardware validation. Profile writes/restore, GUI editing, adaptive-trigger translation and motion remain unavailable. |
 | Flydigi CD2 charging dock | Hardware-validated with one noted gap | Identity, four settings, eight generated lighting effects, and picture/GIF sampling onto 162 LEDs; nickname read/write is implemented | Nickname writing is not hardware-verified. The dock is a separate USB device and uses its own selector. |
 | Other Flydigi controllers and accessories | Not driven | Devices may be discovered and identified when they use the current transport | Normal configuration commands, including nickname writes, refuse unsupported models. Developer bench tools explicitly documented as ungated can send raw commands. |
 
@@ -333,6 +333,7 @@ single firmware mode byte. Uploads therefore take several seconds.
 | `tools/flydigi-ds5` | Virtual DualSense over uhid |
 | `tools/flydigi-ds5-usbip` | Virtual USB DualSense with optional haptic audio |
 | `tools/flydigi-haptics` | Apex-specific bridge from a real DualSense audio sink to grip motors |
+| `tools/flydigi-apex6` | Experimental Apex 6 identity, read-only configuration snapshots and grip-waveform playback |
 | `tools/flydigi_cmd.py` | Ungated manual vendor-command bench tool; raw node selection only |
 
 Developer generators, simulators, and hardware probes also live under `tools/`.
@@ -366,7 +367,7 @@ metadata, not a complete installable-package definition. Its file list is also
 incomplete and must be synchronized with the current models, pages, components,
 and `gui/i18n.py` before relying on `pyside6-project build` or its static checks.
 
-## Experimental Apex 6 / Apex 6 Pro grip haptics
+## Experimental Apex 6 / Apex 6 Pro
 
 The Apex 6 implementation is **experimental, emulator-tested**. It uses the
 new GPA6 transport and the reported `hapticGrip` flag; the SKU name alone never
@@ -377,6 +378,7 @@ Try it without hardware:
 
 ~~~bash
 FLYDIGI_MOCK_BUS=pad:k6 tools/flydigi-apex6 --device mock:pad0 info
+FLYDIGI_MOCK_BUS=pad:k6 tools/flydigi-apex6 --device mock:pad0 snapshot apex6-mock.json
 FLYDIGI_MOCK_BUS=pad:k6 tools/flydigi-apex6 --device mock:pad0 --experimental tone --duration 2
 ~~~
 
@@ -385,9 +387,23 @@ For a physical pad, list devices first, then select its UUID:
 ~~~bash
 tools/flydigi-devices list
 tools/flydigi-apex6 --device uid:YOUR_UUID info
+tools/flydigi-apex6 --device uid:YOUR_UUID snapshot apex6-active.json
 tools/flydigi-apex6 --device uid:YOUR_UUID --experimental tone --left 80 --right 120
 tools/flydigi-apex6 --device uid:YOUR_UUID --experimental play haptics.wav
 ~~~
+
+`snapshot` reads global settings and the active slot's mapping, lighting and
+motor RAM into a new JSON file. It works with rotary and linear grips and needs
+no output opt-in. It verifies transfer lengths, checksums, UUID and configuration
+fingerprints, then publishes the complete file without overwriting an existing
+path. Another session holding the controller claim prevents the read.
+
+The snapshot retains every raw byte, with decoded global settings, XMUL v1.8/v1.9
+headers, LGHT v2 lighting and known grip modes where available. Unknown formats
+are retained with a `decode_error`. This captures **active RAM**, including any
+unsaved changes; it does not switch slots, read all flash profiles, or support
+restoration. Blocks above 4096 bytes are refused because chunk indices are one
+byte. Changes detected during capture abort without creating an output file.
 
 `play` accepts 48 kHz signed 16-bit PCM WAV: two channels for left/right grips,
 or four channels from a DualSense capture (only channels 2/3 are used). Output
