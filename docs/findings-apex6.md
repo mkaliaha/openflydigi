@@ -1,9 +1,9 @@
 # Apex 6 / Apex 6 Pro and xHaptics
 
 Research date: 2026-09-22. **Static analysis and offline encoder verification;
-no Apex 6/6 Pro hardware available.** The first runtime milestone is now
-implemented as opt-in grip-waveform support with a stateful emulator. It is
-experimental and emulator-tested, not hardware-validated.
+no Apex 6/6 Pro hardware available.** Opt-in grip-waveform support and a USB
+DualSense audio/HID-rumble relay are implemented with a stateful emulator.
+They are experimental and emulator-tested, not hardware-validated.
 
 The new haptics are explicitly present in Flydigi's shipping software. Support
 looks feasible, including a route from our virtual DualSense audio to linear
@@ -267,8 +267,8 @@ pacing and session cleanup; `flydigi/mock/apex6.py` models the device.
 The registry names all three SKUs and preserves the entire 16-byte UUID.
 `identity.SUPPORTED` deliberately continues to describe legacy configuration
 support (`k5`, `f5`), keeping the GUI, daemon and older relays off the new dialect.
-The `37d7:2502` permission rule is included; SDL launch options are unchanged
-because no Apex 6 virtual-controller route is enabled yet.
+The `37d7:2502` permission rule is included. The experimental USB relay prints
+SDL launch options including `37d7:2502`; default GUI/legacy options are unchanged.
 
 Descriptor parsing selects the vendor output report ID and byte count, accepts
 32–64 byte outputs and rejects ambiguous or smaller layouts. Hidraw writes
@@ -321,6 +321,42 @@ Regeneration requires the ignored research directory and its optional research
 dependencies. Only input/output protocol facts, not vendor implementation or
 assets, are stored in the fixture.
 
-Live DualSense relay integration, new input/motion reports, trigger translation,
-ordinary-game-audio synthesis and persistent profile/lighting codecs are still
-separate milestones. The first milestone does not imply configuration/UI parity.
+## Implemented USB DualSense integration
+
+`flydigi/ds5_apex6.py` connects the existing virtual USB DualSense to the grip
+backend, enabled only by `tools/flydigi-ds5-usbip --experimental-apex6 --device
+SELECTOR`. `--motors` enables game haptic audio; HID rumble remains independent.
+This uses the existing evdev Xbox-layout mapping, gated on the required axes,
+and resolves input under the selected vendor node's USB root. It does not claim
+to decode new vendor input or motion reports. Physical input layouts remain
+unverified. Both input and feedback are pinned to the full UUID on reconnect.
+
+The output worker owns its HID handle and claim from setup through restoration.
+USB callbacks enqueue PCM with arrival timestamps into a 40 ms inbox, respecting
+isochronous packet offsets and substituting silence for failed packets. The
+worker consumes every fresh block in order; overflow or stale data resets
+queued samples and filter history. The existing session independently bounds
+the filtered queue and checks sample age after blocking identity reads. These
+are software queue bounds, not a measured end-to-end hardware latency guarantee.
+
+HID rumble intensities synthesize left/right 80/160 Hz tones at maximum amplitude
+0.35 and mix additively with the audio before clipping. Those frequencies and
+gain are our approximation, not recovered vendor behavior. Zero rumble updates
+stop that source; audio underruns do not clear HID levels. Disconnects, profile
+changes and reconnects discard both sources' previous state. A single worker
+performs setup, output and cleanup, while USB enumeration/input serving continues
+independently. A physical-pad disconnect releases buttons and axes without
+detaching the virtual USB controller.
+
+`tests/test_ds5_apex6.py` exercises the actual DualSense endpoint callbacks,
+stereo continuity, simultaneous sources, packet offsets, queue overflow,
+underruns, malformed input, worker ownership, UUID replacement, lost replies
+during setup/streaming/cleanup, profile changes, runtime disconnect/reconnect,
+privilege-drop ordering and final restoration. No kernel module, hardware or
+vendor binary is required for these tests.
+
+Adaptive-trigger translation, new motion reports, ordinary-game-audio synthesis
+and persistent profile/lighting codecs remain separate milestones. Bluetooth
+HID waveform transport is not implemented by this USB relay. Neither the uhid
+relay nor the GUI enables the Apex 6 route. No configuration/UI parity or
+hardware acceptance is implied.

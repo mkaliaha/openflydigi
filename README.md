@@ -16,7 +16,7 @@ application adds PySide6, Qt, Kirigami, and Kirigami Addons.
 |---|---|---|---|
 | Flydigi Apex 5 | Hardware-validated | All controller features, adaptive triggers, display, game routes, and both virtual-DualSense relays | Display uploads require a wired connection. Steam Input must be disabled for virtual-DualSense games. |
 | Flydigi Vader 5 Pro | Experimental, partially implemented | Identity, profiles, buttons, sticks, gyro, vibration, lighting, settings, the v3.2 macro-store implementation, and a derived factory profile | No Vader 5 has been tested. It has trigger motors rather than force triggers and has no display. The trigger-motor editor is not built. The v3.2 macro store is unverified on hardware. The DualSense relay, evdev discovery, permissions, and SDL ignore identifier are not validated end to end. |
-| Flydigi Apex 6 / Apex 6 Pro | Experimental, emulator-tested | SKU/UUID/capability discovery and opt-in stereo grip waveforms through `tools/flydigi-apex6` | Requires reported `hapticGrip`. No hardware validation. Profiles, GUI editing, trigger translation, input/motion and live DualSense integration remain unavailable. |
+| Flydigi Apex 6 / Apex 6 Pro | Experimental, emulator-tested | SKU/UUID/capability discovery, standalone grip waveforms, opt-in USB DualSense input, stereo haptic audio and synthesized HID rumble | Requires reported `hapticGrip` and Xbox-style evdev input for the relay. No hardware validation. Profiles, GUI editing, adaptive-trigger translation and motion remain unavailable. |
 | Flydigi CD2 charging dock | Hardware-validated with one noted gap | Identity, four settings, eight generated lighting effects, and picture/GIF sampling onto 162 LEDs; nickname read/write is implemented | Nickname writing is not hardware-verified. The dock is a separate USB device and uses its own selector. |
 | Other Flydigi controllers and accessories | Not driven | Devices may be discovered and identified when they use the current transport | Normal configuration commands, including nickname writes, refuse unsupported models. Developer bench tools explicitly documented as ungated can send raw commands. |
 
@@ -368,7 +368,7 @@ and `gui/i18n.py` before relying on `pyside6-project build` or its static checks
 
 ## Experimental Apex 6 / Apex 6 Pro grip haptics
 
-The first Apex 6 milestone is **experimental, emulator-tested**. It uses the
+The Apex 6 implementation is **experimental, emulator-tested**. It uses the
 new GPA6 transport and the reported `hapticGrip` flag; the SKU name alone never
 enables linear grips. Apex 6, Apex 6 Pro and Pro Phantom Blade Zero are named
 separately. Unknown HID layouts and motor-map layouts are refused.
@@ -394,8 +394,6 @@ or four channels from a DualSense capture (only channels 2/3 are used). Output
 preserves stereo, filters before resampling to 1 kHz, and sends eight samples
 per packet. The queue holds at most 40 ms; scheduler stalls discard stale
 samples and underruns emit neutral samples. The filter adds 8 ms of delay.
-This is a standalone waveform prototype; the existing DualSense relays still
-use the Apex 5/Vader path and refuse Apex 6.
 
 The tool holds an exclusive session claim, saves the active motor map, and
 sends neutral/disable commands and restores the grips on exit, including
@@ -406,9 +404,42 @@ motor map again. A profile change stops output unless reconnect is enabled;
 cleanup uses the new profile's map. Do not infer physical motor behavior or
 USB/receiver timing from the emulator.
 
+The USB DualSense relay also has an explicit Apex 6 route:
+
+~~~bash
+sudo tools/flydigi-ds5-usbip --experimental-apex6 --device uid:YOUR_UUID --motors --haptics --gain 1
+~~~
+
+Use XInput mode; the selected device must expose Xbox-style evdev axes. Both
+input and output are pinned to its full UUID, and input must belong to the same
+USB device. The relay drops root after attaching the virtual USB controller.
+Disable Steam Input for the game and use these launch options:
+
+~~~text
+SDL_GAMECONTROLLER_IGNORE_DEVICES=0x37d7/0x2501,0x37d7/0x2502 SDL_JOYSTICK_IGNORE_DEVICES=0x37d7/0x2501,0x37d7/0x2502 %command%
+~~~
+
+The relay preserves fresh PCM blocks on channels 2/3 and streams them through
+the stereo filter. `--motors` enables this audio source; `--gain` controls its
+amplitude (0–4). HID rumble works independently: left/right intensities produce
+80/160 Hz grip tones with maximum amplitude 0.35, added to the audio and clipped
+to the motor range. This is an approximate application-defined rumble conversion,
+not a reproduction of the original motors. Legacy `--crossover`, `--gate` and
+`--curve` controls do not apply to this route.
+
+The worker bounds incoming PCM to 40 ms, discards stale samples, and resets its
+filter after overflow. Disconnects release input while keeping the virtual
+DualSense attached. Reconnect and profile changes reopen the same UUID, reread
+the motor map, and discard feedback from the previous session. Motor output,
+setup and restoration run on their own thread. Trigger reports are counted but
+not translated; motion remains disabled. The uhid relay and GUI DualSense
+switch do not enable this experimental route.
+
 Legacy profile, settings, nickname, lighting and screen writes remain refused.
-Full configuration codecs, trigger translation, and live DualSense input/audio
-integration are later milestones. Protocol evidence, emulator assumptions and
+Full configuration codecs, trigger translation, motion, and ordinary-game-audio
+synthesis are later milestones. Actual input layouts, firmware acceptance,
+actuator response and USB/receiver timing still require hardware validation.
+Protocol evidence, emulator assumptions and
 fixture reproduction are in [the Apex 6 findings](docs/findings-apex6.md).
 
 ## Tests

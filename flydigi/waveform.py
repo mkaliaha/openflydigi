@@ -105,7 +105,14 @@ class GripSession:
         self.ctrl._grip_session = self
         self._claim = claim
         try:
-            identity.require(self.ctrl, "k6")
+            try:
+                identity.require(self.ctrl, "k6")
+            except identity.WrongDevice as exc:
+                # The shared identity API wraps unanswered reads too. A grip
+                # session must distinguish those from a real model mismatch.
+                if isinstance(exc.__cause__, gpa6.ReplyTimeout):
+                    raise gpa6.ReplyTimeout(str(exc)) from exc
+                raise
             self.info = self.protocol.info()
             if not self.info["haptic_grip"]:
                 raise identity.WrongDevice("this Apex 6 reports rotary grips, not hapticGrip")
@@ -128,10 +135,7 @@ class GripSession:
             self.next_check = self.next_packet
             return self
         except BaseException as exc:
-            try:
-                self.stop()
-            except Exception as cleanup:
-                raise gpa6.ProtocolError(f"{exc}; cleanup failed: {cleanup}") from exc
+            self._stop_after_error(exc)
             raise
 
     def __enter__(self):
@@ -196,20 +200,27 @@ class GripSession:
                 left.append(l)
                 right.append(r)
             self.underruns += SAMPLES - len(left)
-            self.ctrl.send(self.protocol.layout.wrap(gpa6.waveform(left=left, right=right)), wait=0)
+            self._write_samples(left, right, now)
             self.sent += 1
             self.next_packet += (missed + 1) * PERIOD
             return True
         except BaseException as exc:
-            try:
-                self.stop()
-            except Exception as cleanup:
-                if isinstance(exc, gpa6.ReplyTimeout) and isinstance(cleanup, (OSError, gpa6.ReplyTimeout)):
-                    raise gpa6.ReplyTimeout(f"{exc}; cleanup failed: {cleanup}") from exc
-                if isinstance(exc, OSError) and isinstance(cleanup, (OSError, gpa6.ReplyTimeout)):
-                    raise exc from cleanup
-                raise gpa6.ProtocolError(f"{exc}; cleanup failed: {cleanup}") from exc
+            self._stop_after_error(exc)
             raise
+
+    def _stop_after_error(self, exc):
+        try:
+            self.stop()
+        except Exception as cleanup:
+            if isinstance(cleanup, (OSError, gpa6.ReplyTimeout)):
+                if isinstance(exc, (gpa6.ReplyTimeout, ProfileChanged)):
+                    raise type(exc)(f"{exc}; cleanup failed: {cleanup}") from exc
+                if isinstance(exc, OSError):
+                    raise exc from cleanup
+            raise gpa6.ProtocolError(f"{exc}; cleanup failed: {cleanup}") from exc
+
+    def _write_samples(self, left, right, now):
+        self.ctrl.send(self.protocol.layout.wrap(gpa6.waveform(left=left, right=right)), wait=0)
 
     def stop(self):
         self.active = False
@@ -228,11 +239,11 @@ class GripSession:
                     try:
                         self.ctrl.send(self.protocol.layout.wrap(frame), wait=0)
                     except Exception as exc:
-                        errors.append(str(exc))
+                        errors.append(exc)
                 try:
                     self.protocol.mode(0x12, 0)
                 except Exception as exc:
-                    errors.append(str(exc))
+                    errors.append(exc)
                 # Slot changes may happen through the pad itself even though
                 # our tools are excluded by the session claim.
                 mapping = self.saved
@@ -242,11 +253,19 @@ class GripSession:
                     try:
                         self.protocol.mode(target, mode, params)
                     except Exception as exc:
-                        errors.append(str(exc))
+                        errors.append(exc)
+        except Exception as exc:
+            if not errors:
+                raise
+            # A later failed query must not hide an earlier malformed reply.
+            errors.append(exc)
         finally:
             self.dirty = False
             claim, self._claim = self._claim, None
             self.ctrl._grip_session = None
             claim.__exit__(None, None, None)
         if errors:
-            raise gpa6.ProtocolError("grip cleanup incomplete: " + "; ".join(errors))
+            error_type = gpa6.ProtocolError
+            if all(isinstance(exc, (OSError, gpa6.ReplyTimeout)) for exc in errors):
+                error_type = gpa6.ReplyTimeout if isinstance(errors[0], gpa6.ReplyTimeout) else OSError
+            raise error_type("grip cleanup incomplete: " + "; ".join(map(str, errors))) from errors[0]

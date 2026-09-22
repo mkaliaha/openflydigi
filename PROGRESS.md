@@ -25,7 +25,7 @@ Detailed evidence lives in [PROTOCOL.md](PROTOCOL.md) and
 |---|---|---|
 | Flydigi Apex 5 | Hardware-validated | Reference controller. Profiles, mappings, macros, sticks, gyro-to-stick, vibration, adaptive triggers, lighting, settings, display, game routes, and virtual-DualSense relays are implemented. |
 | Flydigi Vader 5 Pro | Experimental and partial | Identity, capability gating, profiles, mappings, sticks, gyro, vibration, lighting, settings, v3.2 macro-store handling, and a derived factory profile are implemented. No Vader 5 hardware has been tested. |
-| Flydigi Apex 6 / Apex 6 Pro | Experimental, emulator-tested | New transport, SKU/UUID/capability discovery, standalone stereo grip waveforms, stateful emulator and cleanup/reconnect tests. Requires explicit opt-in and `hapticGrip`; legacy configuration and DualSense relays remain refused. See [findings](docs/findings-apex6.md). |
+| Flydigi Apex 6 / Apex 6 Pro | Experimental, emulator-tested | New transport, SKU/UUID/capability discovery, standalone waveforms and opt-in USB DualSense input, stereo audio and synthesized HID rumble. UUID-bound reconnect, profile-change restoration and bounded buffering are simulated. Requires `hapticGrip` and Xbox-style evdev input; configuration, adaptive triggers, motion, uhid and GUI integration remain unavailable. See [findings](docs/findings-apex6.md). |
 | Flydigi CD2 dock | Hardware-validated with one noted gap | Device identity, four settings, generated lighting, and picture/GIF sampling are hardware-validated. Nickname read/write is implemented, but nickname writing is not hardware-verified. |
 | Other Flydigi hardware | Unsupported | It may be discovered by the shared transport. Normal configuration commands refuse unsupported models; explicitly ungated developer bench tools are outside that guarantee. |
 
@@ -134,13 +134,13 @@ Qt-dependent Python scripts.
 
 Current inventory:
 
-- 19 backend `tests/test_*.py` scripts;
+- 20 backend `tests/test_*.py` scripts;
 - 3 Qt-dependent Python scripts: `test_models.py`, `test_shell.py`, and
   `test_qml.py`;
 - 13 QML cases under `tests/qml/tst_*.qml`.
 
 Run the [discovered backend set](README.md#tests) rather than maintaining a
-hand-written filename list. All 19 backend scripts are hardware-free. The
+hand-written filename list. All 20 backend scripts are hardware-free. The
 documented loop continues after failures and returns nonzero if any script
 fails.
 
@@ -164,7 +164,7 @@ See [gui/README.md](gui/README.md) for distribution-specific Qt setup.
 |---|---|---|
 | P0 | Complete CLI v3.2 backup/restore | `flydigi-mapping backup` uses packed profile + macro-store data and remains compatible with legacy raw files |
 | P0 | Resolve selector gaps in Apex-specific tools | `flydigi-haptics` and `flydigi-run` find the first compatible Apex rather than failing when a Vader sorts first; probes either select explicitly or document their exact gate |
-| P1 | Extend experimental Apex 6 support | Live DualSense stereo streaming and lifecycle integration, separately recovered input/motion and trigger translation; new persistent codecs before configuration/UI parity |
+| P1 | Extend experimental Apex 6 support | Validate USB DualSense input/audio/rumble on hardware; recover motion and trigger translation, ordinary-game-audio synthesis, and new persistent codecs before configuration/UI parity |
 | P1 | Validate Vader 5 on hardware | Identity, permissions, profile/settings I/O, macros, factory restore, lighting, motion, rumble, and reconnect paths have recorded results |
 | P1 | Generalize and validate Vader DualSense mode | Real evdev discovery, model-specific ignore ID, udev access, input, gyro, rumble, and haptic audio pass end to end |
 | P1 | Add the Vader trigger-motor page | Editor matches the stored block and has hardware verification, including live-rumble interaction |

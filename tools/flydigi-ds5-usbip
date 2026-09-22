@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Present the Apex 5 as a DualSense that is a real USB device.
+"""Present a Flydigi pad as a DualSense that is a real USB device.
 
     Apex 5 ──evdev──► relay ──► virtual DualSense (usbip + vhci) ──► game
                         ▲                    │            │
@@ -154,7 +154,10 @@ def main():
     ap.add_argument("--haptics", action="store_true",
                     help="analyse the haptic stream and report peaks per channel")
     ap.add_argument("--motors", action="store_true",
-                    help="drive the Apex 5's motors from the haptic stream")
+                    help="drive the controller's grip motors from the haptic stream")
+    ap.add_argument("--experimental-apex6", action="store_true",
+                    help="opt into Apex 6/6 Pro linear grips: USB audio and HID rumble; "
+                         "requires --device; no adaptive triggers or motion")
     ap.add_argument("--gain", type=float, default=1.5)
     ap.add_argument("--crossover", type=float, default=250.0)
     ap.add_argument("--gate", type=float, default=haptics_dsp.GATE)
@@ -167,6 +170,13 @@ def main():
                     help="read our own virtual pad back from evdev, to prove "
                          "input reaches the OS independently of any game")
     args = ap.parse_args()
+    if args.experimental_apex6:
+        if not args.device:
+            ap.error("--experimental-apex6 requires --device (see flydigi-devices list)")
+        if args.dump:
+            ap.error("--dump cannot be combined with --experimental-apex6")
+        if not 0 <= args.gain <= 4:
+            ap.error("Apex 6 audio gain must be finite and between 0 and 4")
 
     if os.geteuid() != 0:
         sys.exit("needs root: attaching to vhci is a privileged sysfs write.\n"
@@ -179,6 +189,13 @@ def main():
 
     signal.signal(signal.SIGTERM, _terminate)
     signal.signal(signal.SIGHUP, _terminate)
+
+    if args.experimental_apex6:
+        from flydigi import ds5_apex6
+        try:
+            return ds5_apex6.run(args, log, Haptics() if args.haptics else None)
+        except (OSError, RuntimeError, ValueError) as exc:
+            sys.exit(str(exc))
 
     # Output reports arrive on the server's own thread. Hand them to the main
     # loop rather than touching the Apex 5 from there: a blocking hidraw write

@@ -352,6 +352,52 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.pad.runtime[17], self.original[17])
         self.assertIsNone(self.pad._grip_session)
 
+    def test_cleanup_ack_timeouts_remain_retryable(self):
+        for faults in (("drop", None, None), (None, "drop", None),
+                       (None, None, "drop"), ("drop", "drop", "drop")):
+            with self.subTest(faults=faults):
+                session = self.session().start()
+                self.pad.faults[0x53] = deque(faults)
+                with self.assertRaisesRegex(gpa6.ReplyTimeout, "cleanup incomplete"):
+                    session.stop()
+                self.assertEqual(self.pad.runtime, self.original)
+                self.assertIsNone(self.pad._grip_session)
+
+    def test_disconnect_during_cleanup_remains_retryable(self):
+        session = self.session().start()
+        self.pad.faults[0x57] = deque(["disconnect"])
+        with self.assertRaises(OSError):
+            session.stop()
+        self.assertIsNone(self.pad._grip_session)
+        self.assertFalse(session.active)
+
+    def test_cleanup_protocol_failure_is_not_masked_by_timeout(self):
+        for fault in ("malformed", "error"):
+            for later_query in (False, True):
+                with self.subTest(fault=fault, later_query=later_query):
+                    session = self.session().start()
+                    if later_query:
+                        # The slot read occurs after the disable ACK; its
+                        # timeout must not replace that earlier fatal error.
+                        self.pad.faults[0x53] = deque([fault])
+                        self.pad.faults[0xa1] = deque(["drop"])
+                    else:
+                        self.pad.faults[0x53] = deque(["drop", fault])
+                    with self.assertRaises(gpa6.ProtocolError) as caught:
+                        session.stop()
+                    self.assertNotIsInstance(caught.exception, gpa6.ReplyTimeout)
+                    self.assertIsNone(self.pad._grip_session)
+
+    def test_fatal_tick_error_is_not_masked_by_cleanup_timeout(self):
+        session = self.session().start()
+        self.pad.faults[4] = deque(["malformed"])
+        self.pad.faults[0x53] = deque(["drop"])
+        with self.assertRaises(gpa6.ProtocolError) as caught:
+            session.tick()
+        self.assertNotIsInstance(caught.exception, gpa6.ReplyTimeout)
+        self.assertEqual(self.pad.runtime, self.original)
+        self.assertIsNone(self.pad._grip_session)
+
     def test_profile_change_restores_new_profile(self):
         session = self.session().start()
         self.pad.maps[1][23:27] = bytes((1, 33, 0, 0))
