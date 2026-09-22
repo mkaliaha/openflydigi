@@ -77,10 +77,8 @@ CMD_GET_INFO = 0x01
 CMD_RUMBLE = 0x12
 CMD_SET_FORCE_TRIGGER = 81
 CMD_SET_FORCE_TRIGGER_GRIP = 82
-# "K6" is Flydigi's DeviceCode for the Apex 6, which had not shipped as of
-# July 2026 -- these three are transcribed from the SDK and have never been
-# sent to hardware. The Apex 5 is "k5" and uses 81/82 above. See
-# docs/findings-other-devices.md for the full device-code table.
+# Historical SDK command numbers. Current Apex 6 framing and payloads live in
+# gpa6.py; these constants do not make the legacy packet builder compatible.
 CMD_K6_TRIGGER_MODE = 83
 CMD_K6_TRIGGER_WAVEFORM = 85
 CMD_K6_TRIGGER_REALTIME = 87
@@ -198,7 +196,15 @@ def _real_nodes(family):
             continue
         try:
             with open(f"/sys/class/hidraw/{node}/device/report_descriptor", "rb") as fh:
-                if fh.read(3) == VENDOR_DESC_PREFIX:
+                descriptor = fh.read()
+                from . import gpa6
+                if ids[1] in gpa6.PRODUCT_IDS:
+                    try:
+                        gpa6.report_layout(descriptor)
+                    except gpa6.ProtocolError:
+                        continue
+                    yield path
+                elif descriptor[:3] == VENDOR_DESC_PREFIX:
                     yield path
         except OSError:
             continue
@@ -273,6 +279,7 @@ class Controller:
     # that the resolving happens once, in `__new__`, where the mock bus is also
     # consulted. `flydigi/charger.py:Dock` is the one subclass.
     FAMILY = FAMILY_PAD
+    dialect = "legacy"
 
     def __new__(cls, path=None):
         """Resolve which device this is, and hand back a fake for a fake one.
@@ -304,6 +311,13 @@ class Controller:
         # `path` is deliberately not read here: `__new__` had to resolve it to
         # decide whether this is a real device, and asking the bus a second
         # time could get a second answer -- the node numbers move.
+        from . import gpa6
+        node = os.path.basename(self.path)
+        ids = hid_ids(node)
+        if ids and ids[0] == VID and ids[1] in gpa6.PRODUCT_IDS:
+            with open(f"/sys/class/hidraw/{node}/device/report_descriptor", "rb") as fh:
+                self.report_layout = gpa6.report_layout(fh.read())
+            self.dialect = "gpa6"
         self.fd = os.open(self.path, os.O_RDWR | os.O_NONBLOCK)
         # flock is per *open file description*, so two Controllers in one
         # process already exclude each other -- but two threads sharing one
@@ -348,7 +362,9 @@ class Controller:
 
         Re-entrant, so a claimed sequence can call `send` freely.
         """
-        with self._threads:
+        if not self._threads.acquire(timeout=timeout):
+            raise DeviceBusy(f"another thread is using {self.path}")
+        try:
             if self._depth == 0:
                 self._flock(timeout)
             self._depth += 1
@@ -358,6 +374,8 @@ class Controller:
                 self._depth -= 1
                 if self._depth == 0:
                     fcntl.flock(self.fd, fcntl.LOCK_UN)
+        finally:
+            self._threads.release()
 
     def _flock(self, timeout):
         deadline = time.monotonic() + timeout
@@ -386,7 +404,7 @@ class Controller:
             if not ready:
                 return
             try:
-                if not os.read(self.fd, 64):
+                if not os.read(self.fd, 65 if self.dialect == "gpa6" else 64):
                     return
             except BlockingIOError:
                 return
@@ -405,9 +423,16 @@ class Controller:
         minutes. Pass `until` there and the wait becomes a ceiling rather than a
         cost.
         """
+        if self.dialect == "gpa6":
+            from .gpa6 import ProtocolError
+            if (len(buf) != self.report_layout.output_size + 1
+                    or buf[0] != self.report_layout.output_id
+                    or buf[1:3] != b"\x5a\xa5"):
+                raise ProtocolError("legacy packets are refused on GPA6 devices")
         with self.claim():
             self._drain()
-            os.write(self.fd, bytes(buf))
+            if os.write(self.fd, bytes(buf)) != len(buf):
+                raise OSError("short HID report write")
             replies = []
             deadline = time.time() + wait
             while time.time() < deadline:
@@ -415,7 +440,7 @@ class Controller:
                     [self.fd], [], [], max(0.0, deadline - time.time()))
                 if not ready:
                     continue
-                data = os.read(self.fd, 64)
+                data = os.read(self.fd, 65 if self.dialect == "gpa6" else 64)
                 if data:
                     replies.append(data)
                     if until is not None and until(replies):

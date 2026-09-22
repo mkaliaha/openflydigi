@@ -32,6 +32,13 @@ precedence = "closest"
 SPDX-FileCopyrightText = "2026 Mikalai Kaliaha"
 SPDX-License-Identifier = "CC0-1.0"
 
+# Native input/output protocol fixtures contain no vendor implementation.
+[[annotations]]
+path = "tests/fixtures/apex6-encoder.json"
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 Mikalai Kaliaha"
+SPDX-License-Identifier = "CC0-1.0"
+
 [[annotations]]
 path = [".gitignore", "LICENSE", "NOTICE", "REUSE.toml"]
 precedence = "closest"

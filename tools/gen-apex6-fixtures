@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
+"""Generate protocol fixtures by emulating the pinned native vendor routines.
+
+Optional research-only tool. Needs ignored work/apex6-research/, pefile and
+Unicorn; normal tests use the resulting JSON and have no vendor dependency.
+The generator never imports flydigi's encoders or writes to a device.
+"""
+import json
+from pathlib import Path
+import random
+import runpy
+import struct
+
+root = Path(__file__).resolve().parents[1]
+reference = runpy.run_path(str(root / "work/apex6-research/verify_engine_packets.py"))
+Emulator = reference["Emulator"]
+rng = random.Random(6006)
+quantizers, packets = [], []
+for value in [-2, -1, -.5, 0, .5, 1, 2] + [rng.uniform(-2, 2) for _ in range(64)]:
+    quantizers.append({"input": value, "output": Emulator().call(0x22d160, (), xmm0=value) & 255})
+for length in (0, 1, 8, 12):
+    for enabled in ((True, True, True), (False, True, True), (True, False, False), (True, False, True)):
+        for selector in (0, 1, 2):
+            channels = [[rng.uniform(-1.2, 1.2) for _ in range(length)] for _ in range(3)]
+            machine = Emulator()
+            obj = machine.alloc(0x400)
+            vectors = [machine.vec(struct.pack("<" + "f" * len(c), *c)) for c in channels]
+            machine.call(0x224370, (obj, *vectors), (*enabled, selector))
+            packets.append({"channels": channels, "enabled": enabled, "selector": selector,
+                            "frame": machine.writes[0].hex()})
+destination = root / "tests/fixtures/apex6-encoder.json"
+destination.parent.mkdir(exist_ok=True)
+destination.write_text(json.dumps({"engine_sha256": reference["result"]["engineSha256"],
+                                  "quantizers": quantizers, "packets": packets}, indent=2) + "\n")
+print(destination)

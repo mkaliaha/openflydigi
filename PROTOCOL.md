@@ -261,8 +261,9 @@ force triggers for exactly this reason.
 **Historical SDK layout.** Research on 2026-09-22 found a different shipping
 protocol in xHaptics Engine 5.0.1.4, including changed command-83 payload and
 command-87 framing/checksum. See [the Apex 6 findings](docs/findings-apex6.md)
-for current implementation planning. The table below records the older SDK;
-it is not a hardware-validated specification for retail Apex 6/6 Pro.
+for the current experimental grip implementation and its test evidence. The
+table below records the older SDK; it is not a hardware-validated specification
+for retail Apex 6/6 Pro.
 
 **Nothing in this section is hardware-verified — the layouts are transcribed from the SDK.** It
 gates this family on

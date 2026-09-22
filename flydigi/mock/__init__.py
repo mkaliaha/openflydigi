@@ -248,6 +248,9 @@ def instance(path):
     if kind == KIND_DOCK:
         from .dock import build_dock
         fake = build_dock(path, index, entry)
+    elif entry.get("code") == "k6":
+        from .apex6 import build_pad
+        fake = build_pad(path, index, entry)
     else:
         from .pad import build_pad
         fake = build_pad(path, index, entry)

@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
+"""Opt-in, emulator-tested Apex 6 / 6 Pro grip-waveform prototype."""
+import argparse
+import json
+import math
+import os
+import signal
+import struct
+import sys
+import time
+import wave
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from flydigi import device, gpa6, identity, registry, waveform
+
+
+def open_selected(selector):
+    expected_uid = None
+    if not selector:
+        entries = [e for e in registry.list_pads(deep=True)
+                   if e.get("code") == "k6" and e.get("uid") and not e.get("error")]
+        if not entries:
+            raise device.DeviceNotFound("no Apex 6 found; use FLYDIGI_MOCK_BUS=pad:k6 to emulate")
+        if len(entries) > 1:
+            raise registry.Ambiguous("multiple Apex 6 pads found; select one with --device")
+        expected_uid = entries[0]["uid"]
+        selector = entries[0]["path"]
+    elif registry._node_selector(selector) is None:
+        entry = registry.find(selector, registry.KIND_PAD, deep=True)
+        expected_uid = entry.get("uid")
+        if not expected_uid:
+            raise identity.WrongDevice("selected controller did not report a UUID")
+        selector = entry["path"]
+    ctrl = registry.open_pad(selector)
+    try:
+        identity.require(ctrl, "k6")
+        if expected_uid is not None and gpa6.Protocol(ctrl).uid() != expected_uid:
+            raise identity.WrongDevice("selected UUID changed while opening the device")
+        return ctrl
+    except BaseException:
+        ctrl.close()
+        raise
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    registry.add_device_argument(parser)
+    parser.add_argument("--experimental", action="store_true", help="enable unvalidated grip output")
+    parser.add_argument("--reconnect", action="store_true", help="resume only the same UUID after unplug/sleep")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("info", help="read identity, capabilities and format versions")
+    tone = sub.add_parser("tone", help="play a quiet stereo test tone")
+    tone.add_argument("--duration", type=float, default=2)
+    tone.add_argument("--left", type=float, default=80, help="left frequency in Hz; 0 disables")
+    tone.add_argument("--right", type=float, default=120, help="right frequency in Hz; 0 disables")
+    tone.add_argument("--amplitude", type=float, default=0.15)
+    play = sub.add_parser("play", help="play 48 kHz s16 PCM WAV; stereo or four-channel DualSense capture")
+    play.add_argument("wav")
+    args = parser.parse_args()
+    if args.command != "info" and not args.experimental:
+        parser.error("grip output requires --experimental (emulator-tested, no hardware validation)")
+    if args.command == "tone":
+        values = (args.duration, args.left, args.right, args.amplitude)
+        if (not all(math.isfinite(x) for x in values) or not 0 < args.duration <= 3600
+                or not 0 <= args.left <= 300 or not 0 <= args.right <= 300
+                or not 0 <= args.amplitude <= 1):
+            parser.error("use a duration in (0,3600], frequencies in [0,300] and amplitude in [0,1]")
+    source = None
+    ctrl = session = None
+    try:
+        channels = 2
+        if args.command == "play":
+            source = wave.open(args.wav, "rb")
+            channels = source.getnchannels()
+            if source.getframerate() != 48000 or source.getsampwidth() != 2 or channels not in (2, 4):
+                raise ValueError("WAV must be 48 kHz, signed 16-bit PCM, with 2 or 4 channels")
+            duration = source.getnframes() / 48000
+        elif args.command == "tone":
+            duration = args.duration
+        ctrl = open_selected(args.device)
+        protocol = gpa6.Protocol(ctrl)
+        uid = protocol.uid()
+        if args.command == "info":
+            print(json.dumps({"uid": uid, "info": protocol.info(),
+                              "format_versions": protocol.versions(),
+                              "experimental": True, "mock": device.is_mock(ctrl.path)}, indent=2))
+            return 0
+        print(f"{identity.name_for(protocol.info()['device_type'])}: experimental grip output; "
+              f"UUID {uid}" + (" [MOCK]" if device.is_mock(ctrl.path) else ""), file=sys.stderr)
+        session = waveform.GripSession(ctrl, experimental=True, expected_uid=uid, channels=channels)
+        session.start()
+        start = time.monotonic()
+        next_feed = start
+        source_frame = 0
+        while time.monotonic() - start < duration:
+            now = time.monotonic()
+            if session is None:
+                try:
+                    ctrl = open_selected("uid:" + uid)
+                    session = waveform.GripSession(ctrl, experimental=True, expected_uid=uid, channels=channels)
+                    session.start()
+                    next_feed = now
+                    source_frame = int((now - start) * 48000)
+                except (OSError, device.DeviceNotFound, device.DeviceBusy, identity.WrongDevice, gpa6.ProtocolError):
+                    if ctrl:
+                        ctrl.close()
+                    ctrl = session = None
+                    time.sleep(0.25)
+                    continue
+            try:
+                if now >= next_feed:
+                    if now - next_feed > session.max_latency:
+                        source_frame = int((now - start) * 48000)
+                        next_feed = now
+                    offset = source_frame
+                    if source:
+                        source.setpos(min(source.getnframes(), offset))
+                        pcm = source.readframes(384)
+                    else:
+                        values = (round(32767 * args.amplitude * math.sin(2 * math.pi * hz * (offset + i) / 48000))
+                                  for i in range(min(384, max(0, int(duration * 48000) - offset)))
+                                  for hz in (args.left, args.right))
+                        values = list(values)
+                        pcm = struct.pack("<" + "h" * len(values), *values)
+                    session.feed(pcm, now)
+                    source_frame += 384
+                    next_feed += waveform.PERIOD
+                session.tick(now)
+            except (OSError, gpa6.ReplyTimeout, waveform.ProfileChanged) as exc:
+                if not args.reconnect:
+                    raise
+                print(f"{exc}; waiting for UUID {uid}", file=sys.stderr)
+                try:
+                    session.stop()
+                except (OSError, gpa6.ProtocolError):
+                    pass
+                ctrl.close()
+                ctrl = session = None
+                continue
+            time.sleep(max(0, min(next_feed, session.next_packet) - time.monotonic()))
+        return 0
+    finally:
+        try:
+            if session:
+                session.stop()
+        finally:
+            if ctrl:
+                ctrl.close()
+            if source:
+                source.close()
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(0)
+    except (OSError, ValueError, wave.Error, identity.WrongDevice, device.DeviceNotFound, device.DeviceBusy) as exc:
+        sys.exit(str(exc))

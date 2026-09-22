@@ -26,6 +26,9 @@
 # Apex 5 vendor command interface (trigger effects, rumble, config).
 KERNEL=="hidraw*", ATTRS{idVendor}=="37d7", ATTRS{idProduct}=="2501", TAG+="uaccess"
 
+# Apex 6 family, from the web client's HID filter (not hardware-validated).
+KERNEL=="hidraw*", ATTRS{idVendor}=="37d7", ATTRS{idProduct}=="2502", TAG+="uaccess"
+
 # CD2 charging dock: its switches and its lighting. A separate product id
 # rather than a second interface on the pad, and a separate rule for the same
 # reason -- the two are unrelated devices that happen to share a vendor.

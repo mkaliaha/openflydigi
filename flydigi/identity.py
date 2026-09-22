@@ -86,7 +86,7 @@ DEVICE_TYPES = {
     84: "k2", 86: "k2", 87: "k2", 92: "k2", 93: "k2",
     102: "k2", 103: "k2", 104: "k2",
     128: "k5", 129: "k5", 133: "k5", 134: "k5", 135: "k5", 136: "k5",
-    149: "k6", 150: "k6",
+    149: "k6", 150: "k6", 152: "k6",
     # `f3` is the plain Vader 3 alone; the three Pro SKUs are their own code.
     28: "f3",
     80: "f3p", 81: "f3p", 88: "f3p",
@@ -228,7 +228,9 @@ def name_for(device_type):
     code = code_for(device_type)
     if code is None:
         return f"an unrecognised Flydigi device (DeviceType {device_type})"
-    return f"{PRODUCT_NAMES.get(code, code)} ({code}, DeviceType {device_type})"
+    from .gpa6 import SKUS
+    name = SKUS.get(device_type, PRODUCT_NAMES.get(code, code))
+    return f"{name} ({code}, DeviceType {device_type})"
 
 
 def identify(ctrl, wait=0.6):
@@ -239,7 +241,14 @@ def identify(ctrl, wait=0.6):
     between "it is not an Apex 5" and "it did not say" to be loud either way --
     a sleeping pad and an unknown model must not both read as "carry on".
     """
-    info = motion.read_info(ctrl, wait=wait)
+    if getattr(ctrl, "dialect", None) == "gpa6":
+        from .gpa6 import Protocol, ProtocolError
+        try:
+            info = Protocol(ctrl).info()
+        except ProtocolError as exc:
+            raise WrongDevice(str(exc)) from exc
+    else:
+        info = motion.read_info(ctrl, wait=wait)
     if not info or "device_type" not in info:
         raise WrongDevice(
             "no reply to the identify read -- press a button to wake the pad, "
@@ -360,6 +369,9 @@ def read_uid(ctrl, wait=0.6):
     their indexing and so from raw 6 in ours -- which is where every other
     single-frame reply puts its payload.
     """
+    if getattr(ctrl, "dialect", None) == "gpa6":
+        from .gpa6 import Protocol
+        return Protocol(ctrl).uid()
     reply = _ask(ctrl, CMD_READ_UID, wait)
     if reply is None or len(reply) < 6 + UID_LEN:
         return None
@@ -391,6 +403,8 @@ def read_nickname(ctrl, wait=0.6):
     `\\x01\\x01\\t\\t\\td\\x04^` in a device picker would be worse than showing
     nothing, and this is what a factory-fresh pad actually contains.
     """
+    if getattr(ctrl, "dialect", None) == "gpa6":
+        return None  # new global configuration codec, not legacy command 2
     reply = _ask(ctrl, CMD_READ_NICKNAME, wait)
     if reply is None or len(reply) < 8:
         return None

@@ -78,7 +78,12 @@ def show(args):
                   else "{}/{}".format(entry["battery"], motion.MAX_LEVEL))
         print(f"  battery     {charge}   over {entry['connect_type']}")
     print(f"  selector    {registry.key(entry)}")
-    if not entry["supported"]:
+    if entry.get("experimental"):
+        grips = entry.get("features", {}).get("haptic_grip", False)
+        print("  -- experimental Apex 6: " + ("opt-in grip waveforms available"
+                                              if grips else "no linear grips reported"))
+        print("  -- configuration writes are refused; see tools/flydigi-apex6")
+    elif not entry["supported"]:
         print("  -- this project does not drive it; writes are refused")
     if entry["error"]:
         print(f"  -- {entry['error']}")

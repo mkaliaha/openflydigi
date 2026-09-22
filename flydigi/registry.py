@@ -120,6 +120,27 @@ def blank(path, kind):
 
 def probe_pad(ctrl, entry, deep=False):
     """Fill in a pad's entry. One exchange, or three with `deep`."""
+    if getattr(ctrl, "dialect", None) == "gpa6":
+        from .gpa6 import FEATURES, Protocol, ProtocolError, SKUS
+        try:
+            protocol = Protocol(ctrl)
+            info = protocol.info()
+            entry.update(info=info, device_type=info["device_type"],
+                         code=identity.code_for(info["device_type"]),
+                         model=SKUS.get(info["device_type"]), mac=info["mac"],
+                         battery=info["battery_level"], charging=info["charging"],
+                         connect_type=info["connect_type"], dialect="gpa6",
+                         experimental=info["device_type"] in SKUS,
+                         features={k: info[k] for k in FEATURES})
+            version = info["firmware"][0]
+            entry["firmware"] = ".".join(str((version >> s) & 15) for s in (12, 8, 4, 0))
+            if deep:
+                entry["uid"] = protocol.uid()
+                entry["format_versions"] = protocol.versions()
+            # supported remains False: legacy configuration/relays cannot use it.
+        except ProtocolError as exc:
+            entry["error"] = str(exc)
+        return entry
     # `until`, or every probe costs the full 0.6 s even when the pad answers at
     # once -- and the bus is probed on a timer. See `Controller.send`.
     replies = ctrl.send(_info_request(), wait=0.6,
@@ -195,7 +216,7 @@ def probe(path, kind, deep=False):
             if kind == KIND_DOCK:
                 return probe_dock(handle, entry, deep=deep)
             return probe_pad(handle, entry, deep=deep)
-    except (OSError, DeviceBusy, DeviceNotFound) as exc:
+    except (OSError, DeviceBusy, DeviceNotFound, ValueError) as exc:
         entry["error"] = str(exc)
         return entry
 
@@ -287,6 +308,10 @@ def describe(entry):
     parts = [entry["path"], label(entry)]
     if entry.get("mock"):
         parts.append("MOCK")
+    if entry.get("experimental"):
+        parts.append("experimental grip haptics; configuration unavailable"
+                     if entry.get("features", {}).get("haptic_grip")
+                     else "experimental identity only; no linear grips reported")
     if entry.get("firmware"):
         parts.append(f"fw {entry['firmware']}")
     if entry.get("battery") is not None:

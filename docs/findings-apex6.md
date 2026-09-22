@@ -1,9 +1,9 @@
 # Apex 6 / Apex 6 Pro and xHaptics
 
 Research date: 2026-09-22. **Static analysis and offline encoder verification;
-no Apex 6/6 Pro hardware available.** Experimental implementation can use an
-emulated pad and tests as its acceptance target. Runtime support is not enabled
-by this investigation.
+no Apex 6/6 Pro hardware available.** The first runtime milestone is now
+implemented as opt-in grip-waveform support with a stateful emulator. It is
+experimental and emulator-tested, not hardware-validated.
 
 The new haptics are explicitly present in Flydigi's shipping software. Support
 looks feasible, including a route from our virtual DualSense audio to linear
@@ -134,8 +134,8 @@ Mode command **0x53 / 83** now takes `[area, target, mode, ...params]`, confirme
 in both web and native code. The engine checks ACK errors for invalid selections
 and insufficient parameters. It also reads persistent motor mapping through
 0xA3 and restores it after a session. Implementation must cover restoration,
-not only neutral samples. Full mode/target semantics remain to be recovered
-and tested against the emulator's explicit assumptions.
+not only neutral samples. The grip subset is recovered below; broader mode/target semantics and physical
+trigger routing remain unverified.
 
 ### Offline verification
 
@@ -258,3 +258,69 @@ distrobox enter wine-arch -- bash -lc '
 
 The successful run logged an established UI/backend socket. No single root
 cause was proven for the earlier failed attached launches.
+
+## Implemented first milestone
+
+`flydigi/gpa6.py` owns the new protocol; `flydigi/waveform.py` owns stereo DSP,
+pacing and session cleanup; `flydigi/mock/apex6.py` models the device.
+`tools/flydigi-apex6` provides identity reads and opt-in tone/WAV playback.
+The registry names all three SKUs and preserves the entire 16-byte UUID.
+`identity.SUPPORTED` deliberately continues to describe legacy configuration
+support (`k5`, `f5`), keeping the GUI, daemon and older relays off the new dialect.
+The `37d7:2502` permission rule is included; SDL launch options are unchanged
+because no Apex 6 virtual-controller route is enabled yet.
+
+Descriptor parsing selects the vendor output report ID and byte count, accepts
+32–64 byte outputs and rejects ambiguous or smaller layouts. Hidraw writes
+include a report ID or zero placeholder; unnumbered reads do not. The command-7
+versions are exposed for diagnostics; no version is interpreted as an Apex 5
+profile format. Motor RAM layout validation, not a guessed mapping-file
+version, gates volatile grip output.
+
+Additional static anchors from the same pinned native executable:
+
+| RVA | Recovered behavior |
+|---|---|
+| `21e27d` | Grip stream setup: command `53`, payload `01 12 02 40 00` |
+| `21e5b5` | Grip disable: command `53`, payload `01 12 00` |
+| `222ee0` | Read RAM ID 6 using command `A3` (native chunk size 20; web default 16) |
+| `22cd00`, `22c780` | Motor-map layout 2; left/right grip modes at offsets 23/25, mode 0 has no params, mode 1 has one following gain byte |
+| `223366` | Restore using area 1, targets `10`/`11`, saved mode and parameters |
+| `223f70` | Command-53 ACK payload status 0 means success; nonzero is failure |
+
+The emulator explicitly assumes area-1 writes are volatile, RAM 6 retains the
+persistent profile mapping, changing profiles resets live modes, and an enabled
+non-neutral grip waveform requires realtime setup. Those state transitions are
+software acceptance contracts; they are not firmware observations. Only the
+grips are configured/restored. Trigger modes and the trigger waveform column
+are not driven. Neutral samples are sent before disabling; an all-channels-off
+frame is also sent, followed by acknowledged mode disable. The native streaming
+builder skips output entirely when all channels are disabled, so that explicit
+off frame is an emulator assumption rather than a native fixture case.
+
+The DSP accepts 48 kHz stereo PCM or the two haptic channels from four-channel
+DualSense PCM. It uses a 769-tap Blackman-windowed sinc low-pass at 350 Hz before
+48:1 decimation, with 8 ms group delay. Packet pacing is nominally 8 ms. The
+40 ms queue cap, stale-data discard, neutral underruns and periodic UUID/profile
+checks are tested using a fake clock. Claims exclude this project's other
+writers for the whole session. Hardware timing and third-party software that
+does not honor advisory locks remain untested.
+
+`tests/test_apex6.py` covers identity variants, descriptors, format versions,
+legacy-write refusal, independent encoder fixtures, stereo isolation and
+anti-alias filtering, chunk boundaries, pacing, underruns, bounded backlog,
+setup/ACK failures, partial cleanup, profile changes, UUID replacement,
+reconnect, contention, and the command-line mock route. The tests run without
+research files or vendor binaries.
+
+`tests/fixtures/apex6-encoder.json` stores 71 native quantizer results and 48
+native streaming packets with their input samples. `tools/gen-apex6-fixtures`
+regenerates these by calling the pinned executable's routines under Unicorn
+through the local research harness; it never imports the production encoder.
+Regeneration requires the ignored research directory and its optional research
+dependencies. Only input/output protocol facts, not vendor implementation or
+assets, are stored in the fixture.
+
+Live DualSense relay integration, new input/motion reports, trigger translation,
+ordinary-game-audio synthesis and persistent profile/lighting codecs are still
+separate milestones. The first milestone does not imply configuration/UI parity.

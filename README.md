@@ -16,6 +16,7 @@ application adds PySide6, Qt, Kirigami, and Kirigami Addons.
 |---|---|---|---|
 | Flydigi Apex 5 | Hardware-validated | All controller features, adaptive triggers, display, game routes, and both virtual-DualSense relays | Display uploads require a wired connection. Steam Input must be disabled for virtual-DualSense games. |
 | Flydigi Vader 5 Pro | Experimental, partially implemented | Identity, profiles, buttons, sticks, gyro, vibration, lighting, settings, the v3.2 macro-store implementation, and a derived factory profile | No Vader 5 has been tested. It has trigger motors rather than force triggers and has no display. The trigger-motor editor is not built. The v3.2 macro store is unverified on hardware. The DualSense relay, evdev discovery, permissions, and SDL ignore identifier are not validated end to end. |
+| Flydigi Apex 6 / Apex 6 Pro | Experimental, emulator-tested | SKU/UUID/capability discovery and opt-in stereo grip waveforms through `tools/flydigi-apex6` | Requires reported `hapticGrip`. No hardware validation. Profiles, GUI editing, trigger translation, input/motion and live DualSense integration remain unavailable. |
 | Flydigi CD2 charging dock | Hardware-validated with one noted gap | Identity, four settings, eight generated lighting effects, and picture/GIF sampling onto 162 LEDs; nickname read/write is implemented | Nickname writing is not hardware-verified. The dock is a separate USB device and uses its own selector. |
 | Other Flydigi controllers and accessories | Not driven | Devices may be discovered and identified when they use the current transport | Normal configuration commands, including nickname writes, refuse unsupported models. Developer bench tools explicitly documented as ungated can send raw commands. |
 
@@ -31,6 +32,7 @@ test and report results, not as a hardware-validated compatibility claim.
 - Read and write access to the controller or dock's vendor hidraw node.
 - The udev rules in `udev/72-flydigi-apex5.rules`. They cover:
   - the Apex 5 vendor interface (`37d7:2501`);
+  - the experimental Apex 6 vendor interface (`37d7:2502`);
   - the CD2 dock (`37d7:6001`);
   - the display bootloader serial device (`ffaa:5555`);
   - `/dev/uhid`;
@@ -363,6 +365,51 @@ Development setup, QML architecture, type generation, and static checks are in
 metadata, not a complete installable-package definition. Its file list is also
 incomplete and must be synchronized with the current models, pages, components,
 and `gui/i18n.py` before relying on `pyside6-project build` or its static checks.
+
+## Experimental Apex 6 / Apex 6 Pro grip haptics
+
+The first Apex 6 milestone is **experimental, emulator-tested**. It uses the
+new GPA6 transport and the reported `hapticGrip` flag; the SKU name alone never
+enables linear grips. Apex 6, Apex 6 Pro and Pro Phantom Blade Zero are named
+separately. Unknown HID layouts and motor-map layouts are refused.
+
+Try it without hardware:
+
+~~~bash
+FLYDIGI_MOCK_BUS=pad:k6 tools/flydigi-apex6 --device mock:pad0 info
+FLYDIGI_MOCK_BUS=pad:k6 tools/flydigi-apex6 --device mock:pad0 --experimental tone --duration 2
+~~~
+
+For a physical pad, list devices first, then select its UUID:
+
+~~~bash
+tools/flydigi-devices list
+tools/flydigi-apex6 --device uid:YOUR_UUID info
+tools/flydigi-apex6 --device uid:YOUR_UUID --experimental tone --left 80 --right 120
+tools/flydigi-apex6 --device uid:YOUR_UUID --experimental play haptics.wav
+~~~
+
+`play` accepts 48 kHz signed 16-bit PCM WAV: two channels for left/right grips,
+or four channels from a DualSense capture (only channels 2/3 are used). Output
+preserves stereo, filters before resampling to 1 kHz, and sends eight samples
+per packet. The queue holds at most 40 ms; scheduler stalls discard stale
+samples and underruns emit neutral samples. The filter adds 8 ms of delay.
+This is a standalone waveform prototype; the existing DualSense relays still
+use the Apex 5/Vader path and refuse Apex 6.
+
+The tool holds an exclusive session claim, saves the active motor map, and
+sends neutral/disable commands and restores the grips on exit, including
+Ctrl-C and SIGTERM. Cleanup failures are reported. A disconnected device cannot
+receive cleanup. `--reconnect` resumes only the same full UUID within the
+remaining playback time, drops audio missed during the absence, and reads the
+motor map again. A profile change stops output unless reconnect is enabled;
+cleanup uses the new profile's map. Do not infer physical motor behavior or
+USB/receiver timing from the emulator.
+
+Legacy profile, settings, nickname, lighting and screen writes remain refused.
+Full configuration codecs, trigger translation, and live DualSense input/audio
+integration are later milestones. Protocol evidence, emulator assumptions and
+fixture reproduction are in [the Apex 6 findings](docs/findings-apex6.md).
 
 ## Tests
 
