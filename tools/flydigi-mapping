@@ -72,9 +72,17 @@ def open_pad(selector=None):
 
 def read(ctrl, cfg_id):
     try:
-        return mapping.read_config(ctrl, cfg_id)
+        config = mapping.read_config(ctrl, cfg_id)
     except mapping.ProtocolError as exc:
         sys.exit(f"error: {exc}")
+    # A profile read pages that slot in and audibly re-seats the trigger
+    # motors, but does not start the effects stored in the blob.  Leaving a
+    # `show`, `backup` or `macros` command here therefore changed the running
+    # controller: the read could return Lock while the physical trigger had
+    # already gone loose.  The desktop worker and `apply_profile` both replay
+    # the stored effects after the same read; CLI inspection must do so too.
+    effects.engage_stored(ctrl, config, getattr(ctrl, "device_code", None))
+    return config
 
 
 def describe(config, code=None):

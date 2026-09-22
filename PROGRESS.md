@@ -25,6 +25,7 @@ Detailed evidence lives in [PROTOCOL.md](PROTOCOL.md) and
 |---|---|---|
 | Flydigi Apex 5 | Hardware-validated | Reference controller. Profiles, mappings, macros, sticks, gyro-to-stick, vibration, adaptive triggers, lighting, settings, display, game routes, and virtual-DualSense relays are implemented. |
 | Flydigi Vader 5 Pro | Experimental and partial | Identity, capability gating, profiles, mappings, sticks, gyro, vibration, lighting, settings, v3.2 macro-store handling, and a derived factory profile are implemented. No Vader 5 hardware has been tested. |
+| Flydigi Apex 6 / Apex 6 Pro | Unsupported; assessed | Current web protocol and xHaptics Engine 5.0.1.4 inspected; streaming encoder verified offline. No runtime support enabled. Experimental implementation can target a pad emulator and tests. See [findings](docs/findings-apex6.md). |
 | Flydigi CD2 dock | Hardware-validated with one noted gap | Device identity, four settings, generated lighting, and picture/GIF sampling are hardware-validated. Nickname read/write is implemented, but nickname writing is not hardware-verified. |
 | Other Flydigi hardware | Unsupported | It may be discovered by the shared transport. Normal configuration commands refuse unsupported models; explicitly ungated developer bench tools are outside that guarantee. |
 

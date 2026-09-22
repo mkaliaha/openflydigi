@@ -11,6 +11,11 @@ been tested on Vader 5 hardware. Older-pad, Apex 6, cooler, keyboard, and unused
 are reference transcriptions unless explicitly labelled measured. Decompiled sources are not
 distributed in the public repository.
 
+**Apex 6 update (2026-09-22):** the factory/SDK tables below describe the older
+desktop architecture. Current web Space Station and xHaptics Engine use runtime
+motor capabilities and a different configuration/streaming dialect. See
+[Apex 6 / Apex 6 Pro findings](findings-apex6.md) for the new evidence and scope.
+
 ## Device-code mapping
 
 Flydigi's SDK identifies a model by a short `DeviceCode` string, and every capability check in

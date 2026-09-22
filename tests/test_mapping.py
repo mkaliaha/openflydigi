@@ -153,6 +153,39 @@ def test_cli_apply_skips_force_trigger_replay_on_vader():
           output.getvalue().strip())
 
 
+def test_cli_read_replays_the_effect_its_profile_read_reseats():
+    """Inspecting a profile must not leave its physical triggers loose.
+
+    Measured on the Apex 5 during the hardware smoke pass: the GUI applied a
+    right-trigger Lock and it could be felt, then the CLI read the same profile
+    back as mode 4 while the physical lock disappeared.  Reading pages the
+    profile in and re-seats the motors; the live command has to follow even
+    though the stored bytes themselves are unchanged.
+    """
+    path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                        "tools", "flydigi-mapping")
+    loader = importlib.machinery.SourceFileLoader(
+        "flydigi_mapping_read_tool", path)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    tool = importlib.util.module_from_spec(spec)
+    loader.exec_module(tool)
+
+    pad = FakePad()
+    pad.device_code = "k5"
+    config = mapping.MappingConfig(pad.blobs[0], 0)
+    params, bind = effects.stored(effects.MODE_LOCK, {"start": 60})
+    config.set_trigger_effect("right", effects.MODE_LOCK, params, bind)
+    pad.blobs[0] = config.blob
+
+    read_back = tool.read(pad, 0)
+    check("CLI inspection still reads the stored Lock",
+          read_back.trigger_effect("right")[0] == effects.MODE_LOCK)
+    check("and replays it after the profile read re-seats the motors",
+          pad.live_effects.get(device.SIDE_RIGHT, (None,))[0]
+          == effects.MODE_LOCK,
+          str(pad.live_effects))
+
+
 def test_a_models_keys_are_its_own():
     """Which buttons exist is a property of the pad, not a constant.
 
@@ -1944,6 +1977,7 @@ def main():
                  test_write_without_baseline_sends_everything,
                  test_unchanged_write_sends_nothing, test_apply_and_save,
                  test_cli_apply_skips_force_trigger_replay_on_vader,
+                 test_cli_read_replays_the_effect_its_profile_read_reseats,
                  test_reading_switches_the_pad, test_browsing_puts_the_pad_back,
                  test_browsing_the_running_profile_restores_nothing,
                  test_a_failed_browse_still_puts_the_pad_back,
