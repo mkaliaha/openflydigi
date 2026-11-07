@@ -110,6 +110,7 @@ def blank(path, kind):
         "nickname": None,
         "firmware": None,
         "battery": None,
+        "battery_steps": motion.MAX_LEVEL,
         "charging": None,
         "connect_type": None,
         "supported": False,
@@ -128,7 +129,8 @@ def probe_pad(ctrl, entry, deep=False):
             entry.update(info=info, device_type=info["device_type"],
                          code=identity.code_for(info["device_type"]),
                          model=SKUS.get(info["device_type"]), mac=info["mac"],
-                         battery=info["battery_level"], charging=info["charging"],
+                         battery=info["battery_level"], battery_steps=10,
+                         charging=info["charging"],
                          connect_type=info["connect_type"], dialect="gpa6",
                          experimental=info["device_type"] in SKUS,
                          features={k: info[k] for k in FEATURES})
@@ -309,13 +311,13 @@ def describe(entry):
     if entry.get("mock"):
         parts.append("MOCK")
     if entry.get("experimental"):
-        parts.append("experimental grip haptics; configuration unavailable"
+        parts.append("experimental grip haptics and configuration"
                      if entry.get("features", {}).get("haptic_grip")
-                     else "experimental identity only; no linear grips reported")
+                     else "experimental configuration; no linear grips reported")
     if entry.get("firmware"):
         parts.append(f"fw {entry['firmware']}")
     if entry.get("battery") is not None:
-        parts.append(f"battery {entry['battery']}/{motion.MAX_LEVEL}"
+        parts.append(f"battery {entry['battery']}/{entry.get('battery_steps', motion.MAX_LEVEL)}"
                      if not entry.get("charging") else "charging")
     if entry.get("error"):
         parts.append(f"-- {entry['error']}")

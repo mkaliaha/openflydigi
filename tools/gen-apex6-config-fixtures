@@ -32,7 +32,11 @@ const evaluate = (source, result) => vm.runInNewContext(`${source}\n;(${result})
 // unchanged in an offline context without a device/browser/network API.
 const unmodule = source => source.replace(/import\s*[\s\S]*?;\s*/g, "")
   .replace(/export\s*\{[\s\S]*?\};?\s*$/, "");
-const codecs = evaluate(unmodule(codec), "({lighting: Mn, mapping: Oe})");
+// The codec imports its activator limit from the contract. Recover that
+// literal from the independently hash-checked module as well.
+const limit = contract.match(/const jt=(\d+);/)[1];
+const codecs = evaluate(`const L=${limit};\n${unmodule(codec)}`,
+  "({lighting: Mn, mapping: Oe, fullMapping: Bn})");
 const {wrap, crc32} = evaluate(unmodule(core), "({wrap: Ct, crc32: K})");
 const globalDecode = evaluate(contract.slice(contract.indexOf("function ir("), contract.indexOf("const or=")), "ir");
 const hex = b => Buffer.from(b).toString("hex");
@@ -54,6 +58,25 @@ const mapping = ["1.8", "1.9"].map(version => {
     layer_count: 1, layers: [{layer_id: 0, activator_mappings: [], macro_definitions: []}]};
   return {version, ...blob(codecs.mapping(input))};
 });
+const mappingEdits = ["1.8", "1.9"].map(version => {
+  const button = id => ({type: "btn_gamepad", id});
+  const input = {version, name: "Preserve this metadata", runtime_policies: {long_ms: 513, double_ms: 257},
+    layer_count: 2, layers: [
+      {layer_id: 0, activator_mappings: [
+        {source: "button_m1", activators: [{type: "simple", target: button("button_a")}]},
+        {source: "button_m2", activators: [{type: "simple", target: button("button_y")}]},
+      ], macro_definitions: [{macro_id: 1, name: "Preserve macro", trigger_mode: "press_once",
+        loop_interval_ms: 50, actions: [{action_type: "press", target: button("button_x"), timestamp_ms: 10},
+          {action_type: "release", target: button("button_x"), timestamp_ms: 80}]}],
+        trigger_zones_left: [{start: 10, stop: 90, target: button("button_b")}],
+        stick_zones_right: {angle_mode: "8way", zones: [{start: 20, stop: 100, dir: "up", target: button("button_y")}]}},
+      {layer_id: 1, activator_mappings: [{source: "button_m3", activators: [{type: "simple", target: button("button_x")}]}],
+        macro_definitions: []},
+    ]};
+  const edited = JSON.parse(JSON.stringify(input));
+  edited.layers[0].activator_mappings[0].activators[0].target = button("button_b");
+  return {version, before: blob(codecs.fullMapping(input)), after: blob(codecs.fullMapping(edited))};
+});
 const globalData = new Uint8Array(80);
 globalData[3] = 15;
 for (const i of [4, 39, 40, 47, 52]) globalData[i] = 1;
@@ -64,5 +87,5 @@ delete globalExpected.rawBlob;
 const globalRam = new Uint8Array(82);
 globalRam[0] = 82; globalRam.set(globalData, 2);
 process.stdout.write(JSON.stringify({source: "Flydigi web Space Station 5.0.1.1; synthetic inputs",
-  sources: sources.map(([file, sha256]) => ({file, sha256})), lighting, mapping,
+  sources: sources.map(([file, sha256]) => ({file, sha256})), lighting, mapping, mappingEdits,
   global: {hex: hex(globalRam), expected: globalExpected}}, null, 2) + "\n");

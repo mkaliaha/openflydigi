@@ -75,7 +75,7 @@ def show(args):
     print(f"  firmware    {entry['firmware'] or 'not reported'}")
     if entry["battery"] is not None:
         charge = ("charging" if entry["charging"]
-                  else "{}/{}".format(entry["battery"], motion.MAX_LEVEL))
+                  else "{}/{}".format(entry["battery"], entry.get("battery_steps", motion.MAX_LEVEL)))
         print(f"  battery     {charge}   over {entry['connect_type']}")
     print(f"  selector    {registry.key(entry)}")
     if entry.get("experimental"):

@@ -2,11 +2,12 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Read-only Apex 6 configuration snapshots and bounded format inspection.
+"""Apex 6 snapshots, format inspection and bounded configuration edits.
 
 Sources: pinned GPA6 web core/codec/contract in docs/findings-apex6.md.
 Raw RAM bytes are retained even when a decoder does not know their format.
-There is deliberately no write, save, slot-switch or restore operation here.
+Editors preserve unrelated bytes and verify writes before an explicit save.
+Snapshots remain read-only; arbitrary snapshot restoration is not supported.
 """
 import binascii
 from datetime import datetime, timezone
@@ -18,7 +19,13 @@ import tempfile
 
 from . import gpa6, identity
 
-RAM_BLOCKS = {1: "global", 4: "mapping", 5: "lighting", 6: "motors"}
+RAM_BLOCKS = {1: "global", 4: "lighting", 5: "mapping", 6: "motors"}
+
+
+def wrap_blob(data):
+    if len(data) + 4 > gpa6.MAX_RAM_SIZE:
+        raise ValueError("configuration exceeds supported RAM size")
+    return struct.pack("<HH", len(data) + 4, binascii.crc_hqx(data, 0xffff)) + bytes(data)
 
 
 def unwrap_blob(data, magic):
@@ -106,12 +113,154 @@ def global_config(data, version):
             "xinput_home": p[52] == 1}
 
 
+# A0 field ID, offset within the 80-byte global payload, accepted values.
+GLOBAL_FIELDS = {
+    "sleep_time": (32, 3, tuple(range(256))),
+    "quick_switch": (20, 4, (False, True)),
+    "stick_center_auto_adjust": (25, 39, (False, True)),
+    "local_mapping": (23, 40, (False, True)),
+    "usb_report_rate_hz": (33, 41, (125, 250, 500, 1000)),
+    "stick_resolution": (34, 43, (8, 9, 10, 11, 12)),
+    "allow_third_party": (37, 47, (False, True)),
+    "xinput_home": (38, 52, (False, True)),
+}
+
+
+def _editor(ctrl, expected_uid=None):
+    identity.require(ctrl, "k6")
+    protocol = gpa6.Protocol(ctrl)
+    uid = protocol.uid()
+    if expected_uid is not None and uid != expected_uid:
+        raise identity.WrongDevice("selected Apex 6 UUID changed before editing")
+    return protocol, uid
+
+
+def set_setting(ctrl, name, value, *, expected_uid=None):
+    """Apply one global field and verify all other global bytes are preserved."""
+    if name not in GLOBAL_FIELDS:
+        raise ValueError("unsupported Apex 6 setting")
+    field, offset, allowed = GLOBAL_FIELDS[name]
+    boolean = type(allowed[0]) is bool
+    if type(value) is not (bool if boolean else int) or value not in allowed:
+        raise ValueError(f"invalid value for {name}")
+    with ctrl.claim(timeout=0):
+        protocol, uid = _editor(ctrl, expected_uid)
+        version = protocol.versions()[0]
+        before = protocol.read_ram(1)
+        old = global_config(before, version)[name]
+        if old == value:
+            return global_config(before, version)
+        width = 2 if name == "usb_report_rate_hz" else 1
+        wanted = bytearray(before)
+        encoded = int(value).to_bytes(width, "little")
+        wanted[offset + 2:offset + 2 + width] = encoded
+        try:
+            protocol.set_global(field, encoded)
+            after = protocol.read_ram(1)
+            if protocol.uid() != uid:
+                raise identity.WrongDevice("UUID changed during settings write")
+            if after != wanted:
+                raise gpa6.ProtocolError("settings read-back differs from the requested field edit")
+            return global_config(after, version)
+        except BaseException as exc:
+            try:
+                if protocol.uid() == uid:
+                    current = protocol.read_ram(1)
+                    if current == wanted:
+                        protocol.set_global(field, int(old).to_bytes(width, "little"))
+                        if protocol.read_ram(1) != before:
+                            raise gpa6.ProtocolError("global setting rollback did not verify")
+            except Exception as cleanup:
+                raise gpa6.ProtocolError(f"{exc}; setting rollback failed: {cleanup}") from exc
+            raise
+
+
+def encode_lighting(config):
+    """Build LGHT v2 using the same six modes as the vendor client."""
+    mode = config["base"]["mode"]
+    values = config["base"].get("config")
+    if type(mode) is not int or mode not in range(6):
+        raise ValueError("lighting mode must be 0..5")
+    def byte(value, maximum=100):
+        if type(value) is not int or not 0 <= value <= maximum:
+            raise ValueError(f"lighting value must be 0..{maximum}")
+        return value
+    payload = bytearray([mode])
+    if mode == 1:
+        payload.extend(byte(values["color"][key], 255) for key in ("r", "g", "b"))
+        payload.append(byte(values["brightness"]))
+    elif mode in (2, 3):
+        colors = values["colors"]
+        if not 1 <= len(colors) <= 8:
+            raise ValueError("lighting requires 1..8 colors")
+        payload.extend((byte(values["brightness"]), byte(values["speed"]), len(colors)))
+        for color in colors:
+            payload.extend(byte(color[key], 255) for key in ("r", "g", "b"))
+    elif mode in (4, 5):
+        payload.extend((byte(values["brightness"]), byte(values["speed"])))
+    vibration = config.get("vibration", False)
+    if type(vibration) is not bool:
+        raise ValueError("lighting vibration must be boolean")
+    payload.append(int(vibration))
+    header = b"LGHT" + struct.pack("<HI", 2, len(payload))
+    return wrap_blob(header + struct.pack("<H", sum(header) & 0xffff)
+                     + payload + struct.pack("<H", sum(payload) & 0xffff))
+
+
+def edit_ram(ctrl, ram_id, transform, *, save=False, expected_uid=None):
+    """Edit one domain with optimistic checks and rollback of our own write.
+
+    Unknown blocks are refused. On an ambiguous failure, rollback only if the
+    same device/slot still contains our exact candidate; never overwrite a
+    third-party edit. Flash save is a separate, explicit caller choice.
+    """
+    if ram_id not in (4, 5):
+        raise ValueError("only lighting and mapping can be edited")
+    with ctrl.claim(timeout=0):
+        protocol, uid = _editor(ctrl, expected_uid)
+        versions = protocol.versions()
+        if ram_id == 5 and versions[1] not in (18, 19):
+            raise gpa6.ProtocolError("unsupported mapping protocol version")
+        fingerprint = protocol.ram_info(ram_id)
+        before = protocol.read_ram(ram_id, expected=fingerprint)
+        if ram_id == 5:
+            from .gpa6_profile import describe
+            validate = describe
+        else:
+            validate = lighting_config
+        validate(before)
+        wanted = bytes(transform(before))
+        validate(wanted)
+        if wanted == before:
+            if save:
+                protocol.save_slot(fingerprint[0])
+            return wanted
+        try:
+            protocol.write_ram(ram_id, wanted, expected=fingerprint)
+            if protocol.uid() != uid:
+                raise identity.WrongDevice("UUID changed during configuration write")
+        except BaseException as exc:
+            try:
+                if protocol.uid() == uid and protocol.slot() == fingerprint[0]:
+                    current = protocol.ram_info(ram_id)
+                    if protocol.read_ram(ram_id, expected=current) == wanted:
+                        protocol.write_ram(ram_id, before, expected=current)
+            except Exception as cleanup:
+                raise gpa6.ProtocolError(f"{exc}; configuration rollback failed: {cleanup}") from exc
+            raise
+        if save:
+            # If the save acknowledgment is lost, report uncertainty. Rolling
+            # RAM back cannot establish which bytes reached flash.
+            protocol.save_slot(fingerprint[0])
+        return wanted
+
+
 def inspect_block(ram_id, data, versions):
     if ram_id == 1:
         return global_config(data, versions[0])
-    if ram_id == 4:
-        return mapping_header(data)
     if ram_id == 5:
+        return mapping_header(data)
+    if ram_id == 4:
         return lighting_config(data)
     return {"layout": 2, "decoded_scope": "grips only",
             "grips": {side: {"mode": mode, "params_hex": params.hex()}

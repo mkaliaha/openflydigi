@@ -8,6 +8,8 @@ The wire decoder is independent of the production encoder. Area 1 is assumed
 volatile, RAM 6 persistent, and profile selection resets live motor modes.
 Frames require setup, and the trigger column is intentionally unsupported.
 No claim is made about actuator response, receiver timing or selector routing.
+In particular, the emulator accepts grip mode-1 restoration, which the tested
+Pro firmware 9.0.6.8 refuses; passing lifecycle tests do not resolve that gap.
 """
 from collections import deque
 import binascii
@@ -25,7 +27,7 @@ class FakeApex6:
     fd = None
 
     def __init__(self, device_type=150, *, features=0xf7, uid=None,
-                 layout=None, versions=(22, 0x109, 1), path="mock:apex6"):
+                 layout=None, versions=(22, 19, 10), path="mock:apex6"):
         self.path = path
         self.device_type, self.features = device_type, features
         self.uid = uid or "000102030405060708090a0b0c0d0e0f"
@@ -50,12 +52,14 @@ class FakeApex6:
         for _ in range(4):
             mapping = (b"XMUL" + struct.pack("<I", 9) + b"\x01\0\0\0"
                        + struct.pack("<HHI", 500, 250, 0)
-                       + bytes((0, 0, 0, 0, 1, 0, 0, 0)) + bytes(12))
+                       + bytes((0, 0, 0, 0, 1, 0, 0, 0)) + bytes(12) + b"\xff\0")
             header = b"LGHT" + struct.pack("<HI", 2, 2)
             lighting = header + struct.pack("<H", sum(header)) + bytes(4)
             def wrap(data):
                 return struct.pack("<HH", len(data) + 4, binascii.crc_hqx(data, 0xffff)) + data
-            self.configs.append({4: wrap(mapping), 5: wrap(lighting)})
+            self.configs.append({4: wrap(lighting), 5: wrap(mapping)})
+        self.stored_configs = [dict(config) for config in self.configs]
+        self.transfer = None
         self.runtime = {0x10: (1, b"\x4b"), 0x11: (1, b"\x3c")}
         self.history = deque(maxlen=256)
         self.frames = deque(maxlen=256)
@@ -157,6 +161,66 @@ class FakeApex6:
                 reply = self._reply(command, struct.pack("<3H", *self.versions))
             elif command == 0xa1:
                 reply = self._reply(command, self.config_state())
+            elif command == 0xa0:
+                fields = {20: (6, 1), 25: (41, 1), 23: (42, 1),
+                          32: (5, 1), 33: (43, 2), 34: (45, 1),
+                          37: (49, 1), 38: (54, 1)}
+                field = payload[0]
+                if field not in fields or len(payload) != fields[field][1] + 1:
+                    raise ValueError("invalid global field write")
+                offset, width = fields[field]
+                self.global_data[offset:offset + width] = payload[1:]
+                reply = self._reply(command, bytes([0, field]))
+            elif command == 0xa2:
+                if len(payload) != 1 or payload[0] > 3:
+                    raise ValueError("invalid profile slot")
+                self.change_profile(payload[0])
+                self.configs[self.slot] = dict(self.stored_configs[self.slot])
+                reply = self._reply(command, self.config_state())
+            elif command == 0xa7:
+                if payload != bytes([1, self.slot]):
+                    raise ValueError("invalid profile save")
+                self.stored_configs[self.slot] = dict(self.configs[self.slot])
+                reply = self._reply(command, b"\0")
+            elif command == 0xa4:
+                operation = payload[0]
+                if operation == 3:
+                    self.transfer = None
+                    ack = bytes([3, 0, 0, self.slot]) + bytes(6)
+                elif operation == 0:
+                    ram_id = payload[1]
+                    length, crc = struct.unpack("<HI", payload[2:])
+                    if ram_id not in (4, 5) or not 1 <= length <= 4096:
+                        raise ValueError("invalid RAM write target/length")
+                    self.transfer = (ram_id, self.slot, length, crc, bytearray())
+                    ack = struct.pack("<4BHI", 0, 0, ram_id, self.slot, length, crc)
+                else:
+                    if self.transfer is None:
+                        raise ValueError("RAM write has not begun")
+                    ram_id, slot, length, crc, content = self.transfer
+                    if self.slot != slot:
+                        raise ValueError("profile changed during RAM write")
+                    if operation == 1:
+                        offset, count = struct.unpack("<HB", payload[1:4])
+                        if not 1 <= count <= 16 or len(payload) != count + 4:
+                            raise ValueError("invalid RAM chunk")
+                        if offset == len(content):
+                            content.extend(payload[4:])
+                        elif offset + count != len(content) or content[offset:] != payload[4:]:
+                            raise ValueError("conflicting or out-of-order RAM chunk")
+                        if len(content) > length:
+                            raise ValueError("RAM chunk exceeds target length")
+                        ack = struct.pack("<4BHI", 1, 0, ram_id, slot, len(content), 0)
+                    elif operation == 2:
+                        if (struct.unpack("<HI", payload[1:]) != (length, crc)
+                                or len(content) != length or zlib.crc32(content) != crc):
+                            raise ValueError("RAM commit length/CRC mismatch")
+                        self.configs[slot][ram_id] = bytes(content)
+                        self.transfer = None
+                        ack = struct.pack("<4BHI", 2, 0, ram_id, slot, length, crc)
+                    else:
+                        raise ValueError("unsupported RAM write operation")
+                reply = self._reply(command, ack, v21=True)
             elif command == 0xa3:
                 if len(payload) < 2 or payload[1] not in (1, 4, 5, 6):
                     raise ValueError("unsupported RAM read")

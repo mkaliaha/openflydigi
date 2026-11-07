@@ -4,6 +4,12 @@ This reference covers the Apex 5 vendor protocol and the related DSX, Forza, scr
 charging-dock and identity paths implemented by this project. It is not limited to force-trigger
 commands.
 
+The current **Apex 6 / Apex 6 Pro GPA6 protocol is a separate dialect**. Its
+[configuration format reference](docs/findings-apex6.md#configuration-format-reference)
+documents framing, global fields, XMUL profiles and LGHT lighting. The same
+document records hardware verification and remaining gaps. The historical K6
+SDK commands in §3b below are not the current GPA6 implementation.
+
 **Reference provenance.** The vendor behavior was reverse-engineered from **Flydigi Space Station
 4.2.0.9** (Windows installer, run under Wine), primarily from decompiled .NET assemblies in the
 `SpaceStationService.exe` single-file bundle. Those local derived artifacts are not distributed in

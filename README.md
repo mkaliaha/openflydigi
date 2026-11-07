@@ -16,7 +16,7 @@ application adds PySide6, Qt, Kirigami, and Kirigami Addons.
 |---|---|---|---|
 | Flydigi Apex 5 | Hardware-validated | All controller features, adaptive triggers, display, game routes, and both virtual-DualSense relays | Display uploads require a wired connection. Steam Input must be disabled for virtual-DualSense games. |
 | Flydigi Vader 5 Pro | Experimental, partially implemented | Identity, profiles, buttons, sticks, gyro, vibration, lighting, settings, the v3.2 macro-store implementation, and a derived factory profile | No Vader 5 has been tested. It has trigger motors rather than force triggers and has no display. The trigger-motor editor is not built. The v3.2 macro store is unverified on hardware. The DualSense relay, evdev discovery, permissions, and SDL ignore identifier are not validated end to end. |
-| Flydigi Apex 6 / Apex 6 Pro | Experimental, emulator-tested | SKU/UUID/capability discovery, read-only active-RAM snapshots, standalone grip waveforms, opt-in USB DualSense input, stereo haptic audio and synthesized HID rumble | Requires reported `hapticGrip` and Xbox-style evdev input for the relay. No hardware validation. Profile writes/restore, GUI editing, adaptive-trigger translation and motion remain unavailable. |
+| Flydigi Apex 6 / Apex 6 Pro | Experimental; wired Apex 6 Pro partly hardware-verified | SKU/UUID/capabilities, active-RAM snapshots, CLI global settings, button remapping, press timings, lighting, profile loading/saving; experimental grip waveforms and USB DualSense relay | Tested on Pro firmware 9.0.6.8. GUI editing, snapshot restoration, adaptive-trigger translation and motion remain unavailable. Grip output works, but restoring the original grip mode fails on this firmware. Receiver and relay behavior remain unverified on hardware. |
 | Flydigi CD2 charging dock | Hardware-validated with one noted gap | Identity, four settings, eight generated lighting effects, and picture/GIF sampling onto 162 LEDs; nickname read/write is implemented | Nickname writing is not hardware-verified. The dock is a separate USB device and uses its own selector. |
 | Other Flydigi controllers and accessories | Not driven | Devices may be discovered and identified when they use the current transport | Normal configuration commands, including nickname writes, refuse unsupported models. Developer bench tools explicitly documented as ungated can send raw commands. |
 
@@ -333,7 +333,7 @@ single firmware mode byte. Uploads therefore take several seconds.
 | `tools/flydigi-ds5` | Virtual DualSense over uhid |
 | `tools/flydigi-ds5-usbip` | Virtual USB DualSense with optional haptic audio |
 | `tools/flydigi-haptics` | Apex-specific bridge from a real DualSense audio sink to grip motors |
-| `tools/flydigi-apex6` | Experimental Apex 6 identity, read-only configuration snapshots and grip-waveform playback |
+| `tools/flydigi-apex6` | Experimental Apex 6 settings, profile editing, snapshots and grip-waveform playback |
 | `tools/flydigi_cmd.py` | Ungated manual vendor-command bench tool; raw node selection only |
 
 Developer generators, simulators, and hardware probes also live under `tools/`.
@@ -369,7 +369,11 @@ and `gui/i18n.py` before relying on `pyside6-project build` or its static checks
 
 ## Experimental Apex 6 / Apex 6 Pro
 
-The Apex 6 implementation is **experimental, emulator-tested**. It uses the
+The Apex 6 implementation is **experimental**, with wired Apex 6 Pro checks on
+firmware **9.0.6.8**. Global sleep settings, lighting, physical M1-to-B remapping,
+profile timing and save/reload persistence have been verified on that unit.
+Other global fields follow the recovered vendor protocol and have software tests.
+The implementation uses the
 new GPA6 transport and the reported `hapticGrip` flag; the SKU name alone never
 enables linear grips. Apex 6, Apex 6 Pro and Pro Phantom Blade Zero are named
 separately. Unknown HID layouts and motor-map layouts are refused.
@@ -388,9 +392,27 @@ For a physical pad, list devices first, then select its UUID:
 tools/flydigi-devices list
 tools/flydigi-apex6 --device uid:YOUR_UUID info
 tools/flydigi-apex6 --device uid:YOUR_UUID snapshot apex6-active.json
-tools/flydigi-apex6 --device uid:YOUR_UUID --experimental tone --left 80 --right 120
-tools/flydigi-apex6 --device uid:YOUR_UUID --experimental play haptics.wav
+tools/flydigi-apex6 --device uid:YOUR_UUID settings
+tools/flydigi-apex6 --device uid:YOUR_UUID profile
+tools/flydigi-apex6 --device uid:YOUR_UUID --experimental set-setting sleep_time 15
+tools/flydigi-apex6 --device uid:YOUR_UUID --experimental map m1 b
+tools/flydigi-apex6 --device uid:YOUR_UUID --experimental timing --long-ms 600
+tools/flydigi-apex6 --device uid:YOUR_UUID --experimental light --mode solid --color 0030FF --brightness 25
+tools/flydigi-apex6 --device uid:YOUR_UUID --experimental save
 ~~~
+
+Profile edits apply to active RAM. `save` or an edit's `--save` flag saves the
+current profile, including any other unsaved changes. `slot 1` through `slot 4`
+loads a stored profile and discards unsaved edits, even when reloading the active
+slot. Global settings apply directly. `map m1 default` removes the M1 override;
+`--layer` selects an existing layer (0–3). Remapping replaces all activators for
+that one button while preserving other mappings, macros, zones, curves and
+metadata. Macro/curve editing and the Apex 6 GUI editor are not implemented.
+
+Writes require `--experimental` and check the model, UUID, format, slot and
+read-back. Transfers stage chunks before committing. Failed edits roll back only
+when the same controller/profile still contains the exact bytes we wrote.
+An uncertain flash-save acknowledgment is reported as an error.
 
 `snapshot` reads global settings and the active slot's mapping, lighting and
 motor RAM into a new JSON file. It works with rotary and linear grips and needs
@@ -412,13 +434,20 @@ per packet. The queue holds at most 40 ms; scheduler stalls discard stale
 samples and underruns emit neutral samples. The filter adds 8 ms of delay.
 
 The tool holds an exclusive session claim, saves the active motor map, and
-sends neutral/disable commands and restores the grips on exit, including
+sends neutral/disable commands and attempts to restore the grips on exit, including
 Ctrl-C and SIGTERM. Cleanup failures are reported. A disconnected device cannot
 receive cleanup. `--reconnect` resumes only the same full UUID within the
 remaining playback time, drops audio missed during the absence, and reads the
 motor map again. A profile change stops output unless reconnect is enabled;
 cleanup uses the new profile's map. Do not infer physical motor behavior or
 USB/receiver timing from the emulator.
+
+On the tested Pro firmware, a quiet left-grip tone was felt and neutral/disable
+stopped it, but restoring mode 1 returned firmware error 1. A profile reload
+restored runtime state during testing. Playback therefore remains experimental;
+the tool reports the cleanup error and does not reload a profile automatically,
+since that would discard unsaved edits. Right-grip response and the complete
+DualSense relay have not been hardware-verified.
 
 The USB DualSense relay also has an explicit Apex 6 route:
 
@@ -451,10 +480,10 @@ setup and restoration run on their own thread. Trigger reports are counted but
 not translated; motion remains disabled. The uhid relay and GUI DualSense
 switch do not enable this experimental route.
 
-Legacy profile, settings, nickname, lighting and screen writes remain refused.
-Full configuration codecs, trigger translation, motion, and ordinary-game-audio
-synthesis are later milestones. Actual input layouts, firmware acceptance,
-actuator response and USB/receiver timing still require hardware validation.
+Legacy Apex 5 commands remain refused on Apex 6. Full configuration codecs,
+nickname/screen editing, trigger translation, motion, and ordinary-game-audio
+synthesis are later milestones. Complete input layouts, receiver timing and
+the remaining actuator behavior still require hardware validation.
 Protocol evidence, emulator assumptions and
 fixture reproduction are in [the Apex 6 findings](docs/findings-apex6.md).
 

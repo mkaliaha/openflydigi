@@ -5,12 +5,14 @@
 """Experimental Apex 6 protocol, independent of the Apex 5 profile dialect.
 
 Wire facts come from the pinned web client and xHaptics Engine 5.0.1.4 in
-docs/findings-apex6.md. Hardware timing and actuator behavior remain untested.
-Identity, bounded configuration reads and volatile grip output are implemented.
+docs/findings-apex6.md, with wired Apex 6 Pro checks on firmware 9.0.6.8.
+Identity, bounded configuration edits and volatile grip output are implemented.
+Grip-mode restoration remains unresolved on the tested firmware.
 """
 from dataclasses import dataclass
 import math
 import struct
+import time
 import zlib
 
 PRODUCT_IDS = (0x2502, 0x2401)
@@ -247,6 +249,90 @@ class Protocol:
             raise ProtocolError("profile changed during motor map read")
         grip_restore(data)  # reject layouts we cannot restore before any write
         return slot, bytes(data)
+
+    def set_global(self, field, data):
+        if not 0 <= field <= 255 or not 1 <= len(data) <= 26:
+            raise ValueError("invalid global field or data length")
+        ack = self.ask(0xa0, 2, bytes([field]) + bytes(data))
+        if ack != bytes([0, field]):
+            raise ProtocolError(f"global field {field} refused or mismatched: {ack.hex()}")
+
+    def select_slot(self, slot):
+        if type(slot) is not int or not 0 <= slot <= 3:
+            raise ValueError("profile slot must be 0..3")
+        with self.ctrl.claim():
+            ack = self.ask(0xa2, 11, bytes([slot]))
+            if ack[0] != slot:
+                raise ProtocolError("profile selection acknowledgment mismatch")
+            # The vendor client also lets the newly selected RAM settle.
+            time.sleep(0.100)
+            if self.slot() != slot:
+                raise ProtocolError("profile selection read-back mismatch")
+
+    def save_slot(self, slot):
+        if type(slot) is not int or not 0 <= slot <= 3:
+            raise ValueError("profile slot must be 0..3")
+        with self.ctrl.claim():
+            if self.slot() != slot:
+                raise ProtocolError("active profile changed before save")
+            if self.ask(0xa7, 1, bytes([1, slot])) != b"\0":
+                raise ProtocolError("profile save was refused")
+            if self.slot() != slot:
+                raise ProtocolError("active profile changed during save")
+
+    def write_ram(self, ram_id, data, *, expected):
+        """Stage and verify a complete lighting/mapping block, without saving.
+
+        The caller supplies the fingerprint it edited. A4 chunks use byte
+        offsets, unlike A3's chunk indices. Only recovered configuration
+        domains are writable; firmware and motor RAM are never accepted here.
+        """
+        data = bytes(data)
+        if ram_id not in (4, 5) or not 1 <= len(data) <= MAX_RAM_SIZE:
+            raise ValueError("only bounded lighting and mapping RAM writes are supported")
+        with self.ctrl.claim():
+            before = self.ram_info(ram_id)
+            if before != expected:
+                raise ProtocolError("configuration changed before write")
+            slot, _, _ = before
+            crc = zlib.crc32(data)
+
+            def exchange(payload):
+                # Repeating an offset-addressed chunk is idempotent on the
+                # tested firmware. Do not replay commit after a lost ACK.
+                for attempt in range(3 if payload[0] == 1 else 1):
+                    try:
+                        ack = self.ask(0xa4, 10, payload, v21=True)
+                        break
+                    except ReplyTimeout:
+                        if payload[0] != 1 or attempt == 2:
+                            raise
+                if ack[:4] != bytes([payload[0], 0, ram_id, slot]):
+                    raise ProtocolError(f"A4 status, RAM or slot mismatch: {ack.hex()}")
+                return struct.unpack_from("<HI", ack, 4)
+
+            try:
+                if exchange(bytes([0, ram_id]) + struct.pack("<HI", len(data), crc)) != (len(data), crc):
+                    raise ProtocolError("A4 begin length/CRC mismatch")
+                for offset in range(0, len(data), RAM_CHUNK_SIZE):
+                    chunk = data[offset:offset + RAM_CHUNK_SIZE]
+                    length, _ = exchange(bytes([1]) + struct.pack("<HB", offset, len(chunk)) + chunk)
+                    if length != offset + len(chunk):
+                        raise ProtocolError("A4 chunk offset mismatch")
+                if self.slot() != slot:
+                    raise ProtocolError("active profile changed before commit")
+                if exchange(bytes([2]) + struct.pack("<HI", len(data), crc)) != (len(data), crc):
+                    raise ProtocolError("A4 commit length/CRC mismatch")
+                if self.read_ram(ram_id, expected=(slot, len(data), crc)) != data:
+                    raise ProtocolError("configuration write read-back mismatch")
+            except BaseException as exc:
+                try:
+                    ack = self.ask(0xa4, 10, b"\x03", v21=True)
+                    if ack[:2] != b"\x03\x00":
+                        raise ProtocolError("A4 abort refused")
+                except Exception as cleanup:
+                    raise ProtocolError(f"{exc}; transfer abort failed: {cleanup}") from exc
+                raise
 
     def mode(self, target, mode, params=b""):
         status = self.ask(0x53, 1, bytes((1, target, mode)) + params)[0]

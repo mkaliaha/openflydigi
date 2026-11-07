@@ -1,10 +1,12 @@
 # Apex 6 / Apex 6 Pro and xHaptics
 
-Research date: 2026-09-22. **Static analysis and offline encoder verification;
-no Apex 6/6 Pro hardware available.** Opt-in grip-waveform support, a USB
-DualSense audio/HID-rumble relay and read-only configuration snapshots are
-implemented with a stateful emulator.
-They are experimental and emulator-tested, not hardware-validated.
+Initial research: 2026-09-22. **Hardware update: 2026-11-07, wired Apex 6 Pro,
+firmware 9.0.6.8.** Identity, snapshots, sleep setting edits, lighting, physical
+button remapping and profile save/reload are now verified on that unit.
+CLI settings/profile editing is implemented; GUI editing is not.
+The left grip produced the requested tone and stopped, but mode-1 restoration
+was refused. Receiver operation and the USB DualSense relay remain unverified
+on hardware. See the hardware findings below for the precise scope.
 
 The new haptics are explicitly present in Flydigi's shipping software. Support
 looks feasible, including a route from our virtual DualSense audio to linear
@@ -185,7 +187,7 @@ zones and TLV blocks; `LGHT` is a separate lighting format. The current fixed
 Apex 5 profile blob cannot be reused. Legacy profile writes should stay refused
 even when experimental haptic streaming is enabled.
 
-## Implementation and test plan without hardware
+## Original implementation and test plan (2026-09-22, before hardware)
 
 | Area | Reusable | Required work |
 |---|---|---|
@@ -357,7 +359,8 @@ privilege-drop ordering and final restoration. No kernel module, hardware or
 vendor binary is required for these tests.
 
 Adaptive-trigger translation, new motion reports, ordinary-game-audio synthesis
-and configuration writing remain separate milestones. Bluetooth
+and GUI configuration remain separate milestones; CLI configuration editing is
+documented below. Bluetooth
 HID waveform transport is not implemented by this USB relay. Neither the uhid
 relay nor the GUI enables the Apex 6 route. No configuration/UI parity or
 hardware acceptance is implied.
@@ -376,7 +379,7 @@ Additional anchors in the pinned web bundles:
 |---|---|
 | core `ee` | A3 QUERY_RAM request `[1, ramId]`; response `[1, status, ramId, activeSlot, len:u16le, crc32:u32le]` |
 | core `_t`, `te` | A3 READ_CHUNK request `[0, ramId, index, 16]`; response `[0, status, ramId, activeSlot, total:u16le, index, count, data...]` |
-| core `Zt`, `Je`, `Jt`, `Qe` | RAM IDs 1=global, 4=mapping, 5=lighting, 6=motors |
+| core `Zt`, `Je`, `Jt`, `Qe` | RAM IDs 1=global, 4=lighting, 5=mapping, 6=motors; corrected and confirmed on hardware |
 | core `vt` | A1 active slot, four slot CRC16s and global CRC16 |
 | core `Ct`, `qt`, `K` | Four-byte length/CRC16 envelope; CRC16-CCITT with initial FFFF; reflected IEEE CRC32 for RAM fingerprints |
 | core `tn`, contract `ir` | Global RAM payload at bytes 2–81, including name/settings offsets |
@@ -413,3 +416,328 @@ v1.8/v1.9 mapping headers, envelope checksums and global settings offsets.
 `node tools/gen-apex6-config-fixtures` regenerates it from SHA-256-checked raw
 research bundles without importing the Python implementation. Ordinary tests
 need neither Node nor the ignored vendor files.
+
+## Configuration format reference
+
+This section consolidates the formats used by `flydigi/gpa6.py`,
+`gpa6_config.py` and `gpa6_profile.py`. Layouts come from the pinned vendor
+core/codec/contract above; the hardware findings below distinguish what was
+actually exercised on Pro firmware 9.0.6.8. A recovered field or enum does not
+by itself mean its physical behavior has been tested or that the editor exposes
+it. Reserved and uninterpreted bytes must be preserved.
+
+All offsets and enum values below are **decimal**, except numbers prefixed with
+`0x` and byte strings in code blocks. `u8`, `u16` and `u32` mean unsigned integers;
+multi-byte configuration values are little-endian. Offsets in an XMUL or LGHT
+body start at its four-byte magic, excluding the optional outer envelope.
+
+### Transport and configuration commands
+
+The 32-byte GPA6 request body, excluding any HID report-ID prefix, is:
+
+| Body offset | Size | Meaning |
+|---|---|---|
+| 0 | 2 | Magic `5a a5` |
+| 2 | 1 | Command |
+| 3 | 1 | Payload length + 2 |
+| 4 | 0–27 | Payload, then zero padding through offset 30 |
+| 31 | 1 | Sum of bytes 2–30, modulo 256 |
+
+On the measured wired descriptor, hidraw writes prepend `00` to this body;
+input reports are unnumbered and arrive without that byte. Other report layouts
+must be derived from the HID descriptor, not borrowed from Apex 5.
+
+Normal success replies have prefix `5a a5 command 01 00`, then the command's
+payload. A3/A4 use the vendor's v21 reply variant, whose payload starts directly
+after `5a a5 command`. Payload length comes from the command format, not a
+request-style length byte. Compact replies place the checksum immediately after
+the payload; padded replies put it at offset 31. The checksum sums bytes from
+offset 2 up to, but excluding, the checksum. Padding is zero. Normal error
+replies use byte 3 = 0 and an error byte at body offset 5.
+
+| Command | Request payload | Success payload |
+|---|---|---|
+| `0x07` | Empty | Global, mapping and LED protocol versions: three `u16`; observed `(22, 19, 10)` |
+| `0xA0` | `fieldId:u8, encodedValue...` | `0, fieldId` |
+| `0xA1` | Empty | `activeSlot:u8, slotCRC16[4]:u16, globalCRC16:u16` (11 bytes) |
+| `0xA2` | `slot:u8` | Same state layout as A1 |
+| `0xA3` query | `1, ramId` | `1, status, ramId, slot, length:u16, crc32:u32` |
+| `0xA3` chunk | `0, ramId, chunkIndex, 16` | `0, status, ramId, slot, totalLength:u16, chunkIndex:u8, count:u8, data...` |
+| `0xA7` | `1, slot` | `0` |
+
+A3 status 0 means success. Chunk indices address 16-byte units; the final
+chunk can be short or padded, so trim to the total length before checking CRC32.
+The one-byte index limits this reader to 4096 bytes. Slots are 0–3 on the wire
+and 1–4 in the CLI. The firmware's exact A1 CRC16 coverage remains unknown;
+do not substitute those values for A3's full-block CRC32.
+
+RAM IDs are **1 global, 4 lighting, 5 mapping, 6 motors**. A4 stages a complete
+block and commits it to active RAM; the hardware findings below give every A4
+request and ACK layout. A7 saves the current profile. A2 reloads stored data,
+including when selecting the already-active slot. Neither A4 nor A7 is a way to
+write an Apex 5 profile blob.
+
+### XMUL/LGHT outer envelope
+
+The captured RAM 4/5 blocks have this envelope; the format readers also accept
+bare bodies beginning with their magic:
+
+| Block offset | Size | Meaning |
+|---|---|---|
+| 0 | 2 | Total block length, including this four-byte envelope |
+| 2 | 2 | CRC16-CCITT of the body, polynomial `0x1021`, initial value `0xffff`, no final XOR |
+| 4 | Remaining | XMUL or LGHT body |
+
+A3/A4 CRC32 covers the **entire block**, including this envelope, using the
+standard reflected IEEE CRC32 (`zlib.crc32`). These checksums are independent of
+the GPA6 packet checksum and LGHT's inner sums.
+
+### Global settings: RAM 1, format 22
+
+The block is 82 bytes: a two-byte prefix and an 80-byte payload. The captured
+prefix is `01 00`; it is **not** the XMUL/LGHT length/CRC envelope, and its
+semantics are not established. The table's offsets start at the 80-byte payload;
+add two for an offset in the full RAM block. A0 field IDs are independent of
+those offsets. Values/ranges listed are what the current editor accepts.
+
+| Payload offset | Size | Field | A0 field ID | Encoding / editor values |
+|---|---|---|---|---|
+| 3 | 1 | Sleep time | 32 | Minutes, integer 0–255; special meaning of zero not hardware-tested |
+| 4 | 1 | Quick switching | 20 | Boolean, write 0/1 |
+| 7 | 32 | Display name | Not exposed | UTF-8 up to first NUL; read only |
+| 39 | 1 | Stick center auto-adjust | 25 | Boolean, write 0/1 |
+| 40 | 1 | Local mapping | 23 | Boolean, write 0/1 |
+| 41 | 2 | USB report rate | 33 | `u16` Hz: 125, 250, 500, 1000 |
+| 43 | 1 | Stick resolution | 34 | 8–12 bits |
+| 47 | 1 | Allow third-party access | 37 | Boolean, write 0/1 |
+| 52 | 1 | XInput Home | 38 | Boolean, write 0/1 |
+
+The pinned decoder treats boolean value 1 as true. Other bytes remain opaque.
+A0 applies a field directly; it does not take an XMUL blob or require the
+profile editor's A4/A7 sequence. Read back the whole global block and compare
+all bytes, not just the requested setting.
+
+### Mapping profiles: RAM 5, XMUL v1.8/v1.9
+
+The mapping protocol version reported by command 7 is 18/19; the XMUL body's
+version field is 8/9. These are different encodings of the version.
+
+| Body offset | Size | Meaning |
+|---|---|---|
+| 0 | 4 | ASCII `XMUL` |
+| 4 | 4 | Version `u32`: 8 or 9 |
+| 8 | 1 | Slot count, exactly 1 |
+| 9 | 3 | Reserved |
+| 12 | 2 | Long-press threshold in milliseconds |
+| 14 | 2 | Double-press threshold in milliseconds |
+| 16 | 4 | Reserved |
+| 20 | 1 | Internal slot ID, 0; not the currently selected hardware slot |
+| 21 | 3 | Reserved |
+| 24 | 1 | Layer count, 1–4 |
+| 25 | 3 | Reserved |
+| 28 | Variable | Layers in sequence, then optional TLVs |
+
+Each layer has an eight-byte header:
+
+| Layer-relative offset | Size | Meaning |
+|---|---|---|
+| 0 | 1 | Layer ID, unique within the profile, 0–3 |
+| 1 | 1 | Reserved |
+| 2 | 2 | Number of source-button mapping entries |
+| 4 | 2 | Number of macro definitions |
+| 6 | 2 | Reserved |
+
+Following that header, sections appear in this exact order: mapping entries,
+macro definitions, left trigger zones, right trigger zones, left stick zones,
+right stick zones. Their variable lengths determine where the next layer starts.
+
+Each **mapping entry** starts with `source:u8, activatorCount:u8, reserved:u16`,
+followed by `activatorCount` five-byte records: `activatorType:u8, target[4]`.
+The vendor limit is five activators per source. Activator types are simple (0),
+timing-single (1), timing-long (2), timing-double (3), pulse-press (4),
+pulse-release (5) and toggle (6). The current CLI writes only simple activators.
+
+The supported source and gamepad-target IDs are:
+
+| ID | Button | ID | Button |
+|---|---|---|---|
+| 0 | A | 11 | D-pad down |
+| 1 | B | 12 | D-pad left |
+| 2 | X | 13 | D-pad right |
+| 3 | Y | 14 | C |
+| 4 | LB | 15 | Z |
+| 5 | RB | 16 | M1 |
+| 6 | Back | 17 | M2 |
+| 7 | Start | 18 | M3 |
+| 8 | Left stick click | 19 | M4 |
+| 9 | Right stick click | 20 | M5 |
+| 10 | D-pad up | 21 | M6 |
+
+A gamepad target is `[0, buttonId, 0, 0]`. Other four-byte targets are kept
+verbatim by this editor; it does not convert them to simple targets unless
+that source is explicitly remapped. For example, a complete M1-to-B entry is:
+
+```text
+10 01 00 00  00 00 01 00 00
+source/count  simple + gamepad B
+```
+
+Removing an override removes the whole entry and decrements the layer's entry
+count. Replacing an entry replaces all of its activators. Other source entries,
+layer headers and the following sections retain their original bytes.
+
+Each **macro definition** has `macroId:u8, triggerMode:u8, loopIntervalMs:u16,
+actionCount:u8, reserved:u8`, followed by `actionCount` seven-byte actions:
+`actionType:u8, target[4], timestampMs:u16`. Action types are press (0) and
+release (1). Trigger modes are press-once (0), immediate-loop (1), wait-loop (2)
+and press-hold (3). Macro definitions are traversed and preserved, not edited.
+
+Each **trigger-zone section** starts with a presence byte. Zero ends the section;
+one is followed by `count:u8` and `count` six-byte records: `start:u8, stop:u8,
+target[4]`. The recovered limit is four zones per trigger.
+
+Each **stick-zone section** also starts with a presence byte. When present,
+it contains `angleMode:u8, count:u8` followed by **eight fixed seven-byte records**,
+including padding for unused zones. Each record is `start:u8, stop:u8, direction:u8,
+target[4]`. Count is at most eight. Angle modes are 4-way (0), 8-way (1) and
+overlapping 4-way (2). Directions are up/down/left/right (0–3), then
+up-left/up-right/down-left/down-right (4–7). Do not skip only `count * 7` bytes:
+the reserved records still occupy space.
+
+### XMUL extension tail
+
+After all layers, optional records use `type:u8, length:u8, value[length]`.
+The terminator is `ff 00`. A body with no tail is also valid; the vendor's v1.8
+encoder omits it when no extensions are present. Once a tail is present, this
+editor requires a complete terminator and no trailing bytes. Unknown TLV types
+are preserved if structurally valid.
+
+| Type | Value length | Recovered meaning |
+|---|---|---|
+| 1, 2 | 12 | Left/right stick curve plus flags |
+| 3, 4 | 11 | Left/right trigger curve |
+| 5 | 24 | Gyroscope configuration |
+| 6, 7 | 12 | Left/right trigger vibration curve, prefixed by a byte |
+| 8, 9 | 12 | Left/right grip vibration flags and curve |
+| 32 | Variable | v1.9 profile and macro names |
+| 255 | 0 | End |
+
+The common 11-byte curve is `startX, startY, endX, endY, midpointCount,
+midpoint1X, midpoint1Y, midpoint2X, midpoint2Y, reserved[2]`, all bytes, with at
+most two midpoints. Stick flags follow the curve: invert-X bit 0, invert-Y bit 1,
+round bit 2. Grip vibration flags precede the curve, with enabled at bit 0.
+These layouts are vendor-derived; the current profile editor preserves the
+entire TLV tail rather than decoding or rewriting these settings.
+
+Type 32 contains `nameLength:u8, UTF8Name[nameLength], namedMacroCount:u8`,
+then records `layerId:u8, macroId:u8, nameLength:u8, UTF8Name[nameLength]`.
+The whole value must fit the one-byte TLV length. v1.8 has no such name metadata.
+
+### Lighting: RAM 4, LGHT v2
+
+Command 7's LED protocol version (observed 10) is separate from the LGHT
+body's version field (2), just as the mapping protocol and body versions differ.
+
+| Body offset | Size | Meaning |
+|---|---|---|
+| 0 | 4 | ASCII `LGHT` |
+| 4 | 2 | Version `u16`, exactly 2 |
+| 6 | 4 | Payload length `L:u32` |
+| 10 | 2 | Sum of bytes 0–9, modulo 65536 |
+| 12 | L | Mode/configuration payload |
+| 12 + L | 2 | Sum of the payload bytes, modulo 65536 |
+
+Total bare-body size is `14 + L`. The payload begins with a mode byte:
+
+| Mode | Meaning | Bytes after the mode, before optional vibration flag |
+|---|---|---|
+| 0 | Off | None |
+| 1 | Solid | `R, G, B, brightness` |
+| 2 | Breathing | `brightness, speed, colorCount`, then RGB triples |
+| 3 | Gradient | `brightness, speed, colorCount`, then RGB triples |
+| 4 | Streaming | `brightness, speed` |
+| 5 | Default | `brightness, speed` |
+
+An optional final byte is the vibration flag (0/1); absent means false.
+The encoder emits it explicitly. RGB channels are 0–255; the editor accepts
+brightness/speed 0–100 and one to eight colors for modes 2/3. Other trailing
+bytes or unknown modes are refused for editing. Full encoded outputs for all
+six modes, with both vibration states, are compared with independent vendor
+fixtures in `tests/fixtures/apex6-config.json`.
+
+## Wired Apex 6 Pro findings, 2026-11-07
+
+The tested device reports SKU 150, USB `37d7:2502`, firmware `9.0.6.8`, format
+versions `(22, 19, 10)` and feature bits `0x9f`. Its vendor collection uses
+unnumbered 32-byte input/output reports: hidraw writes need a leading zero;
+reads do not. Battery level is on a 0–10 scale, unlike Apex 5's 0–5 scale.
+The device list now keeps each model's scale separately.
+
+Captured descriptor, identity replies and initial RAM blocks are in
+`tests/fixtures/apex6-hardware.json`. Local traces and before/after snapshots
+are in ignored `work/apex6-hardware-20261107/`.
+
+Two assumptions in the first implementation were wrong: RAM 4 is LGHT lighting
+and RAM 5 is XMUL mapping; and identical control requests within 100 ms are
+silently suppressed. Repeated queries at 0/5/20/50 ms timed out; 100/200 ms
+succeeded. The transport now spaces only identical GPA6 control requests by
+100 ms. Legacy packets and the 8 ms waveform stream are unaffected. This also
+fixes consecutive UUID reads when opening a UUID-selected controller.
+
+The new editor implements the following recovered transactions:
+
+| Command | Observed behavior |
+|---|---|
+| A0 | Global field/value write; ACK `[0, fieldId]`. Sleep time changed and restored, with all other global bytes preserved. |
+| A2 | Load slot 0–3; 11-byte state ACK. Reloading the active slot discards unsaved RAM. |
+| A4 begin | Request `[0, ramId, length:u16le, crc32:u32le]`; 10-byte v21 ACK `[op, status, ramId, slot, length:u16le, crc32:u32le]`. |
+| A4 chunk | Request `[1, byteOffset:u16le, count:u8, data...]`, at most 16 data bytes. ACK length is the cumulative offset. Repeating the last chunk is idempotent. |
+| A4 commit | Request `[2, length:u16le, crc32:u32le]`; ACK echoes length and CRC32. Full RAM read-back verifies the result. |
+| A4 abort | Request `[3]`; successful ACK starts `[3, 0]`. Remaining target fields are not used. |
+| A7 | Save active profile with `[1, slot]`; ACK payload `[0]`. A modified 600 ms long-press timing survived an A2 reload. |
+
+One mapping chunk initially timed out. The editor now retries a timed-out
+offset-addressed chunk up to three attempts; begin and commit are not replayed.
+A separate hardware probe confirmed that a duplicate chunk does not append
+data twice. Six mapping edit/restore round trips then passed. The physical
+M1-to-B check produced Linux `BTN_EAST` (305) press/release events from the
+upper-right rear paddle. Solid lighting edits and restoration also read back
+correctly. The saved timing edit was restored, saved and reloaded; all original
+RAM blocks matched the starting snapshot afterward.
+
+`gpa6_profile.py` edits XMUL v1.8/v1.9 mappings without rebuilding unrelated
+sections: other layers, macros, trigger/stick zones, curves, metadata and
+reserved bytes are preserved. `map` replaces one source's activators with one
+simple gamepad target, or removes the override with `default`. Timing changes
+touch only the two u16 fields and enclosing checksum. The fixture generator
+also executes the independent vendor encoder on complex two-layer profiles
+with macros and zones; tests compare complete edited bytes for both versions.
+
+Writes are restricted to global fields and RAM 4/5. UUID/model/format checks,
+slot fingerprints and advisory claims prevent common targeting mistakes.
+After an ambiguous error, rollback is attempted only if the same device/slot
+still contains our exact candidate bytes. An external edit is not overwritten.
+Saving is explicit and saves the current profile as a whole. Lost save ACKs
+are reported; rollback of RAM alone would not establish what reached flash.
+Unplugging or a third-party writer can still prevent restoration.
+
+Global sleep time is hardware-verified. Other implemented global fields are
+derived from the vendor A0 field table and tested in software: quick switching,
+stick center adjustment, local mapping, USB report rate, stick resolution,
+third-party access and XInput Home. They have not each been exercised on the
+physical controller. Snapshot import, macro/curve editing, motor configuration
+editing and GUI configuration remain outside this implementation.
+
+The one-second left-grip test at 80 Hz/amplitude 0.12 was felt by the user;
+the controller was quiet afterward. Neutral/disable succeeded, but restoring
+mode 1 on targets `0x10`/`0x11` returned error 1 with both tested parameter
+lengths. Motor RAM stayed unchanged. Reloading the saved profile restored its
+runtime configuration. The existing emulator accepts that restoration, so its
+passing haptic lifecycle tests do not establish firmware compatibility.
+
+Regression verification for this change: all 22 backend test scripts passed,
+including 19 new captured-wire/editing tests. The GUI suites passed 762 model
+checks, 131 window checks and 138 QML tests (none skipped). New tests explicitly
+refuse Apex 5 in the GPA6 editors and leave legacy transport pacing unchanged.
+An Apex 5 was not physically attached during this session; its preservation
+claim is based on the existing software regressions, not a new hardware run.

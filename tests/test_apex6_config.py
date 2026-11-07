@@ -225,8 +225,8 @@ class SnapshotTests(unittest.TestCase):
 
     def test_unknown_formats_retain_exact_raw_bytes(self):
         self.pad.versions = (23, 42, 3)
-        self.pad.configs[0][4] = b"future mapping format"
-        self.pad.configs[0][5] = b"future lighting format"
+        self.pad.configs[0][5] = b"future mapping format"
+        self.pad.configs[0][4] = b"future lighting format"
         self.pad.maps[0][0] = 3
         snapshot = config.snapshot(self.pad)
         for block in snapshot["blocks"].values():

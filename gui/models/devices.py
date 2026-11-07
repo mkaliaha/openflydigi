@@ -95,6 +95,7 @@ class DevicesModel(QAbstractListModel):
     UidRole = Qt.UserRole + 14
     ErrorRole = Qt.UserRole + 15
     CodeRole = Qt.UserRole + 16
+    BatteryStepsRole = Qt.UserRole + 17
 
     # Which roles each field of a probe entry feeds, so a poll that found one
     # number different can say which number rather than replacing the row. The
@@ -121,6 +122,7 @@ class DevicesModel(QAbstractListModel):
         "supported": (SupportedRole, DetailRole),
         "error": (ErrorRole, DetailRole),
         "battery": (BatteryRole,),
+        "battery_steps": (BatteryStepsRole,),
         "charging": (ChargingRole,),
         "firmware": (FirmwareRole,),
         "family": (),
@@ -166,6 +168,7 @@ class DevicesModel(QAbstractListModel):
             self.SelectorRole: b"selector", self.IconRole: b"iconName",
             self.MockRole: b"mock", self.SupportedRole: b"supported",
             self.BatteryRole: b"battery", self.ChargingRole: b"charging",
+            self.BatteryStepsRole: b"batterySteps",
             self.FirmwareRole: b"firmware", self.NicknameRole: b"nickname",
             self.ModelRole: b"model", self.UidRole: b"uid",
             self.ErrorRole: b"error",
@@ -187,6 +190,7 @@ class DevicesModel(QAbstractListModel):
             self.SupportedRole: bool(entry.get("supported")),
             self.BatteryRole: (-1 if entry.get("battery") is None
                                else int(entry["battery"])),
+            self.BatteryStepsRole: int(entry.get("battery_steps", 5)),
             self.ChargingRole: bool(entry.get("charging")),
             self.FirmwareRole: entry.get("firmware") or "",
             self.NicknameRole: entry.get("nickname") or "",

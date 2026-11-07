@@ -2070,6 +2070,12 @@ def test_the_device_list_shows_what_each_device_is():
     check("an unnamed pad is told apart by its node", "/dev/hidraw4" in detail,
           detail)
     check("nothing is marked as a mock", not model.hasMock)
+    apex6 = dict(pad_entry(8), code="k6", model="Apex 6 Pro", battery=10,
+                 battery_steps=10, supported=False, experimental=True)
+    model.devicesReceived([pad_entry(2), apex6])
+    steps = [model.data(model.index(row, 0), models.DevicesModel.BatteryStepsRole)
+             for row in range(model.count)]
+    check("each model keeps its battery scale", steps == [5, 10], str(steps))
 
 
 def test_choosing_a_pad_tells_the_daemon_and_choosing_a_dock_does_not():

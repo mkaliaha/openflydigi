@@ -430,9 +430,20 @@ class Controller:
                     or buf[1:3] != b"\x5a\xa5"):
                 raise ProtocolError("legacy packets are refused on GPA6 devices")
         with self.claim():
+            # Apex 6 firmware 9.0.6.8 suppresses identical control requests
+            # repeated within 100 ms. Pace only exact repeats; waveform frames
+            # (0x57) must keep their 8 ms cadence, including repeated silence.
+            if self.dialect == "gpa6" and buf[3] != 0x57:
+                previous, sent_at = getattr(self, "_gpa6_last_control", (None, 0))
+                if previous == bytes(buf):
+                    delay = 0.100 - (time.monotonic() - sent_at)
+                    if delay > 0:
+                        time.sleep(delay)
             self._drain()
             if os.write(self.fd, bytes(buf)) != len(buf):
                 raise OSError("short HID report write")
+            if self.dialect == "gpa6" and buf[3] != 0x57:
+                self._gpa6_last_control = bytes(buf), time.monotonic()
             replies = []
             deadline = time.time() + wait
             while time.time() < deadline:

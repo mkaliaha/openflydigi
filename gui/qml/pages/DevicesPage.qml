@@ -67,6 +67,7 @@ Kirigami.ScrollablePage {
                 required property bool mock
                 required property bool supported
                 required property int battery
+                required property int batterySteps
                 required property bool charging
                 required property string firmware
                 required property string nickname
@@ -134,7 +135,7 @@ Kirigami.ScrollablePage {
                                     bits.push(card.charging
                                         ? "charging"
                                         : "battery " + card.battery + "/"
-                                          + App.device.batterySteps);
+                                          + card.batterySteps);
                                 return bits.join(" · ");
                             }
                         }
