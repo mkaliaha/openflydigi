@@ -96,6 +96,19 @@ def main():
     timing.add_argument("--long-ms", type=int)
     timing.add_argument("--double-ms", type=int)
     timing.add_argument("--save", action="store_true")
+    for command in ("trigger-zones", "stick-zones"):
+        zones = sub.add_parser(command, help="read or replace one control's action zones")
+        zones.add_argument("side", choices=("left", "right"))
+        zones.add_argument("--layer", type=int, choices=range(4), default=0)
+        changes = zones.add_mutually_exclusive_group()
+        fields = ("DIR", "START", "STOP", "TARGET") if command == "stick-zones" else ("START", "STOP", "TARGET")
+        changes.add_argument("--zone", nargs=len(fields), action="append", metavar=fields,
+                             help="replace all zones; repeat up to " + ("eight" if command == "stick-zones" else "four")
+                             + " times; ranges use 0..255; targets match bind")
+        changes.add_argument("--clear", action="store_true", help="remove this side/layer's zone section")
+        zones.add_argument("--save", action="store_true")
+        if command == "stick-zones":
+            zones.add_argument("--mode", choices=gpa6_profile.ANGLE_MODES, help="preserve existing angle mode by default; new sections use 4way")
     for command in ("stick", "trigger"):
         response = sub.add_parser(command, help=f"read or edit one {command}'s response")
         response.add_argument("side", choices=("left", "right"))
@@ -130,6 +143,33 @@ def main():
     play = sub.add_parser("play", help="play 48 kHz s16 PCM WAV; stereo or four-channel DualSense capture")
     play.add_argument("wav")
     args = parser.parse_args()
+    zone_command = args.command in ("trigger-zones", "stick-zones")
+    zone_write = False
+    if zone_command:
+        zone_mode = getattr(args, "mode", None)
+        zone_write = args.zone is not None or args.clear or args.save or zone_mode is not None
+        if args.clear and zone_mode is not None:
+            parser.error("--clear and --mode cannot be combined")
+        zone_values = None
+        if args.zone is not None:
+            try:
+                maximum = 8 if args.command == "stick-zones" else 4
+                if len(args.zone) > maximum:
+                    raise ValueError(f"at most {maximum} zones are supported")
+                zone_values = []
+                for parts in args.zone:
+                    low, high, target = parts[-3:]
+                    low, high = int(low), int(high)
+                    if not 0 <= low <= high <= 255:
+                        raise ValueError("zone ranges require 0 <= START <= STOP <= 255")
+                    zone = {"start": low, "stop": high, "target": action_target(target)}
+                    if args.command == "stick-zones":
+                        if parts[0] not in gpa6_profile.DIRECTIONS:
+                            raise ValueError("unknown stick direction: " + parts[0])
+                        zone["dir"] = parts[0]
+                    zone_values.append(zone)
+            except ValueError as exc:
+                parser.error(str(exc))
     bind_write = args.command == "bind" and (args.action is not None or args.clear or args.save)
     if args.command == "bind":
         try:
@@ -157,7 +197,7 @@ def main():
         if native and facade_write:
             parser.error("edit either exact curve coordinates or preset/deadzone/travel controls in one command")
     if (args.command in ("tone", "play", "set-setting", "map", "timing", "slot", "save", "layer-add")
-            or light_write or response_write or bind_write
+            or light_write or response_write or bind_write or zone_write
             or ((args.command == "light" or response_command) and args.save)) and not args.experimental:
         parser.error("configuration writes and grip output require --experimental")
     if args.command == "timing" and args.long_ms is None and args.double_ms is None:
@@ -206,6 +246,26 @@ def main():
             slot = protocol.slot()
             protocol.save_slot(slot)
             print(f"Saved profile {slot + 1}")
+            return 0
+        if zone_command:
+            def edit_zones(data):
+                config = gpa6_profile.MappingConfig(data)
+                values = [] if args.clear else zone_values
+                if args.command == "trigger-zones":
+                    config.trigger_zones(args.side, layer=args.layer)
+                    if values is not None:
+                        config.set_trigger_zones(args.side, values, layer=args.layer)
+                else:
+                    config.set_stick_zones(args.side, values, angle_mode=zone_mode, layer=args.layer)
+                return config.blob
+            data = (gpa6_config.edit_ram(ctrl, 5, edit_zones, save=args.save, expected_uid=uid)
+                    if zone_write else protocol.read_ram(5))
+            config = gpa6_profile.MappingConfig(data)
+            result = (config.trigger_zones(args.side, layer=args.layer) if args.command == "trigger-zones"
+                      else config.stick_zones(args.side, layer=args.layer))
+            if zone_write:
+                print("Profile save acknowledged." if args.save else "Applied and verified; this firmware can retain edits without explicit save.", file=sys.stderr)
+            print(json.dumps(result, indent=2))
             return 0
         if args.command in ("bind", "layer-add"):
             def edit_bindings(data):

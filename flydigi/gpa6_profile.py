@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
 # SPDX-License-Identifier: MIT
 
-"""Lossless edits to XMUL v1.8/v1.9 mappings, timings and response curves.
+"""Lossless edits to XMUL v1.8/v1.9 mappings, zones, timings and response curves.
 
 Edits touch only the selected activator entry, timing field or response
-extension, or append an empty layer. Other sections, metadata and reserved
+extension or zone section, or append an empty layer. Other sections, metadata and reserved
 bytes keep their exact bytes.
 """
 import struct
@@ -13,8 +13,11 @@ from . import gpa6, mapping
 from .gpa6_config import mapping_header, unwrap_blob, wrap_blob
 from .gpa6_actions import ACTIVATORS, BUTTONS, decode_target, encode_target
 
+ANGLE_MODES = ("4way", "8way", "4way_overlap")
+DIRECTIONS = ("up", "down", "left", "right", "up_left", "up_right", "down_left", "down_right")
 
-def _layout(blob):
+
+def _layout(blob, *, zone_sections=None):
     mapping_header(blob)
     data = unwrap_blob(blob, b"XMUL")
     position = 28
@@ -53,7 +56,8 @@ def _layout(blob):
         for _ in range(macros):
             header = take(6)
             take(header[4] * 7)  # action, target[4], timestamp:u16
-        for _ in range(2):
+        for side in mapping.SIDES:
+            zone_start = position
             present = take(1)[0]
             if present not in (0, 1):
                 raise gpa6.ProtocolError("unsupported trigger-zone flag")
@@ -62,7 +66,10 @@ def _layout(blob):
                 if count > 4:
                     raise gpa6.ProtocolError("invalid trigger-zone count")
                 take(count * 6)
-        for _ in range(2):
+            if zone_sections is not None:
+                zone_sections[(layer_id, "trigger", side)] = (zone_start, position)
+        for side in mapping.SIDES:
+            zone_start = position
             present = take(1)[0]
             if present not in (0, 1):
                 raise gpa6.ProtocolError("unsupported stick-zone flag")
@@ -71,6 +78,8 @@ def _layout(blob):
                 if mode > 2 or count > 8:
                     raise gpa6.ProtocolError("invalid stick-zone header")
                 take(8 * 7)
+            if zone_sections is not None:
+                zone_sections[(layer_id, "stick", side)] = (zone_start, position)
         layers.append((layer_id, start, entries_end, entries))
     # The vendor also accepts a mapping with no optional TLV tail (v1.8's
     # encoder omits it when there are no curves or other extensions).
@@ -100,8 +109,9 @@ def describe(blob):
     data, layers = _layers(blob)
     result = mapping_header(data)
     names = {value: key for key, value in BUTTONS.items()}
-    result["decoded_scope"] = "button activators, timing and stick/trigger response; other sections preserved"
+    result["decoded_scope"] = "button activators, zones, timing and stick/trigger response; other sections preserved"
     result["layers"] = []
+    config = MappingConfig(blob)
     for layer_id, _, _, entries in layers:
         mappings = {}
         for source, _, _, activators in entries:
@@ -110,8 +120,9 @@ def describe(blob):
             else:
                 mappings[names[source]] = {"activators_hex": activators.hex(),
                                            "activators": _decode_activators(activators)}
-        result["layers"].append({"id": layer_id, "overrides": mappings})
-    config = MappingConfig(blob)
+        result["layers"].append({"id": layer_id, "overrides": mappings,
+            "trigger_zones": {side: config.trigger_zones(side, layer=layer_id) for side in mapping.SIDES},
+            "stick_zones": {side: config.stick_zones(side, layer=layer_id) for side in mapping.SIDES}})
     result["response"] = {}
     for control in ("stick", "trigger"):
         result["response"][control] = {}
@@ -145,6 +156,21 @@ def _selected_layer(blob, layer):
     if found is None:
         raise ValueError("selected mapping layer does not exist")
     return data, layers, found
+
+
+def _encode_layer_target(data, layers, selected, target, *, previous=None):
+    raw = encode_target(target, previous=previous)
+    if raw[0] in (20, 21) and raw[1] not in [item[0] for item in layers]:
+        raise ValueError("target mapping layer does not exist; create it first")
+    if raw[0] == 30:
+        _, header, position, _ = selected
+        macro_ids = []
+        for _ in range(struct.unpack_from("<H", data, header + 4)[0]):
+            macro_ids.append(data[position])
+            position += 6 + data[position + 4] * 7
+        if macro_ids.count(raw[1]) != 1:
+            raise ValueError("target macro must exist uniquely in the selected layer")
+    return raw
 
 
 def timing(blob, *, long_ms=None, double_ms=None):
@@ -239,6 +265,7 @@ class MappingConfig:
     trigger travel uses 0..255. ``response_curve``/``set_response_curve`` expose
     exact absolute 0..255 coordinates for richer Apex 6 editors. Activators use
     the shared native action model; their setters touch only the chosen entry.
+    Zone setters touch only the selected control, side and layer's zone section.
     Response setters touch only the selected TLV. All setters are atomic.
     This is not a legacy wire config:
     submit it through gpa6_config.edit_ram, never mapping.write_config.
@@ -290,25 +317,17 @@ class MappingConfig:
             raise ValueError("unknown source button")
         if activators is not None and (not isinstance(activators, (list, tuple)) or len(activators) > 5):
             raise ValueError("a button supports at most five activators")
-        data, layers, (_, header, end, entries) = _selected_layer(self.blob, layer)
+        data, layers, selected = _selected_layer(self.blob, layer)
+        _, header, end, entries = selected
         source_id = BUTTONS[source]
         old = next((entry for entry in entries if entry[0] == source_id), None)
-        macro_ids = []
-        position = end
-        for _ in range(struct.unpack_from("<H", data, header + 4)[0]):
-            macro_ids.append(data[position])
-            position += 6 + data[position + 4] * 7
         records = bytearray()
         for index, action in enumerate(activators or ()):
             if (not isinstance(action, dict) or set(action) != {"type", "target"}
                     or action["type"] not in ACTIVATORS):
                 raise ValueError("an activator requires a supported type and target")
             previous = old[3][index * 5 + 1:index * 5 + 5] if old else None
-            target = encode_target(action["target"], previous=previous)
-            if target[0] in (20, 21) and target[1] not in [item[0] for item in layers]:
-                raise ValueError("target mapping layer does not exist; create it first")
-            if target[0] == 30 and macro_ids.count(target[1]) != 1:
-                raise ValueError("target macro must exist uniquely in the selected layer")
+            target = _encode_layer_target(data, layers, selected, action["target"], previous=previous)
             records.extend(bytes([ACTIVATORS.index(action["type"])]) + target)
         if activators is None:
             replacement = b""
@@ -320,6 +339,109 @@ class MappingConfig:
             return
         result = bytearray(data[:start] + replacement + data[stop:])
         struct.pack_into("<H", result, header + 2, len(entries) - bool(old) + (activators is not None))
+        _layout(result)
+        self.blob[:] = wrap_blob(result)
+
+    def _zone_section(self, control, side, layer):
+        if control not in ("trigger", "stick") or side not in mapping.SIDES:
+            raise ValueError("zone control must be trigger/stick and side left/right")
+        _integer(layer, 3, "layer")
+        sections = {}
+        data, layers, _ = _layout(self.blob, zone_sections=sections)
+        selected = next((item for item in layers if item[0] == layer), None)
+        if selected is None:
+            raise ValueError("selected mapping layer does not exist")
+        start, stop = sections[(layer, control, side)]
+        return data, layers, selected, start, stop
+
+    def trigger_zones(self, side, *, layer=0):
+        """Explicit travel zones in native 0..255 units; [] when absent."""
+        data, _, _, start, stop = self._zone_section("trigger", side, layer)
+        raw = data[start:stop]
+        return [] if not raw[0] else [
+            {"start": raw[i], "stop": raw[i + 1], "target": decode_target(raw[i + 2:i + 6])}
+            for i in range(2, len(raw), 6)]
+
+    def stick_zones(self, side, *, layer=0):
+        """Angle mode and active radius/direction zones, or None when absent.
+
+        Unused records remain in the blob and are never exposed as active zones.
+        Unknown directions and targets can be inspected without rewriting them.
+        """
+        data, _, _, start, stop = self._zone_section("stick", side, layer)
+        raw = data[start:stop]
+        if not raw[0]:
+            return None
+        return {"angle_mode": ANGLE_MODES[raw[1]], "zones": [
+            {"start": raw[i], "stop": raw[i + 1],
+             "dir": DIRECTIONS[raw[i + 2]] if raw[i + 2] < len(DIRECTIONS) else raw[i + 2],
+             "target": decode_target(raw[i + 3:i + 7])}
+            for i in range(3, 3 + raw[2] * 7, 7)]}
+
+    def set_trigger_zones(self, side, zones, *, layer=0):
+        """Replace up to four travel zones. [] removes the selected section."""
+        self._set_zones("trigger", side, zones, layer=layer)
+
+    def set_stick_zones(self, side, zones=None, *, angle_mode=None, layer=0):
+        """Replace up to eight zones and/or change their shared angle mode.
+
+        None preserves zones; [] removes the section. An omitted angle mode
+        preserves it, or defaults to 4way for a new section. A mode-only edit
+        needs an existing section and preserves every zone/target/padding byte.
+        """
+        self._set_zones("stick", side, zones, angle_mode=angle_mode, layer=layer)
+
+    def _set_zones(self, control, side, zones, *, angle_mode=None, layer=0):
+        data, layers, selected, start, stop = self._zone_section(control, side, layer)
+        raw = data[start:stop]
+        stick = control == "stick"
+        if angle_mode is not None and angle_mode not in ANGLE_MODES:
+            raise ValueError("unknown stick angle mode")
+        if zones is None:
+            if not stick:
+                raise ValueError("trigger zones must be a sequence; use [] to clear")
+            if angle_mode is None:
+                return
+            if not raw[0]:
+                raise ValueError("create stick zones before changing their angle mode")
+            replacement = bytearray(raw)
+            replacement[1] = ANGLE_MODES.index(angle_mode)
+        else:
+            maximum = 8 if stick else 4
+            if not isinstance(zones, (list, tuple)) or len(zones) > maximum:
+                raise ValueError(f"{control} zones must be a sequence of at most {maximum} entries")
+            if not zones:
+                if angle_mode is not None:
+                    raise ValueError("cannot set angle mode while clearing stick zones")
+                replacement = b"\0"
+            else:
+                header_size, stride = (3, 7) if stick else (2, 6)
+                if stick:
+                    replacement = bytearray(raw if raw[0] else bytes(3 + 8 * 7))
+                    mode = ANGLE_MODES.index(angle_mode) if angle_mode is not None else (raw[1] if raw[0] else 0)
+                    replacement[:3] = bytes([1, mode, len(zones)])
+                else:
+                    replacement = bytearray([1, len(zones)]) + bytearray(len(zones) * 6)
+                for index, zone in enumerate(zones):
+                    fields = {"start", "stop", "target", "dir"} if stick else {"start", "stop", "target"}
+                    if not isinstance(zone, dict) or set(zone) != fields:
+                        raise ValueError("zone requires start, stop, target" + (" and dir" if stick else ""))
+                    low = _integer(zone["start"], 255, "zone start")
+                    high = _integer(zone["stop"], 255, "zone stop")
+                    if low > high:
+                        raise ValueError("zone start must not exceed stop")
+                    prefix = bytes([low, high])
+                    if stick:
+                        if zone["dir"] not in DIRECTIONS:
+                            raise ValueError("unknown stick zone direction")
+                        prefix += bytes([DIRECTIONS.index(zone["dir"])])
+                    offset = header_size + index * stride
+                    previous = raw[offset + len(prefix):offset + stride] if raw[0] else None
+                    target = _encode_layer_target(data, layers, selected, zone["target"], previous=previous)
+                    replacement[offset:offset + stride] = prefix + target
+        if data[start:stop] == replacement:
+            return
+        result = data[:start] + replacement + data[stop:]
         _layout(result)
         self.blob[:] = wrap_blob(result)
 

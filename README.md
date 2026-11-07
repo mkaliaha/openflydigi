@@ -406,6 +406,9 @@ tools/flydigi-apex6 --device uid:YOUR_UUID --experimental bind m1 --action timin
 tools/flydigi-apex6 --device uid:YOUR_UUID --experimental layer-add 1
 tools/flydigi-apex6 --device uid:YOUR_UUID --experimental bind m1 --action simple layer-hold:1
 tools/flydigi-apex6 --device uid:YOUR_UUID --experimental bind a --layer 1 --action simple x
+tools/flydigi-apex6 --device uid:YOUR_UUID trigger-zones left
+tools/flydigi-apex6 --device uid:YOUR_UUID --experimental trigger-zones left --zone 64 159 b --zone 160 255 x
+tools/flydigi-apex6 --device uid:YOUR_UUID --experimental stick-zones right --mode 8way --zone up 128 255 a --zone right 128 255 b
 tools/flydigi-apex6 --device uid:YOUR_UUID stick left
 tools/flydigi-apex6 --device uid:YOUR_UUID --experimental stick left --center 10 --edge 5 --circular on --invert-y off
 tools/flydigi-apex6 --device uid:YOUR_UUID --experimental trigger right --zero 30 --end 200
@@ -440,8 +443,29 @@ encodes a HID keyboard target; firmware/connection-mode support for host keyboar
 and mouse output is not established by encoding it. `layer-add 1/2/3` creates an
 empty Shift layer without changing existing layers; layer references must already
 exist. Macro targets must refer to an existing macro in the selected layer.
-These controls use the Apex 6 backend; GUI integration and stick/trigger zone
-editing remain separate work.
+These controls use the Apex 6 backend; GUI integration remains separate work.
+
+`trigger-zones left/right` and `stick-zones left/right` read action zones in
+`--layer 0/1/2/3` (default 0). Repeated `--zone START STOP TARGET` replaces all
+zones for a trigger (up to four). A stick uses `--zone DIR START STOP TARGET`
+(up to eight total). Ranges use native 0–255 travel/radius units; direction
+names are `up`, `down`, `left`, `right`, `up_left`, `up_right`, `down_left` and
+`down_right`. Targets use the same button names, layer shortcuts and JSON as
+`bind`. Zone actions do not have button-style press/hold/toggle activators.
+
+Stick `--mode 4way/8way/4way_overlap` selects the angular partition, retaining
+the existing mode if omitted and using `4way` for a new section. A mode-only edit
+requires existing stick zones. `--clear` removes the selected side/layer's zone
+section. Zones may overlap and repeat directions; their supplied order is kept.
+Edits preserve the response curves, other sections and inactive stick records.
+`--save` is optional; all writes still require `--experimental`. See the
+[zone findings](docs/findings-apex6.md#trigger-and-stick-action-zone-editor) for
+validation scope and the reusable backend interface.
+Guided physical checks verified trigger ranges, stick direction/radius modes
+and selected Shift-zone configurations, with original settings restored after
+every phase. The findings retain an initial ambiguous Shift event and the
+successful focused follow-ups; exact physical cutoffs and every target type
+are not covered by this acceptance round.
 
 `stick left/right` and `trigger left/right` read or edit response settings.
 Stick deadzones use percentages; `--preset default/instant/delay/custom` reuses

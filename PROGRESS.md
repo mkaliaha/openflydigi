@@ -78,8 +78,19 @@ single/long/double press, press/release pulses, toggle, simultaneous actions,
 hold Shift and toggle Shift. Every phase restored all original configuration
 bytes and the active profile. Other typed target effects remain unverified.
 
-Remaining configuration work includes macro editing, stick/trigger action zones,
-gyro mapping, native grip/trigger haptic settings,
+Trigger/stick action-zone editing now also has a shared profile API and CLI,
+with four travel zones per trigger, eight radius/direction zones per stick,
+three angle modes and per-layer selection. Nineteen focused tests include 88
+independent complete-profile vendor-encoder comparisons and guarded fake-pad
+writes. Seven hardware storage/restoration cases passed. Guided physical checks
+verified both trigger ranges, stick 4-way/8-way/overlapping modes, radius ranges
+and Shift-layer activation. An unexpected X event in the initial combined Shift
+phase did not recur in isolated or controlled combined follow-ups. The user
+reported possibly misunderstanding that step's instructions; the cause remains
+unconfirmed and documented. All nine physical phases restored the original
+profile and configuration bytes; every test session exited cleanly.
+
+Remaining configuration work includes macro editing, gyro mapping, native grip/trigger haptic settings,
 restorable profile backups/library, screen support and GUI wiring. Apex 6 remains
 outside the legacy configuration allowlist, so Apex 5 wire paths stay separate.
 

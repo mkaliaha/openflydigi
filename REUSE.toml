@@ -34,7 +34,7 @@ SPDX-License-Identifier = "CC0-1.0"
 
 # Native/web input/output protocol fixtures contain no vendor implementation.
 [[annotations]]
-path = ["tests/fixtures/apex6-encoder.json", "tests/fixtures/apex6-config.json", "tests/fixtures/apex6-activators.json"]
+path = ["tests/fixtures/apex6-encoder.json", "tests/fixtures/apex6-config.json", "tests/fixtures/apex6-activators.json", "tests/fixtures/apex6-zones.json"]
 precedence = "closest"
 SPDX-FileCopyrightText = "2026 Mikalai Kaliaha"
 SPDX-License-Identifier = "CC0-1.0"

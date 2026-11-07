@@ -704,9 +704,111 @@ blocks and the active slot byte for byte. Final cleanup passed and the process
 exited 0, releasing the HID claim and evdev reader. Evidence and event sequences:
 `work/apex6-activators-20261107/physical/results.json` and per-phase logs.
 
-Trigger zones (up to four travel ranges) and stick zones (up to eight
-direction/radius ranges) use the same target records. Their editing and the
-vendor's stick WASD/mouse modes remain separate work from button activators.
+Trigger zones and stick zones use the same target records. Their editor is
+described below; dedicated WASD/mouse presets and GUI workflows remain separate.
+
+### Trigger and stick action-zone editor
+
+`MappingConfig.trigger_zones(side, layer=0)` returns active zones as
+`{start, stop, target}` records, or `[]` when absent.
+`set_trigger_zones(side, zones, layer=0)` replaces up to four zones; `[]` removes
+the whole selected section. Each target uses the shared `gpa6_actions` codec.
+
+`stick_zones(side, layer=0)` returns `{angle_mode, zones}`, or `None` when absent.
+Stick zone records add `dir` to the trigger fields. `set_stick_zones(side,
+zones=None, angle_mode=None, layer=0)` replaces up to eight zones and/or changes
+the section's angle mode. `zones=None` preserves records; `zones=[]` removes
+the section. Omitted angle mode preserves the existing value or defaults to
+`4way` for a new section. Mode-only edits need an existing section and change
+only the mode byte, preserving even unknown directions/targets.
+
+Accepted angle modes are `4way`, `8way`, `4way_overlap`; directions are up,
+down, left, right, up_left, up_right, down_left and down_right. Endpoints are
+integers in 0–255 with start ≤ stop. Overlaps, repeated directions and the
+caller's ordering are retained rather than sorted or merged. This does not
+establish firmware behavior at equal boundaries or every overlapping combination.
+Zone targets have no separate button activator byte. Target layer/macro reference
+checks are shared with button bindings; references must already exist.
+
+Setters update only the selected control/side/layer section and validate before
+mutating the object. Stick sections always occupy eight records when present.
+Shrinking the active count preserves the former active records as inactive
+padding; new sections initialize padding to zero. Replacing targets of the same
+kind retains their reserved bytes. Clearing a section intentionally removes its
+padding. Untouched sources, layers, macros, curves, metadata and unknown TLVs
+remain byte-exact. Reads expose unknown directions/targets without rewriting
+them; typed replacement refuses unsupported values. `describe()` now includes
+both sides' zones for each layer, and the CLI `profile` output shows them.
+
+CLI commands are `trigger-zones SIDE` and `stick-zones SIDE`. A trigger takes
+repeated `--zone START STOP TARGET`; a stick adds the leading `DIR` argument
+and optional `--mode`. `--clear` removes the selected section. Both support
+`--layer` and `--save`, read without opt-in, and require `--experimental` for
+writes. Changes go through the existing guarded RAM-5 write/verify/rollback path.
+The editor does not synthesize response-curve changes or WASD/mouse presets.
+
+`tests/fixtures/apex6-zones.json` records 88 complete before/after bodies from
+independent execution of the pinned vendor encoder: both XMUL versions, both
+sides, layers 0/1, trigger capacity, all stick modes, eight directions, insertion,
+replacement, clearing and mode-only edits. Source SHA-256 and harness adaptations
+are recorded in the fixture. No vendor code is checked in. Nineteen focused
+tests additionally cover unused/reserved bytes, resizing, unknown target/direction
+preservation, overlapping ranges, bad inputs, reference checks, CLI opt-in and
+fake-pad write/save/power-cycle/rollback/restoration.
+
+All 25 backend scripts and 772 GUI model checks passed after these changes.
+The device test's local-socket checks required host access and passed 14/14
+there; the other backend scripts passed in the sandbox.
+
+Seven bounded cases on SKU 150 / firmware 9.0.6.8 passed exact write/read-back:
+four-zone left/right triggers, eight-direction left stick, 4-way right stick,
+overlapping 4-way left stick, an eight-to-one stick-zone shrink retaining unused
+slots, and trigger/stick zones in layer 1 with M1 as its hold binding. Each case
+restored all four original RAM blocks and the original profile. No physical
+zone-effect claim follows from this storage test alone. Evidence and verified
+restoration snapshots: `work/apex6-zones-20261107/readback/`.
+
+#### Guided physical zone acceptance
+
+The subsequent guided round used held configurations, full-UUID-bound HID and
+evdev discovery, a fresh baseline and byte-exact restoration after every phase.
+The controller was SKU 150 / firmware 9.0.6.8 on the receiver. Native gamepad
+targets were exercised; normal analog axes continued reporting alongside them.
+
+| Check | Observed result |
+|---|---|
+| Both trigger travel ranges | Three sweeps each: left B→X→B, right A→Y→A, then no action near rest. Both analog triggers still produced all 256 values. |
+| Left stick 4-way | Cardinal up/down/left/right produced A/B/X/Y; diagonal movement selected one cardinal action at a time. |
+| Left stick overlapping 4-way | Upper-right A+Y, lower-right B+Y, lower-left B+X, upper-left A+X; each pair pressed/released together. |
+| Left stick 8-way | Stable cardinal and diagonal positions matched all eight assigned directions. Two brief mixed-action frames appeared during movement between directions, so this is not a strict mutual-exclusion guarantee during transitions. |
+| Right stick radius ranges | Three rightward sweeps through 64–159 and 160–255 produced B→X→B and then no action near centre. Analog stick output remained active. |
+| Isolated Shift-zone controls | Separate trigger and stick follow-ups produced no action before Shift, B or X during Shift, and no action after Shift. |
+| Combined Shift release inside zones | B and X released together when M1 was released while LT remained 255 and RX remained 32767. A subsequent unshifted movement produced neither action. |
+
+Configured trigger boundaries were 64/159 and 160/255. Captured transitions
+occurred around analog values 69 and 165 while squeezing, and 153–154 and 58
+while releasing. This is consistent with firmware hysteresis, but does not
+establish an exact rule or calibrated physical cutoffs. The editor keeps the
+native encoded endpoints; no compensation or response-curve adjustment was added.
+
+The first combined Shift phase contained an unexpected late X event. The user
+later noted that they may have misunderstood that step's instructions; this is
+a possible explanation, not an established cause. It did not recur in either
+isolated follow-up or the final controlled combined check, including release of
+M1 while both controls remained
+inside their zones. Retain the original capture rather than labelling that first
+phase an unqualified pass. The follow-ups added a simple-Y action to M1 in layer
+0 as an observation aid; it pulsed for about 1 ms on layer entry and did not
+continuously indicate the physical M1 hold. No firmware workaround was added.
+
+All nine captured phases across three sessions restored the original profile 1
+and all four RAM blocks byte for byte. Each session exited 0 and released its
+HID claim and evdev reader. The physical scope is selected ranges, direction
+modes and layer-1 activation using gamepad targets; other target effects, exact
+angular boundaries, arbitrary overlaps and all layer combinations remain outside
+this round. Raw logs, snapshots and computed checks are under
+`work/apex6-zones-20261107/physical/`, `physical-shift-followup/` and
+`physical-combined-followup/`; the combined result is `physical-results.json`.
 
 ### XMUL extension tail
 
