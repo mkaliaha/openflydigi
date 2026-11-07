@@ -541,6 +541,15 @@ version field is 8/9. These are different encodings of the version.
 | 25 | 3 | Reserved |
 | 28 | Variable | Layers in sequence, then optional TLVs |
 
+The long/double-press thresholds are shared by every button and layer in this
+profile. Each hardware profile can hold different values. They are not per-button
+fields or controller-wide global settings. The captured defaults were 300/400 ms.
+The vendor's mapping UI describes long press as activation after holding for the
+configured duration, and double press as two presses within the time limit.
+Our Apex 6 CLI edits these fields; our GUI does not expose them or timed activators.
+No equivalent fields have been identified in the decoded Apex 5 profile format;
+macro delays and repeat intervals are separate settings.
+
 Each layer has an eight-byte header:
 
 | Layer-relative offset | Size | Meaning |
@@ -747,9 +756,42 @@ wireless controller to sleep: the user observed its disappearance from the
 system while the receiver remained plugged in, and USB inventory showed no
 Flydigi device at that point. Waking it restored the same UUID; the original
 15-minute timer and every active configuration block were then restored.
-Local mapping, center auto-adjust and third-party access have only been verified
-by write/read-back/restoration. Snapshot import, macro/curve editing, motor
+Local mapping and center auto-adjust have only been verified by
+write/read-back/restoration, accepted for settings support without further
+physical checks. Third-party permission was subsequently tested as described
+below. Snapshot import, macro/curve editing, motor
 configuration editing and GUI configuration remain outside this implementation.
+
+### Third-party takeover permission
+
+A receiver-connected test on the same firmware exercised the cooperative
+request used by SDL and the older SDK: GPA6 command `0x1c`, a one-byte
+acquire/release flag followed by a 20-byte ASCII owner tag. The new descriptor's
+framing and checksum were used. Command `0x10` status has active at payload byte
+0 and permission at byte 4, matching the web client's decoder. These bytes must
+not be interpreted as the legacy Apex 5 transport flags.
+
+| Operation | Observed result |
+|---|---|
+| Acquire with permission off | Grant byte 0; status inactive |
+| Enable permission, then acquire | Grant byte 1; status active |
+| Release while permission stays on | Grant byte 1; status inactive |
+| Acquire again, then disable permission | Status immediately inactive with permission off |
+
+Acquisition also started unsolicited `0xef` input reports; release/revocation
+stopped them apart from a pending report during release. Their input/motion
+layout was not decoded by this check. The owner name was not echoed in status.
+Only one requesting client was exercised: owner arbitration and timeout expiry
+remain untested. The official browser UI's response was not exercised, although
+its inspected code uses the same active/allowed status bits.
+
+The original permission was restored to off. All configuration blocks and the
+active slot matched the pre-test snapshot, and final takeover status was inactive.
+`tests/fixtures/apex6-takeover.json` holds captured request/reply bytes and status
+payloads. The fake pad models the measured permission/grant/release/revocation
+sequence; it does not model competing owners, expiry or raw input streaming.
+
+### Remaining acceptance observations
 
 The one-second left-grip test at 80 Hz/amplitude 0.12 was felt by the user;
 the controller was quiet afterward. Neutral/disable succeeded, but restoring
@@ -797,9 +839,11 @@ The final audit compared mapping, lighting and motor blocks in all four profiles
 with their pre-test backups, then returned to profile 1. All matched. The active
 profile and global block also matched the original snapshot byte for byte.
 
-Regression verification for this change: all 22 backend test scripts passed,
-including 22 captured-wire/editing tests. The GUI suites passed 762 model
-checks, 131 window checks and 138 QML tests (none skipped). New tests explicitly
+Regression verification at the acceptance commit: all 22 backend test scripts
+passed. The subsequent takeover addition passed all four Apex 6 suites: 43
+protocol/lifecycle, 28 snapshot, 23 captured-wire/editing and 27 USB DualSense
+integration tests. The earlier GUI suites passed 762 model checks, 131 window
+checks and 138 QML tests (none skipped). New tests explicitly
 refuse Apex 5 in the GPA6 editors and leave legacy transport pacing unchanged.
 An Apex 5 was not physically attached during this session; its preservation
 claim is based on the existing software regressions, not a new hardware run.

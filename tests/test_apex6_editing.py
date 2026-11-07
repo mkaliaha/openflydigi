@@ -23,6 +23,7 @@ from flydigi.mock.pad import FakePad
 
 HARDWARE = json.loads((ROOT / "tests/fixtures/apex6-hardware.json").read_text())
 VENDOR = json.loads((ROOT / "tests/fixtures/apex6-config.json").read_text())
+TAKEOVER = json.loads((ROOT / "tests/fixtures/apex6-takeover.json").read_text())
 
 
 def captured_pad():
@@ -140,6 +141,33 @@ class EditingTests(unittest.TestCase):
                     edit()
             self.assertTrue(send.call_args_list)
             self.assertTrue(all(call.args[0][3] == 1 for call in send.call_args_list))
+
+    def test_third_party_permission_gates_and_revokes_captured_takeover(self):
+        before = config.snapshot(self.pad)["blocks"]
+        acquire = bytes.fromhex(TAKEOVER["acquire_request_hex"])
+        release = bytes.fromhex(TAKEOVER["release_request_hex"])
+        def status(stage):
+            self.assertEqual(self.protocol.ask(0x10, 25).hex(),
+                             TAKEOVER["status_payloads"][stage])
+        def request(packet, reply):
+            self.assertEqual(self.pad.send(packet), [bytes.fromhex(TAKEOVER[reply])])
+        status("initial")
+        request(acquire, "denied_reply_hex")
+        status("acquire_with_permission_off")
+        request(release, "release_reply_hex")
+        config.set_setting(self.pad, "allow_third_party", True)
+        status("permission_on")
+        request(acquire, "granted_reply_hex")
+        status("acquire_with_permission_on")
+        request(release, "release_reply_hex")
+        status("released_with_permission_on")
+        request(acquire, "granted_reply_hex")
+        status("reacquired_with_permission_on")
+        config.set_setting(self.pad, "allow_third_party", False)
+        status("permission_revoked")
+        request(acquire, "denied_reply_hex")
+        status("final")
+        self.assertEqual(config.snapshot(self.pad)["blocks"], before)
 
     def test_lighting_encoder_matches_independent_vendor_bytes(self):
         for case in VENDOR["lighting"]:

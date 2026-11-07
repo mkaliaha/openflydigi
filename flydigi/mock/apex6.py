@@ -34,6 +34,7 @@ class FakeApex6:
         self.report_layout = layout or ReportLayout(0, 32)
         self.versions = versions
         self.present = True
+        self.takeover_active = False
         self.slot = 0
         self.maps = []
         for _ in range(4):
@@ -101,6 +102,7 @@ class FakeApex6:
         """
         self.configs = [dict(config) for config in self.stored_configs]
         self.transfer = None
+        self.takeover_active = False
         self.change_profile(self.slot)
 
     def ram(self, ram_id):
@@ -177,6 +179,21 @@ class FakeApex6:
                 reply = self._reply(command, bytes.fromhex(self.uid))
             elif command == 7:
                 reply = self._reply(command, struct.pack("<3H", *self.versions))
+            elif command == 0x10:
+                # Pro 9.0.6.8 status: active at byte 0, permission at byte 4.
+                # This is not the legacy transport-flags/owner-name layout.
+                status = bytearray(25)
+                status[0] = self.takeover_active
+                status[4] = self.global_data[49] == 1
+                reply = self._reply(command, status)
+            elif command == 0x1c:
+                if len(payload) != 21 or payload[0] not in (0, 1):
+                    raise ValueError("invalid cooperative takeover request")
+                # Measured single-caller grant/release behavior only; owner
+                # arbitration, expiry and raw input streaming are not modeled.
+                self.takeover_active = bool(payload[0] and self.global_data[49] == 1)
+                granted = not payload[0] or self.takeover_active
+                reply = self._reply(command, bytes([granted]))
             elif command == 0xa1:
                 reply = self._reply(command, self.config_state())
             elif command == 0xa0:
@@ -188,6 +205,8 @@ class FakeApex6:
                     raise ValueError("invalid global field write")
                 offset, width = fields[field]
                 self.global_data[offset:offset + width] = payload[1:]
+                if field == 37 and not payload[1]:
+                    self.takeover_active = False
                 reply = self._reply(command, bytes([0, field]))
             elif command == 0xa2:
                 if len(payload) != 1 or payload[0] > 3:
