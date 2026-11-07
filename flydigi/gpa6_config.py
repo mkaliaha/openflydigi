@@ -7,6 +7,7 @@
 Sources: pinned GPA6 web core/codec/contract in docs/findings-apex6.md.
 Raw RAM bytes are retained even when a decoder does not know their format.
 Editors preserve unrelated bytes and verify writes before an explicit save.
+An A4 edit can already persist without that explicit save on tested firmware.
 Snapshots remain read-only; arbitrary snapshot restoration is not supported.
 """
 import binascii
@@ -212,7 +213,8 @@ def edit_ram(ctrl, ram_id, transform, *, save=False, expected_uid=None):
 
     Unknown blocks are refused. On an ambiguous failure, rollback only if the
     same device/slot still contains our exact candidate; never overwrite a
-    third-party edit. Flash save is a separate, explicit caller choice.
+    third-party edit. A7 save is an explicit caller choice, but A4 commits can
+    already persist on the tested firmware; save=False is not a preview mode.
     """
     if ram_id not in (4, 5):
         raise ValueError("only lighting and mapping can be edited")

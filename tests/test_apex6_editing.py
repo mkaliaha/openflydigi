@@ -35,6 +35,14 @@ def captured_pad():
 
 
 class HardwareTests(unittest.TestCase):
+    def test_connection_modes_use_captured_gpa6_values_not_legacy_labels(self):
+        for key, mode, label in (("info_reply_hex", 1, "dongle"),
+                                 ("wired_info_reply_hex", 0, "wired")):
+            pad = captured_pad()
+            with patch.object(pad, "send", return_value=[bytes.fromhex(HARDWARE[key])]):
+                info = gpa6.Protocol(pad).info()
+            self.assertEqual((info["connection_mode"], info["connect_type"]), (mode, label))
+
     def test_real_descriptor_identity_and_ram_domains(self):
         self.assertEqual(gpa6.report_layout(bytes.fromhex(HARDWARE["descriptor_hex"])),
                          gpa6.ReportLayout(0, 32))
@@ -49,6 +57,7 @@ class HardwareTests(unittest.TestCase):
             entry = registry.probe_pad(pad, registry.blank(pad.path, "pad"), deep=True)
             self.assertEqual((entry["firmware"], entry["battery"], entry["battery_steps"]), ("9.0.6.8", 10, 10))
             self.assertIn("battery 10/10", registry.describe(entry))
+            self.assertEqual(entry["connect_type"], "dongle")
             self.assertEqual(gpa6.Protocol(pad).versions(), (22, 19, 10))
             snapshot = config.snapshot(pad)
         self.assertEqual(snapshot["blocks"]["lighting"]["ram_id"], 4)
@@ -176,15 +185,45 @@ class EditingTests(unittest.TestCase):
             self.assertFalse(any(cmd == 0xa4 for cmd, _ in self.pad.history))
             self.pad = captured_pad()
 
-    def test_staged_write_and_explicit_save(self):
+    def test_applied_edit_survives_selection_and_restart_without_explicit_save(self):
         before = self.pad.ram(5)
         after = config.edit_ram(self.pad, 5, lambda b: profile.remap(b, "m1", "b"))
         self.assertEqual(self.pad.ram(5), after)
         self.protocol.select_slot(0)
-        self.assertEqual(self.pad.ram(5), before)
+        self.assertEqual(self.pad.ram(5), after)
+        self.protocol.select_slot(1)
+        self.protocol.select_slot(0)
+        self.assertEqual(self.pad.ram(5), after)
+        self.assertFalse(any(cmd == 0xa7 for cmd, _ in self.pad.history))
+        self.pad.power_cycle()
+        self.assertEqual(self.pad.ram(5), after)
         config.edit_ram(self.pad, 5, lambda b: profile.remap(b, "m1", "b"), save=True)
         self.protocol.select_slot(0)
         self.assertEqual(self.pad.ram(5), after)
+        self.assertEqual(self.pad.stored_configs[0][5], after)
+        self.assertTrue(any(cmd == 0xa7 for cmd, _ in self.pad.history))
+        config.edit_ram(self.pad, 5, lambda b: profile.remap(b, "m1", "default"), save=True)
+        self.pad.power_cycle()
+        self.assertEqual(self.pad.ram(5), before)
+
+    def test_ram_read_retries_a_lost_reply_without_skipping_data(self):
+        before = self.pad.ram(5)
+        self.pad.faults[0xa3] = deque(["drop", None, "drop"])
+        self.assertEqual(self.protocol.read_ram(5), before)
+        requests = [payload for cmd, payload in self.pad.history if cmd == 0xa3]
+        self.assertEqual(requests[0], requests[1])
+        self.assertEqual(requests[2], requests[3])
+
+    def test_slot_verification_retries_reads_without_replaying_switch(self):
+        self.pad.faults[0xa1] = deque(["drop", None])
+        self.protocol.select_slot(1)
+        self.assertEqual(self.pad.slot, 1)
+        commands = [cmd for cmd, _ in self.pad.history]
+        self.assertEqual(commands.count(0xa2), 1)
+        self.assertEqual(commands.count(0xa1), 2)
+        self.pad.faults[0xa1] = deque(["drop"] * 3)
+        with self.assertRaises(gpa6.ReplyTimeout):
+            self.protocol.select_slot(0)
 
     def test_commit_ack_loss_rolls_back_exact_candidate(self):
         before = self.pad.ram(5)
@@ -236,7 +275,8 @@ class EditingTests(unittest.TestCase):
 
 class CommandTests(unittest.TestCase):
     def run_command(self, *args):
-        return subprocess.run([sys.executable, str(ROOT / "tools/flydigi-apex6"), *args],
+        return subprocess.run([sys.executable, str(ROOT / "tools/flydigi-apex6"),
+                               "--device", "mock:pad0", *args],
                               env={**os.environ, "FLYDIGI_MOCK_BUS": "pad:k6"},
                               capture_output=True, text=True)
 
@@ -256,7 +296,7 @@ class CommandTests(unittest.TestCase):
         result = self.run_command("--experimental", "map", "m1", "b")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["layers"][0]["overrides"], {"m1": "b"})
-        self.assertIn("active RAM", result.stderr)
+        self.assertIn("retain edits without explicit save", result.stderr)
 
 
 if __name__ == "__main__":

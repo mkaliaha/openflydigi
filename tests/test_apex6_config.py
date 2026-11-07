@@ -120,7 +120,7 @@ class TransferTests(unittest.TestCase):
                              ("disconnect", OSError)):
             with self.subTest(fault=fault):
                 self.pad.present = True
-                self.pad.faults[0xa3] = deque([None, fault])
+                self.pad.faults[0xa3] = deque([None] + [fault] * (3 if fault == "drop" else 1))
                 with self.assertRaises(error):
                     self.protocol.read_ram(6)
                 acquired = []
@@ -334,7 +334,7 @@ class SnapshotTests(unittest.TestCase):
         main = module["main"]
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "snapshot.json"
-            self.pad.faults[0xa3] = deque([None, "drop"])
+            self.pad.faults[0xa3] = deque([None, "drop", "drop", "drop"])
             with patch.dict(main.__globals__, {"open_selected": lambda _: self.pad}), \
                     patch.object(sys, "argv", ["flydigi-apex6", "snapshot", str(target)]), \
                     patch.object(self.pad, "close") as close:

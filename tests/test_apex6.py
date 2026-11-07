@@ -352,6 +352,20 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.pad.runtime[17], self.original[17])
         self.assertIsNone(self.pad._grip_session)
 
+    def test_observed_pro_mode1_refusal_still_disables_and_reports_both_errors(self):
+        session = self.session().start()
+        before = bytes(self.pad.maps[self.pad.slot])
+        # Pro 9.0.6.8 accepts disable but refuses each saved mode-1 restore.
+        self.pad.faults[0x53] = deque([None, "packet_error", "packet_error"])
+        with self.assertRaisesRegex(gpa6.ProtocolError, "cleanup incomplete") as caught:
+            session.stop()
+        self.assertEqual(str(caught.exception).count("error 1"), 2)
+        self.assertEqual(self.pad.runtime, {16: (0, b""), 17: (0, b"")})
+        self.assertEqual(bytes(self.pad.maps[self.pad.slot]), before)
+        self.assertFalse(any(cmd in (0xa2, 0xa4, 0xa7) for cmd, _ in self.pad.history))
+        self.assertFalse(session.active)
+        self.assertIsNone(self.pad._grip_session)
+
     def test_cleanup_ack_timeouts_remain_retryable(self):
         for faults in (("drop", None, None), (None, "drop", None),
                        (None, None, "drop"), ("drop", "drop", "drop")):

@@ -1,12 +1,14 @@
 # Apex 6 / Apex 6 Pro and xHaptics
 
-Initial research: 2026-09-22. **Hardware update: 2026-11-07, wired Apex 6 Pro,
-firmware 9.0.6.8.** Identity, snapshots, sleep setting edits, lighting, physical
-button remapping and profile save/reload are now verified on that unit.
+Initial research: 2026-09-22. **Hardware update: 2026-11-07, Apex 6 Pro over receiver
+and direct USB, firmware 9.0.6.8.** Identity, snapshots, global setting writes,
+lighting, physical button remapping, quick profile switching, stick precision
+and XInput Home are verified on that unit.
 CLI settings/profile editing is implemented; GUI editing is not.
-The left grip produced the requested tone and stopped, but mode-1 restoration
-was refused. Receiver operation and the USB DualSense relay remain unverified
-on hardware. See the hardware findings below for the precise scope.
+Left/right/stereo grip output stopped correctly, but mode-1 restoration was
+refused. Ordinary game rumble still worked afterward. Some setting effects and
+the complete USB DualSense relay remain unverified. See the hardware findings
+below for the precise scope.
 
 The new haptics are explicitly present in Flydigi's shipping software. Support
 looks feasible, including a route from our virtual DualSense audio to linear
@@ -331,8 +333,9 @@ backend, enabled only by `tools/flydigi-ds5-usbip --experimental-apex6 --device
 SELECTOR`. `--motors` enables game haptic audio; HID rumble remains independent.
 This uses the existing evdev Xbox-layout mapping, gated on the required axes,
 and resolves input under the selected vendor node's USB root. It does not claim
-to decode new vendor input or motion reports. Physical input layouts remain
-unverified. Both input and feedback are pinned to the full UUID on reconnect.
+to decode new vendor input or motion reports. The hardware checks below cover
+selected buttons and stick axes; the complete input layout and in-game relay
+remain unverified. Both input and feedback are pinned to the full UUID on reconnect.
 
 The output worker owns its HID handle and claim from setup through restoration.
 USB callbacks enqueue PCM with arrival timestamps into a 40 ms inbox, respecting
@@ -443,7 +446,7 @@ The 32-byte GPA6 request body, excluding any HID report-ID prefix, is:
 | 4 | 0–27 | Payload, then zero padding through offset 30 |
 | 31 | 1 | Sum of bytes 2–30, modulo 256 |
 
-On the measured wired descriptor, hidraw writes prepend `00` to this body;
+On the measured receiver descriptor, hidraw writes prepend `00` to this body;
 input reports are unnumbered and arrive without that byte. Other report layouts
 must be derived from the HID descriptor, not borrowed from Apex 5.
 
@@ -473,8 +476,9 @@ do not substitute those values for A3's full-block CRC32.
 
 RAM IDs are **1 global, 4 lighting, 5 mapping, 6 motors**. A4 stages a complete
 block and commits it to active RAM; the hardware findings below give every A4
-request and ACK layout. A7 saves the current profile. A2 reloads stored data,
-including when selecting the already-active slot. Neither A4 nor A7 is a way to
+request and ACK layout. A7 requests saving the current profile. A2 selects
+resident profile RAM; edits made without A7 survive both same-slot selection
+and switching away and back. Neither A4 nor A7 is a way to
 write an Apex 5 profile blob.
 
 ### XMUL/LGHT outer envelope
@@ -665,7 +669,14 @@ bytes or unknown modes are refused for editing. Full encoded outputs for all
 six modes, with both vibration states, are compared with independent vendor
 fixtures in `tests/fixtures/apex6-config.json`.
 
-## Wired Apex 6 Pro findings, 2026-11-07
+## Apex 6 Pro hardware findings, 2026-11-07
+
+The user confirmed the controller was connected through its receiver, with no
+USB cable attached to the controller. The original "wired" label was an incorrect
+reuse of Apex 5's connection enum. GPA6 mode 1 means receiver. A subsequent
+direct-cable check with the receiver unplugged confirmed mode 0 means wired.
+The UUID stayed identical and all configuration blocks matched across transports.
+Unverified mode values remain unknown rather than inheriting the legacy enum.
 
 The tested device reports SKU 150, USB `37d7:2502`, firmware `9.0.6.8`, format
 versions `(22, 19, 10)` and feature bits `0x9f`. Its vendor collection uses
@@ -675,7 +686,8 @@ The device list now keeps each model's scale separately.
 
 Captured descriptor, identity replies and initial RAM blocks are in
 `tests/fixtures/apex6-hardware.json`. Local traces and before/after snapshots
-are in ignored `work/apex6-hardware-20261107/`.
+are in ignored `work/apex6-hardware-20261107/` and
+`work/apex6-acceptance-20261107/`.
 
 Two assumptions in the first implementation were wrong: RAM 4 is LGHT lighting
 and RAM 5 is XMUL mapping; and identical control requests within 100 ms are
@@ -689,12 +701,12 @@ The new editor implements the following recovered transactions:
 | Command | Observed behavior |
 |---|---|
 | A0 | Global field/value write; ACK `[0, fieldId]`. Sleep time changed and restored, with all other global bytes preserved. |
-| A2 | Load slot 0–3; 11-byte state ACK. Reloading the active slot discards unsaved RAM. |
+| A2 | Select slot 0–3; 11-byte state ACK. Unsaved RAM survives both same-slot selection and switching away/back. |
 | A4 begin | Request `[0, ramId, length:u16le, crc32:u32le]`; 10-byte v21 ACK `[op, status, ramId, slot, length:u16le, crc32:u32le]`. |
 | A4 chunk | Request `[1, byteOffset:u16le, count:u8, data...]`, at most 16 data bytes. ACK length is the cumulative offset. Repeating the last chunk is idempotent. |
 | A4 commit | Request `[2, length:u16le, crc32:u32le]`; ACK echoes length and CRC32. Full RAM read-back verifies the result. |
 | A4 abort | Request `[3]`; successful ACK starts `[3, 0]`. Remaining target fields are not used. |
-| A7 | Save active profile with `[1, slot]`; ACK payload `[0]`. A modified 600 ms long-press timing survived an A2 reload. |
+| A7 | Request saving the active profile with `[1, slot]`; ACK payload `[0]`. A modified 600 ms long-press timing survived A2 selection, which alone does not prove persistence. |
 
 One mapping chunk initially timed out. The editor now retries a timed-out
 offset-addressed chunk up to three attempts; begin and commit are not replayed.
@@ -702,7 +714,7 @@ A separate hardware probe confirmed that a duplicate chunk does not append
 data twice. Six mapping edit/restore round trips then passed. The physical
 M1-to-B check produced Linux `BTN_EAST` (305) press/release events from the
 upper-right rear paddle. Solid lighting edits and restoration also read back
-correctly. The saved timing edit was restored, saved and reloaded; all original
+correctly. The timing edit was restored, saved and the slot reselected; all original
 RAM blocks matched the starting snapshot afterward.
 
 `gpa6_profile.py` edits XMUL v1.8/v1.9 mappings without rebuilding unrelated
@@ -717,26 +729,76 @@ Writes are restricted to global fields and RAM 4/5. UUID/model/format checks,
 slot fingerprints and advisory claims prevent common targeting mistakes.
 After an ambiguous error, rollback is attempted only if the same device/slot
 still contains our exact candidate bytes. An external edit is not overwritten.
-Saving is explicit and saves the current profile as a whole. Lost save ACKs
-are reported; rollback of RAM alone would not establish what reached flash.
+A7 is explicit and addresses the current profile as a whole, but **A4 edits can
+already persist without it**: the user restarted the controller and receiver,
+and an A-to-B edit made without A7 was still present. Exact flash-write timing
+is not established. The fake pad conservatively models persistence at A4 commit;
+it no longer promises volatile previews or discard-on-selection. Lost A7 ACKs
+are reported; read-back alone would not establish exact flash behavior.
 Unplugging or a third-party writer can still prevent restoration.
 
-Global sleep time is hardware-verified. Other implemented global fields are
-derived from the vendor A0 field table and tested in software: quick switching,
-stick center adjustment, local mapping, USB report rate, stick resolution,
-third-party access and XInput Home. They have not each been exercised on the
-physical controller. Snapshot import, macro/curve editing, motor configuration
-editing and GUI configuration remain outside this implementation.
+All eight implemented global fields passed temporary write/read-back/restoration
+on hardware, including all supported report rates and stick resolutions. FN+B
+selected profile 2 with quick switching enabled and stayed on profile 1 when
+disabled, confirmed both by A1 and the built-in screen. With XInput Home off,
+two Logo/Home taps produced no guide events; with it on, two `BTN_MODE` (316)
+press/release pairs arrived over direct USB. A one-minute sleep timer put the
+wireless controller to sleep: the user observed its disappearance from the
+system while the receiver remained plugged in, and USB inventory showed no
+Flydigi device at that point. Waking it restored the same UUID; the original
+15-minute timer and every active configuration block were then restored.
+Local mapping, center auto-adjust and third-party access have only been verified
+by write/read-back/restoration. Snapshot import, macro/curve editing, motor
+configuration editing and GUI configuration remain outside this implementation.
 
 The one-second left-grip test at 80 Hz/amplitude 0.12 was felt by the user;
 the controller was quiet afterward. Neutral/disable succeeded, but restoring
 mode 1 on targets `0x10`/`0x11` returned error 1 with both tested parameter
-lengths. Motor RAM stayed unchanged. Reloading the saved profile restored its
-runtime configuration. The existing emulator accepts that restoration, so its
-passing haptic lifecycle tests do not establish firmware compatibility.
+lengths. Motor RAM stayed unchanged. A later direct-USB sequence separately
+confirmed left-only, right-only and both grips, with quiet pauses and a quiet
+ending. Both mode-1 restore requests still returned error 1. Ordinary Linux
+`FF_RUMBLE` pulses were felt and stopped before and after that sequence, so the
+restore errors did not prevent ordinary rumble in this test. Exact live motor
+mode restoration remains unresolved. The default emulator accepts restoration;
+a regression now injects both observed refusals and checks that disable still
+occurs, both errors are reported, the claim is released and no profile write or
+selection is used to hide the failure.
+
+During guided acceptance testing, two reads went unanswered around profile
+changes. RAM queries/chunks now retry unanswered A3 requests up to three attempts,
+while retaining echo, fingerprint and CRC checks. Profile selection retries
+only its A1 verification read, never A2. Malformed or refused replies are not
+retried. Fake-pad tests cover recovery and bounded failure.
+
+Physical input checks confirmed A-to-B on both receiver and direct USB, then
+A-to-X after an explicit A7 save and profile switches, and A-to-A after removing
+the override and saving. All three presses and releases in each phase arrived
+with the expected Linux button code. Original mapping and timing bytes were
+restored. Direct-USB stick sweeps produced 255 distinct values per axis and
+256-unit steps at 8-bit precision, versus thousands of values at 12 bits.
+All supported report-rate values were accepted and read back correctly. This
+satisfies the agreed acceptance criterion for exposing the setting; it is not
+a blocker for settings support. The 125 Hz setting did not change the observed
+approximately 1 ms evdev intervals in that run. What the firmware controls with
+this field remains undetermined: radio-link cadence and battery savings are
+unverified hypotheses. Separate power-cycle persistence of a changed report
+rate was not tested.
+
+All six lighting modes were checked visually: solid red/green/blue, off, blue
+breathing, red/blue gradient, streaming rainbow and default (visually the same
+rainbow as streaming). Brightness 5 to 70 visibly increased intensity. Holding
+breathing speed 5 produced an approximately 8–10 second rise from dark to bright;
+speed 95 took about one second. With vibration response off, ordinary rumble left
+solid blue steady. With it on, the user saw a brief brightness increase, without
+the motor-dependent spatial response or dimming they recalled from Apex 5.
+This establishes a visible response, not the complete lighting algorithm.
+
+The final audit compared mapping, lighting and motor blocks in all four profiles
+with their pre-test backups, then returned to profile 1. All matched. The active
+profile and global block also matched the original snapshot byte for byte.
 
 Regression verification for this change: all 22 backend test scripts passed,
-including 19 new captured-wire/editing tests. The GUI suites passed 762 model
+including 22 captured-wire/editing tests. The GUI suites passed 762 model
 checks, 131 window checks and 138 QML tests (none skipped). New tests explicitly
 refuse Apex 5 in the GPA6 editors and leave legacy transport pacing unchanged.
 An Apex 5 was not physically attached during this session; its preservation

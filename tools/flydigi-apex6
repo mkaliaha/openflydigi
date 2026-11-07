@@ -59,14 +59,14 @@ def main():
     setting = sub.add_parser("set-setting", help="apply and verify one global setting")
     setting.add_argument("name", choices=tuple(gpa6_config.GLOBAL_FIELDS))
     setting.add_argument("value", help="integer, or on/off for a switch")
-    slot = sub.add_parser("slot", help="load a stored profile; discards unsaved changes")
+    slot = sub.add_parser("slot", help="select a profile; unsaved RAM edits are retained")
     slot.add_argument("number", type=int, choices=range(1, 5))
     sub.add_parser("save", help="save the active profile's current settings")
     remap = sub.add_parser("map", help="replace one button's activators with a simple button mapping")
     remap.add_argument("source", choices=tuple(gpa6_profile.BUTTONS))
     remap.add_argument("target", choices=(*gpa6_profile.BUTTONS, "default"))
     remap.add_argument("--layer", type=int, choices=range(4), default=0)
-    remap.add_argument("--save", action="store_true", help="also save to the active profile")
+    remap.add_argument("--save", action="store_true", help="also send explicit profile save; applied edits may already persist")
     timing = sub.add_parser("timing", help="set profile long/double-press timing in milliseconds")
     timing.add_argument("--long-ms", type=int)
     timing.add_argument("--double-ms", type=int)
@@ -133,7 +133,7 @@ def main():
             return 0
         if args.command == "slot":
             protocol.select_slot(args.number - 1)
-            print(f"Loaded profile {args.number}")
+            print(f"Selected profile {args.number}")
             return 0
         if args.command == "save":
             slot = protocol.slot()
@@ -147,7 +147,7 @@ def main():
                 transform = (lambda data: gpa6_profile.remap(data, args.source, args.target, layer=args.layer)) if args.command == "map" else (
                     lambda data: gpa6_profile.timing(data, long_ms=args.long_ms, double_ms=args.double_ms))
                 data = gpa6_config.edit_ram(ctrl, 5, transform, save=args.save, expected_uid=uid)
-                print("Profile saved." if args.save else "Applied to active RAM; use save to keep the change.", file=sys.stderr)
+                print("Profile save acknowledged." if args.save else "Applied and verified; this firmware can retain edits without explicit save.", file=sys.stderr)
             print(json.dumps(gpa6_profile.describe(data), indent=2))
             return 0
         if args.command == "light":
@@ -177,7 +177,7 @@ def main():
             if args.save and not light_write:
                 protocol.save_slot(protocol.slot())
             if light_write or args.save:
-                print("Profile saved." if args.save else "Applied to active RAM; use save to keep the change.", file=sys.stderr)
+                print("Profile save acknowledged." if args.save else "Applied and verified; this firmware can retain edits without explicit save.", file=sys.stderr)
             print(json.dumps(gpa6_config.lighting_config(data), indent=2))
             return 0
         if args.command == "info":

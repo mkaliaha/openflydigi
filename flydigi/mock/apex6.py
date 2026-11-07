@@ -64,7 +64,7 @@ class FakeApex6:
         self.history = deque(maxlen=256)
         self.frames = deque(maxlen=256)
         self.frame_count = 0
-        self.faults = {}  # command -> deque of None/error/drop/malformed/disconnect
+        self.faults = {}  # command -> deque of None/error/packet_error/drop/malformed/disconnect
         self._lock = threading.RLock()
         self._bus = False
 
@@ -92,6 +92,16 @@ class FakeApex6:
         self.runtime = {target: (mapping[offset], bytes(mapping[offset + 1:offset + 2])
                                 if mapping[offset] else b"")
                         for target, offset in ((16, 23), (17, 25))}
+
+    def power_cycle(self):
+        """Restart from saved blocks; tested Pro edits persist without A7 too.
+
+        The emulator persists A4 commits immediately as a conservative model.
+        Hardware tests establish persistence, not the exact flash-write timing.
+        """
+        self.configs = [dict(config) for config in self.stored_configs]
+        self.transfer = None
+        self.change_profile(self.slot)
 
     def ram(self, ram_id):
         if ram_id == 1:
@@ -146,8 +156,16 @@ class FakeApex6:
             if fault == "disconnect":
                 self.present = False
                 raise OSError("emulated disconnect during write")
-            if fault == "error":
+            if fault in ("error", "packet_error"):
                 reply = self._reply(command, b"\x01")
+                if fault == "packet_error":
+                    # A transport-level refusal, distinct from a success
+                    # packet whose command-specific status byte is nonzero.
+                    reply = bytearray(reply)
+                    prefix = int(layout.input_ids != (0,))
+                    reply[prefix + 3] = 0
+                    reply[prefix + 31] = sum(reply[prefix + 2:prefix + 31]) & 255
+                    reply = bytes(reply)
             elif command == 1:
                 info = bytearray(25)
                 info[0:2] = bytes((self.device_type, 1))
@@ -175,7 +193,6 @@ class FakeApex6:
                 if len(payload) != 1 or payload[0] > 3:
                     raise ValueError("invalid profile slot")
                 self.change_profile(payload[0])
-                self.configs[self.slot] = dict(self.stored_configs[self.slot])
                 reply = self._reply(command, self.config_state())
             elif command == 0xa7:
                 if payload != bytes([1, self.slot]):
@@ -216,6 +233,9 @@ class FakeApex6:
                                 or len(content) != length or zlib.crc32(content) != crc):
                             raise ValueError("RAM commit length/CRC mismatch")
                         self.configs[slot][ram_id] = bytes(content)
+                        # On Pro 9.0.6.8 an A4 edit survived a full controller
+                        # and receiver power cycle without a separate A7 save.
+                        self.stored_configs[slot][ram_id] = bytes(content)
                         self.transfer = None
                         ack = struct.pack("<4BHI", 2, 0, ram_id, slot, length, crc)
                     else:

@@ -16,7 +16,7 @@ application adds PySide6, Qt, Kirigami, and Kirigami Addons.
 |---|---|---|---|
 | Flydigi Apex 5 | Hardware-validated | All controller features, adaptive triggers, display, game routes, and both virtual-DualSense relays | Display uploads require a wired connection. Steam Input must be disabled for virtual-DualSense games. |
 | Flydigi Vader 5 Pro | Experimental, partially implemented | Identity, profiles, buttons, sticks, gyro, vibration, lighting, settings, the v3.2 macro-store implementation, and a derived factory profile | No Vader 5 has been tested. It has trigger motors rather than force triggers and has no display. The trigger-motor editor is not built. The v3.2 macro store is unverified on hardware. The DualSense relay, evdev discovery, permissions, and SDL ignore identifier are not validated end to end. |
-| Flydigi Apex 6 / Apex 6 Pro | Experimental; wired Apex 6 Pro partly hardware-verified | SKU/UUID/capabilities, active-RAM snapshots, CLI global settings, button remapping, press timings, lighting, profile loading/saving; experimental grip waveforms and USB DualSense relay | Tested on Pro firmware 9.0.6.8. GUI editing, snapshot restoration, adaptive-trigger translation and motion remain unavailable. Grip output works, but restoring the original grip mode fails on this firmware. Receiver and relay behavior remain unverified on hardware. |
+| Flydigi Apex 6 / Apex 6 Pro | Experimental; Pro partly verified over receiver and direct USB | SKU/UUID/capabilities, active-RAM snapshots, CLI global settings, button remapping, press timings, lighting, profile selection/saving; experimental grip waveforms and USB DualSense relay | Tested on Pro firmware 9.0.6.8. GUI editing, snapshot restoration, adaptive-trigger translation and motion remain unavailable. Grip-mode restoration returns an error, although ordinary rumble worked afterward. Some setting effects and the complete DualSense relay remain unverified. |
 | Flydigi CD2 charging dock | Hardware-validated with one noted gap | Identity, four settings, eight generated lighting effects, and picture/GIF sampling onto 162 LEDs; nickname read/write is implemented | Nickname writing is not hardware-verified. The dock is a separate USB device and uses its own selector. |
 | Other Flydigi controllers and accessories | Not driven | Devices may be discovered and identified when they use the current transport | Normal configuration commands, including nickname writes, refuse unsupported models. Developer bench tools explicitly documented as ungated can send raw commands. |
 
@@ -369,10 +369,14 @@ and `gui/i18n.py` before relying on `pyside6-project build` or its static checks
 
 ## Experimental Apex 6 / Apex 6 Pro
 
-The Apex 6 implementation is **experimental**, with wired Apex 6 Pro checks on
-firmware **9.0.6.8**. Global sleep settings, lighting, physical M1-to-B remapping,
-profile timing and save/reload persistence have been verified on that unit.
-Other global fields follow the recovered vendor protocol and have software tests.
+The Apex 6 implementation is **experimental**, with receiver and direct-USB
+Apex 6 Pro checks on firmware **9.0.6.8**. All supported global setting writes
+read back and restore correctly. Lighting modes and controls, physical button
+remapping, quick profile switching, stick precision and XInput Home have been
+confirmed. Report-rate setting writes and read-back are verified; the setting's
+physical effect is undetermined. Profile timing bytes and save acknowledgment are verified; activator
+timing behavior and other untested effects are distinguished in the
+[hardware findings](docs/findings-apex6.md#apex-6-pro-hardware-findings-2026-11-07).
 The implementation uses the
 new GPA6 transport and the reported `hapticGrip` flag; the SKU name alone never
 enables linear grips. Apex 6, Apex 6 Pro and Pro Phantom Blade Zero are named
@@ -401,10 +405,13 @@ tools/flydigi-apex6 --device uid:YOUR_UUID --experimental light --mode solid --c
 tools/flydigi-apex6 --device uid:YOUR_UUID --experimental save
 ~~~
 
-Profile edits apply to active RAM. `save` or an edit's `--save` flag saves the
-current profile, including any other unsaved changes. `slot 1` through `slot 4`
-loads a stored profile and discards unsaved edits, even when reloading the active
-slot. Global settings apply directly. `map m1 default` removes the M1 override;
+Profile edits apply immediately and **can persist without an explicit save**:
+on the tested firmware an A4 mapping edit survived restarting both the controller
+and receiver without A7. `save` or an edit's `--save` flag also sends the explicit
+save command for the current profile. `slot 1` through `slot 4`
+selects a resident profile: edits made without saving are retained both when
+reselecting it and when switching away and back. Profile selection is not an
+undo operation. Global settings apply directly. `map m1 default` removes the M1 override;
 `--layer` selects an existing layer (0–3). Remapping replaces all activators for
 that one button while preserving other mappings, macros, zones, curves and
 metadata. Macro/curve editing and the Apex 6 GUI editor are not implemented.
@@ -412,7 +419,8 @@ metadata. Macro/curve editing and the Apex 6 GUI editor are not implemented.
 Writes require `--experimental` and check the model, UUID, format, slot and
 read-back. Transfers stage chunks before committing. Failed edits roll back only
 when the same controller/profile still contains the exact bytes we wrote.
-An uncertain flash-save acknowledgment is reported as an error.
+An uncertain save acknowledgment is reported as an error. Omitting `--save`
+does not provide a temporary preview; restore the original values explicitly.
 
 `snapshot` reads global settings and the active slot's mapping, lighting and
 motor RAM into a new JSON file. It works with rotary and linear grips and needs
@@ -442,12 +450,13 @@ motor map again. A profile change stops output unless reconnect is enabled;
 cleanup uses the new profile's map. Do not infer physical motor behavior or
 USB/receiver timing from the emulator.
 
-On the tested Pro firmware, a quiet left-grip tone was felt and neutral/disable
-stopped it, but restoring mode 1 returned firmware error 1. A profile reload
-restored runtime state during testing. Playback therefore remains experimental;
-the tool reports the cleanup error and does not reload a profile automatically,
-since that would discard unsaved edits. Right-grip response and the complete
-DualSense relay have not been hardware-verified.
+On the tested Pro firmware, left-only, right-only and stereo waveforms were felt
+and neutral/disable stopped them. Restoring mode 1 still returned firmware error
+1. Ordinary game rumble worked and stopped both before and after waveform
+playback over direct USB; this does not establish exact motor-mode restoration.
+Playback remains experimental: the tool reports the cleanup error and does not
+silently select a profile as a substitute. The complete DualSense relay has not
+been hardware-verified.
 
 The USB DualSense relay also has an explicit Apex 6 route:
 

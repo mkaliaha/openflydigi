@@ -5,7 +5,7 @@
 """Experimental Apex 6 protocol, independent of the Apex 5 profile dialect.
 
 Wire facts come from the pinned web client and xHaptics Engine 5.0.1.4 in
-docs/findings-apex6.md, with wired Apex 6 Pro checks on firmware 9.0.6.8.
+docs/findings-apex6.md, with wired and receiver Apex 6 Pro checks on firmware 9.0.6.8.
 Identity, bounded configuration edits and volatile grip output are implemented.
 Grip-mode restoration remains unresolved on the tested firmware.
 """
@@ -167,7 +167,9 @@ class Protocol:
     def info(self):
         p = self.ask(1, 25)
         return {"device_type": p[0], "connection_mode": p[1],
-                "connect_type": {1: "wired", 2: "dongle"}.get(p[1], "unknown"),
+                # GPA6's mode byte is not the legacy Apex 5 ConnectType enum.
+                # Confirmed by testing direct USB and receiver separately.
+                "connect_type": {0: "wired", 1: "dongle"}.get(p[1], "unknown"),
                 "mac": ":".join(f"{b:02X}" for b in reversed(p[2:6])) if any(p[2:6]) else None,
                 "battery_level": p[6] & 15, "charging": bool(p[6] >> 4),
                 "firmware": tuple(struct.unpack(">7H", p[10:24])),
@@ -195,10 +197,21 @@ class Protocol:
         """A3 QUERY_RAM: slot, byte length and CRC32 of a current RAM block."""
         if ram_id not in (1, 4, 5, 6):
             raise ValueError("unsupported configuration RAM ID")
-        p = self.ask(0xa3, 10, bytes((1, ram_id)), v21=True)
+        p = self._ask_ram(10, bytes((1, ram_id)))
         if p[:3] != bytes((1, 0, ram_id)) or p[3] > 3:
             raise ProtocolError("RAM query status, ID or slot mismatch")
         return struct.unpack("<BHI", p[3:])
+
+    def _ask_ram(self, size, payload):
+        # Firmware 9.0.6.8 occasionally misses a RAM read reply. A3 is read
+        # only: retry an unanswered request, retaining all echo/CRC checks.
+        # Malformed replies, wrong targets and device errors still fail fast.
+        for attempt in range(3):
+            try:
+                return self.ask(0xa3, size, payload, v21=True)
+            except ReplyTimeout:
+                if attempt == 2:
+                    raise
 
     def read_ram(self, ram_id, *, expected=None):
         """Read a bounded RAM block, verifying every echo and its CRC32.
@@ -223,8 +236,7 @@ class Protocol:
 
             for index in range((total + RAM_CHUNK_SIZE - 1) // RAM_CHUNK_SIZE):
                 count = min(RAM_CHUNK_SIZE, total - len(data))
-                p = self.ask(0xa3, payload_size,
-                             bytes((0, ram_id, index, RAM_CHUNK_SIZE)), v21=True)
+                p = self._ask_ram(payload_size, bytes((0, ram_id, index, RAM_CHUNK_SIZE)))
                 header = struct.pack("<4BHB", 0, 0, ram_id, slot, total, index)
                 # The web reader trims the final chunk to totalLen. Accept
                 # either its meaningful size or a full padded final chunk.
@@ -258,6 +270,7 @@ class Protocol:
             raise ProtocolError(f"global field {field} refused or mismatched: {ack.hex()}")
 
     def select_slot(self, slot):
+        """Select a resident profile; switching does not discard unsaved RAM."""
         if type(slot) is not int or not 0 <= slot <= 3:
             raise ValueError("profile slot must be 0..3")
         with self.ctrl.claim():
@@ -266,7 +279,16 @@ class Protocol:
                 raise ProtocolError("profile selection acknowledgment mismatch")
             # The vendor client also lets the newly selected RAM settle.
             time.sleep(0.100)
-            if self.slot() != slot:
+            # A2 can be acknowledged while its first A1 verification goes
+            # unanswered. Retry the read, never replay the selection command.
+            for attempt in range(3):
+                try:
+                    actual = self.slot()
+                    break
+                except ReplyTimeout:
+                    if attempt == 2:
+                        raise
+            if actual != slot:
                 raise ProtocolError("profile selection read-back mismatch")
 
     def save_slot(self, slot):
@@ -281,11 +303,12 @@ class Protocol:
                 raise ProtocolError("active profile changed during save")
 
     def write_ram(self, ram_id, data, *, expected):
-        """Stage and verify a complete lighting/mapping block, without saving.
+        """Stage and verify a complete lighting/mapping block, without A7.
 
         The caller supplies the fingerprint it edited. A4 chunks use byte
         offsets, unlike A3's chunk indices. Only recovered configuration
         domains are writable; firmware and motor RAM are never accepted here.
+        A4 edits can persist across power cycles even without explicit A7 save.
         """
         data = bytes(data)
         if ram_id not in (4, 5) or not 1 <= len(data) <= MAX_RAM_SIZE:
