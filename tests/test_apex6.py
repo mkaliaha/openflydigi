@@ -169,8 +169,8 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(session.versions, (65535,) * 3)
         self.assertFalse(any(c in (164, 165, 166, 167, 175) for c, _ in pad.history))
 
-    def test_bad_ack_and_mapping_reads(self):
-        for command in (1, 4, 7, 0xa1, 0xa3):
+    def test_bad_identity_and_slot_reads(self):
+        for command in (1, 4, 7, 0xa1):
             for fault in ("drop", "malformed"):
                 pad = FakeApex6()
                 pad.faults[command] = deque([fault])
@@ -190,8 +190,79 @@ class ProtocolTests(unittest.TestCase):
             pad = BadMap()
             pad.bad_offset = offset
             with self.assertRaises(gpa6.ProtocolError):
-                waveform.GripSession(pad, experimental=True).start()
+                gpa6.Protocol(pad).motor_map()
             self.assertFalse(any(c == 0x53 for c, _ in pad.history))
+
+    def test_native_lifecycle_fixtures(self):
+        fixtures = json.loads((ROOT / "tests/fixtures/apex6-lifecycle.json").read_text())
+        for case in fixtures["lifecycle"]:
+            with self.subTest(case=case):
+                pad = FakeApex6()
+                if case["fail_write"]:
+                    pad.faults[0x53] = deque([None] * (case["fail_write"] - 1) + ["write_error"])
+                with patch.object(pad, "send", wraps=pad.send) as send:
+                    try:
+                        gpa6.Protocol(pad).grip_stream(case["action"] == "setup")
+                        success = True
+                    except OSError:
+                        success = False
+                self.assertEqual(success, case["success"])
+                self.assertEqual([call.args[0][1:].hex() for call in send.call_args_list],
+                                 case["frames"])
+                self.assertTrue(all(call.kwargs["wait"] == 0 for call in send.call_args_list))
+
+    def test_native_motor_decoder_fixtures(self):
+        fixtures = json.loads((ROOT / "tests/fixtures/apex6-lifecycle.json").read_text())
+        for case in fixtures["motor_maps"]:
+            with self.subTest(mapping=case["mapping"]):
+                raw = bytes.fromhex(case["mapping"])
+                if case["entries"] is None:
+                    with self.assertRaises(gpa6.ProtocolError):
+                        gpa6.motor_restore(raw)
+                else:
+                    self.assertEqual(gpa6.motor_restore(raw), [
+                        (e["target"], e["mode"], bytes.fromhex(e["params"])) for e in case["entries"]])
+
+    def test_explicit_motor_configuration_still_checks_ack(self):
+        for fault in ("drop", "error", "packet_error", "malformed"):
+            pad = FakeApex6()
+            pad.faults[0x53] = deque([fault])
+            with self.assertRaises(gpa6.ProtocolError):
+                gpa6.Protocol(pad).mode(0x12, 0)
+
+    def test_complete_native_restore_fixtures(self):
+        fixtures = json.loads((ROOT / "tests/fixtures/apex6-lifecycle.json").read_text())["restore"]
+        for case in fixtures["cases"]:
+            with self.subTest(case=case):
+                pad = FakeApex6()
+                pad.maps[0][:] = bytes.fromhex(fixtures["mapping"])
+                writes, reads = [], []
+                send = pad.send
+
+                def transfer(report, wait=0, until=None):
+                    writes.append(report[1:].hex())
+                    if len(writes) == case["fail_write"]:
+                        raise OSError("HID write failed")
+                    if wait:
+                        reads.append({"command": report[3], "timeout_ms": round(wait * 1000)})
+                        if len(reads) == case["fail_read"]:
+                            return []
+                    if report[3] == 0xa3:
+                        index, width = report[7], case["chunk_size"]
+                        chunk = pad.maps[0][index * width:(index + 1) * width]
+                        payload = struct.pack("<4BH2B", 0, 0, 6, 0, 64, index, len(chunk)) + chunk
+                        return [pad._reply(0xa3, payload, v21=True)]
+                    return send(report, wait=wait, until=until)
+
+                with patch.object(pad, "send", side_effect=transfer):
+                    try:
+                        gpa6.Protocol(pad).restore_motors()
+                        success = True
+                    except (OSError, gpa6.ProtocolError):
+                        success = False
+                self.assertEqual(success, case["success"])
+                self.assertEqual(writes, case["frames"])
+                self.assertEqual(reads, case["reads"])
 
 
 class AudioTests(unittest.TestCase):
@@ -241,13 +312,17 @@ class LifecycleTests(unittest.TestCase):
             self.session().start()
         self.assertFalse(any(c == 0x53 for c, _ in self.pad.history))
 
-    def test_unknown_motor_layout_fails_before_writes(self):
-        for offset, value in ((0, 3), (23, 3), (25, 255)):
+    def test_unknown_motor_layout_prevents_replay_after_stop(self):
+        for offset, value in ((0, 3), (1, 3), (12, 255), (23, 3), (25, 255)):
             pad = FakeApex6()
             pad.maps[0][offset] = value
+            session = waveform.GripSession(pad, experimental=True).start()
+            pad.history.clear()
             with self.assertRaises(gpa6.ProtocolError):
-                waveform.GripSession(pad, experimental=True).start()
-            self.assertFalse(any(c == 0x53 for c, _ in pad.history))
+                session.stop()
+            self.assertEqual([p for c, p in pad.history if c == 0x53],
+                             [bytes.fromhex("010200"), bytes.fromhex("011200")])
+            self.assertIsNone(pad._grip_session)
 
     def test_order_pacing_underrun_and_restore(self):
         with self.session() as session:
@@ -267,7 +342,7 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(session.underruns, 8)
             self.assertEqual(self.pad.frames[-1][5:29], bytes([128] * 24))
         self.assertEqual(self.pad.runtime, self.original)
-        self.assertEqual(self.pad.frames[-1][4], 0x80)
+        self.assertEqual(len(self.pad.frames), 3)  # no extra shutdown waveform
         session.stop()
 
     def test_latency_and_queue_are_bounded(self):
@@ -321,14 +396,46 @@ class LifecycleTests(unittest.TestCase):
         session.stop()
         self.assertEqual(self.pad.runtime, {16: (0, b""), 17: (1, b"\x16")})
 
-    def test_partial_setup_rolls_back_even_after_lost_ack(self):
-        for fault in ("error", "drop", "malformed"):
-            with self.subTest(fault=fault):
-                self.pad.faults[0x53] = deque([fault])
-                with self.assertRaises(gpa6.ProtocolError):
+    def test_session_uses_native_sequence_and_rereads_same_slot(self):
+        with patch.object(self.pad, "send", wraps=self.pad.send) as send:
+            session = self.session().start()
+        self.assertFalse(any(c == 0xa3 for c, _ in self.pad.history))
+        modes = [c for c in send.call_args_list if c.args[0][3] == 0x53]
+        self.assertEqual([c.args[0][5:8].hex() for c in modes], ["010200", "011202"])
+        self.assertEqual([c.kwargs["wait"] for c in modes], [0, 0])
+        # Change every motor entry without changing the slot. Cleanup must
+        # replay these fresh values, including the native trigger modes.
+        self.pad.maps[0][1:12] = bytes([1]) + bytes(range(10))
+        self.pad.maps[0][12:16] = bytes((2, 0, 64, 6))
+        self.pad.maps[0][23:27] = bytes((0, 0, 1, 22))
+        self.pad.history.clear()
+        with patch.object(self.pad, "send", wraps=self.pad.send) as send:
+            session.stop()
+        history = list(self.pad.history)
+        self.assertEqual([c for c, _ in history], [0x53, 0x53, 0xa1] + [0xa3] * 4 + [0x53] * 4)
+        self.assertEqual([p for c, p in history if c == 0xa3],
+                         [bytes((0, 6, i, 20)) for i in range(4)])
+        self.assertEqual([c.kwargs["wait"] for c in send.call_args_list], [0, 0] + [1.5] * 5 + [0] * 4)
+        self.assertEqual(self.pad.trigger_runtime, {0: (1, bytes(range(10))), 1: (2, bytes((0, 64, 6)))})
+        self.assertEqual(self.pad.runtime, {16: (0, b""), 17: (1, b"\x16")})
+        self.assertFalse(self.pad.frames)
+
+    def test_partial_setup_write_failure_cleans_up(self):
+        for faults in (("write_error", None), (None, "write_error")):
+            with self.subTest(faults=faults):
+                self.pad.faults[0x53] = deque(faults)
+                with self.assertRaises(OSError):
                     self.session().start()
                 self.assertEqual(self.pad.runtime, self.original)
                 self.assertIsNone(self.pad._grip_session)
+
+    def test_setup_ignores_mode_acks(self):
+        for fault in ("error", "packet_error", "drop", "malformed"):
+            with self.subTest(fault=fault):
+                self.pad.faults[0x53] = deque([fault, fault])
+                with self.session() as session:
+                    self.assertTrue(session.active)
+                self.assertEqual(self.pad.runtime, self.original)
 
     def test_exception_cleanup(self):
         with self.assertRaisesRegex(RuntimeError, "test exception"):
@@ -336,80 +443,95 @@ class LifecycleTests(unittest.TestCase):
                 raise RuntimeError("test exception")
         self.assertEqual(self.pad.runtime, self.original)
 
-    def test_cleanup_continues_after_failed_disable(self):
+    def test_stop_attempts_both_writes_but_skips_restore_on_write_failure(self):
+        for faults in (("write_error", None), (None, "write_error")):
+            with self.subTest(faults=faults):
+                session = self.session().start()
+                self.pad.history.clear()
+                self.pad.faults[0x53] = deque(faults)
+                with self.assertRaisesRegex(OSError, "HID write failure"):
+                    session.stop()
+                self.assertEqual(list(self.pad.history), [
+                    (0x53, bytes.fromhex("010200")), (0x53, bytes.fromhex("011200"))])
+                self.assertIsNone(self.pad._grip_session)
+
+    def test_cleanup_replay_stops_at_first_write_failure(self):
         session = self.session().start()
-        self.pad.faults[0x53] = deque(["error"])
-        with self.assertRaisesRegex(gpa6.ProtocolError, "cleanup incomplete"):
+        write = session.protocol.write
+        def fail_left(command, payload=b""):
+            if command == 0x53 and payload[1] == 0x10:
+                raise OSError("short HID report write")
+            return write(command, payload)
+        with patch.object(session.protocol, "write", side_effect=fail_left), \
+                self.assertRaisesRegex(OSError, "short HID report write"):
             session.stop()
-        self.assertEqual(self.pad.runtime, self.original)
+        self.assertEqual(self.pad.runtime[16], (0, b""))
+        self.assertEqual(self.pad.runtime[17], (0, b""))
         self.assertIsNone(self.pad._grip_session)
 
-    def test_cleanup_failure_is_reported(self):
-        session = self.session().start()
-        self.pad.faults[0x53] = deque([None, "error", None])
-        with self.assertRaisesRegex(gpa6.ProtocolError, "cleanup incomplete"):
-            session.stop()
-        self.assertEqual(self.pad.runtime[17], self.original[17])
-        self.assertIsNone(self.pad._grip_session)
-
-    def test_observed_pro_mode1_refusal_still_disables_and_reports_both_errors(self):
+    def test_observed_pro_mode1_refusal_uses_native_unacknowledged_replay(self):
         session = self.session().start()
         before = bytes(self.pad.maps[self.pad.slot])
-        # Pro 9.0.6.8 accepts disable but refuses each saved mode-1 restore.
-        self.pad.faults[0x53] = deque([None, "packet_error", "packet_error"])
-        with self.assertRaisesRegex(gpa6.ProtocolError, "cleanup incomplete") as caught:
+        # Pro 9.0.6.8 and the issue-2 Pro variant accept disable but refuse
+        # saved mode-1 replay. Like the native engine, replay does not read ACKs.
+        self.pad.faults[0x53] = deque([None] * 2 + ["packet_error"] * 4)
+        with patch.object(self.pad, "send", wraps=self.pad.send) as send:
             session.stop()
-        self.assertEqual(str(caught.exception).count("error 1"), 2)
+        mode_calls = [call for call in send.call_args_list if call.args[0][3] == 0x53]
+        self.assertEqual([call.kwargs['wait'] for call in mode_calls], [0] * 6)
         self.assertEqual(self.pad.runtime, {16: (0, b""), 17: (0, b"")})
         self.assertEqual(bytes(self.pad.maps[self.pad.slot]), before)
         self.assertFalse(any(cmd in (0xa2, 0xa4, 0xa7) for cmd, _ in self.pad.history))
         self.assertFalse(session.active)
         self.assertIsNone(self.pad._grip_session)
 
-    def test_cleanup_ack_timeouts_remain_retryable(self):
-        for faults in (("drop", None, None), (None, "drop", None),
-                       (None, None, "drop"), ("drop", "drop", "drop")):
+    def test_cleanup_needs_no_mode_acks(self):
+        for faults in (("drop", None, None, None, None, None), ("drop",) * 6):
             with self.subTest(faults=faults):
                 session = self.session().start()
                 self.pad.faults[0x53] = deque(faults)
-                with self.assertRaisesRegex(gpa6.ReplyTimeout, "cleanup incomplete"):
-                    session.stop()
+                session.stop()
                 self.assertEqual(self.pad.runtime, self.original)
+                self.assertIsNone(self.pad._grip_session)
+
+    def test_cleanup_does_not_require_valid_or_present_mode_ack(self):
+        for fault in ("error", "packet_error", "malformed", "drop"):
+            with self.subTest(fault=fault):
+                session = self.session().start()
+                self.pad.faults[0x53] = deque([fault] * 6)
+                session.stop()
+                self.assertFalse(session.active)
                 self.assertIsNone(self.pad._grip_session)
 
     def test_disconnect_during_cleanup_remains_retryable(self):
         session = self.session().start()
-        self.pad.faults[0x57] = deque(["disconnect"])
+        self.pad.faults[0x53] = deque(["disconnect"])
         with self.assertRaises(OSError):
             session.stop()
         self.assertIsNone(self.pad._grip_session)
         self.assertFalse(session.active)
 
-    def test_cleanup_protocol_failure_is_not_masked_by_timeout(self):
-        for fault in ("malformed", "error"):
-            for later_query in (False, True):
-                with self.subTest(fault=fault, later_query=later_query):
+    def test_cleanup_read_failure_prevents_replay_and_is_not_retried(self):
+        for fault in ("malformed", "error", "drop"):
+            for command in (0xa1, 0xa3):
+                with self.subTest(fault=fault, command=command):
                     session = self.session().start()
-                    if later_query:
-                        # The slot read occurs after the disable ACK; its
-                        # timeout must not replace that earlier fatal error.
-                        self.pad.faults[0x53] = deque([fault])
-                        self.pad.faults[0xa1] = deque(["drop"])
-                    else:
-                        self.pad.faults[0x53] = deque(["drop", fault])
-                    with self.assertRaises(gpa6.ProtocolError) as caught:
+                    self.pad.history.clear()
+                    self.pad.faults[command] = deque([fault])
+                    with self.assertRaises(gpa6.ProtocolError):
                         session.stop()
-                    self.assertNotIsInstance(caught.exception, gpa6.ReplyTimeout)
+                    self.assertEqual(sum(c == command for c, _ in self.pad.history), 1)
+                    self.assertEqual(sum(c == 0x53 for c, _ in self.pad.history), 2)
                     self.assertIsNone(self.pad._grip_session)
 
     def test_fatal_tick_error_is_not_masked_by_cleanup_timeout(self):
         session = self.session().start()
         self.pad.faults[4] = deque(["malformed"])
-        self.pad.faults[0x53] = deque(["drop"])
+        self.pad.faults[0xa1] = deque(["drop"])
         with self.assertRaises(gpa6.ProtocolError) as caught:
             session.tick()
         self.assertNotIsInstance(caught.exception, gpa6.ReplyTimeout)
-        self.assertEqual(self.pad.runtime, self.original)
+        self.assertEqual(self.pad.runtime, {16: (0, b""), 17: (0, b"")})
         self.assertIsNone(self.pad._grip_session)
 
     def test_profile_change_restores_new_profile(self):
@@ -442,9 +564,9 @@ class LifecycleTests(unittest.TestCase):
         session = self.session().start()
         self.pad.uid = "ff" * 16
         self.pad.history.clear()
-        with self.assertRaises(gpa6.ProtocolError):
+        with self.assertRaises(identity.WrongDevice):
             session.tick()
-        self.assertEqual([c for c, _ in self.pad.history], [4, 4])
+        self.assertEqual([c for c, _ in self.pad.history], [4])
         self.assertIsNone(self.pad._grip_session)
 
     def test_output_contention(self):
@@ -468,6 +590,20 @@ class LifecycleTests(unittest.TestCase):
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_cli_tone_succeeds_when_firmware_refuses_saved_mode_replay(self):
+        tool = runpy.run_path(str(ROOT / "tools/flydigi-apex6"))
+        pad = FakeApex6()
+        pad.faults[0x53] = deque([None] * 4 + ["packet_error"] * 4)
+        argv = ["flydigi-apex6", "--device", pad.path, "--experimental",
+                "tone", "--duration", "0.01", "--amplitude", "0"]
+        stderr = io.StringIO()
+        with patch("sys.argv", argv), patch("sys.stderr", stderr), \
+                patch("flydigi.registry.open_pad", return_value=pad):
+            self.assertEqual(tool["main"](), 0)
+        self.assertNotIn("cleanup", stderr.getvalue())
+        self.assertEqual(pad.runtime, {16: (0, b""), 17: (0, b"")})
+        self.assertIsNone(pad._grip_session)
+
     def test_cli_reconnects_after_unanswered_queries(self):
         for faults, reconnect in ((["drop"], True), (["drop", "drop"], True),
                                   (["drop"], False), (["malformed"], True)):
@@ -482,7 +618,9 @@ class IntegrationTests(unittest.TestCase):
                     def start(self):
                         super().start()
                         if not sessions:
-                            pad.faults[4] = deque(faults)
+                            pad.faults[4] = deque(faults[:1])
+                            if len(faults) == 2:
+                                pad.faults[0xa1] = deque(faults[1:])
                         sessions.append(self)
                         return self
 

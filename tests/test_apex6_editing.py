@@ -94,6 +94,32 @@ class HardwareTests(unittest.TestCase):
                 ctrl.send(device.build(4), wait=0)
             self.assertEqual(writes[-1][1], writes[-2][1])
 
+    def test_duplicate_control_pacing_accounts_for_receiver_reply_delay(self):
+        ctrl = object.__new__(device.Controller)
+        ctrl.fd, ctrl.path, ctrl.dialect = 123, "/dev/fake", "gpa6"
+        ctrl._threads, ctrl._depth = threading.RLock(), 0
+        ctrl.report_layout = gpa6.ReportLayout(0, 32)
+        now, writes = [100.0], []
+        def write(fd, packet):
+            writes.append(now[0])
+            return len(packet)
+        def read(fd, size):
+            now[0] += .015
+            return bytes.fromhex(HARDWARE["info_reply_hex"])
+        def sleep(delay):
+            now[0] += delay
+        with patch.object(ctrl, "_drain"), patch.object(ctrl, "_flock"), \
+                patch("flydigi.device.fcntl.flock"), \
+                patch("flydigi.device.time.monotonic", side_effect=lambda: now[0]), \
+                patch("flydigi.device.time.sleep", side_effect=sleep), \
+                patch("flydigi.device.os.write", side_effect=write), \
+                patch("flydigi.device.os.read", side_effect=read), \
+                patch("flydigi.device.select.select", return_value=([ctrl.fd], [], [])):
+            packet = ctrl.report_layout.wrap(gpa6.frame(1))
+            ctrl.send(packet, until=lambda replies: True)
+            ctrl.send(packet, wait=0)
+        self.assertAlmostEqual(writes[1] - writes[0], .115)
+
 
 class EditingTests(unittest.TestCase):
     def setUp(self):

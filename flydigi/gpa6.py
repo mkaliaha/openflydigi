@@ -7,7 +7,8 @@
 Wire facts come from the pinned web client and xHaptics Engine 5.0.1.4 in
 docs/findings-apex6.md, with wired and receiver Apex 6 Pro checks on firmware 9.0.6.8.
 Identity, bounded configuration edits and volatile grip output are implemented.
-Grip-mode restoration remains unresolved on the tested firmware.
+The grip-session motor lifecycle follows the native engine without mode ACKs; exact
+live-mode restoration remains unresolved on the tested firmware.
 """
 from dataclasses import dataclass
 import math
@@ -153,11 +154,11 @@ class Protocol:
     def write(self, command, payload=b""):
         self.ctrl.send(self.layout.wrap(frame(command, payload)), wait=0)
 
-    def ask(self, command, size, payload=b"", v21=False):
+    def ask(self, command, size, payload=b"", v21=False, *, timeout=0.6):
         def parse(reply):
             return _payload(self.layout.unwrap(reply), command, size, v21)
         replies = self.ctrl.send(self.layout.wrap(frame(command, payload)),
-                                 wait=0.6, until=lambda seen: parse(seen[-1]) is not None)
+                                 wait=timeout, until=lambda seen: parse(seen[-1]) is not None)
         for reply in replies:
             found = parse(reply)
             if found is not None:
@@ -250,17 +251,55 @@ class Protocol:
             return bytes(data)
 
     def motor_map(self):
-        slot = self.slot()
+        """Native restore read (RVA 222dc0): A1, then 20-byte RAM 6 chunks.
+
+        This deliberately differs from the general snapshot reader: no CRC
+        queries, retries, cached map or final A1, and a 1500 ms reply timeout.
+        """
+        slot = self.ask(0xa1, 11, timeout=1.5)[0]
+        if slot > 3:
+            raise ProtocolError(f"invalid active slot {slot}")
         data = bytearray()
-        for index in range(4):
-            p = self.ask(0xa3, 24, bytes((0, 6, index, 16)), v21=True)
-            if p[:8] != bytes((0, 0, 6, slot, 64, 0, index, 16)):
+
+        def payload_size(p):
+            if len(p) < 8 or not 1 <= p[7] <= 20:
+                raise ProtocolError("invalid motor map chunk size")
+            return 8 + p[7]
+
+        index = 0
+        while len(data) < 64:
+            p = self.ask(0xa3, payload_size, bytes((0, 6, index, 20)),
+                         v21=True, timeout=1.5)
+            if p[:7] != bytes((0, 0, 6, slot, 64, 0, index)):
                 raise ProtocolError("motor map ACK status, slot, length or chunk mismatch")
-            data.extend(p[8:24])
-        if self.slot() != slot:
-            raise ProtocolError("profile changed during motor map read")
-        grip_restore(data)  # reject layouts we cannot restore before any write
+            data.extend(p[8:])
+            index += 1
+        if len(data) != 64:
+            raise ProtocolError("motor map length mismatch")
         return slot, bytes(data)
+
+    def grip_stream(self, enabled):
+        """Native grip-only setup/stop (RVAs 21dfd0/21e410).
+
+        Both operations disable trigger output, then enable/disable grips.
+        Attempt both HID writes, checking transport completion only.
+        """
+        errors = []
+        for target, mode, params in ((2, 0, b""),
+                                     (0x12, 2 if enabled else 0,
+                                      b"\x40\x00" if enabled else b"")):
+            try:
+                self.mode(target, mode, params, wait_for_ack=False)
+            except OSError as exc:
+                errors.append(exc)
+        if errors:
+            raise OSError("motor mode write failed: " + "; ".join(map(str, errors))) from errors[0]
+
+    def restore_motors(self):
+        """Native restoration: fresh RAM, all four motors, stop on write failure."""
+        _, mapping = self.motor_map()
+        for target, mode, params in motor_restore(mapping):
+            self.mode(target, mode, params, wait_for_ack=False)
 
     def set_global(self, field, data):
         if not 0 <= field <= 255 or not 1 <= len(data) <= 26:
@@ -357,18 +396,37 @@ class Protocol:
                     raise ProtocolError(f"{exc}; transfer abort failed: {cleanup}") from exc
                 raise
 
-    def mode(self, target, mode, params=b""):
-        status = self.ask(0x53, 1, bytes((1, target, mode)) + params)[0]
+    def mode(self, target, mode, params=b"", *, wait_for_ack=True):
+        """Set a runtime motor mode; the native lifecycle uses no ACKs.
+
+        A successful unacknowledged write only establishes transport completion.
+        Explicit motor configuration retains the acknowledged default.
+        """
+        payload = bytes((1, target, mode)) + params
+        if not wait_for_ack:
+            self.write(0x53, payload)
+            return
+        status = self.ask(0x53, 1, payload)[0]
         if status != 0:
             raise ProtocolError(f"motor configuration refused: status {status}")
 
 
-def grip_restore(mapping):
-    """RAM 6 layout 2: grips at 23/25, mode 0 or mode 1 + one gain byte.
+def motor_restore(mapping):
+    """Native RAM 6 layout-2 decoder (RVA 22cd00), in replay order."""
+    if len(mapping) < 32 or mapping[0] != 2:
+        raise ProtocolError("unsupported motor mapping layout")
+    result = []
+    for target, offset, widths in ((0, 1, (0, 10, 3)), (1, 12, (0, 10, 3)),
+                                   (0x10, 23, (0, 1)), (0x11, 25, (0, 1))):
+        mode = mapping[offset]
+        if mode >= len(widths):
+            raise ProtocolError("unsupported persistent motor mode")
+        result.append((target, mode, bytes(mapping[offset + 1:offset + 1 + widths[mode]])))
+    return result
 
-    Native decoder RVAs 22cd00 / 22c780; restoration uses area 1 and targets
-    0x10/0x11. We only change grips, so trigger entries are left alone.
-    """
+
+def grip_restore(mapping):
+    """Describe the grip entries for configuration snapshots."""
     if len(mapping) != 64 or mapping[0] != 2:
         raise ProtocolError("unsupported motor mapping layout")
     result = []

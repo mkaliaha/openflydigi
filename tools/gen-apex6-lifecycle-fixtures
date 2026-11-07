@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
+"""Generate lifecycle facts by executing pinned xHaptics Engine 5.0.1.4 code.
+
+Optional research tool: requires ignored work/apex6-research/ and its Unicorn/
+pefile dependencies, as with gen-apex6-fixtures. OS/HID calls are stubbed; this
+never accesses hardware or imports production protocol code. Normal tests use
+only the resulting JSON and need neither vendor binaries nor research tools.
+"""
+from pathlib import Path
+import json
+import struct
+
+ROOT = Path(__file__).resolve().parents[1]
+source = ROOT/'work/apex6-research/verify_engine_packets.py'
+ns = {'__file__': str(source)}
+exec(compile(source.read_text().split('rng = random.Random(6)')[0], str(source), 'exec'), ns)
+Emulator = ns['Emulator']
+BASE = ns['BASE']
+for name, value in ns.items():
+    if name.startswith('UC_X86_REG_'):
+        globals()[name] = value
+
+
+class Native(Emulator):
+    def __init__(self, fail_write=None):
+        self.fail_write = fail_write
+        super().__init__()
+
+    def hook(self, u, addr, size, arg):
+        rva = addr-BASE
+        if rva in (0x221c00, 0x222ca0):
+            raise AssertionError('mode operation unexpectedly waits for ACK')
+        if rva == 0x2365f0:  # security-cookie check preserves the return value
+            self.ret(u.reg_read(UC_X86_REG_RAX))
+        elif rva == 0x2268d0:
+            vector = u.reg_read(UC_X86_REG_RDX)
+            start, end = struct.unpack('<QQ', u.mem_read(vector, 16))
+            self.writes.append(bytes(u.mem_read(start, end-start)))
+            self.ret(int(len(self.writes) != self.fail_write))
+        elif rva == 0x002e40:  # diagnostic string assignment on write failure
+            self.ret(u.reg_read(UC_X86_REG_RCX))
+        else:
+            super().hook(u, addr, size, arg)
+
+    def modes(self, action):
+        obj = self.alloc(0x400)
+        if action == 'setup':
+            # trigger output off, grips on, both-trigger selector, hapticGrip.
+            ok = self.call(0x21dfd0, (obj, 0, 1, 2), (1,)) & 255
+        else:
+            ok = self.call(0x21e410, (obj, 1)) & 255
+        return {'action': action, 'fail_write': self.fail_write, 'success': bool(ok),
+                'frames': [frame.hex() for frame in self.writes]}
+
+    def decode(self, raw):
+        span = self.blob(struct.pack('<QQ', self.blob(bytes(raw)), len(raw)))
+        result = self.alloc(32)
+        self.call(0x22cd00, (result, span))
+        if not self.u.mem_read(result+24, 1)[0]:
+            return None
+        start, end = struct.unpack('<QQ', self.u.mem_read(result, 16))
+        entries = []
+        for ptr in range(start, end, 32):
+            target, mode = self.u.mem_read(ptr, 2)
+            first, last = struct.unpack('<QQ', self.u.mem_read(ptr+8, 16))
+            params = bytes(self.u.mem_read(first, last-first)) if last > first else b''
+            entries.append({'target': target, 'mode': mode, 'params': params.hex()})
+        return entries
+
+
+class Restore(Native):
+    def __init__(self, mapping, fail_write=None, fail_read=None, chunk_size=20):
+        self.mapping, self.fail_read, self.chunk_size = mapping, fail_read, chunk_size
+        self.reads = []
+        super().__init__(fail_write)
+
+    def hook(self, u, addr, size, arg):
+        rva = addr-BASE
+        if rva == 0x220b50:  # connected HID handle
+            self.ret(1)
+        elif rva == 0x222ca0:  # run native A1 write/read helper
+            pass
+        elif rva == 0x221c00:  # only mock the actual reply wait
+            dest, command, timeout = [u.reg_read(r) for r in (UC_X86_REG_RDX, UC_X86_REG_R8, UC_X86_REG_R9)]
+            command &= 255
+            self.reads.append({'command': command, 'timeout_ms': timeout})
+            if len(self.reads) == self.fail_read:
+                u.mem_write(dest, bytes(32))
+            else:
+                if command == 0xa1:
+                    data = bytes(11)
+                elif command == 0xa3:
+                    index = self.writes[-1][6]
+                    chunk = self.mapping[index*self.chunk_size:(index+1)*self.chunk_size]
+                    data = struct.pack('<4BH2B', 0, 0, 6, 0, 64, index, len(chunk)) + chunk
+                    report = bytearray(32)
+                    report[:3] = b'\x5a\xa5\xa3'
+                    report[3:3+len(data)] = data
+                    report[31] = sum(report[2:31]) & 255
+                    data = bytes(report)
+                else:
+                    raise AssertionError(f'Unexpected ACK wait: {command:02x}')
+                start = self.blob(data)
+                u.mem_write(dest, struct.pack('<QQQB7x', start, start+len(data), start+len(data), 1))
+            self.ret(dest)
+        elif rva in (0x011ff0, 0x011ee0):  # diagnostic strings
+            self.ret(u.reg_read(UC_X86_REG_RCX))
+        else:
+            super().hook(u, addr, size, arg)
+
+    def run(self):
+        obj, result = self.alloc(0x400), self.alloc(0x80)
+        try:
+            self.call(0x222dc0, (obj, result, 1))
+        except Exception:
+            print('failure at', hex(self.u.reg_read(UC_X86_REG_RIP)), 'writes', len(self.writes))
+            raise
+        return {'fail_write': self.fail_write, 'fail_read': self.fail_read, 'chunk_size': self.chunk_size,
+                'success': bool(self.u.mem_read(result,1)[0]),
+                'frames': [f.hex() for f in self.writes], 'reads': self.reads}
+
+lifecycle = [Native(fail).modes(action) for action in ('setup', 'stop') for fail in (None, 1, 2)]
+assert [bytes.fromhex(f)[4:7].hex() for f in lifecycle[0]['frames']] == ['010200', '011202']
+assert [bytes.fromhex(f)[4:7].hex() for f in lifecycle[3]['frames']] == ['010200', '011200']
+assert all(len(c['frames']) == 2 and c['success'] == (c['fail_write'] is None) for c in lifecycle)
+decodes = []
+for left in (0, 1, 2):
+    for right in (0, 1, 2):
+        for grip in (0, 1):
+            raw = bytearray(range(64))
+            raw[0], raw[1], raw[12], raw[23], raw[25] = 2, left, right, grip, 1-grip
+            entries = Native().decode(raw)
+            assert entries is not None
+            decodes.append({'mapping': raw.hex(), 'entries': entries})
+for offset, mode in [(0, 1), (1, 3), (12, 255), (23, 2), (25, 255)]:
+    raw = bytearray(64)
+    raw[0] = 2
+    raw[offset] = mode
+    assert Native().decode(raw) is None
+    decodes.append({'mapping': raw.hex(), 'entries': None})
+result = {'engine_sha256': '176f4ee36ba66d818d2c785cc7688ff7608d2a3e50b5d87ce20d1cbd49c444a6',
+          'source': 'Offline execution of xHaptics Engine 5.0.1.4 RVAs 21dfd0, 21e410, 22cd00; OS/HID mocked',
+          'lifecycle': lifecycle, 'motor_maps': decodes}
+raw = bytes.fromhex(json.loads((ROOT/'tests/fixtures/apex6-hardware.json').read_text())['ram']['6']['hex'])
+cases = [Restore(raw).run()]
+for fail in range(1,10):
+    cases.append(Restore(raw, fail_write=fail).run())
+for fail in range(1,6):
+    cases.append(Restore(raw, fail_read=fail).run())
+cases.append(Restore(raw, chunk_size=16).run())
+cases.append(Restore(raw, chunk_size=7).run())
+assert cases[0]['success'] and len(cases[0]['frames']) == 9
+assert all(c['success'] for c in cases[-2:])
+assert all(not c['success'] for c in cases[1:-2])
+result['restore'] = {'mapping': raw.hex(), 'cases': cases}
+result['source'] += '; full restore RVA 222dc0 with reply-wait stub and native packet builders/decoders'
+destination = ROOT/'tests/fixtures/apex6-lifecycle.json'
+destination.write_text(json.dumps(result, indent=2)+'\n')
+print(f'PASS: {len(lifecycle)} setup/stop cases, {len(decodes)} decodes, {len(cases)} restore cases')
+print(destination)

@@ -188,9 +188,22 @@ class FeedbackTests(unittest.TestCase):
         self.feedback.step()
         self.assertTrue(self.feedback.session.active)
 
+    def test_native_replay_refusal_does_not_fail_disconnect_or_reconnect(self):
+        self.pad.faults[0x53] = deque([None] * 2 + ["packet_error"] * 4)
+        self.feedback.set_connected(False)
+        self.feedback.step()
+        self.assertIsNone(self.feedback.failed)
+        self.assertIsNone(self.feedback.session)
+        self.assertIsNone(self.pad._grip_session)
+        self.assertEqual(self.pad.runtime, {16: (0, b""), 17: (0, b"")})
+        self.feedback.set_connected(True)
+        self.feedback.step()
+        self.assertTrue(self.feedback.session.active)
+
     def test_reply_timeout_reconnects_without_replaying_samples(self):
         self.audio(pcm())
-        self.pad.faults[4] = deque(["drop", "drop"])
+        self.pad.faults[4] = deque(["drop"])
+        self.pad.faults[0xa1] = deque(["drop"])
         self.feedback.step()
         self.assertIsNone(self.feedback.session)
         self.assertFalse(self.feedback.blocks)
@@ -202,14 +215,13 @@ class FeedbackTests(unittest.TestCase):
     def test_disconnect_during_setup_and_cleanup_can_reconnect(self):
         self.feedback.set_connected(False)
         self.feedback.step()
-        # Setup applies realtime mode, loses its ACK, then loses the cleanup
-        # UUID reply too. This remains a recoverable communication timeout.
-        self.pad.faults[0x53] = deque(["drop"])
-        self.pad.faults[4] = deque([None, "drop"])
+        # A transport disconnect during setup also prevents stop writes.
+        self.pad.faults[0x53] = deque(["disconnect"])
         self.feedback.set_connected(True)
         self.feedback.step()
         self.assertIsNone(self.feedback.session)
         self.assertIsNone(self.pad._grip_session)
+        self.pad.present = True
         self.clock.now = 1
         self.feedback.step()
         self.assertTrue(self.feedback.accepting)

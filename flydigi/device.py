@@ -433,6 +433,8 @@ class Controller:
             # Apex 6 firmware 9.0.6.8 suppresses identical control requests
             # repeated within 100 ms. Pace only exact repeats; waveform frames
             # (0x57) must keep their 8 ms cadence, including repeated silence.
+            # For acknowledged requests, count from the previous reply so
+            # receiver latency cannot shorten the firmware's quiet interval.
             if self.dialect == "gpa6" and buf[3] != 0x57:
                 previous, sent_at = getattr(self, "_gpa6_last_control", (None, 0))
                 if previous == bytes(buf):
@@ -453,6 +455,10 @@ class Controller:
                     continue
                 data = os.read(self.fd, 65 if self.dialect == "gpa6" else 64)
                 if data:
+                    if self.dialect == "gpa6" and buf[3] != 0x57:
+                        reply = self.report_layout.unwrap(data)
+                        if reply[:3] == bytes((0x5a, 0xa5, buf[3])):
+                            self._gpa6_last_control = bytes(buf), time.monotonic()
                     replies.append(data)
                     if until is not None and until(replies):
                         break

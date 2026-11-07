@@ -136,11 +136,14 @@ with a calculated checksum at report offset 32. It must not be confused with
 the ordinary path.
 
 Mode command **0x53 / 83** now takes `[area, target, mode, ...params]`, confirmed
-in both web and native code. The engine checks ACK errors for invalid selections
-and insufficient parameters. It also reads persistent motor mapping through
-0xA3 and restores it after a session. Implementation must cover restoration,
-not only neutral samples. The grip subset is recovered below; broader mode/target semantics and physical
-trigger routing remain unverified.
+in both web and native code. The engine's general motor-setting API checks ACK
+errors, but its separate session-cleanup routine does not: it reads persistent
+motor mapping through 0xA3 and attempts to replay it using writes alone. This is
+not proof that firmware accepts restoration. See the
+[restoration investigation](#native-engine-restoration-investigation) for the
+observed refusals and the distinction between stopping output and restoring
+the saved live modes. Broader mode/target semantics and physical trigger
+routing remain unverified.
 
 ### Offline verification
 
@@ -279,29 +282,30 @@ Descriptor parsing selects the vendor output report ID and byte count, accepts
 32–64 byte outputs and rejects ambiguous or smaller layouts. Hidraw writes
 include a report ID or zero placeholder; unnumbered reads do not. The command-7
 versions are exposed for diagnostics; no version is interpreted as an Apex 5
-profile format. Motor RAM layout validation, not a guessed mapping-file
-version, gates volatile grip output.
+profile format. Motor RAM layout 2 is validated when restoring the current
+motor modes on exit, following the native engine.
 
 Additional static anchors from the same pinned native executable:
 
 | RVA | Recovered behavior |
 |---|---|
+| `21dfd0` | Grip-only setup disables both triggers before enabling grip streaming; both writes attempted without ACK waits |
 | `21e27d` | Grip stream setup: command `53`, payload `01 12 02 40 00` |
+| `21e410` | Stop disables both triggers, then both grips; both writes attempted without ACK waits |
 | `21e5b5` | Grip disable: command `53`, payload `01 12 00` |
 | `222ee0` | Read RAM ID 6 using command `A3` (native chunk size 20; web default 16) |
-| `22cd00`, `22c780` | Motor-map layout 2; left/right grip modes at offsets 23/25, mode 0 has no params, mode 1 has one following gain byte |
-| `223366` | Restore using area 1, targets `10`/`11`, saved mode and parameters |
-| `223f70` | Command-53 ACK payload status 0 means success; nonzero is failure |
+| `22cd00`, `22c780` | Layout 2: triggers at offsets 1/12 (modes 0/1/2, parameter lengths 0/10/3); grips at 23/25 (modes 0/1, parameter lengths 0/1) |
+| `223366` | Area-1 replay, targets `00`, `01`, `10`, `11`; checks write success only and stops on the first failed write |
+| `223f70` | Separate general motor-setting API checks command-53 ACK payload status; not called by the restore loop |
 
 The emulator explicitly assumes area-1 writes are volatile, RAM 6 retains the
 persistent profile mapping, changing profiles resets live modes, and an enabled
 non-neutral grip waveform requires realtime setup. Those state transitions are
-software acceptance contracts; they are not firmware observations. Only the
-grips are configured/restored. Trigger modes and the trigger waveform column
-are not driven. Neutral samples are sent before disabling; an all-channels-off
-frame is also sent, followed by acknowledged mode disable. The native streaming
-builder skips output entirely when all channels are disabled, so that explicit
-off frame is an emulator assumption rather than a native fixture case.
+software acceptance contracts; they are not firmware observations. The session
+matches the native grip-only route: trigger modes are disabled during streaming
+and included in restoration. The trigger waveform column stays neutral. Stop
+sends only the native mode commands, with no additional neutral/off waveform
+packets. Mode ACKs are ignored throughout setup, stop and replay.
 
 The DSP accepts 48 kHz stereo PCM or the two haptic channels from four-channel
 DualSense PCM. It uses a 769-tap Blackman-windowed sinc low-pass at 350 Hz before
@@ -314,7 +318,7 @@ does not honor advisory locks remain untested.
 `tests/test_apex6.py` covers identity variants, descriptors, format versions,
 legacy-write refusal, independent encoder fixtures, stereo isolation and
 anti-alias filtering, chunk boundaries, pacing, underruns, bounded backlog,
-setup/ACK failures, partial cleanup, profile changes, UUID replacement,
+transport failures, ignored mode ACKs, restoration-read failures, profile changes, UUID replacement,
 reconnect, contention, and the command-line mock route. The tests run without
 research files or vendor binaries.
 
@@ -918,12 +922,160 @@ ending. Both mode-1 restore requests still returned error 1. Ordinary Linux
 `FF_RUMBLE` pulses were felt and stopped before and after that sequence, so the
 restore errors did not prevent ordinary rumble in this test. Exact live motor
 mode restoration remains unresolved. The default emulator accepts restoration;
-a regression now injects both observed refusals and checks that disable still
-occurs, both errors are reported, the claim is released and no profile write or
-selection is used to hide the failure.
+a regression injects the observed refusals. With the native lifecycle described
+below, it verifies unacknowledged trigger/grip disable and replay, claim release
+and no profile writes or selections.
+
+#### Native engine restoration investigation
+
+On 2026-11-07, the native engine and browser paths were compared with the real
+controller replies. The native executable is the pinned **xHaptics Engine
+5.0.1.4**, SHA-256
+`176f4ee36ba66d818d2c785cc7688ff7608d2a3e50b5d87ce20d1cbd49c444a6`.
+This investigation did not run an official Windows engine session or establish
+that this is the latest downloadable engine.
+
+The engine does attempt restoration after a successful session stop. The stop
+path calls the device-manager wrapper at RVA `1f9650` from `1f0267`, which reaches
+the driver routine at `222dc0`. The driver reads the active slot and RAM 6,
+decodes the motor entries, and replays trigger entries first, then grip entries
+when its include-grips flag is set. For the captured baseline the command-53
+payloads are:
+
+| Entry | Payload |
+|---|---|
+| Left trigger | `01 00 02 00 40 06` |
+| Right trigger | `01 01 02 00 40 06` |
+| Left grip | `01 10 01 40` |
+| Right grip | `01 11 01 40` |
+
+All four replay reports match the native reports **byte for byte**, including
+framing and checksum. The motor decoder at `22cd00` and post-read replay loop
+at `223343` were executed offline with Unicorn, using the captured RAM bytes
+and a stubbed HID writer. With successful writes the native routine reports
+success without calling either reply-wait helper (`221c00` or `222ca0`). With a
+failed write it takes the failure branch at `22356f`. Its writer at `2268d0`
+checks Windows `WriteFile` and the byte count, not firmware acceptance. The
+separate general motor-setting method at `223ac0` does wait for a reply; that
+must not be mistaken for the cleanup implementation. Native stop/disable at
+`21e410` likewise uses write results rather than firmware ACKs.
+
+The browser xHaptics page in the 2026-11-07 capture
+(`XHapticsPage-C0QVWt0G.js`) delegates runtime control/configuration to the local
+engine through `/api/v1/xhaptics`; it contains no separate motor-restore loop.
+The browser's direct motor-setting helper (`an`, exported as `T`, in
+`vendor-gpa6-core-BPfCX4IE.js`) sends the same area/target/mode format and *does*
+reject packet-level errors through its shared command helper. Its ordinary
+configuration path is distinct from engine session cleanup. The captured simple
+vibration editor uses area 0 for persistent trigger-bound-grip settings, rather
+than the engine's area-1 replay. This is not a reason to substitute persistent
+configuration writes for runtime cleanup.
+
+A bounded host-access probe on the Apex 6 Pro, firmware 9.0.6.8 over the receiver,
+then tested the known replay commands without playing a waveform:
+
+- Both grip mode-1 commands returned packet-level error 1 even without starting
+  a stream. The rejection is therefore not specific to exiting our waveform
+  session.
+- After acknowledged grip disable, the full native trigger-then-grip replay
+  returned error 1 for each of the four commands when replies were collected
+  individually. Replaying trigger entries first did not fix grip restoration.
+- Sending all four replay reports without ACK waits still produced an error-1
+  reply. Only one reply was captured for that burst; it cannot establish the
+  individual outcome of all four writes or be correlated to a particular target.
+- Final grip disable succeeded. The active slot and all four configuration RAM
+  blocks were unchanged byte for byte. No profile write, save, or selection was
+  used, and the device claim/handle were released.
+
+An independent report, [GitHub issue #2](https://github.com/mkaliaha/openflydigi/issues/2),
+records working tone output followed by the same two `0x53 error 1` cleanup
+failures on an **Apex 6 Pro Phantom Blade Zero (SKU 152), firmware 9.0.4.1, wired**.
+Together with our SKU-150/9.0.6.8 observations, this supports a shared
+protocol/firmware compatibility issue rather than a defect unique to one unit;
+it does not establish behavior on every Apex 6 variant or firmware.
+
+The engine's unchecked writes explain how its cleanup can report success while
+the corresponding firmware commands are refused. No alternative successful
+restoration command was recovered. A plausible explanation is that the saved
+configuration modes cannot be reapplied through this runtime area on these
+firmwares. That remains an inference: error 1's precise meaning, whether any
+rejected command has side effects, and whether disable alone restores every
+profile-specific motor behavior are unproven. Earlier working ordinary rumble
+after cleanup establishes that useful native output survives, not full live-mode
+equivalence. Waveform packets already use no ACK waits; suppressing a one-off
+cleanup rejection would not establish restoration.
+
+Reproduction evidence is local and ignored under
+`work/apex6-grip-restoration-20261107/`: `verify_restore.py`,
+`native-restore-verification.json`, `check_native_order.py`,
+`hardware-native-order.json`, before/after snapshots, and the issue/comments.
+The implementation now matches the native engine's **grip-only motor lifecycle**:
+
+1. Setup (`21dfd0`) sends command 53 with `01 02 00` (triggers disabled), then
+   `01 12 02 40 00` (grip streaming enabled).
+2. Stop (`21e410`) sends `01 02 00`, then `01 12 00`. Both setup and stop attempt
+   both writes even when the first fails. Neither consumes mode ACKs or sends
+   extra neutral/off waveform packets.
+3. After successful stop writes, restore (`222dc0`) reads A1 once, then RAM 6
+   using A3 requests `00 06 <index> 14` until 64 bytes arrive. Both reads use
+   1500 ms timeouts. It validates the slot, RAM ID, total length, chunk index
+   and nonempty data. It uses no cached map, read retries or final A1 query.
+4. The layout-2 decoder validates all four motor entries before replay. Replay
+   writes left trigger, right trigger, left grip, right grip through area 1,
+   without ACK waits, stopping at the first failed HID write. A stop-write,
+   restore-read or decode failure prevents replay.
+
+`Protocol.grip_stream()` and `restore_motors()` implement this sequence;
+`GripSession` uses them for both CLI and DualSense output. Device selection,
+exclusive claims and periodic identity/profile monitoring remain the Linux
+routing layer. The separate explicit `Protocol.mode()` API still checks ACKs
+by default, like the native general motor-settings API.
+
+`tests/fixtures/apex6-lifecycle.json` records independent native execution of
+six setup/stop cases, 23 motor decodes and 17 complete restore cases. The restore
+routine runs from entry through return with mocked HID writes/reply waits;
+its packet builders, RAM decoder, motor decoder and control flow execute from
+the pinned binary. Cases include failure at every write/read and shorter RAM
+chunks. Tests compare complete frames, order, read timeouts and failure results.
+The session regression additionally changes all four motor entries within the
+same slot to verify fresh restoration, and checks that stop adds no waveform
+packets or identity queries.
+`tools/gen-apex6-lifecycle-fixtures` regenerates these facts using the same
+optional research harness as the waveform generator, without production codecs
+or hardware access. Normal tests require only the committed JSON fixtures.
+
+Successful cleanup means that stop and replay reports were written, **not that
+firmware accepted them or saved live modes were verified**. Refused, missing or
+malformed mode ACKs do not fail playback. Read and transport failures still do.
+No profile selection or persistent configuration write substitutes for replay.
+
+The shorter cleanup also exposed a repeat-read timing edge on the receiver.
+During immediate same-handle restart, the two identity requests were about
+102 ms apart, but the first reply arrived about 13 ms after its write. The
+second request, only about 89 ms after that reply, went unanswered. The existing
+100 ms duplicate-command pacing now measures from a matching reply when one was
+received, or from the write for commands sent without waiting. Waveforms and
+legacy commands retain their previous timing. A regression injects receiver
+reply latency to check this boundary.
+
+After the complete lifecycle change, a silent real-controller CLI tone run
+exited 0, and two consecutive sessions on the same handle started and stopped
+successfully over the receiver. Captured setup mode reports and the complete
+stop/read/replay sequence matched the native fixtures byte for byte, with the
+same ACK-wait policy and read timeouts. All four configuration RAM blocks and
+the active slot matched the fresh baseline; claims and handles were released.
+These checks used neutral output and do not add a physical rumble or
+profile-haptics acceptance claim. Results and snapshots are in
+`work/apex6-grip-restoration-20261107/native-lifecycle/`; earlier diagnostics
+remain alongside them. All 23 backend scripts passed, including the Apex 5
+regressions and 146 tests across the five Apex 6 suites. Logs are in
+`work/apex6-grip-restoration-20261107/native-lifecycle-regression/`.
+
+#### Other acceptance observations
 
 During guided acceptance testing, two reads went unanswered around profile
-changes. RAM queries/chunks now retry unanswered A3 requests up to three attempts,
+changes. General configuration RAM queries/chunks retry unanswered A3 requests
+up to three attempts (the native motor-restore reader above does not retry),
 while retaining echo, fingerprint and CRC checks. Profile selection retries
 only its A1 verification read, never A2. Malformed or refused replies are not
 retried. Fake-pad tests cover recovery and bounded failure.

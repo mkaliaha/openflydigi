@@ -62,10 +62,11 @@ class FakeApex6:
         self.stored_configs = [dict(config) for config in self.configs]
         self.transfer = None
         self.runtime = {0x10: (1, b"\x4b"), 0x11: (1, b"\x3c")}
+        self.trigger_runtime = {0: (0, b""), 1: (0, b"")}
         self.history = deque(maxlen=256)
         self.frames = deque(maxlen=256)
         self.frame_count = 0
-        self.faults = {}  # command -> deque of None/error/packet_error/drop/malformed/disconnect
+        self.faults = {}  # command -> deque of None/error/packet_error/drop/malformed/write_error/disconnect
         self._lock = threading.RLock()
         self._bus = False
 
@@ -93,6 +94,9 @@ class FakeApex6:
         self.runtime = {target: (mapping[offset], bytes(mapping[offset + 1:offset + 2])
                                 if mapping[offset] else b"")
                         for target, offset in ((16, 23), (17, 25))}
+        self.trigger_runtime = {target: (mapping[offset], bytes(
+            mapping[offset + 1:offset + 1 + (0, 10, 3)[mapping[offset]]]))
+            for target, offset in ((0, 1), (1, 12))}
 
     def power_cycle(self):
         """Restart from saved blocks; tested Pro edits persist without A7 too.
@@ -155,6 +159,8 @@ class FakeApex6:
             self.history.append((command, payload))
             faults = self.faults.get(command)
             fault = faults.popleft() if faults else None
+            if fault == "write_error":
+                raise OSError("emulated HID write failure")
             if fault == "disconnect":
                 self.present = False
                 raise OSError("emulated disconnect during write")
@@ -268,9 +274,10 @@ class FakeApex6:
                 if operation == 1 and len(payload) == 2:
                     reply = self._reply(command, struct.pack("<4BHI", 1, 0, ram_id,
                                         self.slot, len(data), zlib.crc32(data)), v21=True)
-                elif operation == 0 and len(payload) == 4 and payload[3] == 16:
+                elif operation == 0 and len(payload) == 4 and payload[3] in (16, 20):
                     index = payload[2]
-                    chunk = data[index * 16:(index + 1) * 16]
+                    width = payload[3]
+                    chunk = data[index * width:(index + 1) * width]
                     if not chunk:
                         raise ValueError("invalid RAM chunk index")
                     reply = self._reply(command, struct.pack("<4BH2B", 0, 0, ram_id,
@@ -279,15 +286,19 @@ class FakeApex6:
                     raise ValueError("unsupported RAM read operation")
             elif command == 0x53:
                 valid = (len(payload) >= 3 and payload[0] == 1
-                         and payload[1] in (16, 17, 18))
+                         and payload[1] in (0, 1, 2, 16, 17, 18))
                 if valid:
                     target, mode, params = payload[1], payload[2], payload[3:]
-                    valid = ((mode == 0 and not params)
-                             or (mode == 1 and len(params) == 1)
-                             or (mode == 2 and params == b"\x40\x00" and self.features & 128))
+                    if target <= 2:
+                        valid = mode < 3 and len(params) == (0, 10, 3)[mode]
+                    else:
+                        valid = ((mode == 0 and not params)
+                                 or (mode == 1 and len(params) == 1)
+                                 or (mode == 2 and params == b"\x40\x00" and self.features & 128))
                 if valid:
-                    for side in ((16, 17) if target == 18 else (target,)):
-                        self.runtime[side] = mode, params
+                    runtime = self.trigger_runtime if target <= 2 else self.runtime
+                    for side in ({2: (0, 1), 18: (16, 17)}.get(target, (target,))):
+                        runtime[side] = mode, params
                 reply = self._reply(command, bytes([0 if valid else 1]))
             elif command == 0x57:
                 if len(payload) != 25 or payload[0] & 0xe4 != 0x80:

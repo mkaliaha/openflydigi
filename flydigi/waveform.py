@@ -69,12 +69,11 @@ class ProfileChanged(gpa6.ProtocolError):
 
 
 class GripSession:
-    """Exclusive, UID-bound volatile grip session with rollback on every exit.
+    """Exclusive, UID-bound grip session with disable and replay on every exit.
 
-    Format versions are reported, not guessed into old profile codecs. Motor
-    RAM layout 2 is the compatibility gate. Unknown layouts cannot be restored
-    and are refused. A profile change ends the session, restoring that profile's
-    current persistent grip map rather than overwriting it with a stale one.
+    Motor setup, stop and restore follow the native grip-only route, including
+    trigger disable and replay. Cleanup reads current RAM, decodes all four
+    motors and replays without ACKs; it does not verify live-mode restoration.
     """
     def __init__(self, ctrl, *, experimental=False, expected_uid=None,
                  channels=2, gain=1.0, clock=time.monotonic, max_latency=0.040):
@@ -120,13 +119,10 @@ class GripSession:
             if self.expected_uid is not None and self.uid != self.expected_uid:
                 raise identity.WrongDevice("selected Apex 6 UUID changed; refusing replacement pad")
             self.versions = self.protocol.versions()
-            self.slot, self.saved = self.protocol.motor_map()
-            # Mark dirty before the write: a timed-out ACK can still mean the
-            # pad applied the command. Roll back that case too.
+            self.slot = self.protocol.slot()
+            # A partial setup can change the pad even if a later write fails.
             self.dirty = True
-            # Native RVA 21e27d: area=1, target=both grips, realtime=2,
-            # params 40 00. No trigger selector assumptions are needed here.
-            self.protocol.mode(0x12, 2, b"\x40\x00")
+            self.protocol.grip_stream(True)
             self.active = True
             self.queue.clear()
             self.resampler.reset()
@@ -179,6 +175,9 @@ class GripSession:
         try:
             if now >= self.next_check:
                 if self.protocol.uid() != self.uid:
+                    # The routed device has changed. Release our claim without
+                    # applying the old session's lifecycle to its replacement.
+                    self.dirty = False
                     raise identity.WrongDevice("selected Apex 6 UUID changed")
                 if self.protocol.slot() != self.slot:
                     raise ProfileChanged("profile changed; restart the grip session")
@@ -228,44 +227,14 @@ class GripSession:
         self.resampler.reset()
         if self._claim is None:
             return
-        errors = []
         try:
             if self.dirty:
-                # Never restore the saved state to a replacement at the same
-                # path. A disconnected handle cannot safely receive cleanup.
-                if self.protocol.uid() != self.uid:
-                    raise identity.WrongDevice("UUID changed; cleanup refused on replacement pad")
-                for frame in (gpa6.waveform(), gpa6.waveform(enabled=(False, False, False))):
-                    try:
-                        self.ctrl.send(self.protocol.layout.wrap(frame), wait=0)
-                    except Exception as exc:
-                        errors.append(exc)
-                try:
-                    self.protocol.mode(0x12, 0)
-                except Exception as exc:
-                    errors.append(exc)
-                # Slot changes may happen through the pad itself even though
-                # our tools are excluded by the session claim.
-                mapping = self.saved
-                if self.protocol.slot() != self.slot:
-                    _, mapping = self.protocol.motor_map()
-                for target, mode, params in gpa6.grip_restore(mapping):
-                    try:
-                        self.protocol.mode(target, mode, params)
-                    except Exception as exc:
-                        errors.append(exc)
-        except Exception as exc:
-            if not errors:
-                raise
-            # A later failed query must not hide an earlier malformed reply.
-            errors.append(exc)
+                self.protocol.grip_stream(False)
+                # Native restoration runs only after successful stop writes,
+                # always rereads RAM and stops replay at the first write error.
+                self.protocol.restore_motors()
         finally:
             self.dirty = False
             claim, self._claim = self._claim, None
             self.ctrl._grip_session = None
             claim.__exit__(None, None, None)
-        if errors:
-            error_type = gpa6.ProtocolError
-            if all(isinstance(exc, (OSError, gpa6.ReplyTimeout)) for exc in errors):
-                error_type = gpa6.ReplyTimeout if isinstance(errors[0], gpa6.ReplyTimeout) else OSError
-            raise error_type("grip cleanup incomplete: " + "; ".join(map(str, errors))) from errors[0]
