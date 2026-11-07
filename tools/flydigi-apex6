@@ -16,7 +16,7 @@ import wave
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flydigi import device, gpa6, gpa6_config, gpa6_profile, identity, registry, waveform
+from flydigi import device, gpa6, gpa6_config, gpa6_profile, gpa6_haptics, identity, registry, waveform
 
 
 def action_target(text):
@@ -69,6 +69,20 @@ def main():
     sub.add_parser("info", help="read identity, capabilities and format versions")
     sub.add_parser("settings", help="read global controller settings")
     sub.add_parser("profile", help="read active profile buttons, timings and response curves")
+    vibration = sub.add_parser("vibration", help="read/edit native grip vibration or trigger-bound feedback")
+    vibration.add_argument("target", choices=("grips", "left", "right"), nargs="?")
+    vibration.add_argument("--enabled", choices=("on", "off"))
+    vibration.add_argument("--level", type=int, choices=range(1, 6))
+    vibration.add_argument("--save", action="store_true", help="also explicitly save; edits may already persist")
+    vibration_test = sub.add_parser("vibration-test", help="hold either trigger to test ordinary rumble; Ctrl-C stops")
+    vibration_test.add_argument("--duration", type=float, default=60, help="maximum test time in seconds (default 60)")
+    scene = sub.add_parser("trigger-scene", help="read/select native trigger haptic scenes")
+    scene.add_argument("side", choices=("left", "right", "both"), nargs="?", default="both")
+    scene.add_argument("--scene", choices=("normal", *gpa6_haptics.SCENES),
+                       help="normal resets selected base trigger curves/zones when leaving haptics, like web Pro mode")
+    scene.add_argument("--travel", type=int, choices=range(1, 4))
+    scene.add_argument("--frequency", type=int, choices=range(1, 4), help="looping scenes only")
+    scene.add_argument("--save", action="store_true")
     setting = sub.add_parser("set-setting", help="apply and verify one global setting")
     setting.add_argument("name", choices=tuple(gpa6_config.GLOBAL_FIELDS))
     setting.add_argument("value", help="integer, or on/off for a switch")
@@ -143,6 +157,10 @@ def main():
     play = sub.add_parser("play", help="play 48 kHz s16 PCM WAV; stereo or four-channel DualSense capture")
     play.add_argument("wav")
     args = parser.parse_args()
+    vibration_write = args.command == "vibration" and (args.enabled is not None or args.level is not None or args.save)
+    scene_write = args.command == "trigger-scene" and (args.scene is not None or args.travel is not None or args.frequency is not None or args.save)
+    if vibration_write and args.target is None:
+        parser.error("vibration edits require grips, left or right")
     zone_command = args.command in ("trigger-zones", "stick-zones")
     zone_write = False
     if zone_command:
@@ -196,10 +214,12 @@ def main():
             parser.error("--point and --clear-points cannot be combined")
         if native and facade_write:
             parser.error("edit either exact curve coordinates or preset/deadzone/travel controls in one command")
-    if (args.command in ("tone", "play", "set-setting", "map", "timing", "slot", "save", "layer-add")
-            or light_write or response_write or bind_write or zone_write
+    if (args.command in ("tone", "play", "set-setting", "map", "timing", "slot", "save", "layer-add", "vibration-test")
+            or light_write or response_write or bind_write or zone_write or vibration_write or scene_write
             or ((args.command == "light" or response_command) and args.save)) and not args.experimental:
         parser.error("configuration writes and grip output require --experimental")
+    if args.command == "vibration-test" and (not math.isfinite(args.duration) or not 0 < args.duration <= 3600):
+        parser.error("vibration-test duration must be in (0,3600]")
     if args.command == "timing" and args.long_ms is None and args.double_ms is None:
         parser.error("provide --long-ms and/or --double-ms")
     if args.command == "tone":
@@ -225,6 +245,31 @@ def main():
         ctrl = open_selected(args.device)
         protocol = gpa6.Protocol(ctrl)
         uid = protocol.uid()
+        if args.command == "trigger-scene":
+            if scene_write:
+                config = gpa6_haptics.edit(ctrl, lambda c: c.set_trigger_scene(args.side, args.scene,
+                    travel=args.travel, frequency=args.frequency), save=args.save, expected_uid=uid)
+            else:
+                config = gpa6_haptics.read(ctrl, expected_uid=uid)
+            print(json.dumps({s: config.trigger_scene(s) for s in (gpa6_haptics.SIDES if args.side == "both" else (args.side,))}, indent=2))
+            return 0
+        if args.command == "vibration-test":
+            with gpa6_haptics.VibrationTest(ctrl, expected_uid=uid) as test:
+                print("Hold either trigger past 20% to request rumble. For trigger feedback, pull the trigger being tested. Release both to stop; Ctrl-C ends the test.", flush=True)
+                stop = time.monotonic() + args.duration
+                while time.monotonic() < stop:
+                    test.tick()
+                    time.sleep(.05)
+            return 0
+        if args.command == "vibration":
+            if vibration_write:
+                config = gpa6_haptics.edit(ctrl, lambda c: c.set_vibration(args.target,
+                    enabled=None if args.enabled is None else args.enabled == "on", level=args.level),
+                    save=args.save, expected_uid=uid)
+            else:
+                config = gpa6_haptics.read(ctrl, expected_uid=uid)
+            print(json.dumps(config.vibration(args.target) if args.target else config.describe(), indent=2))
+            return 0
         if args.command == "settings":
             print(json.dumps(gpa6_config.global_config(protocol.read_ram(1), protocol.versions()[0]), indent=2))
             return 0

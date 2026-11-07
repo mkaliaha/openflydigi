@@ -16,6 +16,142 @@ grip haptics. It requires a new transport/configuration dialect and a waveform
 output backend. Merely accepting `k6` or reusing the old SDK's `K6Trigger*`
 packets would be insufficient.
 
+## Native vibration and trigger scenes
+
+The native configuration backend and CLI now expose only the controls present
+in web Space Station's Basic/Pro feedback pages. The currently served entry,
+vibration, trigger and gyro bundles matched the 2026-11-07 local captures.
+Both vibration pages use `VibrationSimpleWorkbench-B-YLTJMI.js`; scene selection
+uses `button-CIH827rx.js` and `TickRange-DyOSfYwy.js`.
+
+| Control | Vendor behavior implemented |
+|---|---|
+| Grip vibration | Shared enable and strength 1–5; both grips receive the selected preset |
+| Trigger-bound grip feedback | Independent left/right enable and strength 1–5; pull the configured trigger to feel its feedback |
+| Trigger scenes | Twelve vendor scenes; select left/right/both |
+| Scene travel | Levels 1–3, selecting start positions 50/80/178 |
+| Scene frequency | Levels 1–3 for the four looping gun scenes only |
+| Normal mode | When leaving a scene, disable the selected motor modes, reset their base-layer input curves to linear and clear their base-layer trigger zones, matching web Pro |
+| Vibration test | While either trigger exceeds 20%, refresh a 150-ms ordinary rumble effect every 50 ms; release/exit stops it |
+
+Grip strength edits use XMUL TLVs 8/9. Rotary presets have end amplitudes
+51/102/153/204/255; `hapticGrip` presets use 128/166/204/230/255. The enable flag
+is bit 0 of the prefix byte. The web exposes these five levels, not freeform
+vibration curves. Unselected flags, reserved bytes and inactive curve slots
+are preserved by our codec. Trigger strength uses TLVs 6/7 and the vendor's
+normalization/scaling, including recovery of its two known zeroed curve shapes.
+Changing strength alone preserves the trigger's current motor mode.
+
+Persistent trigger settings use **command 0x53, area 0**: targets 0/1 for
+left/right; mode 0 off, mode 1 with ten scene bytes, mode 2 with binding bytes
+`00 40 06`. The tested firmware clears the unused bytes in the selected 11-byte
+motor-RAM record. Editors reject selected records whose unknown mode or nonzero
+unused data cannot be restored through the supported commands. Other motor
+records and the rest of RAM 6 remain unchanged. This does not widen A4 writes
+to RAM 6 and does not change area-1 native streaming cleanup.
+
+`gpa6_haptics.HapticConfig` composes the existing `gpa6_profile.MappingConfig`
+with lossless motor data. `vibration`/`set_vibration` and
+`trigger_scene`/`set_trigger_scene` provide reusable backend controls.
+`gpa6_haptics.read` and `edit` bind a fresh state to its UUID and slot. Changes
+across mapping/motors have ordered writes, full read-back and reverse rollback
+only when the exact candidate remains on the same device/profile. Selecting
+a scene zeros conflicting trigger vibration curves first; enabling vibration
+from a scene disables that scene before enabling its binding. Settings may
+persist without explicit save. Unknown scene parameters remain readable;
+unsupported travel/frequency combinations require selecting a known scene.
+
+`VibrationTest` uses `evdev_rumble.RumbleOutput` and an input node resolved under
+the selected HID USB root. It never uses the first arbitrary gamepad, enters
+waveform mode or writes profiles. Its refreshed finite rumble effect is
+stopped/erased on exit; UUID, slot and configuration changes terminate the test when detected
+between holds. Checks are deferred while output is active. Its native
+`ff_effect` ABI matched a compiled Linux-header check (48 bytes, union offset 16
+on this host), and a hardware zero-output upload/start/stop/erase passed.
+
+Independent offline execution of the pinned web helpers plus the vendor XMUL
+encoder produced **160 complete-profile vibration cases** (both 1.8/1.9) and
+**60 scene parameter combinations**. The fixture generator never imports the
+Python implementation. The 28 focused tests also cover preserved bytes,
+capabilities, invalid settings, conflicts, normal-mode resets, cross-domain
+rollback, lost ACKs, changed UUID/slot/configuration, CLI opt-in and test cleanup.
+All 26 backend scripts passed; `test_device.py` required host access for its
+local socket and passed 14/14 there. The existing GUI model suite passed
+772/772 with a writable cache; no GUI wiring was added.
+
+Hardware on Pro SKU 150 / firmware 9.0.6.8 verified **14 vibration cases** and
+**17 scene/transition cases**, including all twelve presets, both sides,
+travel/frequency adjustment, normal mode and scene-to-vibration switching.
+Every case restored the original active profile and all four RAM blocks.
+After the third vibration strength case, a read-only command-1 status query
+timed out during the final snapshot after restoration. A separate fresh
+snapshot confirmed exact restoration; only the remaining cases were resumed,
+with bounded read-only retries. Evidence is under
+`work/apex6-haptics-20261107/`. Storage checks are distinct from the subsequent
+guided physical acceptance below; GUI integration remains pending.
+
+### Guided feedback acceptance
+
+The held-state checks on the same Pro completed with these observations:
+
+| Check | Physical observation |
+|---|---|
+| Grip vibration | Low output worked; maximum output with the final test loop was steady and stopped on release |
+| Left trigger binding | Worked when the left trigger was pulled; also passed after switching from Pistol |
+| Right trigger binding, independent A gate | Feedback started with right-trigger movement and faded after right release while A kept requesting rumble |
+| Pistol travel 1 versus 3 | Brief early kick versus a clearly later kick; other motors quiet |
+| Rifle frequency 1 versus 3 | Repeated while held, level 3 clearly faster, stopped on release; other motors quiet |
+| Sword on both triggers | Both worked separately and together |
+| Sword to Normal | Both triggers quiet; no scene feedback remained |
+| Pistol to vibration binding | Vibration worked without the Pistol kick, stopped on A release; other motors quiet |
+
+The maximum grip setting read back as level 5 with endpoint 255 on both sides
+and full ordinary-rumble magnitude. The user found it milder than expected.
+No calibrated force comparison with rotary motors, clear perceptual low/high
+delta, exact trigger thresholds or physical check of every scene is claimed.
+All twelve scene presets have the separate storage coverage described above.
+
+Two test-path problems were fixed during acceptance. First, periodic HID status
+reads disturbed active rumble. A long effect without those reads was steady;
+the same effect with polling reintroduced rearming. Status queries now run only
+between holds, serialized with output start. A separate 50-ms input/output
+worker refreshes the vendor's 150-ms effect without blocking release on HID
+reads. The final maximum-grip run was steady over 191 refreshes, maximum gap
+50.23 ms, with zero HID queries during output. Profile/configuration changes
+are detected between holds; the effect is stopped and erased on exit.
+
+Second, traces caught nine evdev `SYN_DROPPED` events. The reader now discards
+invalid queued events and refreshes axes/buttons from kernel state, following
+the [Linux input protocol](https://docs.kernel.org/input/event-codes.html).
+EOF reports device loss instead of retaining held values. Five new recovery
+tests pass; the affected macro, relay and Apex6 DualSense suites passed 18, 69
+and 28 checks respectively. The 28 haptics tests cover idle-only status checks,
+right-only refresh, either/both-trigger transitions, release and worker errors.
+A later trace captured successful resyncs and matched every start with a stop.
+The initial reported release issue is retained in the raw evidence; event loss
+was confirmed, but was not conclusively established as that symptom's cause.
+
+The initially requested cross-trigger behavior was too strong an assumption:
+ordinary rumble from a right press did not activate untouched left feedback.
+The user confirmed left feedback worked when left itself was pressed. Restoring
+continuous refresh did not change that behavior. At the user's request, A then
+controlled rumble independently of trigger movement. With right-only binding,
+feedback started on the right pull and faded after its release while A stayed
+held. The trace recorded 98 full-strength requests, maximum gap 50.27 ms, both
+pulled/released right positions under the A hold, and no active-output HID reads.
+This supports native movement-dependent feedback; it does not establish exact
+pressure/position sensing, decay timing or a power-saving motivation. No firmware
+workaround or extra saved configuration control was introduced. A is only the
+diagnostic harness gate; the production test retains the web's trigger gate.
+
+The final nine-phase session and all earlier diagnostics exited cleanly. All
+22 phases across 11 physical sessions restored the same original profile and
+all four RAM blocks byte for byte; no output or temporary setting remains active.
+Evidence is in `work/apex6-haptics-20261107/physical-results.json`, with full
+traces and per-phase snapshots under `physical-button-gate/` and the earlier
+`physical*` directories. Keep failed/ambiguous observations as recorded instead
+of treating every diagnostic phase as a pass.
+
 ## Evidence and versions
 
 | Component inspected | Version | What it establishes |
@@ -1069,7 +1205,8 @@ write/read-back/restoration, accepted for settings support without further
 physical checks. Third-party permission was subsequently tested as described
 below. Stick/trigger response editing was subsequently added with independent
 codec, fake-pad and guided physical-input coverage as described above. Snapshot import, macro editing,
-motor configuration editing and GUI configuration remain outside this implementation.
+GUI configuration remains outside this implementation. Native motor configuration
+editing was added later; see [native feedback](#native-vibration-and-trigger-scenes).
 
 ### Third-party takeover permission
 

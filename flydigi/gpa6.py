@@ -410,6 +410,20 @@ class Protocol:
         if status != 0:
             raise ProtocolError(f"motor configuration refused: status {status}")
 
+    def configure_trigger(self, target, mode, params=b""):
+        """Persistent area-0 trigger settings, distinct from runtime replay.
+
+        Read-back and identity/slot checks belong to gpa6_haptics.edit.
+        RAM 6 is not an A4 write domain. Never use this for stream cleanup.
+        """
+        if (type(target) is not int or target not in (0, 1, 2)
+                or type(mode) is not int or mode not in (0, 1, 2)
+                or len(params) != (0, 10, 3)[mode]):
+            raise ValueError("invalid persistent trigger configuration")
+        status = self.ask(0x53, 1, bytes((0, target, mode)) + bytes(params))[0]
+        if status:
+            raise ProtocolError(f"persistent trigger configuration refused: status {status}")
+
 
 def motor_restore(mapping):
     """Native RAM 6 layout-2 decoder (RVA 22cd00), in replay order."""

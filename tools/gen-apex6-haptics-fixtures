@@ -1,0 +1,59 @@
+#!/usr/bin/env node
+// SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+// SPDX-License-Identifier: MIT
+
+// Execute pinned vendor helpers and codecs offline on synthetic profiles.
+// Requires ignored research assets; no vendor implementation is distributed.
+const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
+const crypto = require('node:crypto');
+const root = path.resolve(__dirname, '..');
+const source = fs.readFileSync(path.join(__dirname, 'gen-apex6-config-fixtures'), 'utf8');
+const reference = vm.runInNewContext(source.slice(0, source.indexOf('const lighting = []'))
+  + ';({codecs,blob})', {require, __dirname, Uint8Array, DataView, TextEncoder, TextDecoder, Buffer, console});
+const files = [
+  'work/apex6-hardware-20261107/VibrationSimpleWorkbench-B-YLTJMI.js',
+  'work/apex6-haptics-20261107/TickRange-DyOSfYwy.js',
+];
+const sources = files.map(file => ({file, sha256: crypto.createHash('sha256')
+  .update(fs.readFileSync(path.join(root,file))).digest('hex')}));
+const hashes=['3665b8b749d76d44b8a45996465a8f22a508edbc0784d219815b42fa1b25cd00',
+              '6e10ce1b6c59a5fed03e339481b5a1d6453914662be94258d9ae77c7c5b9d3e6'];
+sources.forEach((source,i)=>{if(source.sha256!==hashes[i])throw new Error('Pinned source mismatch: '+source.file)});
+const vibration = fs.readFileSync(path.join(root,files[0]),'utf8');
+const scenes = fs.readFileSync(path.join(root,files[1]),'utf8');
+const helpers = vm.runInNewContext(vibration.slice(vibration.indexOf('const k=1'), vibration.indexOf('const V='))
+  + ';({set:st, normalize:$t, summary:Xt})');
+const scene = vm.runInNewContext(scenes.slice(scenes.indexOf('const A=['), scenes.indexOf('function Z('))
+  + ';({presets:A, encode:q, decode:k})', {Uint8Array});
+function input(version) {
+  return {version,name:'Preserve name',runtime_policies:{long_ms:513,double_ms:257},layer_count:2,
+    layers:[{layer_id:0,activator_mappings:[],macro_definitions:[]},
+            {layer_id:1,activator_mappings:[],macro_definitions:[]}]};
+}
+const curve = (end,points=[]) => ({start_x:0,start_y:0,end_x:255,end_y:end,mid_points:points});
+const cases=[];
+for(const version of ['1.8','1.9']) {
+  for(const haptic of [false,true]) for(const enabled of [false,true]) for(let level=1;level<=5;level++) {
+    const before=input(version);
+    // Canonical unused slots permit whole-blob comparisons. Preservation of
+    // nonzero inactive/reserved bytes is a separate production regression.
+    for(const side of ['left','right']) before['vibration_motor_'+side]={enabled:false,curve:curve(201)};
+    const after=JSON.parse(JSON.stringify(before));
+    const wanted=helpers.set('grip',enabled,level,{},haptic);
+    for(const side of ['left','right']) after['vibration_motor_'+side]=wanted[side];
+    cases.push({target:'grips',version,haptic,enabled,level,before:reference.blob(reference.codecs.fullMapping(before)),after:reference.blob(reference.codecs.fullMapping(after))});
+  }
+  for(const side of ['left','right']) for(const initial of [curve(255),curve(153,[{x:80,y:20},{x:170,y:120}]),curve(0,[{x:64,y:0},{x:192,y:0}]),curve(0,[{x:60,y:0},{x:200,y:0}]),curve(0,[{x:50,y:0}]),curve(0,[{x:80,y:100}])]) for(let level=1;level<=5;level++) {
+    const before=input(version), key='vibration_trigger_'+side;
+    before[key]={curve:initial};
+    const after=JSON.parse(JSON.stringify(before));
+    after[key]=helpers.set('trigger',true,level,helpers.normalize(initial))[side];
+    cases.push({target:side,version,level,before:reference.blob(reference.codecs.fullMapping(before)),after:reference.blob(reference.codecs.fullMapping(after))});
+  }
+}
+const sceneCases=[];
+for(const preset of scene.presets) for(let travelLevel=1;travelLevel<=3;travelLevel++) for(const frequencyLevel of preset.loop?[1,2,3]:[null]) {
+  const params=scene.encode(preset,{travelLevel,...frequencyLevel?{frequencyLevel}:{}});
+  sceneCases.push({id:preset.id,travel:travelLevel,frequency:frequencyLevel,params_hex:Buffer.from(params).toString('hex')});
+}
+process.stdout.write(JSON.stringify({sources,cases,scenes:sceneCases},null,2)+'\n');

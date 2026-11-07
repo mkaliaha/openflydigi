@@ -5,7 +5,8 @@
 """Stateful GPA6 emulator. These are explicit firmware assumptions, not a pad.
 
 The wire decoder is independent of the production encoder. Area 1 is assumed
-volatile, RAM 6 persistent, and profile selection resets live motor modes.
+volatile; area-0 trigger writes update RAM 6 and clear unused record bytes,
+as measured on Pro 9.0.6.8. Profile selection resets live motor modes.
 Frames require setup, and the trigger column is intentionally unsupported.
 No claim is made about actuator response, receiver timing or selector routing.
 In particular, the emulator accepts grip mode-1 restoration, which the tested
@@ -285,20 +286,23 @@ class FakeApex6:
                 else:
                     raise ValueError("unsupported RAM read operation")
             elif command == 0x53:
-                valid = (len(payload) >= 3 and payload[0] == 1
+                valid = (len(payload) >= 3 and payload[0] in (0, 1)
                          and payload[1] in (0, 1, 2, 16, 17, 18))
                 if valid:
                     target, mode, params = payload[1], payload[2], payload[3:]
                     if target <= 2:
                         valid = mode < 3 and len(params) == (0, 10, 3)[mode]
                     else:
-                        valid = ((mode == 0 and not params)
+                        valid = payload[0] == 1 and ((mode == 0 and not params)
                                  or (mode == 1 and len(params) == 1)
                                  or (mode == 2 and params == b"\x40\x00" and self.features & 128))
                 if valid:
                     runtime = self.trigger_runtime if target <= 2 else self.runtime
                     for side in ({2: (0, 1), 18: (16, 17)}.get(target, (target,))):
                         runtime[side] = mode, params
+                        if payload[0] == 0:
+                            offset = 1 + side * 11
+                            self.maps[self.slot][offset:offset + 11] = bytes([mode]) + params.ljust(10, b"\0")
                 reply = self._reply(command, bytes([0 if valid else 1]))
             elif command == 0x57:
                 if len(payload) != 25 or payload[0] & 0xe4 != 0x80:

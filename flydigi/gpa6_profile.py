@@ -481,6 +481,49 @@ class MappingConfig:
             replacement += b"\xff\0"
         self.blob[:] = wrap_blob(data[:start] + replacement + data[stop:])
 
+    def _vibration_record(self, control, side):
+        if control not in ("grip", "trigger") or side not in mapping.SIDES:
+            raise ValueError("vibration control must be grip/trigger and side left/right")
+        kind = (8 if control == "grip" else 6) + mapping.SIDES.index(side)
+        data, _, records = _layout(self.blob)
+        matches = [(start, stop) for key, start, stop in records if key == kind]
+        if len(matches) > 1:
+            raise gpa6.ProtocolError("ambiguous duplicate vibration extension")
+        raw = (data[matches[0][0] + 2:matches[0][1]] if matches else
+               bytes([1 if control == "grip" else 0, 0, 0, 255, 255, 0, 0, 0, 0, 0, 0, 0]))
+        if len(raw) != 12:
+            raise gpa6.ProtocolError("unsupported vibration extension length")
+        _decode_curve(raw[1:])
+        return kind, raw, matches
+
+    def vibration_curve(self, control, side):
+        """Native vibration data; trigger enable lives separately in motor RAM.
+
+        This is a codec view, not an additional freeform configuration control.
+        The public haptics editor offers only the vendor's five strength levels.
+        """
+        _, raw, matches = self._vibration_record(control, side)
+        return {"curve": _decode_curve(raw[1:]), "present": bool(matches),
+                **({"enabled": bool(raw[0] & 1)} if control == "grip" else {})}
+
+    def _set_vibration_curve(self, control, side, *, enabled=None, **curve):
+        kind, raw, matches = self._vibration_record(control, side)
+        result = bytearray(raw[:1]) + _patch_curve(raw[1:], **curve)
+        if enabled is not None:
+            if control != "grip" or type(enabled) is not bool:
+                raise ValueError("only grip curves carry a boolean enable flag")
+            result[0] = (result[0] & ~1) | int(enabled)
+        if result == raw:
+            return
+        data, _, records = _layout(self.blob)
+        if matches:
+            start, stop = matches[0]
+        else:
+            start = stop = next((start for key, start, _ in records
+                                if key > kind and key in (*range(1, 10), 32, 255)), len(data))
+        replacement = bytes([kind, 12]) + result + (b"" if records else b"\xff\0")
+        self.blob[:] = wrap_blob(data[:start] + replacement + data[stop:])
+
     def response_curve(self, control, side):
         raw, _ = self._response(control, side)
         return _decode_curve(raw)

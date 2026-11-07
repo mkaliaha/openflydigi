@@ -12,9 +12,11 @@ evdev is event-driven: we block until the pad reports, so there is no polling
 loop to add latency or jitter.
 """
 import ctypes
+import errno
 import fcntl
 import glob
 import os
+import select
 import struct
 
 # struct input_event { struct timeval time; __u16 type, code; __s32 value; }
@@ -24,6 +26,8 @@ EVENT_SIZE = struct.calcsize(_EVENT_FMT)
 EV_SYN = 0x00
 EV_KEY = 0x01
 EV_ABS = 0x03
+SYN_REPORT, SYN_DROPPED = 0, 3
+KEY_CNT = 0x300
 
 ABS_X, ABS_Y, ABS_Z = 0x00, 0x01, 0x02
 ABS_RX, ABS_RY, ABS_RZ = 0x03, 0x04, 0x05
@@ -168,6 +172,7 @@ class Reader:
         self.abs = {}
         self.axes = {}
         self.keys = {}
+        self._dropped = False
         for code in (ABS_X, ABS_Y, ABS_Z, ABS_RX, ABS_RY, ABS_RZ,
                      ABS_HAT0X, ABS_HAT0Y):
             try:
@@ -200,16 +205,48 @@ class Reader:
             data = os.read(self.fd, EVENT_SIZE * 64)
         except BlockingIOError:
             return False
+        if not data:
+            raise OSError(errno.ENODEV, "input device closed")
         for offset in range(0, len(data) - EVENT_SIZE + 1, EVENT_SIZE):
             _s, _us, etype, code, value = struct.unpack_from(
                 _EVENT_FMT, data, offset)
-            if etype == EV_ABS:
+            if etype == EV_SYN and code == SYN_DROPPED:
+                self._dropped = True
+            elif self._dropped:
+                if etype == EV_SYN and code == SYN_REPORT:
+                    # Events after an overrun cannot reconstruct current state.
+                    # Discard the rest of this batch and pending older events
+                    # before obtaining a fresh kernel snapshot.
+                    self._resync()
+                    self._dropped = False
+                    return True
+            elif etype == EV_ABS:
                 self.axes[code] = value
             elif etype == EV_KEY:
                 self.keys[code] = value
-            elif etype == EV_SYN:
+            elif etype == EV_SYN and code == SYN_REPORT:
                 synced = True
         return synced
+
+    def _resync(self):
+        while select.select([self], [], [], 0)[0]:
+            try:
+                data = os.read(self.fd, EVENT_SIZE * 64)
+            except BlockingIOError:
+                break
+            if not data:
+                raise OSError(errno.ENODEV, "input device closed")
+        for code in self.abs:
+            buf = bytearray(24)
+            fcntl.ioctl(self.fd, _eviocgabs(code), buf, True)
+            self.abs[code] = AbsInfo(bytes(buf))
+            self.axes[code] = self.abs[code].value
+        size = KEY_CNT // 8
+        keys = bytearray(size)
+        request = (_IOC_READ << 30) | (size << 16) | (ord('E') << 8) | 0x18
+        fcntl.ioctl(self.fd, request, keys, True)
+        down = {code for code in range(KEY_CNT) if keys[code // 8] & (1 << (code % 8))}
+        self.keys = {code: int(code in down) for code in self.keys.keys() | down}
 
     def axis(self, code, lo=0.0, hi=1.0, default=0.0):
         info = self.abs.get(code)

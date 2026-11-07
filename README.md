@@ -16,7 +16,7 @@ application adds PySide6, Qt, Kirigami, and Kirigami Addons.
 |---|---|---|---|
 | Flydigi Apex 5 | Hardware-validated | All controller features, adaptive triggers, display, game routes, and both virtual-DualSense relays | Display uploads require a wired connection. Steam Input must be disabled for virtual-DualSense games. |
 | Flydigi Vader 5 Pro | Experimental, partially implemented | Identity, profiles, buttons, sticks, gyro, vibration, lighting, settings, the v3.2 macro-store implementation, and a derived factory profile | No Vader 5 has been tested. It has trigger motors rather than force triggers and has no display. The trigger-motor editor is not built. The v3.2 macro store is unverified on hardware. The DualSense relay, evdev discovery, permissions, and SDL ignore identifier are not validated end to end. |
-| Flydigi Apex 6 / Apex 6 Pro | Experimental; Pro partly verified over receiver and direct USB | SKU/UUID/capabilities, active-RAM snapshots, CLI global settings, button remapping, press timings, lighting, profile selection/saving, stick and trigger response curves; experimental grip waveforms and USB DualSense relay | Tested on Pro firmware 9.0.6.8; selected stick/trigger response effects are physically verified through evdev. GUI editing, snapshot restoration, adaptive-trigger translation and motion remain unavailable. Grip cleanup follows native best-effort mode replay; exact live-mode restoration is unverified, although ordinary rumble worked afterward. Some setting effects and the complete DualSense relay remain unverified. |
+| Flydigi Apex 6 / Apex 6 Pro | Experimental; Pro partly verified over receiver and direct USB | SKU/UUID/capabilities, active-RAM snapshots, CLI global settings, button remapping, press timings, lighting, profile selection/saving, stick and trigger response curves, native vibration and trigger scenes; experimental grip waveforms and USB DualSense relay | Tested on Pro firmware 9.0.6.8; selected stick/trigger response effects are physically verified through evdev. GUI editing, snapshot restoration, adaptive-trigger translation and motion remain unavailable. Grip cleanup follows native best-effort mode replay; exact live-mode restoration is unverified, although ordinary rumble worked afterward. Some setting effects and the complete DualSense relay remain unverified. |
 | Flydigi CD2 charging dock | Hardware-validated with one noted gap | Identity, four settings, eight generated lighting effects, and picture/GIF sampling onto 162 LEDs; nickname read/write is implemented | Nickname writing is not hardware-verified. The dock is a separate USB device and uses its own selector. |
 | Other Flydigi controllers and accessories | Not driven | Devices may be discovered and identified when they use the current transport | Normal configuration commands, including nickname writes, refuse unsupported models. Developer bench tools explicitly documented as ungated can send raw commands. |
 
@@ -491,6 +491,49 @@ read-back. Transfers stage chunks before committing. Failed edits roll back only
 when the same controller/profile still contains the exact bytes we wrote.
 An uncertain save acknowledgment is reported as an error. Omitting `--save`
 does not provide a temporary preview; restore the original values explicitly.
+
+Native feedback settings match the web Space Station controls:
+
+```bash
+tools/flydigi-apex6 --device uid:YOUR_UUID vibration
+tools/flydigi-apex6 --experimental --device uid:YOUR_UUID vibration grips --enabled on --level 2
+tools/flydigi-apex6 --experimental --device uid:YOUR_UUID vibration left --enabled on --level 3
+tools/flydigi-apex6 --experimental --device uid:YOUR_UUID vibration right --enabled off
+tools/flydigi-apex6 --device uid:YOUR_UUID trigger-scene
+tools/flydigi-apex6 --experimental --device uid:YOUR_UUID trigger-scene both --scene rifle --travel 2 --frequency 3
+tools/flydigi-apex6 --experimental --device uid:YOUR_UUID trigger-scene left --travel 1
+tools/flydigi-apex6 --experimental --device uid:YOUR_UUID vibration-test --duration 60
+```
+
+Grip enable/strength controls both sides together; each trigger has its own
+enable and strength for the web's trigger-bound grip feedback. Strength uses
+levels 1–5, with capability-specific grip
+presets. A trigger strength edit alone preserves its current mode. Enabling
+trigger vibration replaces a haptic scene; selecting a scene disables the
+selected trigger's conflicting vibration curve. Setting both `--enabled on`
+and `--level` restores vibration strength after leaving a scene.
+
+The twelve scenes are `machine-gun`, `rifle`, `submachine-gun`,
+`light-machine-gun`, `pistol`, `shotgun`, `sniper-rifle`, `sword`, `blade`,
+`dagger`, `axe` and `club`. Travel uses levels 1–3. Only the first four looping
+scenes expose frequency levels 1–3. Omitting `--scene` adjusts the selected
+existing scene(s). **Selecting `--scene normal` from haptics also resets the
+selected base-layer trigger response curve to linear and clears its action
+zones**, matching the web Pro page; other layers are preserved.
+
+The test uses ordinary Linux game rumble on the selected controller's input
+node. Hold either trigger beyond 20% to request rumble; to feel trigger feedback,
+pull the trigger being tested. On the tested Pro, feedback followed that trigger's
+own movement even with a constant rumble request. Release both to stop the output,
+and press Ctrl-C to end the test early. It stops/erases its effect on exit and
+does not change configuration or enter waveform streaming mode. Read-only
+settings need no opt-in; writes and tests require `--experimental`.
+
+The backend/CLI has independent encoder comparisons, fake-pad failure coverage
+and Pro 9.0.6.8 hardware write/read-back/restoration checks. Guided physical checks
+also covered grip output, trigger binding, selected scene travel/frequency and
+mode transitions, with original settings restored. GUI wiring remains pending. See the
+[native feedback findings](docs/findings-apex6.md#native-vibration-and-trigger-scenes).
 
 `snapshot` reads global settings and the active slot's mapping, lighting and
 motor RAM into a new JSON file. It works with rotary and linear grips and needs
