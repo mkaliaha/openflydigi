@@ -550,7 +550,7 @@ profile. Each hardware profile can hold different values. They are not per-butto
 fields or controller-wide global settings. The captured defaults were 300/400 ms.
 The vendor's mapping UI describes long press as activation after holding for the
 configured duration, and double press as two presses within the time limit.
-Our Apex 6 CLI edits these fields; our GUI does not expose them or timed activators.
+Our Apex 6 CLI edits these fields and timed activators; our GUI does not expose them.
 No equivalent fields have been identified in the decoded Apex 5 profile format;
 macro delays and repeat intervals are separate settings.
 
@@ -572,7 +572,7 @@ Each **mapping entry** starts with `source:u8, activatorCount:u8, reserved:u16`,
 followed by `activatorCount` five-byte records: `activatorType:u8, target[4]`.
 The vendor limit is five activators per source. Activator types are simple (0),
 timing-single (1), timing-long (2), timing-double (3), pulse-press (4),
-pulse-release (5) and toggle (6). The current CLI writes only simple activators.
+pulse-release (5) and toggle (6). The CLI's `bind` command writes all seven types.
 
 The supported source and gamepad-target IDs are:
 
@@ -590,9 +590,9 @@ The supported source and gamepad-target IDs are:
 | 9 | Right stick click | 20 | M5 |
 | 10 | D-pad up | 21 | M6 |
 
-A gamepad target is `[0, buttonId, 0, 0]`. Other four-byte targets are kept
-verbatim by this editor; it does not convert them to simple targets unless
-that source is explicitly remapped. For example, a complete M1-to-B entry is:
+A gamepad target is `[0, buttonId, 0, 0]`. Other four-byte targets use the shared
+action codec described below; unselected entries remain verbatim. For example,
+a complete M1-to-B entry is:
 
 ```text
 10 01 00 00  00 00 01 00 00
@@ -620,6 +620,93 @@ target[4]`. Count is at most eight. Angle modes are 4-way (0), 8-way (1) and
 overlapping 4-way (2). Directions are up/down/left/right (0–3), then
 up-left/up-right/down-left/down-right (4–7). Do not skip only `count * 7` bytes:
 the reserved records still occupy space.
+
+### Richer button mappings
+
+`gpa6_profile.MappingConfig` exposes `activators(source, layer=0)` and
+`set_activators(source, actions, layer=0)`. Each action has `type` from the seven
+native activators above and a `target`. A target may be a gamepad-name shorthand
+or a dictionary using the fields below. Up to five actions, including repeated
+types, are allowed. `None` removes an override; `[]` stores an explicit zero-action
+entry. `none` is gamepad target ID 255, distinct from removing an entry.
+
+`layer_ids()` lists existing IDs; `ensure_layer(id)` appends an empty layer if
+absent. Existing layers and extension order remain intact. New layer references
+must resolve in this profile; macro references must resolve uniquely in the
+selected layer. Macro definitions are still preserved rather than edited.
+
+The shared `gpa6_actions` codec uses these four-byte targets:
+
+| Type | Wire kind | Fields after `type` |
+|---|---:|---|
+| `btn_gamepad` | 0 | `id`: button name/0–21, or `none`/255 |
+| `btn_keyboard` | 1 | `key_id`: 0–255; optional `modifier`: 0–255 bitmask |
+| `btn_mouse` | 2 | `mouse_id`: 0–4 |
+| `btn_consumer` | 3 | `consumer_id`: 0–255, native consumer enum |
+| `turbo_gamepad` | 10 | `button_id`; `turbo_interval_10ms`: 1–65535, little endian |
+| `layer_hold`, `layer_toggle` | 20, 21 | `layer_id`: 0–3, existing layer |
+| `macro` | 30 | `macro_id`: 0–255, existing macro in this layer |
+| `simulate_mouse_move` | 40 | `delta_x`, `delta_y`: signed −128–127 |
+| `simulate_mouse_wheel` | 41 | `delta_wheel`: signed −128–127 |
+| `simulate_joystick_left`, `simulate_joystick_right` | 42, 43 | `axis_x`, `axis_y`: signed −128–127 |
+| `simulate_linear_left`, `simulate_linear_right` | 44, 45 | `linear_value`: 0–255 |
+| `simulate_moto` | 46 | `motor_value_left`, `motor_value_right`: 0–255 |
+
+Unused target bytes are retained when editing the same target kind. Entry
+reserved bytes, unknown unselected activators/targets, other layers, macros,
+zones, curves and names are preserved byte for byte. Reads expose unknown target
+bytes; typed writes refuse unknown types/fields and out-of-range values. Setters
+validate the complete edit before mutating the profile object. This API extends
+the existing Apex 6 profile object; it is not a legacy key-table/Qt adapter.
+Writes still go through `gpa6_config.edit_ram`, with its UUID/slot checks and
+conditional rollback. The legacy `map` command remains a simple replacement.
+
+`tests/fixtures/apex6-activators.json` contains 56 independent complete before/after
+XMUL bodies from the pinned current vendor encoder, covering both versions,
+all seven activators, the target kinds, repeated activators, insertion, removal,
+empty entries and layer creation. The fixture records the encoder SHA-256 and
+minimal harness adaptation. Production tests use only those output facts; no
+vendor implementation is checked in. Seventeen focused tests also cover
+preservation, invalid references, atomic failure, CLI opt-in and fake-pad
+write/save/rollback/restoration. All 24 backend scripts passed; the local-socket
+device test needed host access after its sandbox run was denied.
+The unchanged GUI model suite also passed 772/772, including the existing Apex 6
+response-facade checks. No GUI wiring was added.
+
+On the user's SKU 150 / firmware 9.0.6.8, seven bounded cases passed exact
+write/read-back and restoration: timed actions, pulses, toggle, simultaneous
+simple actions, layer hold, layer toggle, and a keyboard/mouse/turbo/no-button
+combination. Every case restored the active slot and all four RAM blocks to the
+fresh baseline. This establishes storage acceptance, not all target effects.
+The first attempt timed out on a read-only A1 query before writing; original
+bytes were verified unchanged. A bounded retry of that harness query allowed
+the complete run. Evidence: `work/apex6-activators-20261107/readback-2/`.
+
+Six guided physical phases then passed on the same controller, with M1 (the
+upper-right rear paddle) as the activator source and A as the Shift-layer probe:
+
+| Phase | Observed evdev output |
+|---|---|
+| Timed actions | Single tap → A, long hold → B, double tap → X, with 700/350 ms configured thresholds |
+| Press/release pulses | Three X/Y pairs on press/release; measured pulse lengths 20–21 ms |
+| Toggle | B remained held between taps; the next tap released it, twice |
+| Multiple simple actions | Three holds produced B and X press/release events at identical timestamps |
+| Hold Shift | A, A before; X, X while holding M1; A, A after release |
+| Toggle Shift | A, A before; X, X after the first M1 tap; A, A after the second |
+
+The tested Shift binding exists only in layer 0; layer 1 contains the A-to-X
+override. No duplicate M1 binding was needed to release/toggle back in these
+tests. The round verifies these concrete configurations, not timing boundary
+accuracy, interactions between all activator combinations or all three Shift
+layers. Keyboard/mouse, consumer, turbo, macro, analog and motor target effects
+were not physically tested in this round. Every phase restored all four RAM
+blocks and the active slot byte for byte. Final cleanup passed and the process
+exited 0, releasing the HID claim and evdev reader. Evidence and event sequences:
+`work/apex6-activators-20261107/physical/results.json` and per-phase logs.
+
+Trigger zones (up to four travel ranges) and stick zones (up to eight
+direction/radius ranges) use the same target records. Their editing and the
+vendor's stick WASD/mouse modes remain separate work from button activators.
 
 ### XMUL extension tail
 

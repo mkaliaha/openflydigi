@@ -68,8 +68,18 @@ original slot and all four configuration RAM blocks.
 Existing settings/remapping/lighting acceptance results are recorded separately
 in the findings; A4 edits can persist even without explicit save.
 
-Remaining configuration work includes macros, richer activators and Shift layers,
-stick/trigger action zones, gyro mapping, native grip/trigger haptic settings,
+Richer button activators and Shift-layer creation now have a lossless backend and
+CLI: all seven activator types, up to five actions per source, typed action
+targets and validated existing layer/macro references. Independent native
+encoder fixtures cover both XMUL versions; fake-pad tests cover guarded writes,
+rollback and restoration. Physical acceptance is recorded separately in the findings.
+Seven hardware storage/restoration cases and six guided physical phases passed:
+single/long/double press, press/release pulses, toggle, simultaneous actions,
+hold Shift and toggle Shift. Every phase restored all original configuration
+bytes and the active profile. Other typed target effects remain unverified.
+
+Remaining configuration work includes macro editing, stick/trigger action zones,
+gyro mapping, native grip/trigger haptic settings,
 restorable profile backups/library, screen support and GUI wiring. Apex 6 remains
 outside the legacy configuration allowlist, so Apex 5 wire paths stay separate.
 

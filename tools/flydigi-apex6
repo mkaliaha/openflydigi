@@ -19,6 +19,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from flydigi import device, gpa6, gpa6_config, gpa6_profile, identity, registry, waveform
 
 
+def action_target(text):
+    """Gamepad shorthand, layer shortcuts, or a native target JSON object."""
+    if text.startswith("{"):
+        target = json.loads(text)
+    elif text.startswith(("layer-hold:", "layer-toggle:")):
+        kind, value = text.split(":", 1)
+        target = {"type": kind.replace("-", "_"), "layer_id": int(value)}
+    else:
+        target = text
+    gpa6_profile.encode_target(target)
+    return target
+
+
 def open_selected(selector):
     expected_uid = None
     if not selector:
@@ -67,6 +80,18 @@ def main():
     remap.add_argument("target", choices=(*gpa6_profile.BUTTONS, "default"))
     remap.add_argument("--layer", type=int, choices=range(4), default=0)
     remap.add_argument("--save", action="store_true", help="also send explicit profile save; applied edits may already persist")
+    bind = sub.add_parser("bind", help="read or replace one button's full activator list")
+    bind.add_argument("source", choices=tuple(gpa6_profile.BUTTONS))
+    bind.add_argument("--layer", type=int, choices=range(4), default=0)
+    actions = bind.add_mutually_exclusive_group()
+    actions.add_argument("--action", nargs=2, action="append", metavar=("TYPE", "TARGET"),
+                         help="repeat up to five times; TYPE: " + ", ".join(gpa6_profile.ACTIVATORS)
+                         + "; TARGET: button/none, layer-hold:N, layer-toggle:N, or native target JSON")
+    actions.add_argument("--clear", action="store_true", help="remove the override, restoring inherited/default behavior")
+    bind.add_argument("--save", action="store_true")
+    layer_add = sub.add_parser("layer-add", help="create an empty Shift layer if absent")
+    layer_add.add_argument("number", type=int, choices=range(1, 4))
+    layer_add.add_argument("--save", action="store_true")
     timing = sub.add_parser("timing", help="set profile long/double-press timing in milliseconds")
     timing.add_argument("--long-ms", type=int)
     timing.add_argument("--double-ms", type=int)
@@ -105,6 +130,18 @@ def main():
     play = sub.add_parser("play", help="play 48 kHz s16 PCM WAV; stereo or four-channel DualSense capture")
     play.add_argument("wav")
     args = parser.parse_args()
+    bind_write = args.command == "bind" and (args.action is not None or args.clear or args.save)
+    if args.command == "bind":
+        try:
+            if args.action and len(args.action) > 5:
+                raise ValueError("a button supports at most five activators")
+            bindings = []
+            for kind, target in args.action or ():
+                if kind not in gpa6_profile.ACTIVATORS:
+                    raise ValueError("unknown activator type: " + kind)
+                bindings.append({"type": kind, "target": action_target(target)})
+        except ValueError as exc:
+            parser.error(str(exc))
     light_write = args.command == "light" and any(
         getattr(args, key) is not None for key in ("mode", "color", "brightness", "speed", "vibration"))
     response_command = args.command in ("stick", "trigger")
@@ -119,8 +156,8 @@ def main():
             parser.error("--point and --clear-points cannot be combined")
         if native and facade_write:
             parser.error("edit either exact curve coordinates or preset/deadzone/travel controls in one command")
-    if (args.command in ("tone", "play", "set-setting", "map", "timing", "slot", "save")
-            or light_write or response_write
+    if (args.command in ("tone", "play", "set-setting", "map", "timing", "slot", "save", "layer-add")
+            or light_write or response_write or bind_write
             or ((args.command == "light" or response_command) and args.save)) and not args.experimental:
         parser.error("configuration writes and grip output require --experimental")
     if args.command == "timing" and args.long_ms is None and args.double_ms is None:
@@ -169,6 +206,25 @@ def main():
             slot = protocol.slot()
             protocol.save_slot(slot)
             print(f"Saved profile {slot + 1}")
+            return 0
+        if args.command in ("bind", "layer-add"):
+            def edit_bindings(data):
+                config = gpa6_profile.MappingConfig(data)
+                if args.command == "layer-add":
+                    config.ensure_layer(args.number)
+                elif args.action is not None or args.clear:
+                    config.set_activators(args.source, None if args.clear else bindings, layer=args.layer)
+                return config.blob
+            writing = bind_write or args.command == "layer-add"
+            data = (gpa6_config.edit_ram(ctrl, 5, edit_bindings, save=args.save, expected_uid=uid)
+                    if writing else protocol.read_ram(5))
+            config = gpa6_profile.MappingConfig(data)
+            result = ({"source": args.source, "layer": args.layer,
+                       "activators": config.activators(args.source, layer=args.layer)}
+                      if args.command == "bind" else {"layers": config.layer_ids()})
+            if writing:
+                print("Profile save acknowledged." if args.save else "Applied and verified; this firmware can retain edits without explicit save.", file=sys.stderr)
+            print(json.dumps(result, indent=2))
             return 0
         if response_command:
             def edit_response(data):

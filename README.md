@@ -401,6 +401,11 @@ tools/flydigi-apex6 --device uid:YOUR_UUID profile
 tools/flydigi-apex6 --device uid:YOUR_UUID --experimental set-setting sleep_time 15
 tools/flydigi-apex6 --device uid:YOUR_UUID --experimental map m1 b
 tools/flydigi-apex6 --device uid:YOUR_UUID --experimental timing --long-ms 600
+tools/flydigi-apex6 --device uid:YOUR_UUID bind m1
+tools/flydigi-apex6 --device uid:YOUR_UUID --experimental bind m1 --action timing_single a --action timing_long b --action timing_double x
+tools/flydigi-apex6 --device uid:YOUR_UUID --experimental layer-add 1
+tools/flydigi-apex6 --device uid:YOUR_UUID --experimental bind m1 --action simple layer-hold:1
+tools/flydigi-apex6 --device uid:YOUR_UUID --experimental bind a --layer 1 --action simple x
 tools/flydigi-apex6 --device uid:YOUR_UUID stick left
 tools/flydigi-apex6 --device uid:YOUR_UUID --experimental stick left --center 10 --edge 5 --circular on --invert-y off
 tools/flydigi-apex6 --device uid:YOUR_UUID --experimental trigger right --zero 30 --end 200
@@ -419,6 +424,24 @@ undo operation. Global settings apply directly. `map m1 default` removes the M1 
 `--layer` selects an existing layer (0–3). Remapping replaces all activators for
 that one button while preserving other mappings, macros, zones, curves and
 metadata. Macro editing and the Apex 6 GUI editor are not implemented.
+
+`bind BUTTON` reads its explicit activators; add repeated `--action TYPE TARGET`
+to replace the complete list (up to five). Types are `simple`, `timing_single`,
+`timing_long`, `timing_double`, `pulse_press`, `pulse_release` and `toggle`.
+Use the three `timing_*` actions for single/long/double-press distinctions;
+their thresholds come from the profile's `timing` settings. Multiple actions
+of the same type are allowed. `--clear` removes the override; a `none` target
+instead writes an explicit no-button action. Reads need no experimental opt-in.
+
+Targets accept button names, `layer-hold:N`, `layer-toggle:N`, or a quoted JSON
+object using the [native action fields](docs/findings-apex6.md#richer-button-mappings).
+For example, `--action simple '{"type":"btn_keyboard","key_id":4,"modifier":2}'`
+encodes a HID keyboard target; firmware/connection-mode support for host keyboard
+and mouse output is not established by encoding it. `layer-add 1/2/3` creates an
+empty Shift layer without changing existing layers; layer references must already
+exist. Macro targets must refer to an existing macro in the selected layer.
+These controls use the Apex 6 backend; GUI integration and stick/trigger zone
+editing remain separate work.
 
 `stick left/right` and `trigger left/right` read or edit response settings.
 Stick deadzones use percentages; `--preset default/instant/delay/custom` reuses

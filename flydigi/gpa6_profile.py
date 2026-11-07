@@ -4,16 +4,14 @@
 """Lossless edits to XMUL v1.8/v1.9 mappings, timings and response curves.
 
 Edits touch only the selected activator entry, timing field or response
-extension. Other sections, metadata and reserved bytes keep their exact bytes.
+extension, or append an empty layer. Other sections, metadata and reserved
+bytes keep their exact bytes.
 """
 import struct
 
 from . import gpa6, mapping
 from .gpa6_config import mapping_header, unwrap_blob, wrap_blob
-
-BUTTONS = {name: i for i, name in enumerate((
-    "a", "b", "x", "y", "lb", "rb", "back", "start", "ls", "rs",
-    "up", "down", "left", "right", "c", "z", "m1", "m2", "m3", "m4", "m5", "m6"))}
+from .gpa6_actions import ACTIVATORS, BUTTONS, decode_target, encode_target
 
 
 def _layout(blob):
@@ -110,7 +108,8 @@ def describe(blob):
             if len(activators) == 5 and activators[0:2] == b"\0\0" and activators[3:] == b"\0\0":
                 mappings[names[source]] = names.get(activators[2], f"button:{activators[2]}")
             else:
-                mappings[names[source]] = {"activators_hex": activators.hex()}
+                mappings[names[source]] = {"activators_hex": activators.hex(),
+                                           "activators": _decode_activators(activators)}
         result["layers"].append({"id": layer_id, "overrides": mappings})
     config = MappingConfig(blob)
     result["response"] = {}
@@ -128,21 +127,24 @@ def describe(blob):
 def remap(blob, source, target, *, layer=0):
     if source not in BUTTONS or target not in (*BUTTONS, "default"):
         raise ValueError("unknown source or target button")
+    config = MappingConfig(blob)
+    config.set_activators(source, None if target == "default" else
+                          [{"type": "simple", "target": target}], layer=layer)
+    return bytes(config.blob)
+
+
+def _decode_activators(raw):
+    return [{"type": ACTIVATORS[raw[i]] if raw[i] < len(ACTIVATORS) else raw[i],
+             "target": decode_target(raw[i + 1:i + 5])} for i in range(0, len(raw), 5)]
+
+
+def _selected_layer(blob, layer):
+    _integer(layer, 3, "layer")
     data, layers = _layers(blob)
     found = next((item for item in layers if item[0] == layer), None)
     if found is None:
         raise ValueError("selected mapping layer does not exist")
-    _, header, end, entries = found
-    source_id = BUTTONS[source]
-    old = next((entry for entry in entries if entry[0] == source_id), None)
-    replacement = (b"" if target == "default" else
-                   bytes([source_id, 1, 0, 0, 0, 0, BUTTONS[target], 0, 0]))
-    start, stop = (old[1], old[2]) if old else (end, end)
-    result = bytearray(data[:start] + replacement + data[stop:])
-    count = len(entries) - bool(old) + bool(replacement)
-    struct.pack_into("<H", result, header + 2, count)
-    _layers(result)
-    return wrap_blob(result)
+    return data, layers, found
 
 
 def timing(blob, *, long_ms=None, double_ms=None):
@@ -235,8 +237,10 @@ class MappingConfig:
     ``blob``, ``cfg_id`` and ``copy()`` follow mapping.MappingConfig. The stick
     facade uses its percentages, preset IDs and 0..127 relative control points;
     trigger travel uses 0..255. ``response_curve``/``set_response_curve`` expose
-    exact absolute 0..255 coordinates for richer Apex 6 editors. Setters are
-    atomic and touch only the selected TLV. This is not a legacy wire config:
+    exact absolute 0..255 coordinates for richer Apex 6 editors. Activators use
+    the shared native action model; their setters touch only the chosen entry.
+    Response setters touch only the selected TLV. All setters are atomic.
+    This is not a legacy wire config:
     submit it through gpa6_config.edit_ram, never mapping.write_config.
     """
 
@@ -247,6 +251,77 @@ class MappingConfig:
 
     def copy(self):
         return MappingConfig(self.blob, self.cfg_id)
+
+    def layer_ids(self):
+        return [layer[0] for layer in _layers(self.blob)[1]]
+
+    def ensure_layer(self, layer):
+        """Append an empty layer if absent, preserving all existing sections."""
+        _integer(layer, 3, "layer")
+        data, layers, extensions = _layout(self.blob)
+        if layer in [item[0] for item in layers]:
+            return
+        position = extensions[0][1] if extensions else len(data)
+        # Eight-byte header, then four absent zone sections; no maps or macros.
+        result = bytearray(data[:position] + bytes([layer]) + bytes(11) + data[position:])
+        result[24] += 1
+        _layout(result)
+        self.blob[:] = wrap_blob(result)
+
+    def activators(self, source, *, layer=0):
+        """Explicit activators, or None when the source has no override.
+
+        An empty list represents a present entry with no actions. Unknown types
+        remain inspectable; replacing that source is an explicit operation.
+        """
+        if source not in BUTTONS:
+            raise ValueError("unknown source button")
+        _, _, (_, _, _, entries) = _selected_layer(self.blob, layer)
+        entry = next((entry for entry in entries if entry[0] == BUTTONS[source]), None)
+        return _decode_activators(entry[3]) if entry else None
+
+    def set_activators(self, source, activators, *, layer=0):
+        """Atomically replace up to five actions; None removes the override.
+
+        Target dictionaries use gpa6_actions' shared native action model. Layer
+        and macro references must already exist. No other mapping is rewritten.
+        """
+        if source not in BUTTONS:
+            raise ValueError("unknown source button")
+        if activators is not None and (not isinstance(activators, (list, tuple)) or len(activators) > 5):
+            raise ValueError("a button supports at most five activators")
+        data, layers, (_, header, end, entries) = _selected_layer(self.blob, layer)
+        source_id = BUTTONS[source]
+        old = next((entry for entry in entries if entry[0] == source_id), None)
+        macro_ids = []
+        position = end
+        for _ in range(struct.unpack_from("<H", data, header + 4)[0]):
+            macro_ids.append(data[position])
+            position += 6 + data[position + 4] * 7
+        records = bytearray()
+        for index, action in enumerate(activators or ()):
+            if (not isinstance(action, dict) or set(action) != {"type", "target"}
+                    or action["type"] not in ACTIVATORS):
+                raise ValueError("an activator requires a supported type and target")
+            previous = old[3][index * 5 + 1:index * 5 + 5] if old else None
+            target = encode_target(action["target"], previous=previous)
+            if target[0] in (20, 21) and target[1] not in [item[0] for item in layers]:
+                raise ValueError("target mapping layer does not exist; create it first")
+            if target[0] == 30 and macro_ids.count(target[1]) != 1:
+                raise ValueError("target macro must exist uniquely in the selected layer")
+            records.extend(bytes([ACTIVATORS.index(action["type"])]) + target)
+        if activators is None:
+            replacement = b""
+        else:
+            reserved = data[old[1] + 2:old[1] + 4] if old else b"\0\0"
+            replacement = bytes([source_id, len(activators)]) + reserved + records
+        start, stop = (old[1], old[2]) if old else (end, end)
+        if data[start:stop] == replacement:
+            return
+        result = bytearray(data[:start] + replacement + data[stop:])
+        struct.pack_into("<H", result, header + 2, len(entries) - bool(old) + (activators is not None))
+        _layout(result)
+        self.blob[:] = wrap_blob(result)
 
     def _response(self, control, side):
         kind = _kind(control, side)
