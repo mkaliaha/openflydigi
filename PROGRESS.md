@@ -25,7 +25,7 @@ Detailed evidence lives in [PROTOCOL.md](PROTOCOL.md) and
 |---|---|---|
 | Flydigi Apex 5 | Hardware-validated | Reference controller. Profiles, mappings, macros, sticks, gyro-to-stick, vibration, adaptive triggers, lighting, settings, display, game routes, and virtual-DualSense relays are implemented. |
 | Flydigi Vader 5 Pro | Experimental and partial | Identity, capability gating, profiles, mappings, sticks, gyro, vibration, lighting, settings, v3.2 macro-store handling, and a derived factory profile are implemented. No Vader 5 hardware has been tested. |
-| Flydigi Apex 6 / Apex 6 Pro | Experimental, emulator-tested | New transport, identity/capabilities, verified active-RAM snapshots, standalone waveforms and opt-in USB DualSense input, stereo audio and synthesized HID rumble. UUID-bound reconnect, profile-change restoration and bounded buffering are simulated. Grip output requires `hapticGrip`; the relay also requires Xbox-style evdev input. Configuration writes, adaptive triggers, motion, uhid and GUI integration remain unavailable. See [findings](docs/findings-apex6.md). |
+| Flydigi Apex 6 / Apex 6 Pro | Experimental; Pro configuration partly hardware-validated | GPA6 identity and snapshots; global settings, simple remapping, timing fields, lighting and profile selection/save verified on Pro firmware 9.0.6.8. Stick/trigger response editing has independent codec, fake-pad, hardware write/read-back and guided physical-input coverage. Grip waveforms were felt on hardware, but exact live-mode restoration is refused. Opt-in USB DualSense input/audio/rumble has software coverage; a full game run, motion, trigger translation, uhid and GUI integration remain outstanding. See [findings](docs/findings-apex6.md). |
 | Flydigi CD2 dock | Hardware-validated with one noted gap | Device identity, four settings, generated lighting, and picture/GIF sampling are hardware-validated. Nickname read/write is implemented, but nickname writing is not hardware-verified. |
 | Other Flydigi hardware | Unsupported | It may be discovered by the shared transport. Normal configuration commands refuse unsupported models; explicitly ungated developer bench tools are outside that guarantee. |
 
@@ -53,6 +53,25 @@ Known capability differences are enforced:
 The Triggers, Screen, and Games pages are hidden when their required capability
 is absent. The trigger-motor configuration backend exists, but no page exposes
 it.
+
+### Apex 6 configuration gaps
+
+The CLI and backend now edit stick deadzones, response curves, inversion and
+output shape, plus trigger travel and nonlinear response curves. The new XMUL
+profile object reuses existing profile method names and UI units while retaining
+exact native coordinates. Four hardware write/read-back/restoration cases and
+seven guided physical checks passed. The latter exercised left-side controls
+against the unchanged right side: inversion, output caps, custom midpoints,
+circular output, inner/outer deadzones and trigger travel. Exact cutoff positions
+were not measured with calibrated physical input. Every test restored the
+original slot and all four configuration RAM blocks.
+Existing settings/remapping/lighting acceptance results are recorded separately
+in the findings; A4 edits can persist even without explicit save.
+
+Remaining configuration work includes macros, richer activators and Shift layers,
+stick/trigger action zones, gyro mapping, native grip/trigger haptic settings,
+restorable profile backups/library, screen support and GUI wiring. Apex 6 remains
+outside the legacy configuration allowlist, so Apex 5 wire paths stay separate.
 
 ## Feature status
 
@@ -164,7 +183,7 @@ See [gui/README.md](gui/README.md) for distribution-specific Qt setup.
 |---|---|---|
 | P0 | Complete CLI v3.2 backup/restore | `flydigi-mapping backup` uses packed profile + macro-store data and remains compatible with legacy raw files |
 | P0 | Resolve selector gaps in Apex-specific tools | `flydigi-haptics` and `flydigi-run` find the first compatible Apex rather than failing when a Vader sorts first; probes either select explicitly or document their exact gate |
-| P1 | Extend experimental Apex 6 support | Validate USB DualSense input/audio/rumble and RAM snapshots on hardware; recover motion/trigger translation, ordinary-game-audio synthesis, complete mapping codecs and transactional configuration writes before UI parity |
+| P1 | Extend experimental Apex 6 support | Complete the remaining configuration codecs through shared UI interfaces; validate USB DualSense in a real game and recover motion/trigger translation and ordinary-game-audio synthesis |
 | P1 | Validate Vader 5 on hardware | Identity, permissions, profile/settings I/O, macros, factory restore, lighting, motion, rumble, and reconnect paths have recorded results |
 | P1 | Generalize and validate Vader DualSense mode | Real evdev discovery, model-specific ignore ID, udev access, input, gyro, rumble, and haptic audio pass end to end |
 | P1 | Add the Vader trigger-motor page | Editor matches the stored block and has hardware verification, including live-rumble interaction |

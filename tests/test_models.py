@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
     from PySide6.QtCore import (QCoreApplication, QEventLoop, QModelIndex,
-                                QTimer)
+                                QObject, QTimer)
 except ImportError:
     print("PySide6 not installed -- skipping model tests")
     sys.exit(0)
@@ -1020,6 +1020,51 @@ def test_a_stick_edit_moves_the_curve_to_custom():
     profile.sticks.left.curveType = 0
     check("the preset is stored as itself", profile.sticks.left.curveType == 0)
     check("it cleared the outer dead zone", profile.sticks.left.edge == 0)
+
+
+def test_apex6_response_facade_reuses_stick_and_trigger_travel_models():
+    from flydigi.gpa6_profile import MappingConfig
+    from flydigi.mock.apex6 import FakeApex6
+
+    class Profile(QObject):
+        # Only the edit-state boundary needed by these controls. The real
+        # ProfileModel/worker still needs explicit GPA6 loading/write routing.
+        def __init__(self):
+            super().__init__()
+            self.config = MappingConfig(FakeApex6().ram(5))
+            self.original = bytes(self.config.blob)
+            self.generation = 0
+            self.dirty = False
+
+        def edited(self):
+            self.generation += 1
+            return self.config
+
+        def markChanged(self):
+            self.dirty = bytes(self.config.blob) != self.original
+
+    profile = Profile()
+    sticks = models.StickModel(profile)
+    triggers = models.TriggerModel(profile)
+    original_right = profile.config.stick("right")
+    check("XMUL stick model starts on Default", sticks.left.curveType == 0)
+    sticks.left.center = 20
+    sticks.left.edge = 10
+    sticks.left.circular = True
+    check("XMUL model keeps percentage units", (sticks.left.center, sticks.left.edge) == (20, 10))
+    check("XMUL edit invalidates the cached preset", sticks.left.curveType == 3)
+    check("XMUL preview fits the existing plot", len(sticks.left.bank) == 9)
+    check("XMUL edit marks dirty", profile.dirty)
+    check("XMUL right stick remains untouched", profile.config.stick("right") == original_right)
+    sticks.left.curveType = 1
+    check("XMUL model accepts the shared Instant preset", sticks.left.curveType == 1)
+    check("XMUL preset resets deadzones", (sticks.left.center, sticks.left.edge) == (0, 0))
+    triggers.right.strokeStart = 30
+    triggers.right.strokeEnd = 200
+    check("XMUL travel model keeps native units", (triggers.right.strokeStart, triggers.right.strokeEnd) == (30, 200))
+    check("XMUL travel model edits its own curve",
+          profile.config.response_curve("trigger", "right") ==
+          {"start": (30, 0), "end": (200, 255), "points": []})
 
 
 def test_a_stick_bound_to_a_key_is_not_offered_a_curve():
@@ -4158,6 +4203,7 @@ def main():
                  test_no_trigger_motor_controls_are_offered,
                  test_a_stick_edit_recompiles_the_bank,
                  test_a_stick_edit_moves_the_curve_to_custom,
+                 test_apex6_response_facade_reuses_stick_and_trigger_travel_models,
                  test_a_stick_bound_to_a_key_is_not_offered_a_curve,
                  test_circularity_is_not_part_of_the_curve,
                  test_the_gyro_starts_off_and_shows_the_keys_the_factory_left,

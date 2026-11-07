@@ -16,7 +16,7 @@ application adds PySide6, Qt, Kirigami, and Kirigami Addons.
 |---|---|---|---|
 | Flydigi Apex 5 | Hardware-validated | All controller features, adaptive triggers, display, game routes, and both virtual-DualSense relays | Display uploads require a wired connection. Steam Input must be disabled for virtual-DualSense games. |
 | Flydigi Vader 5 Pro | Experimental, partially implemented | Identity, profiles, buttons, sticks, gyro, vibration, lighting, settings, the v3.2 macro-store implementation, and a derived factory profile | No Vader 5 has been tested. It has trigger motors rather than force triggers and has no display. The trigger-motor editor is not built. The v3.2 macro store is unverified on hardware. The DualSense relay, evdev discovery, permissions, and SDL ignore identifier are not validated end to end. |
-| Flydigi Apex 6 / Apex 6 Pro | Experimental; Pro partly verified over receiver and direct USB | SKU/UUID/capabilities, active-RAM snapshots, CLI global settings, button remapping, press timings, lighting, profile selection/saving; experimental grip waveforms and USB DualSense relay | Tested on Pro firmware 9.0.6.8. GUI editing, snapshot restoration, adaptive-trigger translation and motion remain unavailable. Grip-mode restoration returns an error, although ordinary rumble worked afterward. Some setting effects and the complete DualSense relay remain unverified. |
+| Flydigi Apex 6 / Apex 6 Pro | Experimental; Pro partly verified over receiver and direct USB | SKU/UUID/capabilities, active-RAM snapshots, CLI global settings, button remapping, press timings, lighting, profile selection/saving, stick and trigger response curves; experimental grip waveforms and USB DualSense relay | Tested on Pro firmware 9.0.6.8; selected stick/trigger response effects are physically verified through evdev. GUI editing, snapshot restoration, adaptive-trigger translation and motion remain unavailable. Grip-mode restoration returns an error, although ordinary rumble worked afterward. Some setting effects and the complete DualSense relay remain unverified. |
 | Flydigi CD2 charging dock | Hardware-validated with one noted gap | Identity, four settings, eight generated lighting effects, and picture/GIF sampling onto 162 LEDs; nickname read/write is implemented | Nickname writing is not hardware-verified. The dock is a separate USB device and uses its own selector. |
 | Other Flydigi controllers and accessories | Not driven | Devices may be discovered and identified when they use the current transport | Normal configuration commands, including nickname writes, refuse unsupported models. Developer bench tools explicitly documented as ungated can send raw commands. |
 
@@ -401,6 +401,10 @@ tools/flydigi-apex6 --device uid:YOUR_UUID profile
 tools/flydigi-apex6 --device uid:YOUR_UUID --experimental set-setting sleep_time 15
 tools/flydigi-apex6 --device uid:YOUR_UUID --experimental map m1 b
 tools/flydigi-apex6 --device uid:YOUR_UUID --experimental timing --long-ms 600
+tools/flydigi-apex6 --device uid:YOUR_UUID stick left
+tools/flydigi-apex6 --device uid:YOUR_UUID --experimental stick left --center 10 --edge 5 --circular on --invert-y off
+tools/flydigi-apex6 --device uid:YOUR_UUID --experimental trigger right --zero 30 --end 200
+tools/flydigi-apex6 --device uid:YOUR_UUID --experimental trigger right --curve-start 0 0 --curve-end 255 255 --point 50 230
 tools/flydigi-apex6 --device uid:YOUR_UUID --experimental light --mode solid --color 0030FF --brightness 25
 tools/flydigi-apex6 --device uid:YOUR_UUID --experimental save
 ~~~
@@ -414,7 +418,26 @@ reselecting it and when switching away and back. Profile selection is not an
 undo operation. Global settings apply directly. `map m1 default` removes the M1 override;
 `--layer` selects an existing layer (0–3). Remapping replaces all activators for
 that one button while preserving other mappings, macros, zones, curves and
-metadata. Macro/curve editing and the Apex 6 GUI editor are not implemented.
+metadata. Macro editing and the Apex 6 GUI editor are not implemented.
+
+`stick left/right` and `trigger left/right` read or edit response settings.
+Stick deadzones use percentages; `--preset default/instant/delay/custom` reuses
+the existing application's curve choices. Stick `--circular`, `--invert-x` and
+`--invert-y` take `on/off`. Trigger `--zero/--end` selects a linear travel window
+on the 0–255 scale. For either control, `--curve-start X Y`, `--curve-end X Y`
+and repeated `--point X Y` edit exact 0–255 input/output coordinates, with up to
+two midpoints. `--clear-points` removes the midpoints. Choose either exact
+coordinates or the preset/deadzone/travel controls in one command. Flags may be
+combined with either. Unspecified fields and unrelated profile bytes survive.
+These response edits are verified against independent vendor-encoder fixtures,
+fake-pad transactions and hardware write/read-back/restoration. Guided physical
+sweeps also verified left-stick inversion, output limits, custom midpoints,
+circular output and inner/outer deadzones, plus left-trigger output limits,
+custom midpoints and travel windows, with the right side as an unchanged
+reference. Exact deadzone percentages were not calibrated against physical
+stick position. Original settings were restored and verified after each test.
+The backend's familiar profile methods are documented in the
+[response editor reference](docs/findings-apex6.md#stick-and-trigger-response-editor).
 
 Writes require `--experimental` and check the model, UUID, format, slot and
 read-back. Transfers stage chunks before committing. Failed edits roll back only

@@ -639,12 +639,127 @@ The common 11-byte curve is `startX, startY, endX, endY, midpointCount,
 midpoint1X, midpoint1Y, midpoint2X, midpoint2Y, reserved[2]`, all bytes, with at
 most two midpoints. Stick flags follow the curve: invert-X bit 0, invert-Y bit 1,
 round bit 2. Grip vibration flags precede the curve, with enabled at bit 0.
-These layouts are vendor-derived; the current profile editor preserves the
-entire TLV tail rather than decoding or rewriting these settings.
+These layouts are vendor-derived. The response editor decodes and edits types
+1–4; it preserves the other types and all unrelated bytes.
 
 Type 32 contains `nameLength:u8, UTF8Name[nameLength], namedMacroCount:u8`,
 then records `layerId:u8, macroId:u8, nameLength:u8, UTF8Name[nameLength]`.
 The whole value must fit the one-byte TLV length. v1.8 has no such name metadata.
+
+### Stick and trigger response editor
+
+`gpa6_profile.MappingConfig` wraps an XMUL blob with the existing profile
+conventions: `blob`, `cfg_id`, `copy()`, `stick(side)`, `set_stick(side, ...)`,
+`trigger_curve(side)` and `set_trigger_curve(side, ...)`. It is an independent
+codec, not a subclass of the legacy flat-profile codec. Use the existing
+`gpa6_config.edit_ram(ctrl, 5, transform, ...)` transaction to apply it. The
+legacy device allowlist and legacy write functions remain unchanged.
+
+The shared stick facade uses 0–100 percent deadzones, existing curve preset IDs
+and 0–127 relative control points, so the current stick-model controls can be
+reused. Moving a deadzone rescales existing midpoint input positions into the
+new window and preserves their outputs. A single deadzone change is clamped
+against the other boundary; explicitly setting both beyond 100 percent is
+refused. Inversion and circular output only change their respective flag bits.
+Choosing a preset resets the endpoints and curve shape, retaining the flags.
+XMUL has no stored preset ID: the returned `type` is inferred from the geometry,
+and choosing Custom alone keeps the current bytes and inferred type.
+
+For exact Apex 6 coordinates, `response_curve(control, side)` returns
+`{"start": (x, y), "end": (x, y), "points": [(x, y), ...]}` on a 0–255 scale.
+`set_response_curve` accepts these fields as keyword arguments; `None` preserves
+a field and `points=[]` clears active midpoints. Zero to two midpoints are
+supported. Input coordinates must be ordered within the endpoints; equal input
+coordinates are permitted for step responses, and output need not be monotonic.
+The native curve is also included in `stick()`/`trigger_curve()` under `curve`.
+The stick's nine-value `bank` is an interpolated UI preview on the existing
+50–150 display scale (`bank_is_preview=True`), not a stored firmware sample bank
+or measured response. A future GUI must use that description when displaying it.
+
+`set_trigger_curve(zero=..., end=...)` uses the existing 0–255 travel-window
+convention and produces a linear response when the window changes.
+`mirror_points=False` keeps the native output endpoints and midpoints, refusing
+points stranded outside the new input window. Use `set_response_curve` for
+explicit nonlinear edits. Supplying unchanged window bounds preserves the
+existing curve exactly.
+
+Missing extensions read as a full-range linear curve (round output for an absent
+stick extension), following the vendor editor's defaults, with `present=False`.
+Reads, copies and empty setters never create extensions. Actual edits can add a
+TLV and terminator, including in v1.8 profiles with no tail. Existing reserved
+bytes, unknown flag bits, unused midpoint slots, unknown TLVs and every other
+layer/section retain their exact bytes. Duplicate selected TLVs, unsupported
+lengths and invalid midpoint counts are refused for that response control;
+inspection reports its decode error without preventing unrelated button edits.
+
+The implementation has 24 independent before/after cases from the pinned vendor
+encoder in `tests/fixtures/apex6-config.json`: v1.8/v1.9, both controls, both sides
+and zero/one/two midpoints. `tests/test_apex6_response.py` also checks complex
+layer preservation, reserved bytes, UI facade units, malformed data, CLI gating,
+verified transactions, lost-commit rollback and exact restoration with the fake
+pad. The Qt model suite also exercises existing `StickModel` controls and the
+travel properties of `TriggerModel` over this facade. Profile loading, dirty-state
+coordination and device writes still need explicit GPA6 routing before GUI use;
+the Apex 5 force-effect methods are not part of this interface.
+
+On 2026-11-07, four cases passed write/read-back on the connected Apex 6 Pro
+(UUID `1420c56eaa1e00000000043401000000`, firmware 9.0.6.8):
+
+| Case | Requested response |
+|---|---|
+| Left stick | 20% center, 10% edge, circular output, invert Y |
+| Right stick | Start (13,7), end (231,247), midpoints (63,88)/(171,199), rectangular output, invert X |
+| Left trigger | Linear travel window 30–200 |
+| Right trigger | Start (5,0), end (220,255), midpoints (50,180)/(140,220) |
+
+Every candidate matched its exact bytes read back from RAM. After each case,
+the original mapping bytes were rewritten with explicit save, and a complete
+snapshot verified all four RAM blocks and the active slot against the fresh
+backup. No profile switching was used as restoration. Those checks establish
+configuration acceptance; subsequent physical checks are recorded below.
+Ignored evidence is in `work/apex6-response-20261107/`, including
+`initial.json`, per-case snapshots and restoration snapshots, `final.json`,
+`results.json` and the bounded test script. Initial discovery in the restricted
+environment hid `/dev/hidraw*`; host discovery correctly found the awake pad.
+
+#### Guided physical response acceptance
+
+Later on 2026-11-07, the user exercised the same Pro while input was recorded
+from its evdev gamepad, resolved under the selected UUID's HID USB root. The
+device reported connection mode 1 (`dongle`); the input node was named
+`Generic X-Box pad`, demonstrating why the input name alone is not a transport
+label. Each phase remained active until the user confirmed completion. All
+changes targeted the left side, with the right side retained as a reference.
+
+The unchanged baseline reached -32768..32767 on both stick axes and 0..255 on
+both triggers. Maximum diagonal radii were 1.145 left and 1.147 right, with
+rectangular output configured. Seven changed-state checks passed:
+
+| Check | Observed physical input |
+|---|---|
+| Invert X and Y | Both sticks were pushed upper-right. All substantial left-stick diagonal samples were negative-X/positive-Y (2,571); all right-stick samples were positive-X/negative-Y (1,827). |
+| Output endpoint capped at 128 | Left stick peaks fell to roughly ±16,384; left trigger maximum was 128. Right stick retained ±32,768 and right trigger 255. |
+| Custom midpoints (127,0), (128,255) | Left trigger reported only 0 and 255, against 253 distinct right-trigger values. Left stick had 1,704 near-full-output samples out of 1,728 above the 2% noise floor, with only 24 samples in the intervening range during slow center-to-edge sweeps. |
+| Circular output | Left maximum diagonal radius fell to 1.001 while right remained 1.141. Both sticks still reached full horizontal/vertical output. |
+| 90% inner deadzone | Left output was silent for 2,657 frames while the reference stick moved between 10% and 70% output during the instructed partial sweeps; left output reached full at the edge. |
+| 90% outer deadzone | Left output exceeded 95% in 3,667 frames where the reference was between 10% and 50% during short physical movements. |
+| Trigger window 0–16 | Left trigger produced 17 distinct values through slow full sweeps, against all 256 on the right; both reached 255. |
+
+These establish physical effects for the tested configurations. They do not
+calibrate an exact percentage of physical travel, exhaust all curve shapes,
+or establish the firmware's interpolation formula. Right-side edits had already
+passed separate byte-exact write/read-back checks; these physical tests used
+the right side as the control.
+
+After every phase, the original mapping bytes were restored with explicit save
+where an edit had been applied. Complete snapshots matched all four RAM blocks
+and active profile 1 against the fresh backup. The session exited successfully,
+released its claim and closed the input reader; final cleanup independently
+verified the same state. No changed configuration was left active.
+
+Ignored evidence is in `work/apex6-response-physical-20261107/`: `session.py`,
+`input.json`, `initial.json`, per-phase applied/restored snapshots, raw input
+frame logs and summaries, `results.json`, `final.json` and `last-cleanup.json`.
 
 ### Lighting: RAM 4, LGHT v2
 
@@ -759,8 +874,9 @@ Flydigi device at that point. Waking it restored the same UUID; the original
 Local mapping and center auto-adjust have only been verified by
 write/read-back/restoration, accepted for settings support without further
 physical checks. Third-party permission was subsequently tested as described
-below. Snapshot import, macro/curve editing, motor
-configuration editing and GUI configuration remain outside this implementation.
+below. Stick/trigger response editing was subsequently added with independent
+codec, fake-pad and guided physical-input coverage as described above. Snapshot import, macro editing,
+motor configuration editing and GUI configuration remain outside this implementation.
 
 ### Third-party takeover permission
 

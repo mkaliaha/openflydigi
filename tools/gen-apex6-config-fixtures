@@ -77,6 +77,30 @@ const mappingEdits = ["1.8", "1.9"].map(version => {
   edited.layers[0].activator_mappings[0].activators[0].target = button("button_b");
   return {version, before: blob(codecs.fullMapping(input)), after: blob(codecs.fullMapping(edited))};
 });
+const responseCurves = [];
+for (const version of ["1.8", "1.9"]) {
+  for (const [control, field] of [["stick", "joystick"], ["trigger", "trigger"]]) {
+    for (const side of ["left", "right"]) {
+      for (const count of [0, 1, 2]) {
+        const input = {version, name: "Keep profile name",
+          runtime_policies: {long_ms: 513, double_ms: 257}, layer_count: 2,
+          layers: [{layer_id: 0, activator_mappings: [], macro_definitions: []},
+                   {layer_id: 1, activator_mappings: [], macro_definitions: []}]};
+        const key = `${field}_${side}`;
+        // Alternate insertion and updates so both paths have independent bytes.
+        if (count !== 0) input[key] = {curve: {start_x: 0, start_y: 0,
+          end_x: 255, end_y: 255, mid_points: []},
+          ...(control === "stick" ? {invert_x: false, invert_y: false, is_round: true} : {})};
+        const edited = JSON.parse(JSON.stringify(input));
+        edited[key] = {curve: {start_x: 13, start_y: 7, end_x: 231, end_y: 247,
+          mid_points: [{x: 63, y: 88}, {x: 171, y: 199}].slice(0, count)},
+          ...(control === "stick" ? {invert_x: true, invert_y: true, is_round: false} : {})};
+        responseCurves.push({version, control, side, input: edited[key],
+          before: blob(codecs.fullMapping(input)), after: blob(codecs.fullMapping(edited))});
+      }
+    }
+  }
+}
 const globalData = new Uint8Array(80);
 globalData[3] = 15;
 for (const i of [4, 39, 40, 47, 52]) globalData[i] = 1;
@@ -87,5 +111,5 @@ delete globalExpected.rawBlob;
 const globalRam = new Uint8Array(82);
 globalRam[0] = 82; globalRam.set(globalData, 2);
 process.stdout.write(JSON.stringify({source: "Flydigi web Space Station 5.0.1.1; synthetic inputs",
-  sources: sources.map(([file, sha256]) => ({file, sha256})), lighting, mapping, mappingEdits,
+  sources: sources.map(([file, sha256]) => ({file, sha256})), lighting, mapping, mappingEdits, responseCurves,
   global: {hex: hex(globalRam), expected: globalExpected}}, null, 2) + "\n");

@@ -55,7 +55,7 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("info", help="read identity, capabilities and format versions")
     sub.add_parser("settings", help="read global controller settings")
-    sub.add_parser("profile", help="read active profile button overrides and timings")
+    sub.add_parser("profile", help="read active profile buttons, timings and response curves")
     setting = sub.add_parser("set-setting", help="apply and verify one global setting")
     setting.add_argument("name", choices=tuple(gpa6_config.GLOBAL_FIELDS))
     setting.add_argument("value", help="integer, or on/off for a switch")
@@ -71,6 +71,23 @@ def main():
     timing.add_argument("--long-ms", type=int)
     timing.add_argument("--double-ms", type=int)
     timing.add_argument("--save", action="store_true")
+    for command in ("stick", "trigger"):
+        response = sub.add_parser(command, help=f"read or edit one {command}'s response")
+        response.add_argument("side", choices=("left", "right"))
+        response.add_argument("--curve-start", type=int, nargs=2, metavar=("X", "Y"), help="absolute input/output start, 0..255")
+        response.add_argument("--curve-end", type=int, nargs=2, metavar=("X", "Y"), help="absolute input/output end, 0..255")
+        response.add_argument("--point", type=int, nargs=2, action="append", metavar=("X", "Y"), help="replace midpoints; repeat at most twice, 0..255")
+        response.add_argument("--clear-points", action="store_true")
+        response.add_argument("--save", action="store_true")
+        if command == "stick":
+            response.add_argument("--preset", choices=("default", "instant", "delay", "custom"), help="shared curve presets; custom keeps the current shape")
+            response.add_argument("--center", type=int, help="inner deadzone, 0..100 percent")
+            response.add_argument("--edge", type=int, help="outer deadzone, 0..100 percent")
+            for flag in ("circular", "invert-x", "invert-y"):
+                response.add_argument("--" + flag, choices=("on", "off"))
+        else:
+            response.add_argument("--zero", type=int, help="start of linear travel window, 0..255")
+            response.add_argument("--end", type=int, help="end of linear travel window, 0..255")
     light = sub.add_parser("light", help="read or edit the active profile's lighting")
     light.add_argument("--mode", choices=("off", "solid", "breathing", "gradient", "streaming", "default"))
     light.add_argument("--color", nargs="+", help="RRGGBB color(s), up to eight")
@@ -90,8 +107,21 @@ def main():
     args = parser.parse_args()
     light_write = args.command == "light" and any(
         getattr(args, key) is not None for key in ("mode", "color", "brightness", "speed", "vibration"))
+    response_command = args.command in ("stick", "trigger")
+    response_write = False
+    if response_command:
+        native = any(getattr(args, key) is not None for key in ("curve_start", "curve_end", "point")) or args.clear_points
+        facade = ("preset", "center", "edge") if args.command == "stick" else ("zero", "end")
+        facade_write = any(getattr(args, key) is not None for key in facade)
+        response_write = native or facade_write or (args.command == "stick" and any(
+            getattr(args, key) is not None for key in ("circular", "invert_x", "invert_y")))
+        if args.point and args.clear_points:
+            parser.error("--point and --clear-points cannot be combined")
+        if native and facade_write:
+            parser.error("edit either exact curve coordinates or preset/deadzone/travel controls in one command")
     if (args.command in ("tone", "play", "set-setting", "map", "timing", "slot", "save")
-            or light_write or (args.command == "light" and args.save)) and not args.experimental:
+            or light_write or response_write
+            or ((args.command == "light" or response_command) and args.save)) and not args.experimental:
         parser.error("configuration writes and grip output require --experimental")
     if args.command == "timing" and args.long_ms is None and args.double_ms is None:
         parser.error("provide --long-ms and/or --double-ms")
@@ -139,6 +169,27 @@ def main():
             slot = protocol.slot()
             protocol.save_slot(slot)
             print(f"Saved profile {slot + 1}")
+            return 0
+        if response_command:
+            def edit_response(data):
+                config = gpa6_profile.MappingConfig(data)
+                if args.command == "stick":
+                    flags = {key: None if getattr(args, key) is None else getattr(args, key) == "on"
+                             for key in ("circular", "invert_x", "invert_y")}
+                    preset = ("default", "instant", "delay", "custom").index(args.preset) if args.preset else None
+                    config.set_stick(args.side, curve_type=preset, center=args.center, edge=args.edge, **flags)
+                else:
+                    config.set_trigger_curve(args.side, zero=args.zero, end=args.end)
+                config.set_response_curve(args.command, args.side, start=args.curve_start,
+                    end=args.curve_end, points=[] if args.clear_points else args.point)
+                return config.blob
+            data = (gpa6_config.edit_ram(ctrl, 5, edit_response, save=args.save, expected_uid=uid)
+                    if response_write or args.save else protocol.read_ram(5))
+            config = gpa6_profile.MappingConfig(data)
+            result = config.stick(args.side) if args.command == "stick" else config.trigger_curve(args.side)
+            if response_write or args.save:
+                print("Profile save acknowledged." if args.save else "Applied and verified; this firmware can retain edits without explicit save.", file=sys.stderr)
+            print(json.dumps(result, indent=2))
             return 0
         if args.command in ("profile", "map", "timing"):
             if args.command == "profile":
