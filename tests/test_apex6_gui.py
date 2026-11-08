@@ -473,7 +473,7 @@ class ButtonModelTests(unittest.TestCase):
                 target = gpa6_actions.decode_target(gpa6_actions.encode_target(entry["target"]))
                 self.editor.target = list(gpa6_actions.TARGETS).index(target["type"])
                 for i, (field, _, _) in enumerate(gpa6_actions.TARGETS[target["type"]][1]):
-                    choices = self.editor._choices(field)
+                    choices = self.editor._targets._choices(field)
                     value = [v for v, _ in choices].index(target[field]) if choices else target[field]
                     if field == "turbo_interval_10ms":
                         value *= 10

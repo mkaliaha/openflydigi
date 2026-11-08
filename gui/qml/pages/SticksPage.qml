@@ -2,12 +2,8 @@
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Joystick response curves, stored in the open profile.
-//
-// The one setting on this pad that Linux has no other tool for, and the one
-// where writing what you edited is not enough: the pad has no curve evaluator.
-// It plays a nine-point table, and everything on this page is compiled into
-// that table before it is written -- see flydigi.mapping.stick_bank.
+// Profile response curves. Legacy controls compile to a nine-point table
+// (flydigi.mapping.stick_bank); the native editor stores exact points and zones.
 
 import QtQuick
 import QtQuick.Layouts
@@ -37,32 +33,39 @@ Kirigami.ScrollablePage {
             explanation: "Pick a profile on the Controller page."
         }
 
+        Loader {
+            Layout.fillWidth: true
+            active: App.profile.apex6 && App.profile.loaded
+            visible: active
+            sourceComponent: Apex6AnalogEditor { editor: App.profile.nativeSticks }
+        }
+
         FormCard.FormHeader {
-            visible: App.profile.loaded
+            visible: App.profile.loaded && !App.profile.apex6
             title: "Left stick"
         }
 
         StickSide {
             objectName: "leftStick"
-            visible: App.profile.loaded
+            visible: App.profile.loaded && !App.profile.apex6
             side: App.profile.sticks.left
             sideName: "left"
         }
 
         FormCard.FormHeader {
-            visible: App.profile.loaded
+            visible: App.profile.loaded && !App.profile.apex6
             title: "Right stick"
         }
 
         StickSide {
             objectName: "rightStick"
-            visible: App.profile.loaded
+            visible: App.profile.loaded && !App.profile.apex6
             side: App.profile.sticks.right
             sideName: "right"
         }
 
         FormCard.FormCard {
-            visible: App.profile.loaded
+            visible: App.profile.loaded && !App.profile.apex6
             Layout.topMargin: Kirigami.Units.largeSpacing
 
             FormCard.FormTextDelegate {

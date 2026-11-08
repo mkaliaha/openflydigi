@@ -18,6 +18,7 @@ from PySide6.QtCore import (Property, QAbstractListModel, QModelIndex, QObject,
 from PySide6.QtQml import QmlElement
 from flydigi import effects, gpa6_backup, mapping
 from .apex6_buttons import Apex6ButtonsModel
+from .apex6_analog import Apex6AnalogModel
 
 # See gui/models/device.py for what these two names do.
 QML_IMPORT_NAME = "Apex5"
@@ -2240,6 +2241,8 @@ class ProfileModel(QObject):
         self._sticks = StickModel(self)
         self._motion = MotionModel(self)
         self._native_buttons = Apex6ButtonsModel(self)
+        self._native_sticks = Apex6AnalogModel(self, "stick")
+        self._native_triggers = Apex6AnalogModel(self, "trigger")
 
     # -- which pad's buttons ------------------------------------------------
     #
@@ -2295,6 +2298,8 @@ class ProfileModel(QObject):
         self._native_pending = None
         self.writingChanged.emit()
         self._native_buttons.clear()
+        self._native_sticks.clear()
+        self._native_triggers.clear()
         self._cfg_id = -1
         self._saved = True
         self._slots.setCount(self._slots.count)
@@ -2341,11 +2346,24 @@ class ProfileModel(QObject):
         if self.nativeConfig is not None:
             self._edited.mapping = config
             self._generation += 1
+            self._refresh_native()
             self.markChanged()
 
     @Property(Apex6ButtonsModel, constant=True)
     def nativeButtons(self):
         return self._native_buttons
+
+    @Property(Apex6AnalogModel, constant=True)
+    def nativeSticks(self):
+        return self._native_sticks
+
+    @Property(Apex6AnalogModel, constant=True)
+    def nativeTriggers(self):
+        return self._native_triggers
+
+    def _refresh_native(self):
+        for editor in (self._native_buttons, self._native_sticks, self._native_triggers):
+            editor.refresh()
 
     @Property(bool, notify=writingChanged)
     def writing(self):
@@ -2614,7 +2632,7 @@ class ProfileModel(QObject):
         self._triggers.refresh()
         self._sticks.refresh()
         self._motion.refresh()
-        self._native_buttons.refresh()
+        self._refresh_native()
         self.markChanged()
 
     @Slot()

@@ -369,7 +369,8 @@ and `gui/i18n.py` before relying on `pyside6-project build` or its static checks
 
 ## Experimental Apex 6 / Apex 6 Pro
 
-The desktop app now reuses its **Controller**, **Device**, **Buttons** and **Lighting** pages
+The desktop app now reuses its **Controller**, **Device**, **Buttons**, **Sticks**,
+**Triggers** and **Lighting** pages
 for Apex 6. It reads the active profile, selects any of the four slots, saves
 the selected profile, edits supported global settings, and configures all six
 native lighting effects with up to eight colours. Settings apply immediately;
@@ -381,10 +382,20 @@ in the selected layer. Unknown actions are preserved until the button is explici
 reset. Mapping edits use Apply / Save profile. **Applied Apex 6
 changes may persist even without an explicit save.**
 
+Sticks and Triggers edit either side's exact 0–255 input/output endpoints and
+zero, one or two interior points, with a preview of the stored curve. Stick
+presets, circular range and axis inversion are supported. Response applies across
+all layers; zone actions are edited separately in the base or three Shift layers.
+Each trigger supports four travel zones; each stick supports eight direction/radius
+zones and three direction modes. Zone outputs share the Buttons editor's typed
+fields and existing layer/macro references. Unsupported response records or zones
+remain preserved; clearing zones explicitly removes only the selected side/layer.
+These trigger controls edit response and zones, not resistance or vibration.
+
 The native GUI route checks the controller UUID, active slot and previously
 read profile bytes before writing. Reconnects retain unsent mapping and lighting edits; Reload
 reads the controller's current active slot. Profile names, factory reset,
-Switch copying, stick/trigger responses and zones, macro creation, gyro, native
+Switch copying, macro creation, gyro, native
 vibration/scenes, file/library workflows, screen uploads
 and DualSense remain outside this GUI slice; their existing CLI support is
 unchanged. The new GUI flow is fake-controller and QML-tested, with no new
@@ -447,7 +458,7 @@ reselecting it and when switching away and back. Profile selection is not an
 undo operation. Global settings apply directly. `map m1 default` removes the M1 override;
 `--layer` selects an existing layer (0–3). Remapping replaces all activators for
 that one button while preserving other mappings, macros, zones, curves and
-metadata. These mapping controls remain CLI-only for Apex 6.
+metadata. The desktop Buttons page also edits these mappings.
 
 `macros` lists definitions in the selected `--layer` (default 0). `macro ID`
 reads one definition; editing flags create or update it. IDs are 0–255, with
@@ -505,7 +516,7 @@ encodes a HID keyboard target; firmware/connection-mode support for host keyboar
 and mouse output is not established by encoding it. `layer-add 1/2/3` creates an
 empty Shift layer without changing existing layers; layer references must already
 exist. Macro targets must refer to an existing macro in the selected layer.
-These controls use the Apex 6 backend; GUI integration remains separate work.
+The desktop Buttons page uses the same Apex 6 backend for these controls.
 
 `trigger-zones left/right` and `stick-zones left/right` read action zones in
 `--layer 0/1/2/3` (default 0). Repeated `--zone START STOP TARGET` replaces all
@@ -783,7 +794,7 @@ Run every backend test, including newly added files, with:
 status=0
 for t in tests/test_*.py; do
     case "$t" in
-        tests/test_models.py|tests/test_qml.py|tests/test_shell.py) continue ;;
+        tests/test_models.py|tests/test_qml.py|tests/test_shell.py|tests/test_apex6_gui.py|tests/test_apex6_analog_gui.py) continue ;;
     esac
     python3 "$t" || status=1
 done
@@ -796,7 +807,8 @@ no controller or dock.
 
 The Qt-dependent tests are:
 
-- `tests/test_models.py`: distribution PySide6;
+- `tests/test_models.py`, `tests/test_apex6_gui.py`, and
+  `tests/test_apex6_analog_gui.py`: distribution PySide6;
 - `tests/test_shell.py` and `tests/test_qml.py`: PySide6 and Kirigami.
 
 `tests/test_qml.py` discovers the `tests/qml/tst_*.qml` cases. Exact commands,

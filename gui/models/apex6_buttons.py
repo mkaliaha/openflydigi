@@ -9,36 +9,16 @@ from PySide6.QtQml import QmlElement
 
 from flydigi import gpa6, gpa6_actions as actions, gpa6_config, gpa6_profile
 
+from .apex6_target import TargetFields, BUTTON_LABELS, TARGET_LABELS
+
 QML_IMPORT_NAME = "Apex5"
 QML_IMPORT_MAJOR_VERSION = 1
 
-BUTTON_LABELS = {
-    "a": "A", "b": "B", "x": "X", "y": "Y", "lb": "Left bumper",
-    "rb": "Right bumper", "back": "Select", "start": "Start",
-    "ls": "Left stick click", "rs": "Right stick click", "up": "Up",
-    "down": "Down", "left": "Left", "right": "Right", "c": "C", "z": "Z",
-    "m1": "M1", "m2": "M2", "m3": "M3", "m4": "M4", "m5": "LM", "m6": "RM",
-    "none": "Disabled",
-}
 # The native button table has no Home or LT/RT sources. C/Z are retained by the
 # codec but are not physical Apex buttons. They remain available as targets.
 SOURCES = [key for key in actions.BUTTONS if key not in ("c", "z")]
 ACTIVATOR_LABELS = ["While held", "Single press", "Long press", "Double press",
                     "On press", "On release", "Toggle"]
-TARGET_LABELS = ["Gamepad button", "Keyboard key", "Mouse button", "Consumer key",
-                 "Turbo button", "Hold Shift layer", "Toggle Shift layer", "Macro",
-                 "Move mouse", "Mouse wheel", "Left stick", "Right stick",
-                 "Left trigger", "Right trigger", "Vibration"]
-FIELD_LABELS = {
-    "id": "Button", "button_id": "Button", "key_id": "Keyboard usage ID",
-    "modifier": "Modifier mask", "mouse_id": "Mouse button ID",
-    "consumer_id": "Consumer key ID", "turbo_interval_10ms": "Repeat interval (ms)",
-    "layer_id": "Layer", "macro_id": "Macro", "delta_x": "Horizontal movement",
-    "delta_y": "Vertical movement", "delta_wheel": "Wheel movement",
-    "axis_x": "Horizontal position", "axis_y": "Vertical position",
-    "linear_value": "Trigger position", "motor_value_left": "Left vibration",
-    "motor_value_right": "Right vibration",
-}
 
 
 @QmlElement
@@ -48,6 +28,7 @@ class Apex6ButtonsModel(QObject):
     def __init__(self, profile):
         super().__init__(profile)
         self._profile = profile
+        self._targets = TargetFields(self)
         self._layer = 0
         self._source = 0
         self._action = 0
@@ -91,7 +72,6 @@ class Apex6ButtonsModel(QObject):
             self.changed.emit()
             return
         self._profile.setNativeMapping(candidate)
-        self.refresh()
 
     def refresh(self):
         self._cache_generation = -1
@@ -246,84 +226,27 @@ class Apex6ButtonsModel(QObject):
 
     @Property("QStringList", constant=True)
     def targetNames(self):
-        return TARGET_LABELS
+        return self._targets.targetNames
 
     @Property(int, notify=changed)
     def target(self):
-        entry = self._entry()
-        name = entry["target"]["type"] if entry else None
-        return list(actions.TARGETS).index(name) if name in actions.TARGETS else -1
+        return self._targets.target
 
     @target.setter
     def target(self, value):
-        if value not in range(len(actions.TARGETS)) or value == self.target:
-            return
-        name = list(actions.TARGETS)[value]
-        target = dict(type=name)
-        for field, low, _ in actions.TARGETS[name][1]:
-            target[field] = max(0, low)
-        if name in ("layer_hold", "layer_toggle"):
-            target["layer_id"] = next((i for i in self._read()["layers"] if i != self._layer), self._layer)
-        if name == "macro":
-            macros = self._read()["macros"]
-            if not macros:
-                self._error = "This layer has no macros to bind."
-                self.changed.emit()
-                return
-            target["macro_id"] = macros[0]["macro_id"]
-        self._change_entry(target=actions.decode_target(actions.encode_target(target)))
-
-    @Slot(int, result="QVariantMap")
-    def field(self, index):
-        entry = self._entry()
-        fields = actions.TARGETS.get(entry["target"]["type"], (0, ()))[1] if entry else ()
-        if index not in range(len(fields)):
-            return dict(visible=False, label="", minimum=0, maximum=0, value=0, step=1, choices=[], selected=-1)
-        name, low, high = fields[index]
-        value = entry["target"][name]
-        choices = self._choices(name)
-        values = [v for v, _ in choices]
-        scale = 10 if name == "turbo_interval_10ms" else 1
-        return dict(visible=True, label=FIELD_LABELS[name], minimum=low * scale, maximum=high * scale,
-                    value=value * scale if type(value) is int else 0, step=scale,
-                    choices=[label for _, label in choices], selected=values.index(value) if value in values else -1)
+        self._targets.target = value
 
     @Property("QVariantList", notify=changed)
     def fields(self):
-        return [self.field(0), self.field(1)]
+        return self._targets.fields
 
-    def _choices(self, field):
-        if field in ("id", "button_id"):
-            return [(key, BUTTON_LABELS[key]) for key in (*actions.BUTTONS, "none")]
-        if field == "layer_id":
-            return [(i, "Base" if i == 0 else f"Shift {i}") for i in self._read()["layers"]]
-        if field == "macro_id":
-            return [(m["macro_id"], m["name"] or f"Macro {m['macro_id']}") for m in self._read()["macros"]]
-        return []
+    @Slot(int, result="QVariantMap")
+    def field(self, index):
+        return self._targets.field(index)
 
     @Slot(int, int)
     def setField(self, index, value):
-        entry = self._entry()
-        if not self.editable or entry is None:
-            return
-        target = deepcopy(entry["target"])
-        fields = actions.TARGETS[target["type"]][1]
-        if index not in range(len(fields)):
-            return
-        field = fields[index][0]
-        if field == "turbo_interval_10ms":
-            if value % 10:
-                self._error = "Turbo intervals must be a multiple of 10 ms."
-                self.changed.emit()
-                return
-            value //= 10
-        choices = self._choices(field)
-        if choices:
-            if value not in range(len(choices)):
-                return
-            value = choices[value][0]
-        target[field] = value
-        self._change_entry(target=target)
+        self._targets.setField(index, value)
 
     @Property(int, notify=changed)
     def longPress(self):

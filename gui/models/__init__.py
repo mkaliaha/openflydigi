@@ -10,6 +10,7 @@ QML pages are both views onto these objects.
 """
 from .device import BATTERY_STEPS, DeviceModel
 from .apex6_buttons import Apex6ButtonsModel
+from .apex6_analog import Apex6AnalogModel
 from .devices import DevicesModel
 from .dock import (DIRECTION_NAMES, MODE_NAMES, SWITCH_LABELS, SWITCHES,
                    DockColoursModel, DockModel)
@@ -37,7 +38,7 @@ from .settings import (PRECISION_NAMES, PRECISION_WIRE, SENSITIVITY_NAMES,
 from .setup import SetupChecksModel, SetupModel
 
 __all__ = [
-    "Apex6ButtonsModel",
+    "Apex6ButtonsModel", "Apex6AnalogModel",
     "ALL_ROUTES", "APPLIABLE_ROUTE", "BATTERY_STEPS", "CURVE_PRESETS",
     "DIRECTION_NAMES", "MODE_NAMES", "SWITCHES", "SWITCH_LABELS",
     "CYCLE_MAX", "CYCLE_MIN", "FIT_MODES", "MAX_FRAMES", "STICK_MAX",

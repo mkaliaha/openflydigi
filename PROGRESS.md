@@ -158,7 +158,7 @@ identity/profile/configuration snapshots match the baseline exactly. Recovery
 after an interrupted transfer is software-tested only; GUI wiring is pending.
 
 The GUI foundation now routes Apex 6 explicitly through its native backend.
-The existing Controller, Device, Buttons and Lighting pages handle active-profile reads,
+The existing Controller, Device, Buttons, Sticks, Triggers and Lighting pages handle active-profile reads,
 slot selection/save, all supported global fields and all six lighting effects.
 Read-back, UUID/slot guards, stale-edit refusal, dirty reconnect preservation and
 late acknowledgements are covered by fake-controller tests. The native Buttons
@@ -167,7 +167,14 @@ button, typed outputs and profile-wide long/double-press timings. The GUI edits
 match 50 complete independent vendor fixtures. Apply/save uses the package
 transaction's full prior-state checks; edits made during a write remain dirty,
 and lighting replies cannot confirm unsent mappings. Window and
-interaction checks cover native pages and returning to Apex 5. No new hardware
+interaction checks cover native pages and returning to Apex 5. Native Sticks and
+Triggers now edit exact response endpoints and zero to two interior points,
+stick presets/circular range/inversion, and per-layer trigger travel or stick
+direction/radius zones. Zone targets reuse the button output fields. The curve
+plot previews stored points; it is not a measured firmware response. Unsupported
+data remains preserved, and explicit zone clearing is scoped to one side/layer.
+GUI edits match 24 response and 88 zone vendor fixtures. The editors share the
+existing profile transaction and dirty/reconnect handling. No new hardware
 GUI acceptance run is claimed. The remaining editors, library and screen GUI
 workflows are still separate work. Apex 6 remains outside the legacy backend
 allowlist and selecting it does not change the daemon's legacy pad preference.
@@ -247,15 +254,15 @@ because it also exposes the audio endpoint used for PS5 haptics.
 
 ## Current test state
 
-The intended test contract is a hardware-free backend suite plus three
+The intended test contract is a hardware-free backend suite plus five
 Qt-dependent Python scripts.
 
 Current inventory:
 
 - 31 backend `tests/test_*.py` scripts;
-- 3 Qt-dependent Python scripts: `test_models.py`, `test_shell.py`, and
-  `test_qml.py`;
-- 13 QML cases under `tests/qml/tst_*.qml`.
+- 5 Qt-dependent Python scripts: `test_models.py`, `test_shell.py`,
+  `test_qml.py`, `test_apex6_gui.py`, and `test_apex6_analog_gui.py`;
+- 14 QML files under `tests/qml/tst_*.qml`.
 
 Run the [discovered backend set](README.md#tests) rather than maintaining a
 hand-written filename list. All 31 backend scripts are hardware-free. The
@@ -267,6 +274,8 @@ installed:
 
 ~~~bash
 python3 tests/test_models.py
+python3 tests/test_apex6_gui.py
+python3 tests/test_apex6_analog_gui.py
 python3 tests/test_shell.py
 python3 tests/test_qml.py
 tools/generate-qmltypes

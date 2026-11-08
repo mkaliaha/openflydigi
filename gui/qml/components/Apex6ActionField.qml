@@ -5,11 +5,10 @@ import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
-import Apex5
 
 RowLayout {
     id: root
-    required property Apex6ButtonsModel editor
+    required property var editor
     required property int fieldIndex
     readonly property var spec: editor.fields[fieldIndex]
     visible: spec.visible
@@ -24,7 +23,10 @@ RowLayout {
         objectName: "nativeFieldChoice" + root.fieldIndex
         visible: root.spec.choices.length > 0
         model: root.spec.choices
-        currentIndex: root.spec.selected
+        Binding on currentIndex {
+            value: root.spec.selected
+            restoreMode: Binding.RestoreNone
+        }
         wheelEnabled: false
         Layout.preferredWidth: Kirigami.Units.gridUnit * 12
         onActivated: (index) => root.editor.setField(root.fieldIndex, index)
@@ -34,7 +36,10 @@ RowLayout {
         visible: root.spec.choices.length === 0
         from: root.spec.minimum
         to: root.spec.maximum
-        value: root.spec.value
+        Binding on value {
+            value: root.spec.value
+            restoreMode: Binding.RestoreNone
+        }
         stepSize: root.spec.step
         editable: true
         wheelEnabled: false

@@ -18,6 +18,8 @@ TestCase {
     Component { id: settings; DeviceSettingsPage { anchors.fill: parent } }
     Component { id: lighting; LightingPage { anchors.fill: parent } }
     Component { id: buttons; ButtonsPage { anchors.fill: parent } }
+    Component { id: sticks; SticksPage { anchors.fill: parent } }
+    Component { id: triggers; TriggersPage { anchors.fill: parent } }
 
     function init() {
         failOnWarning(/.*/);
@@ -49,19 +51,19 @@ TestCase {
         toggle.toggle();
         toggle.toggled();
         tryVerify(() => Fixture.settingsReads > seen, 5000);
-        compare(Fixture.nativeSettings.quick_switch, false);
+        tryVerify(() => Fixture.nativeSettings.quick_switch === false, 5000);
         let resolution = findChild(page, "precisionCombo");
         seen = Fixture.settingsReads;
         resolution.currentIndex = 1;
         resolution.activated(1);
         tryVerify(() => Fixture.settingsReads > seen, 5000);
-        compare(Fixture.nativeSettings.stick_resolution, 9);
+        tryVerify(() => Fixture.nativeSettings.stick_resolution === 9, 5000);
         let rate = findChild(page, "reportRateCombo");
         seen = Fixture.settingsReads;
         rate.currentIndex = 0;
         rate.activated(0);
         tryVerify(() => Fixture.settingsReads > seen, 5000);
-        compare(Fixture.nativeSettings.usb_report_rate_hz, 125);
+        tryVerify(() => Fixture.nativeSettings.usb_report_rate_hz === 125, 5000);
     }
 
     function test_profiles_switch_and_save_without_legacy_actions() {
@@ -111,6 +113,155 @@ TestCase {
         verify(control, name);
         control.currentIndex = index;
         control.activated(index);
+    }
+
+    function number(page, name, value) {
+        let control = findChild(page, name);
+        verify(control, name);
+        control.value = value;
+        control.valueModified();
+        verify(!control.wheelEnabled);
+    }
+
+    function test_analog_response_and_zone_apply_data() {
+        return [{tag: "stick", stick: true}, {tag: "trigger", stick: false}];
+    }
+
+    function test_analog_response_and_zone_apply(data) {
+        let page = createTemporaryObject(data.stick ? sticks : triggers, suite);
+        verify(page);
+        waitForRendering(page);
+        let editor = data.stick ? App.profile.nativeSticks : App.profile.nativeTriggers;
+        verify(findChild(page, "nativeAnalogSide").visible);
+        verify(!findChild(page, data.stick ? "leftStick" : "leftTrigger").visible);
+        verify(!App.profile.dirty);
+        choose(page, "nativeAnalogSide", 1);
+        number(page, "nativeCurveX0", 20);
+        number(page, "nativeCurveY1", 240);
+        choose(page, "nativeMidpointCount", 2);
+        number(page, "nativeCurveY1", 70);
+        number(page, "nativeCurveY2", 210);
+        compare(editor.nodes[0].x, 20);
+        compare(editor.nodes[3].y, 240);
+        if (data.stick) {
+            findChild(page, "nativeInvertX").moved(true);
+            findChild(page, "nativeCircular").moved(false);
+        } else {
+            verify(!findChild(page, "nativeCircular").visible);
+        }
+        choose(page, "nativeZoneLayer", 2);
+        verify(findChild(page, "nativeZoneCreateLayer").visible);
+        findChild(page, "nativeZoneCreateLayer").clicked();
+        findChild(page, "nativeAddZone").clicked();
+        number(page, "nativeZoneStart", 90);
+        number(page, "nativeZoneStop", 200);
+        if (data.stick) {
+            choose(page, "nativeZoneAngle", 1);
+            choose(page, "nativeZoneDirection", 5);
+        }
+        choose(page, "nativeFieldChoice0", 1); // B
+        findChild(page, "applyButton").clicked();
+        tryCompare(App.profile, "writing", false, 5000);
+        compare(App.profile.dirty, false);
+        let stored = Fixture.nativeAnalog(data.stick ? "stick" : "trigger", "right", 2);
+        compare(stored.response.curve.start[0], 20);
+        compare(stored.response.curve.end[1], 240);
+        compare(stored.response.curve.points[0][1], 70);
+        compare(stored.response.curve.points[1][1], 210);
+        let zones = data.stick ? stored.zones.zones : stored.zones;
+        compare(zones.length, 1);
+        compare(zones[0].start, 90);
+        compare(zones[0].stop, 200);
+        compare(zones[0].target.id, "b");
+        if (data.stick) {
+            compare(stored.response.invert_x, true);
+            compare(stored.response.circular, false);
+            compare(zones[0].dir, "up_right");
+            compare(stored.zones.angle_mode, "8way");
+        }
+        findChild(page, "saveButton").clicked();
+        tryVerify(() => Fixture.nativeSaveCount() === 1, 5000);
+        choose(page, "nativeAnalogSide", 0);
+        compare(editor.nodes[0].x, 0);
+        compare(editor.zoneNames.length, 0);
+        choose(page, "nativeAnalogSide", 1);
+        findChild(page, "nativeClearZones").clicked();
+        compare(editor.zoneNames.length, 0);
+        compare(editor.nodes[0].x, 20);
+    }
+
+    function test_analog_controls_follow_external_model_updates() {
+        let page = createTemporaryObject(sticks, suite);
+        verify(page);
+        waitForRendering(page);
+        let editor = App.profile.nativeSticks;
+        choose(page, "nativeResponsePreset", 3);
+        compare(findChild(page, "nativeResponsePreset").currentIndex, 0);
+        verify(!App.profile.dirty);
+        number(page, "nativeCurveX0", 30);
+        editor.side = 1;
+        compare(findChild(page, "nativeCurveX0").value, 0);
+        editor.side = 0;
+        compare(findChild(page, "nativeCurveX0").value, 30);
+        findChild(page, "nativeInvertY").moved(true);
+        editor.invertY = false;
+        compare(findChild(page, "nativeInvertY").checked, false);
+        editor.layer = 3;
+        verify(!editor.layerExists);
+        App.profile.nativeButtons.layer = 3;
+        App.profile.nativeButtons.createLayer();
+        verify(!findChild(page, "nativeZoneCreateLayer").visible);
+        verify(findChild(page, "nativeAddZone").enabled);
+        editor.addZone();
+        choose(page, "nativeZoneTarget", 7); // No macro exists.
+        verify(findChild(page, "nativeAnalogError").visible);
+        compare(editor.target, 0);
+        compare(findChild(page, "nativeZoneTarget").currentIndex, 0);
+    }
+
+    function test_analog_keyboard_and_wheel_keep_model_bindings() {
+        let page = createTemporaryObject(sticks, suite);
+        verify(page);
+        waitForRendering(page);
+        let spin = findChild(page, "nativeCurveX0");
+        let flickable = page.flickable;
+        let offset = spin.mapToItem(flickable.contentItem, 0, 0).y;
+        flickable.contentY = Math.max(0, offset - flickable.height / 2);
+        wait(50);
+        mouseClick(spin.contentItem);
+        keyClick(Qt.Key_A, Qt.ControlModifier);
+        keyClick(Qt.Key_3);
+        keyClick(Qt.Key_0);
+        keyClick(Qt.Key_Return);
+        compare(App.profile.nativeSticks.nodes[0].x, 30);
+        App.profile.nativeSticks.side = 1;
+        compare(spin.value, 0);
+        App.profile.nativeSticks.side = 0;
+        compare(spin.value, 30);
+        const before = flickable.contentY;
+        const where = spin.mapToItem(flickable, spin.width / 2, spin.height / 2);
+        verify(where.y > 0 && where.y < flickable.height);
+        mouseWheel(flickable, where.x, where.y, 0, 120);
+        compare(App.profile.nativeSticks.nodes[0].x, 30);
+        tryVerify(() => flickable.contentY < before, 2000);
+    }
+
+    function test_cached_analog_pages_switch_to_legacy_controls() {
+        let page = createTemporaryObject(triggers, suite);
+        verify(page);
+        waitForRendering(page);
+        verify(findChild(page, "nativeAnalogSide").visible);
+        Fixture.useLegacy();
+        tryCompare(App.profile, "loaded", true, 5000);
+        waitForRendering(page);
+        verify(findChild(page, "leftTrigger").visible);
+        verify(findChild(page, "rightTrigger").visible);
+        Fixture.useApex6();
+        tryCompare(App.profile, "loaded", true, 5000);
+        waitForRendering(page);
+        verify(findChild(page, "nativeAnalogSide").visible);
+        verify(!findChild(page, "leftTrigger").visible);
+        verify(!App.profile.dirty);
     }
 
     function test_buttons_layer_and_hold_shift_apply() {

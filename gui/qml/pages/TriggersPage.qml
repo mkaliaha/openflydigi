@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Adaptive-trigger settings held in the open profile, so no game is needed.
+// Legacy adaptive-trigger settings, or native response curves and action zones.
 
 import QtQuick
 import QtQuick.Layouts
@@ -32,7 +32,7 @@ Kirigami.ScrollablePage {
             explanation: "Pick a profile on the Controller page."
         }
 
-        // No trigger-motor controls here, deliberately. The profile blob has a
+        // The legacy views below deliberately omit trigger-motor controls. The profile blob has a
         // 29-byte trigger-vibration block at offset 154 and this pad does not
         // have the hardware for it: `GenerateControllerApex5` sets seven
         // capability flags and `IsSupportTriggerVibration` is not one of them,
@@ -41,32 +41,39 @@ Kirigami.ScrollablePage {
         // it. Trigger *haptics* do exist here -- they come out of the force
         // triggers above, via the effect vocabulary, not a separate motor.
 
+        Loader {
+            Layout.fillWidth: true
+            active: App.profile.apex6 && App.profile.loaded
+            visible: active
+            sourceComponent: Apex6AnalogEditor { editor: App.profile.nativeTriggers }
+        }
+
         FormCard.FormHeader {
-            visible: App.profile.loaded
+            visible: App.profile.loaded && !App.profile.apex6
             title: "Left trigger"
         }
 
         TriggerSide {
             objectName: "leftTrigger"
-            visible: App.profile.loaded
+            visible: App.profile.loaded && !App.profile.apex6
             side: App.profile.triggers.left
             sideName: "left"
         }
 
         FormCard.FormHeader {
-            visible: App.profile.loaded
+            visible: App.profile.loaded && !App.profile.apex6
             title: "Right trigger"
         }
 
         TriggerSide {
             objectName: "rightTrigger"
-            visible: App.profile.loaded
+            visible: App.profile.loaded && !App.profile.apex6
             side: App.profile.triggers.right
             sideName: "right"
         }
 
         FormCard.FormCard {
-            visible: App.profile.loaded
+            visible: App.profile.loaded && !App.profile.apex6
             Layout.topMargin: Kirigami.Units.largeSpacing
 
             FormCard.FormTextDelegate {

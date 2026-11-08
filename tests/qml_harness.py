@@ -12,6 +12,7 @@ ended up in the blob. `PadProbe` is that window, and nothing more.
 The pad itself is `tests.fake_pad.FakePad`, shared with the backend tests, plus
 the two commands only the desktop app asks for.
 """
+import json
 import os
 import sys
 
@@ -425,6 +426,15 @@ class Fixture(QObject):
     def nativeActions(self, layer, source):
         from flydigi.gpa6_profile import MappingConfig
         return MappingConfig(self._native.ram(5)).activators(source, layer=layer) or []
+
+    @Slot(str, str, int, result="QVariantMap")
+    def nativeAnalog(self, control, side, layer):
+        from flydigi.gpa6_profile import MappingConfig
+        config = MappingConfig(self._native.ram(5))
+        response = config.stick(side) if control == "stick" else config.trigger_curve(side)
+        zones = getattr(config, control + "_zones")(side, layer=layer)
+        # Tuples must become QVariantList values for nested QML indexing.
+        return json.loads(json.dumps(dict(response=response, zones=zones)))
 
     def _count_profile_read(self, *_args):
         self._profile_reads += 1

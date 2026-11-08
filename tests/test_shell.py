@@ -813,8 +813,8 @@ def test_apex6_pages_and_switching_back_to_apex5(qt_app):
         check("native startup reads the current slot", app.profile.cfgId == native.slot == 2)
         check("native startup loads settings and lighting", app.settings.loaded and app.lighting.loaded)
         check("native sidebar offers only wired editors",
-              window.property("drawerSections").toVariant() == ["Devices", "Controller", "Device", "Buttons", "Lighting", "Setup"])
-        for name in ("Controller", "Device", "Buttons", "Lighting"):
+              window.property("drawerSections").toVariant() == ["Devices", "Controller", "Device", "Buttons", "Sticks", "Triggers", "Lighting", "Setup"])
+        for name in ("Controller", "Device", "Buttons", "Sticks", "Triggers", "Lighting"):
             window.openSection(ALL_SECTIONS.index(name))
             pump(qt_app, rounds=5)
             check(f"native {name} page opens", window.property("openPageTitle") == name)
