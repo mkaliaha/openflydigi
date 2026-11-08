@@ -132,8 +132,21 @@ excursions and one mixed horizontal inversion trial remain documented without
 assigning a cause; the focused left-release repeat passed. Mouse output and
 precise nonlinear response remain physically unverified.
 
-Remaining configuration work includes restorable profile backups/library,
-screen support and GUI wiring. Apex 6 remains
+Restorable profile packages and a named local library now have a reusable
+backend and CLI. Packages retain mapping, lighting and motor bytes, including
+macros, gyro, zones and reserved data. Restore targets the active slot with
+compatibility checks, automatic CLI recovery copies, ordered writes, complete
+read-back and exact-state rollback. Unsupported motor-byte changes are refused;
+globals and diagnostic snapshots are outside the restore format. Thirty focused
+tests include 395 independent vendor-encoded profiles, failure/rollback and
+read-timeout coverage. All 30 backend scripts, 772 model checks and REUSE lint
+pass. Seven hardware cases cover individual/combined domains, save/reselection,
+cross-slot reuse and CLI recovery. A UUID read timeout before cleanup writing
+was recovered with a separately verified baseline restore; only unfinished
+cases resumed. Final snapshots match all four original slots and globals, with
+the original active slot restored. No new physical-output claim is made.
+
+Remaining configuration work includes screen support and GUI wiring. Apex 6 remains
 outside the legacy configuration allowlist, so Apex 5 wire paths stay separate.
 
 ## Feature status
@@ -216,13 +229,13 @@ Qt-dependent Python scripts.
 
 Current inventory:
 
-- 28 backend `tests/test_*.py` scripts;
+- 30 backend `tests/test_*.py` scripts;
 - 3 Qt-dependent Python scripts: `test_models.py`, `test_shell.py`, and
   `test_qml.py`;
 - 13 QML cases under `tests/qml/tst_*.qml`.
 
 Run the [discovered backend set](README.md#tests) rather than maintaining a
-hand-written filename list. All 28 backend scripts are hardware-free. The
+hand-written filename list. All 30 backend scripts are hardware-free. The
 documented loop continues after failures and returns nonzero if any script
 fails.
 

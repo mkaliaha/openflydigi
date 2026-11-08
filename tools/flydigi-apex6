@@ -17,6 +17,7 @@ import wave
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flydigi import device, gpa6, gpa6_config, gpa6_profile, gpa6_haptics, gpa6_macros, gpa6_gyro, identity, mapping, registry, waveform
+from flydigi import gpa6_backup
 
 
 def action_target(text):
@@ -181,6 +182,31 @@ def main():
     light.add_argument("--save", action="store_true")
     snapshot = sub.add_parser("snapshot", help="export active RAM to a new JSON file (no restore support)")
     snapshot.add_argument("output", help="new snapshot file; existing files are never overwritten")
+    backup = sub.add_parser("backup", help="export a restorable active-profile package")
+    backup.add_argument("output", help="new JSON file; existing files are never overwritten")
+    backup.add_argument("--name", help="local profile name")
+    restore = sub.add_parser("restore", help="restore a profile package to the active slot")
+    restore.add_argument("input")
+    restore.add_argument("--save", action="store_true", help="also explicitly save; writes may already persist")
+    restore.add_argument("--slot", type=int, choices=range(4), help="require this active slot (0..3); never switches slots")
+    restore.add_argument("--directory", help="library directory for the automatic recovery copy")
+    library = sub.add_parser("library", help="local named profile packages (offline except backup/restore)")
+    library.add_argument("--directory", help="defaults to $XDG_DATA_HOME/openflydigi/apex6/profiles")
+    library_sub = library.add_subparsers(dest="library_command", required=True)
+    library_sub.add_parser("list", help="list profiles and any invalid entries")
+    for command in ("show", "remove", "export", "restore"):
+        item = library_sub.add_parser(command)
+        item.add_argument("id", help="library entry ID from list")
+        if command == "export":
+            item.add_argument("output", help="new JSON file")
+        elif command == "restore":
+            item.add_argument("--save", action="store_true")
+            item.add_argument("--slot", type=int, choices=range(4), help="require this active slot; never switches slots")
+    for command in ("import", "backup"):
+        item = library_sub.add_parser(command)
+        if command == "import":
+            item.add_argument("input")
+        item.add_argument("--name", help="local profile name")
     tone = sub.add_parser("tone", help="play a quiet stereo test tone")
     tone.add_argument("--duration", type=float, default=2)
     tone.add_argument("--left", type=float, default=80, help="left frequency in Hz; 0 disables")
@@ -253,7 +279,9 @@ def main():
             parser.error("--point and --clear-points cannot be combined")
         if native and facade_write:
             parser.error("edit either exact curve coordinates or preset/deadzone/travel controls in one command")
-    if (args.command in ("tone", "play", "set-setting", "map", "timing", "slot", "save", "layer-add", "vibration-test")
+    library_restore = args.command == "library" and args.library_command == "restore"
+    if (args.command in ("tone", "play", "set-setting", "map", "timing", "slot", "save", "layer-add", "vibration-test", "restore")
+            or library_restore
             or light_write or response_write or bind_write or zone_write or vibration_write or scene_write or macro_write or gyro_write
             or ((args.command == "light" or response_command) and args.save)) and not args.experimental:
         parser.error("configuration writes and grip output require --experimental")
@@ -270,6 +298,32 @@ def main():
     source = None
     ctrl = session = None
     try:
+        profile_to_restore = None
+        if args.command in ("library", "restore"):
+            profile_library = gpa6_backup.Library(args.directory)
+            if args.command == "restore":
+                profile_to_restore = gpa6_backup.load_config(args.input)
+            else:
+                command = args.library_command
+                if command == "list":
+                    print(json.dumps(profile_library.list(), indent=2, ensure_ascii=False))
+                    return 0
+                if command == "show":
+                    print(gpa6_backup.pack_config(profile_library.get(args.id)).decode(), end="")
+                    return 0
+                if command == "import":
+                    print(json.dumps({"id": profile_library.import_file(args.input, name=args.name)}))
+                    return 0
+                if command == "export":
+                    profile_library.export(args.id, args.output)
+                    print(json.dumps({"exported": args.output}))
+                    return 0
+                if command == "remove":
+                    profile_library.remove(args.id)
+                    print(json.dumps({"removed": args.id}))
+                    return 0
+                if command == "restore":
+                    profile_to_restore = profile_library.get(args.id)
         macro_steps = None
         if args.command == "macro":
             if args.steps_file is not None:
@@ -287,8 +341,8 @@ def main():
                     step = {"delay": int(delay), "event": mapping.MACRO_PRESS if event == "press" else mapping.MACRO_RELEASE}
                     step["target" if target.startswith("{") else "key"] = json.loads(target) if target.startswith("{") else target
                     macro_steps.append(step)
-        if args.command == "snapshot" and os.path.lexists(args.output):
-            raise FileExistsError(f"snapshot already exists: {args.output}")
+        if args.command in ("snapshot", "backup") and os.path.lexists(args.output):
+            raise FileExistsError(f"output already exists: {args.output}")
         channels = 2
         if args.command == "play":
             source = wave.open(args.wav, "rb")
@@ -301,6 +355,25 @@ def main():
         ctrl = open_selected(args.device)
         protocol = gpa6.Protocol(ctrl)
         uid = protocol.uid()
+        if args.command == "backup" or (args.command == "library" and args.library_command == "backup"):
+            config = gpa6_backup.read_config(ctrl, name=args.name, expected_uid=uid)
+            if args.command == "backup":
+                gpa6_backup.export_config(args.output, config)
+                print(json.dumps({"exported": args.output, **config.describe()}, indent=2, ensure_ascii=False))
+            else:
+                print(json.dumps({"id": profile_library.add(config), **config.describe()}, indent=2, ensure_ascii=False))
+            return 0
+        if profile_to_restore is not None:
+            recovery = []
+            def backup_before(config):
+                entry_id = profile_library.add(config, name=f"Before restore — profile {config.cfg_id + 1}")
+                recovery.append(entry_id)
+                print(f"Recovery profile: {profile_library.directory / (entry_id + '.json')}", file=sys.stderr, flush=True)
+            result = gpa6_backup.write_config(ctrl, profile_to_restore, save=args.save,
+                expected_uid=uid, expected_slot=args.slot, before_write=backup_before)
+            print(json.dumps({"restored_slot": result.cfg_id, "name": result.name,
+                              "recovery_ids": recovery, "saved": args.save}, indent=2, ensure_ascii=False))
+            return 0
         if args.command == "gyro":
             def edit_gyro(data):
                 config = gpa6_profile.MappingConfig(data)

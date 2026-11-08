@@ -16,7 +16,7 @@ application adds PySide6, Qt, Kirigami, and Kirigami Addons.
 |---|---|---|---|
 | Flydigi Apex 5 | Hardware-validated | All controller features, adaptive triggers, display, game routes, and both virtual-DualSense relays | Display uploads require a wired connection. Steam Input must be disabled for virtual-DualSense games. |
 | Flydigi Vader 5 Pro | Experimental, partially implemented | Identity, profiles, buttons, sticks, gyro, vibration, lighting, settings, the v3.2 macro-store implementation, and a derived factory profile | No Vader 5 has been tested. It has trigger motors rather than force triggers and has no display. The trigger-motor editor is not built. The v3.2 macro store is unverified on hardware. The DualSense relay, evdev discovery, permissions, and SDL ignore identifier are not validated end to end. |
-| Flydigi Apex 6 / Apex 6 Pro | Experimental; Pro partly verified over receiver and direct USB | SKU/UUID/capabilities, active-RAM snapshots, CLI global settings, button remapping, press timings, lighting, profile selection/saving, stick and trigger response curves, macro editing, native vibration and trigger scenes; experimental grip waveforms and USB DualSense relay | Tested on Pro firmware 9.0.6.8; selected stick/trigger response effects are physically verified through evdev. GUI editing, snapshot restoration, adaptive-trigger translation and motion remain unavailable. Grip cleanup follows native best-effort mode replay; exact live-mode restoration is unverified, although ordinary rumble worked afterward. Some setting effects and the complete DualSense relay remain unverified. |
+| Flydigi Apex 6 / Apex 6 Pro | Experimental; Pro partly verified over receiver and direct USB | SKU/UUID/capabilities, active-RAM snapshots, CLI global settings, button remapping, press timings, lighting, profile selection/saving, stick and trigger response curves, macros, gyro configuration, native vibration and trigger scenes, restorable profile packages and local library; experimental grip waveforms and USB DualSense relay | Tested on Pro firmware 9.0.6.8; selected stick/trigger response effects are physically verified through evdev. GUI editing, diagnostic-snapshot restoration, adaptive-trigger translation and relay motion remain unavailable. Grip cleanup follows native best-effort mode replay; exact live-mode restoration is unverified, although ordinary rumble worked afterward. Some setting effects and the complete DualSense relay remain unverified. |
 | Flydigi CD2 charging dock | Hardware-validated with one noted gap | Identity, four settings, eight generated lighting effects, and picture/GIF sampling onto 162 LEDs; nickname read/write is implemented | Nickname writing is not hardware-verified. The dock is a separate USB device and uses its own selector. |
 | Other Flydigi controllers and accessories | Not driven | Devices may be discovered and identified when they use the current transport | Normal configuration commands, including nickname writes, refuse unsupported models. Developer bench tools explicitly documented as ungated can send raw commands. |
 
@@ -333,7 +333,7 @@ single firmware mode byte. Uploads therefore take several seconds.
 | `tools/flydigi-ds5` | Virtual DualSense over uhid |
 | `tools/flydigi-ds5-usbip` | Virtual USB DualSense with optional haptic audio |
 | `tools/flydigi-haptics` | Apex-specific bridge from a real DualSense audio sink to grip motors |
-| `tools/flydigi-apex6` | Experimental Apex 6 settings, profile editing, snapshots and grip-waveform playback |
+| `tools/flydigi-apex6` | Experimental Apex 6 settings, profile editing, backup/restore, local library, snapshots and grip-waveform playback |
 | `tools/flydigi_cmd.py` | Ungated manual vendor-command bench tool; raw node selection only |
 
 Developer generators, simulators, and hardware probes also live under `tools/`.
@@ -600,6 +600,51 @@ and Pro 9.0.6.8 hardware write/read-back/restoration checks. Guided physical che
 also covered grip output, trigger binding, selected scene travel/frequency and
 mode transitions, with original settings restored. GUI wiring remains pending. See the
 [native feedback findings](docs/findings-apex6.md#native-vibration-and-trigger-scenes).
+
+Restorable profile packages include mapping (with macros, layers, zones, gyro and
+curves), lighting and the complete motor block. The reusable
+`gpa6_backup.ProfileConfig`, `pack_config`/`unpack_config` and
+`read_config`/`write_config` interfaces follow the existing packed-profile pattern;
+GPA6 writes remain separate from the legacy backend.
+
+~~~bash
+tools/flydigi-apex6 --device uid:YOUR_UUID backup profile.json --name "My profile"
+tools/flydigi-apex6 --experimental --device uid:YOUR_UUID restore profile.json --slot 0 --save
+tools/flydigi-apex6 --device uid:YOUR_UUID library backup --name "Game preset"
+tools/flydigi-apex6 library list
+tools/flydigi-apex6 library show ENTRY_ID
+tools/flydigi-apex6 library export ENTRY_ID exported.json
+tools/flydigi-apex6 library import exported.json --name "Another copy"
+tools/flydigi-apex6 --experimental --device uid:YOUR_UUID library restore ENTRY_ID --slot 0
+tools/flydigi-apex6 library remove ENTRY_ID
+~~~
+
+`restore` always targets the **active slot**. Optional `--slot 0..3` checks that
+selection; it does not switch profiles. Source UUID/slot are provenance, so a
+package can be reused in another slot or compatible controller. Restore requires
+the same SKU, format versions and profile-related capabilities. Globals such as
+sleep time and report rate are outside profile packages and remain unchanged.
+The OpenFlydigi JSON format is distinct from diagnostic snapshots, legacy binary
+backups and vendor browser exports; those files are refused here.
+
+The library stores named, immutable entries under
+`$XDG_DATA_HOME/openflydigi/apex6/profiles` (default `~/.local/share`). Use
+`library --directory DIR ...` to choose another location. Every CLI restore that
+changes data first saves the destination profile as a recovery entry, printing
+its path even if a later write fails. `restore --directory DIR` controls that
+recovery location. Imports and exports preserve raw bytes; existing export files
+are never overwritten. Offline list/show/import/export/remove need no controller.
+
+Restoration validates the whole package and all transitions before writing,
+quiesces affected trigger modes, writes mapping/lighting, then applies saved
+trigger modes through persistent area-0 commands. It checks UUID, active slot,
+formats and every RAM block between steps. Failures roll back only a complete
+state still matching this operation; concurrent/partial changes are reported
+without overwriting them. Grip-mode/reserved motor bytes have no verified
+persistent write path, so differences in those bytes are refused. Unchanged
+opaque data is retained. A4 edits may persist without `--save`; explicit save
+failures report uncertainty without reverting the already applied RAM. See
+[backup findings](docs/findings-apex6.md#restorable-profile-packages-and-library).
 
 `snapshot` reads global settings and the active slot's mapping, lighting and
 motor RAM into a new JSON file. It works with rotary and linear grips and needs
