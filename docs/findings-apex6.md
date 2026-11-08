@@ -247,6 +247,113 @@ traces and per-phase snapshots under `physical-button-gate/` and the earlier
 `physical*` directories. Keep failed/ambiguous observations as recorded instead
 of treating every diagnostic phase as a pass.
 
+## Screen upload compatibility with Apex 5
+
+On 2026-11-08 the locally pinned xHaptics Engine **5.0.1.4** and its bundled
+`FirmwareConsole.exe`/`FirmwareLibrary.dll` were inspected offline. This confirms
+the same screen-resource bootloader workflow as Apex 5. That inspection was
+offline; subsequent implementation and hardware results are recorded below.
+
+- The captured web encoder produces the same 160×80, byte-swapped RGB565 LVGL
+  frames: four header bytes and 25,600 pixel bytes. Image conversion, cropping
+  and previews can share the existing implementation.
+- The native screen job enters upgrade mode and invokes `FirmwareConsole.exe`
+  with `--upgrade_type 2` (`CUSTOM_PIC`), screen chip module 4, picture type/count,
+  frame interval and restore-default metadata. The console selects
+  `OtaNewUpdater` for the FRK chip family. Its constructor explicitly handles
+  `K5FRK` and `K6FRK` together; custom-picture mode supplies only picture data,
+  independently of the program/system-image offsets.
+- The serial bootloader identity is again **FFAA:5555**, at **921600 8N1**, with
+  DTR/RTS enabled. Picture base/version requests are opcodes 11/10, followed by
+  4,096-byte sector erases (3), up-to-55-byte writes (5), and picture reset (12)
+  carrying total byte count and the same checksum algorithm. The base address
+  comes from the chip.
+
+The shared uploader retains the Apex 5 behavior and handles these differences
+for the Apex 6 route:
+
+1. Upgrade entry is still command **31 / 0x1f**, payload **4**, but the engine
+   uses GPA6 framing: a 32-byte report with checksum at byte 31. Offline Unicorn
+   execution of the native encoder at RVA `0x218a90` exactly matches
+   `gpa6.frame(31, b"\x04")`. The existing `screen_ota.enter_upgrade_mode` uses
+   the legacy report-ID/envelope and checksum placement instead.
+2. The bundled updater encodes the actual final write length. For one 25,604-byte
+   frame the last payload is 29 bytes, with packet/data length fields **38/29**;
+   our Apex 5 path retains **64/55** even for this short tail. This is a newer
+   uploader difference, not proof that Apex 6 firmware rejects the older form.
+3. The newer updater validates result codes and echoed write address/length and
+   has bounded command retries. The opt-in route now implements these checks,
+   buffers fragmented/coalesced replies and retries only identical commands.
+   A missing reset ACK reports uncertain completion without repeating reset.
+
+Separately, the LCD interface uses GPA6 `0xAC/0xAD` and reports
+`defaultAnimationEnabled` and `statusBarResident`; no brightness field appears
+in this interface. The captured web page exposes only the animation-display
+toggle and describes disabling it as stopping playback while retaining the
+material and settings. Its precise physical effect on Apex 6 is unverified;
+do not infer it from Apex 5's misleading `OffScreen` name or measured behavior.
+**User decision, 2026-11-08:** retain these findings as documentation only.
+Do not implement Apex 6 backend, CLI or GUI controls for these flags or require
+them for screen upload support.
+
+`flydigi/gpa6_screen.py` now exposes `upload_picture` using the existing frame
+codec and `screen_ota` transport. `tools/flydigi-screen show/animate/send` accept
+`--experimental-apex6` with an explicit device selector and wired identity
+check. The handoff from HID to serial is bound to the physical USB port and
+checked again on the open descriptor. Recovery requires an explicit FFAA:5555
+`--port` instead of a UUID; bootloader mode has no readable controller UUID.
+No arbitrary tty or different-controller fallback is used. Inputs are checked
+before upgrade entry: 1–150 exact frames and 1–2500 ms intervals. Interval
+rounding matches the web editor's hundredths-of-a-second encoding. The legacy
+serial route also now rejects more than 255 frames before entry.
+
+Thirty focused software tests cover four independently generated complete
+vendor packet sequences (1, 2, 5 and 150 frames; 74,558 packets), invalid input,
+model/UUID/wired/USB-path checks, short tails, result/echo failures, bounded
+retries, fragmented replies, disconnects and explicit restart. Reproduce the
+fixture with `tools/gen-apex6-screen-fixtures` and a .NET 10 SDK plus the pinned
+extracted assemblies. The generator invokes the vendor packet builder on an
+uninitialized object without opening hardware or importing our protocol code.
+Normal tests need neither vendor binaries nor .NET. All 31 backend scripts,
+772 GUI model checks and REUSE lint pass. Local-socket tests required host
+access; model checks used a writable cache directory. No new GUI integration
+or Apex 5 hardware run is claimed.
+
+Hardware acceptance on **Apex 6 Pro SKU 150, firmware 9.0.6.8, wired USB**:
+
+| Case | Result |
+|---|---|
+| One-frame PNG through CLI `show` | User confirmed readable text, red on the left and green on the right. 7 erases and 466 writes; reset ACK in 7.3 s including upgrade entry. |
+| Two-frame GIF through CLI `animate`, 500 ms interval | User confirmed both numbered frames, correct colors and roughly two frame changes per second. 13 erases and 932 writes; reset ACK in 9.1 s including entry. |
+| Official stock resource through CLI `send --restore-default` | All 137 frames / 3,507,748 bytes sent; 857 erases and 63,778 writes, reset ACK in 245.7 s including entry. User confirmed the normal stock animation returned. |
+
+All three used the chip-returned base **0x002ff000**, with no command retries.
+The short final writes were accepted with their actual lengths (29, 3 and 13
+bytes respectively). The stock transfer's reconstructed transmitted bytes
+match the downloaded asset exactly. After each restart, the same UUID, format
+versions, active slot, all slot/global CRC16s and four complete active RAM blocks
+matched the original snapshots. The first animation post-check ran after a
+fixed 20 s and found no controller; a later read-only check resolved the same
+UUID and matched all configuration bytes. The local harness now waits boundedly
+for reconnection rather than treating 20 s as sufficient. All sessions exited;
+the stock animation is restored. Screen flash itself has no read-back API, so
+the display claims combine acknowledged transfers with the user's observations.
+Interrupted-upload recovery remains software-tested only.
+
+The captured official page maps both SKU 149 and 150 to
+[this stock animation](https://space_station.flydigi.com/assets/default_screen_image_149-CKZaevgU.bin),
+at 100 ms per frame. Downloaded SHA-256:
+`f755eb27942f028ac1d4b52d300005282f253768278718cc1be3e563d7178b3e`.
+
+Local evidence: `work/apex6-screen-investigation-20261108/` contains extracted
+assemblies, decompiled sources, native disassembly,
+`upgrade-packet-comparison.json`, serial captures, before/after snapshots and
+`hardware-results.json`. The bundled console SHA-256 is
+`d0c8cae1569f434e6b67a9555e08da520c8a6c7d750cd47092174ee4ea761b80`;
+the extracted library SHA-256 is
+`6849f125abb3e07eced6bc1be450ecc1b21b7eb6b6930790cd849246d090a135`.
+Vendor implementation files remain ignored and must not be committed.
+
 ## Evidence and versions
 
 | Component inspected | Version | What it establishes |

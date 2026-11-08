@@ -146,7 +146,18 @@ was recovered with a separately verified baseline restore; only unfinished
 cases resumed. Final snapshots match all four original slots and globals, with
 the original active slot restored. No new physical-output claim is made.
 
-Remaining configuration work includes screen support and GUI wiring. Apex 6 remains
+Screen image/GIF upload now reuses the existing codec and serial transport,
+with GPA6 upgrade entry and an explicit CLI opt-in. Thirty focused tests cover
+independent vendor packet fixtures, identity/wired/USB-port selection, ACKs,
+partial writes, bounded retries and interrupted-upload recovery. All 31 backend
+scripts and 772 GUI model checks pass. LCD animation/status flags remain
+documentation only by user choice. On Pro 9.0.6.8, wired CLI uploads of a still,
+two-frame animation and the 137-frame official stock resource passed, with
+user-confirmed display output. The stock animation is restored and final
+identity/profile/configuration snapshots match the baseline exactly. Recovery
+after an interrupted transfer is software-tested only; GUI wiring is pending.
+
+Remaining configuration work includes GUI wiring. Apex 6 remains
 outside the legacy configuration allowlist, so Apex 5 wire paths stay separate.
 
 ## Feature status
@@ -229,13 +240,13 @@ Qt-dependent Python scripts.
 
 Current inventory:
 
-- 30 backend `tests/test_*.py` scripts;
+- 31 backend `tests/test_*.py` scripts;
 - 3 Qt-dependent Python scripts: `test_models.py`, `test_shell.py`, and
   `test_qml.py`;
 - 13 QML cases under `tests/qml/tst_*.qml`.
 
 Run the [discovered backend set](README.md#tests) rather than maintaining a
-hand-written filename list. All 30 backend scripts are hardware-free. The
+hand-written filename list. All 31 backend scripts are hardware-free. The
 documented loop continues after failures and returns nonzero if any script
 fails.
 

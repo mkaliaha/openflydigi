@@ -562,9 +562,10 @@ uploads, 9623 packets completed without errors and every varied field was echoed
 never changed**. Command 211 does commit metadata (below), and these uploads left the status-bar
 flag enabled; command `19` sub `8` restores it (§8c).
 
-Why Flydigi split the two screen models — the k5 on serial, every other screen pad on HID — is
+Why the older desktop release split its screen models — k5 on serial, other supported screen pads on HID — is
 unexplained: the k2 has the *same* separate `ChipScreen`/`ChipType.Freq`, so "separate screen chip"
-is not the discriminator.
+is not the discriminator. The newer Apex 6 engine uses serial too; see the
+[GPA6 screen findings](docs/findings-apex6.md#screen-upload-compatibility-with-apex-5).
 
 **211 is a commit, not punctuation.** 208 followed by 211 commits picture metadata for a frame that
 was never sent; on a wired Apex 5 that destroys a stored custom image and the screen falls back to
@@ -605,7 +606,7 @@ so a pad counting bytes rather than reading the offset field still lands in the 
 Flydigi's own XInput branch sizes it `32 - 6 = 26`.
 
 **Space Station never sends any of this to an Apex 5.** `upload_pic2screen` in the Electron layer
-branches on the device code: `k5` gets `SwitchUsb` and the serial route of §8d, every other pad
+branches on the device code: `k5` gets `SwitchUsb` and the serial route of §8d, other pads supported by that release
 takes the HID path above. `ControllerSdk.UploadPicImpl` gates only on `IsSupportScreen`, so the SDK
 *would* send 208..211 to a k5 if asked — nothing in their UI asks.
 
@@ -690,13 +691,14 @@ itself and coming back on the HID bus.
 | 14 frames | 88 erases + 6518 writes = 6606 exchanges, **5 m 46 s** (predicted 346 s, measured 346 s) |
 | The 255-frame ceiling | about **1.8 hours** |
 
-It is slow because the unit is 55 bytes and every one waits for its reply; Space Station runs the
-same arithmetic.
+These are measurements of the legacy uploader, including its 50 ms quiet-period
+read after each reply. The newer Apex 6 route parses complete ACKs immediately;
+do not extrapolate this timing to that route.
 
-**The 255-frame ceiling is not enforced on this path.** `screen_ota.upload` sends
-`len(frames) & 0xFF` as the picture count, so a 300-frame set writes all 300 frames of data while
-telling the chip there are 44. The check exists only in the dead HID path (`screen.upload` raises
-above 255) and in the GUI (`MAX_FRAMES = 255`, which truncates and says so).
+**The 255-frame ceiling is now enforced before serial upgrade entry.** The
+previous count-wraparound gap was fixed on 2026-11-08. Backend and CLI reject
+excess frames; the GUI truncates with a warning. The opt-in Apex 6 route uses
+the vendor editor's tighter 150-frame limit.
 
 **Measured behavior: command 31 adds the screen tty without removing the HID nodes.** With the
 bootloader tty active during an upload, the pad's `37d7:2501` hidraw nodes remained enumerated and

@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Drive the Apex 5's 160x80 screen.
+"""Drive Apex 5 and experimental Apex 6 160x80 screens.
 
 Offline, no pad needed (needs Pillow except for `check`):
 
@@ -23,11 +23,15 @@ On the pad, in the order to try them:
     tools/flydigi-screen off / on         # dark when idle, or keep the picture up
     tools/flydigi-screen statusbar on|off
 
+Apex 6 image/GIF uploads use the same commands with --experimental-apex6 and
+an explicit --device selector. A wired connection is required. Display-setting
+and diagnostic commands remain Apex 5 only.
+
 **`show`, `animate` and `send` take Space Station's own route by default**: HID
 command 31 switches the screen chip into upgrade mode, the pad comes back as a
 serial device, and the picture goes over a UART OTA. `--via hid` sends the SDK's
-picture family instead -- which every *other* screen pad uses, and which on an
-Apex 5 acknowledges every packet and changes nothing.
+picture family instead, which on an Apex 5 acknowledges every packet and
+changes nothing. Apex 6 also uses serial upload, through its explicit route.
 
 After a successful upload the screen syncs for about 15 seconds and the pad
 **reboots itself**; do not cut power during that. If an upload fails, the pad is
@@ -47,7 +51,7 @@ import time
 
 sys.path.insert(0, __file__.rsplit("/", 2)[0])
 
-from flydigi import device, identity, motion, registry, screen, screen_ota
+from flydigi import device, gpa6, gpa6_screen, identity, motion, registry, screen, screen_ota
 
 
 def open_pad(args):
@@ -286,6 +290,9 @@ def do_test(args):
 
 
 def upload(args, frames, interval):
+    if getattr(args, "experimental_apex6", False):
+        return upload_apex6(args, frames, interval)
+    frames = screen_ota.validate_frames(frames, interval)
     print(f"{len(frames)} frame(s), {len(frames) * screen.FRAME_LEN} bytes, "
           f"{interval} ms per frame")
     if args.via == "hid":
@@ -293,11 +300,47 @@ def upload(args, frames, interval):
     return upload_over_serial(args, frames, interval)
 
 
+def upload_apex6(args, frames, interval):
+    """Shared image preparation with UUID-bound GPA6 entry and serial upload."""
+    if args.via != "serial" or args.i_know:
+        raise ValueError("Apex 6 requires serial upload over a verified wired connection")
+    if bool(args.device) == bool(args.port):
+        raise ValueError("Apex 6 requires either --device SELECTOR or an explicit recovery --port")
+    frames = gpa6_screen.validate_frames(frames, interval)
+    print(f"{len(frames)} frame(s), {len(frames) * screen.FRAME_LEN} bytes, {interval} ms per frame")
+    print("This replaces the stored screen image; image read-back/automatic rollback is unavailable.")
+    ctrl = None
+    try:
+        uid = None
+        if args.device:
+            selector = args.device
+            if registry._node_selector(selector) is None:
+                entry = registry.find(selector, registry.KIND_PAD, deep=True)
+                uid = entry.get("uid")
+                if entry.get("code") != "k6" or not uid:
+                    raise identity.WrongDevice("selected controller is not an identified Apex 6")
+                selector = entry["path"]
+            ctrl = registry.open_pad(selector)
+            identity.require(ctrl, "k6")
+            actual_uid = gpa6.Protocol(ctrl).uid()
+            if uid is not None and uid != actual_uid:
+                raise identity.WrongDevice("selected UUID changed while opening the controller")
+            uid = actual_uid
+        base = gpa6_screen.upload_picture(ctrl, frames, interval,
+            restore_default=args.restore_default, progress=report_progress,
+            expected_uid=uid, port=args.port)
+    finally:
+        if ctrl is not None:
+            ctrl.close()
+    print(f"Picture reset acknowledged at {base:#010x}. Allow the screen to sync and the controller "
+          "to restart before disconnecting it (about 15 seconds on Apex 5).")
+    return 0
+
+
 def upload_over_hid(args, frames, interval):
     """The SDK's picture family. Inert on an Apex 5 -- see flydigi/screen.py.
 
-    Kept because it is the path every *other* screen pad uses, and because the
-    negative result is only meaningful if the code that produced it survives.
+    Kept to preserve the negative result and the legacy SDK protocol probe.
     """
     period = screen.period_from_interval(interval)
     print(f"over HID, period {period}. On an Apex 5 this ACKs every packet and "
@@ -374,16 +417,18 @@ def do_show(args):
 
 
 def do_animate(args):
-    frames, interval = frames_from_image(args.image, args.mode)
-    if args.interval:
+    limit = gpa6_screen.MAX_FRAMES + 1 if args.experimental_apex6 else 256
+    frames, interval = frames_from_image(args.image, args.mode, limit=limit)
+    if args.interval is not None:
         interval = args.interval
     return upload(args, frames, interval)
 
 
 def do_send(args):
     """Upload a .bin as it stands -- Flydigi's own default images included."""
-    frames = screen.split_frames(open(args.file, "rb").read())
-    return upload(args, frames, args.interval or 100)
+    with open(args.file, "rb") as stream:
+        frames = screen.split_frames(stream.read())
+    return upload(args, frames, 100 if args.interval is None else args.interval)
 
 
 def main():
@@ -412,6 +457,8 @@ def main():
                               "strands it until it is power-cycled")
     sending.add_argument("--restore-default", action="store_true",
                          help="tell the screen chip this is the factory image")
+    sending.add_argument("--experimental-apex6", action="store_true",
+                         help="upload to a wired Apex 6 using --device, or recover with --port")
     sending.add_argument("--dialect", choices=sorted(screen.DIALECTS),
                          default=screen.DEFAULT_DIALECT,
                          help="--via hid only: packet envelope, as reported by `probe`")
@@ -477,7 +524,15 @@ def main():
     p.set_defaults(run=do_send)
 
     args = parser.parse_args()
-    return args.run(args)
+    try:
+        return args.run(args)
+    except (ValueError, OSError, screen.ScreenError, screen_ota.OtaError,
+            identity.WrongDevice, device.DeviceNotFound, device.DeviceBusy) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        if getattr(args, "experimental_apex6", False):
+            print("If the screen is already in upgrade mode, retry the complete image with "
+                  "--experimental-apex6 --port /dev/ttyACM…; otherwise reconnect by cable.", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

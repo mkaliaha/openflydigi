@@ -2,14 +2,15 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Writing pictures to the Apex 5's screen, the way Space Station does it.
+"""Shared picture-resource serial transport for Apex 5 and Apex 6 screens.
 
 **This is the path that works on a k5**, and the HID picture family in
 `screen.py` is not -- see PROTOCOL.md §8b. That one ACKs every packet, echoes
 every field, and never changes the display, because on this pad the panel is
 driven by a separate Freq chip that the main chip does not forward to. Space
-Station knows: `upload_pic2screen` branches `deviceCode == "k5"` to here and
-sends every other screen pad down the HID route.
+Station's older `upload_pic2screen` branches `deviceCode == "k5"` to here.
+The newer Apex 6 engine also uses this transport, with GPA6-specific upgrade
+entry in `gpa6_screen.py` and `strict=True` for its newer packet/ACK behavior.
 
 The shape of it, traced through all four of their layers:
 
@@ -35,6 +36,7 @@ That is the argument for this one operation. It does not extend to flashing
 anything else, and `enter_upgrade_mode` deliberately takes no chip argument.
 """
 import glob
+import math
 import os
 import select
 import struct
@@ -177,6 +179,26 @@ def find_port(vid=USB_VID, pid=USB_PID):
     return None
 
 
+def find_ports(*, usb_root=None):
+    """Bootloader ttys, optionally restricted to one physical USB port."""
+    from . import evdev
+    found = []
+    for path in sorted(glob.glob("/sys/class/tty/ttyACM*") + glob.glob("/sys/class/tty/ttyUSB*")):
+        root = evdev.usb_device(os.path.join(path, "device"))
+        if root is None or (usb_root is not None and root != usb_root):
+            continue
+        try:
+            with open(os.path.join(root, "idVendor")) as stream:
+                vid = int(stream.read().strip(), 16)
+            with open(os.path.join(root, "idProduct")) as stream:
+                pid = int(stream.read().strip(), 16)
+        except (OSError, ValueError):
+            continue
+        if (vid, pid) == (USB_VID, USB_PID):
+            found.append("/dev/" + os.path.basename(path))
+    return found
+
+
 def wait_for_port(timeout=PORT_TIMEOUT, poll=0.5, vid=USB_VID, pid=USB_PID):
     deadline = time.monotonic() + timeout
     while True:
@@ -205,11 +227,25 @@ class OtaLink:
     TIOCM_DTR = 0x002
     TIOCM_RTS = 0x004
 
-    def __init__(self, path):
+    def __init__(self, path, *, usb_root=None):
         import fcntl
         import termios
         self.path = path
         self.fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if usb_root is not None:
+                from . import evdev
+                node = os.fstat(self.fd).st_rdev
+                root = evdev.usb_device(f"/sys/dev/char/{os.major(node)}:{os.minor(node)}/device")
+                if root != usb_root or os.path.realpath(path) not in find_ports(usb_root=root):
+                    raise OtaError("screen bootloader changed before opening its serial port")
+            self._configure(termios, fcntl)
+        except BaseException:
+            self.close()
+            raise
+
+    def _configure(self, termios, fcntl):
         attrs = termios.tcgetattr(self.fd)
         speed = getattr(termios, BAUD_ATTR)
         attrs[0] = 0                                   # iflag: no translation
@@ -238,7 +274,19 @@ class OtaLink:
         self.close()
 
     def write(self, data):
-        os.write(self.fd, data)
+        pending = memoryview(data)
+        deadline = time.monotonic() + REPLY_TIMEOUT
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([], [self.fd], [], remaining)[1]:
+                raise OtaError("screen serial write timed out")
+            try:
+                written = os.write(self.fd, pending)
+            except BlockingIOError:
+                continue
+            if written <= 0:
+                raise OtaError("screen serial port stopped accepting data")
+            pending = pending[written:]
 
     def read_reply(self, timeout=REPLY_TIMEOUT):
         """One reply, or None on timeout.
@@ -265,6 +313,25 @@ class OtaLink:
                 continue
             return buf
         return None
+
+    def read_chunk(self, timeout=REPLY_TIMEOUT):
+        """Read available bytes; the newer protocol parser assembles replies.
+
+        Unlike the legacy quiet-period reader, this does not add 50 ms to every
+        acknowledged write in a multi-megabyte animation.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([self.fd], [], [], remaining)[0]:
+                return None
+            try:
+                chunk = os.read(self.fd, 64)
+            except BlockingIOError:
+                continue
+            if not chunk:
+                raise OtaError("screen serial port disconnected")
+            return chunk
 
 
 def build(opcode, payload=b""):
@@ -296,18 +363,87 @@ def frame_rate(interval_ms):
     return max(1, min(255, int(round(interval_ms / 10.0))))
 
 
-def upload(link, frames, interval_ms=100, restore_default=False, progress=None):
+def validate_frames(frames, interval_ms=100, *, max_frames=255):
+    """Freeze and validate picture resources before any device mutation."""
+    if isinstance(frames, (bytes, bytearray, memoryview)):
+        raise OtaError("provide a sequence of encoded screen frames")
+    result = []
+    for frame in frames:
+        if len(result) >= max_frames:
+            raise OtaError(f"screen upload supports at most {max_frames} frames")
+        if not isinstance(frame, (bytes, bytearray, memoryview)):
+            raise OtaError("screen frames must be encoded bytes")
+        frame = bytes(frame)
+        if len(frame) != screen.FRAME_LEN or frame[:4] != screen.frame_header():
+            raise OtaError("screen frames must be 160x80 RGB565 LVGL images")
+        result.append(frame)
+    if not result:
+        raise OtaError("nothing to upload")
+    if (isinstance(interval_ms, bool) or not isinstance(interval_ms, (int, float))
+            or not math.isfinite(interval_ms) or interval_ms <= 0):
+        raise OtaError("frame interval must be finite and positive")
+    return tuple(result)
+
+
+def _exchange_checked(link, opcode, payload, *, retries=3):
+    """5.0.1.4 acknowledgement checks and bounded identical-command retries."""
+    length = 3 + len(payload) if opcode == OP_WRITE else LENGTH_FIELD[opcode]
+    packet = bytes([opcode]) + struct.pack("<H", length) + payload
+    reply_sizes = {OP_PIC_GET_BASE: 8, OP_PIC_GET_VERSION: 8,
+                   OP_ERASE: 8, OP_WRITE: 10, OP_PIC_RESET: 2}
+    read = getattr(link, "read_chunk", link.read_reply)
+    for attempt in range(retries + 1):
+        link.write(packet)
+        deadline = time.monotonic() + 3.0
+        buffered = b""
+        # Wrong/stale replies never advance the transfer or extend its deadline.
+        for _ in range(32):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            reply = read(timeout=remaining)
+            if not reply:
+                break
+            buffered += reply
+            while len(buffered) >= 2:
+                result, got = buffered[:2]
+                if got not in reply_sizes:
+                    buffered = buffered[1:]
+                    continue
+                if got == opcode and result != 0:
+                    raise OtaError(f"screen opcode {opcode}: device result {result}")
+                size = 2 if result else reply_sizes[got]
+                if len(buffered) < size:
+                    break
+                reply, buffered = buffered[:size], buffered[size:]
+                if got != opcode:
+                    continue
+                body = reply[4:] if size >= 4 else b""
+                if opcode == OP_ERASE and body[:4] != payload[:4]:
+                    continue
+                if opcode == OP_WRITE and body[:6] != payload[:6]:
+                    continue
+                return result, body
+    if opcode == OP_PIC_RESET:
+        raise OtaError("screen reset acknowledgement missing; completion is uncertain")
+    raise OtaError(f"no matching screen acknowledgement for opcode {opcode} after {retries + 1} attempts")
+
+
+def upload(link, frames, interval_ms=100, restore_default=False, progress=None, *, strict=False):
     """Write a picture set over an open link. Returns the base address used.
 
     The sequence is `OtaNewUpdater`'s, flattened from its 300 ms timer into
     straight line code -- every step here waits for the reply that step's state
     transition waited for.
     """
+    frames = validate_frames(frames, interval_ms, max_frames=150 if strict else 255)
+    if strict and not 1 <= interval_ms <= 2500:
+        raise OtaError("Apex 6 frame interval must be 1..2500 ms")
     data = screen.join_frames(frames)
-    if not data:
-        raise OtaError("nothing to upload")
 
     def exchange(opcode, payload=b"", expect=None):
+        if strict:
+            return _exchange_checked(link, opcode, payload)
         link.write(build(opcode, payload))
         result, got, body = parse(link.read_reply())
         if got is None:
@@ -319,12 +455,17 @@ def upload(link, frames, interval_ms=100, restore_default=False, progress=None):
     _result, body = exchange(OP_PIC_GET_BASE, bytes([
         picture_type(len(frames)),
         len(frames) & 0xFF,
-        frame_rate(interval_ms),
+        max(1, int((interval_ms + 5) // 10)) if strict else frame_rate(interval_ms),
         1 if restore_default else 0,
     ]), expect=OP_PIC_GET_BASE)
     if len(body) < 4:
         raise OtaError("the pad did not return a picture base address")
     base = struct.unpack("<I", body[:4])[0]
+    if strict:
+        erase_size = ((len(data) + ERASE_BLOCK - 1) // ERASE_BLOCK) * ERASE_BLOCK
+        if base % ERASE_BLOCK or base + erase_size > 0x100000000:
+            raise OtaError("screen returned an unaligned or overflowing picture address")
+        time.sleep(0.2)  # The native updater settles after the base-address reply.
 
     exchange(OP_PIC_GET_VERSION, expect=OP_PIC_GET_VERSION)
 
@@ -343,17 +484,20 @@ def upload(link, frames, interval_ms=100, restore_default=False, progress=None):
     for index in range(writes):
         offset = index * WRITE_CHUNK
         chunk = data[offset:offset + WRITE_CHUNK]
-        # The inner length stays 55 even when the tail is shorter, and the
-        # packet is simply short. Flydigi's writer does the same.
+        # Preserve the old Apex 5 writer's 55-byte declaration; the newer
+        # engine declares the actual tail length in both length fields.
         exchange(OP_WRITE,
-                 struct.pack("<I", base + offset) + struct.pack("<H", WRITE_CHUNK) + chunk,
+                 struct.pack("<I", base + offset) + struct.pack("<H", len(chunk) if strict else WRITE_CHUNK) + chunk,
                  expect=OP_WRITE)
         done += 1
         if progress:
             progress(done, total)
 
-    link.write(build(OP_PIC_RESET,
-                     struct.pack("<I", len(data)) + struct.pack("<I", checksum(data))))
+    reset = struct.pack("<II", len(data), checksum(data))
+    if strict:
+        _exchange_checked(link, OP_PIC_RESET, reset, retries=0)
+        return base
+    link.write(build(OP_PIC_RESET, reset))
     _result, got, _body = parse(link.read_reply())
     if got != OP_PIC_RESET:
         raise OtaError(f"the pad did not confirm the reset (got {got})")
@@ -369,6 +513,7 @@ def upload_picture(ctrl, frames, interval_ms=100, restore_default=False,
     after this operation. Pass `port` to skip the switch when the screen chip is
     already in upgrade mode after a failed attempt.
     """
+    frames = validate_frames(frames, interval_ms)
     if port is None:
         enter_upgrade_mode(ctrl)
         time.sleep(settle)

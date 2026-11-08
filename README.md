@@ -718,9 +718,36 @@ setup and restoration run on their own thread. Trigger reports are counted but
 not translated; motion remains disabled. The uhid relay and GUI DualSense
 switch do not enable this experimental route.
 
-Legacy Apex 5 commands remain refused on Apex 6. Full configuration codecs,
-nickname/screen editing, trigger translation, motion, and ordinary-game-audio
-synthesis are later milestones. Complete input layouts, receiver timing and
+Image and GIF uploads share the existing screen converter and serial transport:
+
+~~~bash
+tools/flydigi-screen show picture.png --experimental-apex6 --device uid:YOUR_UUID
+tools/flydigi-screen animate animation.gif --interval 100 --experimental-apex6 --device uid:YOUR_UUID
+tools/flydigi-screen send default_screen_image_150.bin --restore-default --experimental-apex6 --device uid:YOUR_UUID
+~~~
+
+Connect by USB cable. This replaces the stored screen material; the current
+image cannot be read back or automatically restored. Keep a copy of any custom
+material you want to preserve. The Apex 6 route accepts 1–150 frames and frame
+intervals of 1–2500 ms, rounded to the nearest 10 ms with a 10 ms minimum.
+It checks identity and connection before switching the screen chip, binds the
+bootloader to the selected USB port, and validates each erase/write reply.
+After reset is acknowledged, leave the controller connected while it syncs.
+An interrupted upload can be restarted with the complete source file and
+`--experimental-apex6 --port /dev/ttyACM0` (use the actual bootloader port),
+instead of `--device`. Recovery accepts only an FFAA:5555 bootloader; that mode
+cannot report the controller UUID. `--restore-default` marks the supplied file
+as stock; it does not download or locate that file.
+
+Still-image, two-frame animation and stock-restore uploads were verified on
+Apex 6 Pro firmware 9.0.6.8, with display output confirmed and the original
+configuration preserved. The 137-frame stock upload took about four minutes,
+followed by synchronization/restart. Other variants remain experimental.
+
+LCD animation-display/status-bar flags are documented only. Screen GUI wiring
+remains pending. Legacy Apex 5 commands remain refused on Apex 6. Nickname
+editing, trigger translation, motion, and ordinary-game-audio synthesis are
+later milestones. Complete input layouts, receiver timing and
 the remaining actuator behavior still require hardware validation.
 Protocol evidence, emulator assumptions and
 fixture reproduction are in [the Apex 6 findings](docs/findings-apex6.md).

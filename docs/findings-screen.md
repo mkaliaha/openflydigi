@@ -3,7 +3,9 @@
 Reference for the 160×80 display, uploads, safety gates, and settings. The wire
 format and protocol state machines are documented in
 [PROTOCOL.md](../PROTOCOL.md) §8. Verified against the repository on
-2026-08-23.
+2026-08-23; frame-count validation updated 2026-11-08. Apex 6 uses the shared
+image/serial layers through a separate opt-in entry path; see the
+[Apex 6 findings](findings-apex6.md#screen-upload-compatibility-with-apex-5).
 
 ## Safety requirements
 
@@ -33,16 +35,14 @@ After a successful write, allow approximately 15 seconds for resource
 synchronization and automatic restart. Do not cut controller power during this
 stage.
 
-### Serial uploads over 255 frames are unsafe
+### Serial uploads are limited to 255 frames
 
-The picture count is one byte. HID uploads reject more than 255 frames and the
-GUI truncates to 255 with a warning. The serial backend does **not**
-enforce the limit: it sends `len(frames) & 0xff`, while CLI `animate` and `send`
-can pass every frame. For example, 300 frames are announced as 44 while all 300
-frame payloads are written.
-
-Do not send more than 255 frames through the serial CLI. This is a validation
-gap, not a supported wraparound format.
+The picture count is one byte. HID and serial uploads reject more than 255
+frames; the GUI truncates to 255 with a warning. The serial backend and CLI now
+validate count, exact frame dimensions/header and a finite positive interval
+before entering upgrade mode. The previous count-wraparound gap is closed.
+The separate Apex 6 route uses the current vendor editor's tighter 150-frame
+limit.
 
 ### Command 242 is not a harmless screen test
 

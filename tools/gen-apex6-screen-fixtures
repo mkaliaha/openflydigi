@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+#
+# SPDX-License-Identifier: MIT
+
+"""Generate screen packets with the pinned vendor updater, without hardware.
+
+Requires a .NET 10 SDK and the assemblies extracted from xHaptics Engine
+5.0.1.4's FirmwareConsole.exe in the ignored investigation directory. Override
+locations with --dotnet and --assemblies. No production Python is imported;
+the updater is allocated without its constructor and only its packet builder
+is invoked. Normal tests need only the generated JSON, not .NET/vendor files.
+"""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+LIBRARY_SHA256 = "6849f125abb3e07eced6bc1be450ecc1b21b7eb6b6930790cd849246d090a135"
+PROGRAM = r"""
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.Loader;
+using System.Security.Cryptography;
+using System.Text.Json;
+
+var root = Path.GetFullPath(args[0]);
+AssemblyLoadContext.Default.Resolving += (context, name) => {
+    var path = Path.Combine(root, name.Name + ".dll");
+    return File.Exists(path) ? context.LoadFromAssemblyPath(path) : null;
+};
+var asm = Assembly.LoadFrom(Path.Combine(root, "FirmwareLibrary.dll"));
+var type = asm.GetType("FirmwareLibrary.OtaNewUpdater", true);
+var configType = asm.GetType("FirmwareLibrary.ScreenUpgradeConfig", true);
+var cmdType = type.GetNestedType("CmdType", BindingFlags.NonPublic);
+var build = type.GetMethod("BuildCommandFrameLocked", BindingFlags.NonPublic | BindingFlags.Instance);
+var cases = new List<object>();
+foreach (var count in new[] {1, 2, 5, 150}) {
+    var updater = RuntimeHelpers.GetUninitializedObject(type);
+    var config = Activator.CreateInstance(configType);
+    void Config(string name, object value) {
+        var field = configType.GetField(name);
+        field.SetValue(config, field.FieldType.IsEnum ? Enum.ToObject(field.FieldType, value) : value);
+    }
+    Config("UpgradeType", 2); Config("PicType", count == 1 ? 2 : 1);
+    Config("PicNum", count); Config("FrameRate", 10); Config("IsRestoreDefault", count == 5);
+    type.GetProperty("ScreenUpgradeConfig").SetValue(updater, config);
+    void Field(string name, object value) => type.GetField(name, BindingFlags.Instance | BindingFlags.NonPublic).SetValue(updater, value);
+    var data = new byte[count * 25604];
+    for (var frame = 0; frame < count; frame++) {
+        new byte[] {4,128,2,10}.CopyTo(data, frame * 25604);
+        for (var j = 4; j < 25604; j++) data[frame * 25604 + j] = (byte)((j - 4 + frame * 17) % 256);
+    }
+    Field("_dataAllArray", data); Field("_otaBaseAddress", 0x120000u);
+    byte[] Packet(int command) => (byte[])build.Invoke(updater, new object[] {Enum.ToObject(cmdType, command)});
+    var packets = new List<byte[]> { Packet(11), Packet(10) };
+    for (uint i = 0; i < (data.Length + 4095) / 4096; i++) { Field("_otaEraseDataIndex", i); packets.Add(Packet(3)); }
+    for (uint i = 0; i < (data.Length + 54) / 55; i++) { Field("_otaSendDataIndex", i); packets.Add(Packet(5)); }
+    packets.Add(Packet(12));
+    var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+    foreach (var packet in packets) { digest.AppendData(BitConverter.GetBytes(packet.Length)); digest.AppendData(packet); }
+    cases.Add(new {count, interval_ms=100, restore_default=count==5,
+        packet_count=packets.Count, packets_sha256=Convert.ToHexString(digest.GetHashAndReset()).ToLowerInvariant(),
+        first=Convert.ToHexString(packets[0]).ToLowerInvariant(),
+        last_write=Convert.ToHexString(packets[^2]).ToLowerInvariant(),
+        reset=Convert.ToHexString(packets[^1]).ToLowerInvariant()});
+}
+Console.WriteLine(JsonSerializer.Serialize(new {library_sha256=Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(Path.Combine(root,"FirmwareLibrary.dll")))).ToLowerInvariant(), cases}, new JsonSerializerOptions {WriteIndented=true}));
+"""
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dotnet", default="dotnet")
+    parser.add_argument("--assemblies", type=Path,
+                        default=ROOT / "work/apex6-screen-investigation-20261108")
+    args = parser.parse_args()
+    library = args.assemblies / "FirmwareLibrary.dll"
+    if hashlib.sha256(library.read_bytes()).hexdigest() != LIBRARY_SHA256:
+        parser.error("FirmwareLibrary.dll does not match the pinned engine release")
+    with tempfile.TemporaryDirectory(prefix="apex6-screen-fixtures-") as folder:
+        project = Path(folder)
+        (project / "Program.cs").write_text(PROGRAM)
+        (project / "oracle.csproj").write_text(
+            '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup>'
+            '<OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework>'
+            '<ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Project>')
+        env = dict(os.environ, DOTNET_CLI_TELEMETRY_OPTOUT="1",
+                   DOTNET_CLI_HOME=str(project / "home"))
+        built = subprocess.run([args.dotnet, "build", str(project / "oracle.csproj"),
+                                "--nologo", "--verbosity", "quiet"],
+                               env=env, capture_output=True, text=True)
+        if built.returncode:
+            raise SystemExit(built.stdout + built.stderr)
+        raw = subprocess.check_output([args.dotnet,
+            str(project / "bin/Debug/net10.0/oracle.dll"), str(args.assemblies.resolve())],
+            env=env, text=True)
+    result = {
+        "source": "xHaptics Engine 5.0.1.4 bundled FirmwareLibrary.dll; "
+                  "OtaNewUpdater.BuildCommandFrameLocked invoked offline on an "
+                  "uninitialized object, without opening hardware",
+        "input": "For each frame: 04 80 02 0a header, then pixel byte i = "
+                 "(i + frame_index * 17) % 256, i=0..25599; base 0x120000. "
+                 "Sequence digest is SHA-256 over each packet prefixed by its "
+                 "little-endian 32-bit length.",
+        **json.loads(raw),
+    }
+    destination = ROOT / "tests/fixtures/apex6-screen.json"
+    destination.write_text(json.dumps(result, indent=2) + "\n")
+    print(f"Generated {len(result['cases'])} independent complete transfers: {destination}")
+
+
+if __name__ == "__main__":
+    main()

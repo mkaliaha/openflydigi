@@ -1,0 +1,47 @@
+{
+  "source": "xHaptics Engine 5.0.1.4 bundled FirmwareLibrary.dll; OtaNewUpdater.BuildCommandFrameLocked invoked offline on an uninitialized object, without opening hardware",
+  "input": "For each frame: 04 80 02 0a header, then pixel byte i = (i + frame_index * 17) % 256, i=0..25599; base 0x120000. Sequence digest is SHA-256 over each packet prefixed by its little-endian 32-bit length.",
+  "library_sha256": "6849f125abb3e07eced6bc1be450ecc1b21b7eb6b6930790cd849246d090a135",
+  "cases": [
+    {
+      "count": 1,
+      "interval_ms": 100,
+      "restore_default": false,
+      "packet_count": 476,
+      "packets_sha256": "ae6503cb2ed5c31af978f8677a64228d3eb90a8f8b989529e8645c1229565ada",
+      "first": "0b040002010a00",
+      "last_write": "052600e76312001d00e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+      "reset": "0c080004640000dc76c32c"
+    },
+    {
+      "count": 2,
+      "interval_ms": 100,
+      "restore_default": false,
+      "packet_count": 948,
+      "packets_sha256": "325b2d32af8c6528b2822e14ebab95a6413a1c6908005d831749c7092350f7c0",
+      "first": "0b040001020a00",
+      "last_write": "050c0005c8120003000e0f10",
+      "reset": "0c080008c80000a05ccd68"
+    },
+    {
+      "count": 5,
+      "interval_ms": 100,
+      "restore_default": true,
+      "packet_count": 2363,
+      "packets_sha256": "9c6a54f0e314bde6dd935831092ea0f9aab11ef8053c3a0ca8d9b17ed0be0799",
+      "first": "0b040001050a01",
+      "last_write": "052c00f1f3130023002122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40414243",
+      "reset": "0c080014f40100ed4b1083"
+    },
+    {
+      "count": 150,
+      "interval_ms": 100,
+      "restore_default": false,
+      "packet_count": 70771,
+      "packets_sha256": "a7241d9e2dfd2afbb56f801b73261e3a9eaa8b81bf4b3b4aa227d110208a6a34",
+      "first": "0b040001960a00",
+      "last_write": "050e00539a4c000500e0e1e2e3e4",
+      "reset": "0c0800589a3a0083d9bf69"
+    }
+  ]
+}

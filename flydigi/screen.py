@@ -32,15 +32,17 @@ set, which includes the Apex 5. But Space Station never asks it to:
 `upload_pic2screen` in the Electron layer branches on the device code, and for
 `k5` it sends `SwitchUsb` -- which is `SwitchToFirmwareUpgradeMode`, command 31
 -- and then runs `FirmwareConsole.exe` with `--upgrade_type 2` over the frames
-instead. Only the other pads take the HID path.
+instead. Other screen pads supported by that older desktop release take the
+HID path. The newer Apex 6 engine also uses serial; `gpa6_screen.py` reuses the
+image codec here with its own upgrade entry.
 
 Tested on hardware: all four commands parse, ACK and echo every field back, two
 complete uploads went out (9623 packets, no errors) and **the display never
 changed**. So 208..211 is live firmware that drives nothing here. This module is
 kept for other screen pads; `probe()` is a capability check for those rather
 than a first contact for this one. Nothing in this module sends
-command 31, and nothing should: it is a one-way door into a bootloader whose
-protocol we do not have. Flydigi's own failure text for a broken screen upload
+command 31: picture-resource upgrade entry belongs in the serial upload modules,
+which deliberately exclude program firmware. Flydigi's failure text for a broken screen upload
 is "toggle the power switch on the back of the controller to restart it", which
 is also the recovery here if an upload stalls half way.
 
