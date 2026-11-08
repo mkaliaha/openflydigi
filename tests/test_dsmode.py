@@ -54,6 +54,7 @@ def main():
 
     with tempfile.TemporaryDirectory() as tmp:
         real_sysfs = usbip.VHCI_SYSFS
+        real_roots = usbip.MODULES_ROOTS
         try:
             # Point the loaded check at nothing, so availability is decided by
             # the file rather than short-circuited by this machine's own module.
@@ -84,8 +85,54 @@ def main():
             modules_dep(tmp, "near-miss", ["kernel/drivers/usb/vhci-hcd-x.ko:"])
             results.append(check("a similarly named module is not it",
                                  not usbip.module_available("near-miss", root)))
+
+            # A distrobox can share the host kernel while keeping /lib/modules
+            # private. Its host mount must be checked for that exact release.
+            host = os.path.join(tmp, "run", "host")
+            usbip.MODULES_ROOTS = (
+                root,
+                os.path.join(host, "lib", "modules"),
+                os.path.join(host, "usr", "lib", "modules"),
+            )
+            modules_dep(host, "host-kernel", [
+                "kernel/drivers/usb/usbip/vhci-hcd.ko.xz:",
+            ])
+            results.append(check("local modules work without a host mount index",
+                                 usbip.module_available("has-it")))
+            results.append(check("host modules are found when local index is absent",
+                                 usbip.module_available("host-kernel")))
+            results.append(check("an explicit root never falls back to host modules",
+                                 not usbip.module_available("host-kernel", root)))
+            modules_dep(tmp, "host-kernel", [
+                "kernel/drivers/usb/usbip/usbip-core.ko.xz:",
+            ])
+            results.append(check("a local index without vhci does not hide host vhci",
+                                 usbip.module_available("host-kernel")))
+            # A directory in place of the index forces OSError even when the
+            # tests run as root, unlike mode bits on an unreadable file.
+            index = os.path.join(root, "host-kernel", "modules.dep")
+            os.unlink(index)
+            os.mkdir(index)
+            results.append(check("an unreadable local index does not hide host vhci",
+                                 usbip.module_available("host-kernel")))
+            modules_dep(os.path.join(host, "usr"), "usr-kernel", [
+                "kernel/drivers/usb/usbip/vhci-hcd.ko.zst:",
+            ])
+            results.append(check("host usr/lib modules are also found",
+                                 usbip.module_available("usr-kernel")))
+            modules_dep(host, "near-miss", [
+                "kernel/drivers/usb/usbip/vhci-hcd-extra.ko.xz:",
+            ])
+            results.append(check("host modules must match the exact module name",
+                                 not usbip.module_available("near-miss")))
+            results.append(check("modules from another host kernel do not count",
+                                 not usbip.module_available("no-such")))
+            os.mkdir(usbip.VHCI_SYSFS)
+            results.append(check("loaded vhci needs no visible module index",
+                                 usbip.module_available("no-such")))
         finally:
             usbip.VHCI_SYSFS = real_sysfs
+            usbip.MODULES_ROOTS = real_roots
 
     # -- the launch option --------------------------------------------------
     # Both spellings or the feature decays silently: SDL3 renamed the hint, and

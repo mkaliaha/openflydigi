@@ -106,35 +106,42 @@ def module_loaded():
     return os.path.isdir(VHCI_SYSFS)
 
 
-MODULES_ROOT = "/lib/modules"
+MODULES_ROOTS = (
+    "/lib/modules",
+    "/run/host/lib/modules",
+    "/run/host/usr/lib/modules",
+)
 
 
-def module_available(release=None, root=MODULES_ROOT):
+def module_available(release=None, root=None):
     """Whether this kernel *has* the module, loaded or not.
 
-    Read out of modules.dep rather than by running modinfo: it is one file, it
-    needs no kmod in PATH, and it is the same list modprobe itself consults. The
-    distinction matters because "not loaded" is a one-line fix and "not built
+    Read out of modules.dep rather than by running modinfo: it needs no kmod in
+    PATH, and it is the same list modprobe itself consults. The distinction
+    matters because "not loaded" is a one-line fix and "not built
     for this kernel" is not -- and Fedora ships it, while a hardened or minimal
     kernel may not.
 
-    `root` is a parameter so a test can point it at a tree it wrote; a distrobox
-    needs no such help, since it mounts the host's /lib/modules and shares its
-    kernel, so the default path is right in there too.
+    Distrobox shares the running kernel but may expose its modules only below
+    /run/host. Try those host trees too, always for the same kernel release.
+    An explicit `root` searches only that tree, so callers and tests can inspect
+    a separate module tree without falling back to this machine's modules.
     """
     if module_loaded():
         return True
     release = release or os.uname().release
-    try:
-        with open(f"{root}/{release}/modules.dep") as handle:
-            for line in handle:
-                # Lines are "path/to/mod.ko[.xz]: deps...", so the module name
-                # is bounded by a slash and a dot on the left-hand side only.
-                path = line.split(":", 1)[0]
-                if os.path.basename(path).split(".", 1)[0] == MODULE:
-                    return True
-    except OSError:
-        return False
+    roots = MODULES_ROOTS if root is None else (root,)
+    for module_root in roots:
+        try:
+            with open(f"{module_root}/{release}/modules.dep") as handle:
+                for line in handle:
+                    # Lines are "path/to/mod.ko[.xz]: deps...", so the module name
+                    # is bounded by a slash and a dot on the left-hand side only.
+                    path = line.split(":", 1)[0]
+                    if os.path.basename(path).split(".", 1)[0] == MODULE:
+                        return True
+        except OSError:
+            continue
     return False
 
 
