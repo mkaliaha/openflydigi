@@ -61,6 +61,8 @@ def detail(entry):
     parts.append(entry["path"])
     if entry.get("error"):
         parts.append(entry["error"])
+    elif entry.get("code") == "k6" and entry.get("dialect") == "gpa6":
+        parts.append("experimental configuration")
     elif not entry.get("supported"):
         parts.append("not driven by this app")
     return " · ".join(parts)
@@ -187,7 +189,8 @@ class DevicesModel(QAbstractListModel):
             self.SelectorRole: registry.key(entry),
             self.IconRole: ICONS.get(entry["kind"], "network-card"),
             self.MockRole: bool(entry.get("mock")),
-            self.SupportedRole: bool(entry.get("supported")),
+            self.SupportedRole: bool(entry.get("supported") or
+                                     (entry.get("code") == "k6" and entry.get("dialect") == "gpa6")),
             self.BatteryRole: (-1 if entry.get("battery") is None
                                else int(entry["battery"])),
             self.BatteryStepsRole: int(entry.get("battery_steps", 5)),
@@ -449,7 +452,8 @@ class DevicesModel(QAbstractListModel):
             # Vader 5 here would aim commands 81 and 82 at it from one click in
             # a picker. The drivers refuse it themselves as well; this stops the
             # preferences file ever asking them to.
-            if decoded[self.SupportedRole]:
+            # GUI-native support does not enable the daemon's legacy routes.
+            if self._entries[row].get("supported"):
                 self._prefs.set_primary_pad(selector)
                 self._prefs.save()
         self.padChanged.emit()

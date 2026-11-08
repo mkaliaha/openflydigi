@@ -34,6 +34,7 @@ Controls.ToolBar {
 
         Controls.Button {
             objectName: "applyButton"
+            visible: !App.profile.apex6
             text: "Apply"
             icon.name: "dialog-ok-apply"
             enabled: App.profile.dirty
@@ -49,7 +50,7 @@ Controls.ToolBar {
             // Spelled out rather than "Apply & save": a bare ampersand in a
             // button label is taken as a mnemonic, swallowed, and shown as an
             // underline on the next character -- it read as "Apply _ save".
-            text: "Apply and save"
+            text: App.profile.apex6 ? "Save profile" : "Apply and save"
             icon.name: "document-save"
             // Enabled for an applied-but-uncommitted change as well, not just
             // an unapplied one -- otherwise pressing Apply immediately greys
@@ -57,7 +58,7 @@ Controls.ToolBar {
             // And only when the pad is actually running this profile: the
             // save command carries no slot id, so it would commit whichever
             // one is running. See ProfileModel.canSaveToFlash.
-            enabled: (App.profile.dirty || App.profile.saveNeeded)
+            enabled: (App.profile.dirty || App.profile.saveNeeded || (App.profile.apex6 && App.profile.loaded))
                      && App.profile.canSaveToFlash
             onClicked: App.profile.write(true)
 

@@ -26,6 +26,7 @@ from flydigi import (blobs, charger, device, effects, identity, lighting,
 # because a label that only existed in a QML page would leave the status line
 # naming a wire field.
 from .models.settings import SETTING_LABELS, describe_setting
+from .apex6 import Backend as Apex6Backend
 
 
 class DeviceWorker(QObject):
@@ -53,6 +54,10 @@ class DeviceWorker(QObject):
     profiles_reset = Signal()            # all four slots are factory again
     devices_changed = Signal(list)       # every device attached, probed
     pad_selected = Signal(str)           # a different pad is now the open one
+    backend_changed = Signal(str, str)   # device code, native UUID (legacy: empty)
+    apex6_lighting_loaded = Signal(bytes, str, int)
+    apex6_lighting_written = Signal(bytes, bool, str, int)
+    profile_load_failed = Signal(int)
     dock_state = Signal(dict)            # one dock's whole state
     dock_switch = Signal(str, str, bool)  # selector, switch name, did it land
     dock_progress = Signal(float)        # 0..1 through a lighting upload
@@ -74,6 +79,7 @@ class DeviceWorker(QObject):
         self._selector = None
         self._stopping = False
         self._stop_recording = False
+        self._apex6_backend = None
 
     def request_stop_recording(self):
         """End a recording early. Called straight from the UI thread.
@@ -98,18 +104,10 @@ class DeviceWorker(QObject):
     def _controller(self):
         """Open the pad, and refuse it if it is not the one this app drives.
 
-        The check is here rather than at each write because this is the only
-        place a handle is opened, and the device on the far end of an open
-        handle does not change. One command-1 exchange per connection.
-
-        It is not paranoia: `find_device` narrows to the controller family and
-        its vendor collection, and every pad of the `5a a5` generation matches
-        both -- a Vader 5 or an Apex 6 would open exactly like an Apex 5 and
-        take an 840-byte Apex 5 profile into its flash without a word. (Nothing
-        older can: those carry no Flydigi vendor id and no HID vendor
-        collection at all.) The family nibble tells kinds of device apart,
-        never models, so this check is still the only thing standing between
-        two pads.
+        One identity read chooses the supported device family per connection.
+        Native methods dispatch through _apex6; _attempt separately refuses a
+        GPA6 handle before any legacy callback. Opening a supported controller
+        is not permission to send another generation's profile format.
         """
         if self._ctrl is None:
             ctrl = registry.open_pad(self._selector)
@@ -117,15 +115,44 @@ class DeviceWorker(QObject):
                 # Kept, not discarded: the model decides which commands may go
                 # out at all, and this is the one place that learns it without
                 # spending an exchange of its own.
-                self._code = identity.require(ctrl)["code"]
+                self._code = identity.require(ctrl, *identity.SUPPORTED, "k6")["code"]
+                if (self._code == "k6") != (getattr(ctrl, "dialect", None) == "gpa6"):
+                    raise identity.WrongDevice("Controller identity and protocol do not match")
             except identity.WrongDevice:
                 ctrl.close()
                 raise
             self._ctrl = ctrl
+            if self._code != "k6":
+                self.backend_changed.emit(self._code, "")
         return self._ctrl
+
+    def _apex6(self, operation, *args):
+        """Dispatch explicitly, without retrying native mutations on failure.
+
+        Legacy entry points still go through _attempt's dialect guard. Merely
+        opening a k6 never permits a legacy settings/profile/screen command.
+        """
+        try:
+            ctrl = self._controller()
+            if getattr(ctrl, "dialect", None) != "gpa6":
+                return False
+            if self._apex6_backend is None:
+                self._apex6_backend = Apex6Backend(self, ctrl)
+                self.backend_changed.emit("k6", self._apex6_backend.uid)
+            getattr(self._apex6_backend, operation)(*args)
+        except Exception as exc:
+            if isinstance(exc, (OSError, identity.WrongDevice)):
+                self._drop()
+            self.failed.emit(f"{operation.replace('_', ' ')}: {exc}")
+            if operation == "load_profile":
+                self.profile_load_failed.emit(args[0])
+            elif operation == "write_setting":
+                self.setting_written.emit(args[0], False)
+        return True
 
     def _drop(self):
         self._code = None
+        self._apex6_backend = None
         if self._ctrl is not None:
             try:
                 self._ctrl.close()
@@ -137,7 +164,10 @@ class DeviceWorker(QObject):
         """Run `work(ctrl)`, reconnecting once if the handle has gone stale."""
         for attempt in (1, 2):
             try:
-                return work(self._controller())
+                ctrl = self._controller()
+                if getattr(ctrl, "dialect", None) == "gpa6":
+                    raise identity.WrongDevice("This editor is not yet available for Apex 6")
+                return work(ctrl)
             except identity.WrongDevice as exc:
                 # Not a stale handle and not worth a second attempt: the pad
                 # answered, and it is the wrong pad. Retrying would ask the same
@@ -344,6 +374,8 @@ class DeviceWorker(QObject):
 
     @Slot()
     def refresh_info(self):
+        if self._apex6("refresh_info"):
+            return
         def work(ctrl):
             info = motion.read_info(ctrl)
             if info is None:
@@ -367,6 +399,8 @@ class DeviceWorker(QObject):
         every config read, so profiles are fetched one at a time, when first
         opened, never all four to fill a list.
         """
+        if self._apex6("load_profile", cfg_id):
+            return
         self.status.emit(f"Reading profile {cfg_id + 1}…")
 
         def work(ctrl):
@@ -510,6 +544,8 @@ class DeviceWorker(QObject):
         itself once it acquires, so what the pad reports afterwards is not what
         anyone asked for.
         """
+        if self._apex6("refresh_transport"):
+            return
         state = self._attempt(motion.read_transport, "reading the transport state")
         if state:
             self.transport_changed.emit(state)
@@ -542,6 +578,8 @@ class DeviceWorker(QObject):
     @Slot()
     def refresh_status(self):
         """Which profile the pad is actually on. Cheap and side-effect free."""
+        if self._apex6("refresh_status"):
+            return
         status = self._attempt(mapping.read_status, "reading controller status")
         if status:
             self.active_changed.emit(status["active"])
@@ -549,6 +587,8 @@ class DeviceWorker(QObject):
     @Slot(int, bytes, bytes, bool)
     def write_profile(self, cfg_id, blob, previous, save):
         """Write a profile, sending only packets that differ from `previous`."""
+        if self._apex6("write_profile", cfg_id, blob, previous, save):
+            return
         self.status.emit(f"Writing profile {cfg_id + 1}…")
         new = mapping.unpack_config(blob, cfg_id)
         old = mapping.unpack_config(previous, cfg_id) if previous else None
@@ -616,6 +656,8 @@ class DeviceWorker(QObject):
 
     @Slot()
     def load_lighting(self):
+        if self._apex6("load_lighting"):
+            return
         config = self._attempt(lighting.read_config, "reading the lighting config")
         if config is not None:
             self.lighting_loaded.emit(bytes(config.blob))
@@ -656,6 +698,17 @@ class DeviceWorker(QObject):
         if result is not None:
             self.lighting_written.emit(*result)
 
+    @Slot(bytes, bytes, bool, str, int)
+    def write_apex6_lighting(self, blob, previous, save, uid, slot):
+        if not self._apex6("write_lighting", blob, previous, save, uid, slot):
+            self.failed.emit("Controller changed; reload before writing Apex 6 lighting")
+
+    @Slot(str, int, str)
+    def write_apex6_setting(self, name, value, uid):
+        if not self._apex6("write_setting", name, value, uid):
+            self.setting_written.emit(name, False)
+            self.failed.emit("Controller changed; reload before writing Apex 6 settings")
+
     @Slot(float)
     def record_macro(self, seconds):
         """Watch the pad and turn what is played into macro steps.
@@ -693,6 +746,8 @@ class DeviceWorker(QObject):
 
     @Slot()
     def refresh_settings(self):
+        if self._apex6("refresh_settings"):
+            return
         block = self._attempt(settings.read_status, "reading the device settings")
         if block:
             self._settings_read(block)
@@ -772,6 +827,8 @@ class DeviceWorker(QObject):
         """
         self.status.emit("Switching the screen into upgrade mode…")
         try:
+            if self._code == "k6" or self._apex6_backend is not None:
+                raise screen_ota.OtaError("Screen uploads are not yet available in the Apex 6 GUI")
             port = screen_ota.find_port()
             if port is None:
                 # Asked again here, and not left to the model. Command 31 is
@@ -781,7 +838,9 @@ class DeviceWorker(QObject):
                 # bootloader's serial device. It stays in upgrade mode until it
                 # is power-cycled. One exchange against six minutes of upload,
                 # and it also covers a cable pulled between the button and here.
-                info = motion.read_info(self._controller())
+                ctrl = self._controller()
+                identity.require(ctrl)  # legacy screen route, including cold calls
+                info = motion.read_info(ctrl)
                 if (info or {}).get("connect_type") != "wired":
                     raise screen_ota.OtaError(
                         "the pad is not on a cable. On the dongle it takes "
@@ -799,7 +858,7 @@ class DeviceWorker(QObject):
                 screen_ota.upload(link, frames, interval_ms=interval,
                                   restore_default=restore,
                                   progress=self.screen_progress.emit)
-        except (screen_ota.OtaError, OSError, device.DeviceNotFound) as exc:
+        except (screen_ota.OtaError, OSError, device.DeviceNotFound, identity.WrongDevice) as exc:
             self._drop()
             self.failed.emit(f"screen upload: {exc}")
             self.screen_finished.emit(False)

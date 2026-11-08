@@ -154,6 +154,7 @@ smooth.
     main.py           QML engine setup: import paths, i18n shim, style, the window
     app.py            the application graph: models, worker thread, the wiring
     worker.py         device access, on its own thread
+    apex6.py          native settings/profile/lighting adapter; no Qt imports
     watchdog.py       off by default: what the GUI thread is in when a frame is late
     i18n.py           the i18n*() shim the engine needs -- PySide6 has no KLocalizedContext
     models/           view-agnostic state -- no QtWidgets, no QtQuick
@@ -194,6 +195,24 @@ thread, waits `STOP_TIMEOUT_MS` (10 s), and only then calls `worker.shutdown()`.
 `@Slot` adds a metaobject entry and nothing else, so `shutdown()` invoked
 directly would close the descriptor on the caller's thread while the worker could
 still be in `select()` on it. On a timeout the handle is left open deliberately.
+
+## Apex 6 routing
+
+The worker identifies `k6` explicitly and dispatches only the implemented
+settings/profile/lighting operations through `apex6.py`. `_attempt` still
+refuses GPA6 before invoking a legacy operation. Do not expand
+`identity.SUPPORTED` to enable a page. Native writes run once through the guarded
+backend, with UUID and slot context carried from the read; a reconnect must not
+turn an old edit into a write to a different controller or profile.
+
+`ProfileModel` holds a native `gpa6_backup.ProfileConfig` package for selection
+and save. Its legacy sub-models receive no config until they gain native editor
+adapters. `LightingModel` shares its QML-facing properties and colour list while
+using native effect parameters. Native write replies include the bytes actually
+submitted, so later edits remain dirty. The app coordinates active-slot reads
+and lighting refreshes; explicit reload discards edits, reconnect keeps them.
+The native sidebar currently exposes Controller, Device and Lighting, alongside
+installation-wide sections. Apex 5/Vader pages retain their existing routes.
 
 ## The QML shell
 
@@ -308,6 +327,7 @@ of the module, not from a package-level setting.
 
 ```bash
 python3 tests/test_models.py           # headless, no engine
+python3 tests/test_apex6_gui.py         # native worker/model integration and failures
 python3 tests/test_shell.py            # window smoke test, the way main.py loads it
 python3 tests/test_qml.py              # QtQuickTest: real clicks on real delegates
 python3 tests/test_qml.py -functions   # list the cases

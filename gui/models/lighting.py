@@ -13,6 +13,7 @@ from PySide6.QtCore import (Property, QAbstractListModel, QModelIndex, QObject,
 from PySide6.QtQml import QmlElement
 
 from flydigi import lighting
+from ..apex6 import LightingConfig as Apex6LightingConfig, LIGHT_EFFECTS
 
 # See gui/models/device.py for what these two names do.
 QML_IMPORT_NAME = "Apex5"
@@ -178,9 +179,11 @@ class LightingModel(QObject):
     cycleTimeChanged = Signal()
     gripSyncChanged = Signal()
     infoChanged = Signal()
+    backendChanged = Signal()
 
     # (blob, previous, save) -- what the worker's write_lighting slot takes.
     writeRequested = Signal(bytes, bytes, bool)
+    apex6WriteRequested = Signal(bytes, bytes, bool, str, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -192,6 +195,46 @@ class LightingModel(QObject):
         self._colours = ColourListModel(self)
         self._colours.changed.connect(self._regenerate)
         self._info = ""
+        self._apex6 = False
+        self._uid = ""
+        self._slot = -1
+        self._active = -1
+
+    @Property(bool, notify=backendChanged)
+    def apex6(self):
+        return self._apex6
+
+    @Property(bool, notify=backendChanged)
+    def canWrite(self):
+        return self.loaded and (not self._apex6 or self._slot == self._active)
+
+    @Property(bool, notify=effectChanged)
+    def hasBrightness(self):
+        return not self._apex6 or self.effect != 0
+
+    @Property(bool, notify=effectChanged)
+    def hasSpeed(self):
+        return not self._apex6 or self.effect in (2, 3, 4, 5)
+
+    def setActive(self, slot):
+        self._active = slot
+        self.backendChanged.emit()
+
+    def profileSaved(self, slot):
+        if self._apex6 and slot == self._slot:
+            self._saved = True
+            self._mark(encode=False)
+
+    def clear(self, apex6=False):
+        self._apex6 = apex6
+        self._uid, self._slot = "", -1
+        self._stored = self._edited = None
+        self._saved = True
+        self._info = ""
+        self.backendChanged.emit()
+        self.loadedChanged.emit()
+        self.infoChanged.emit()
+        self._mark()
 
     @Property(ColourListModel, constant=True)
     def colours(self):
@@ -231,9 +274,9 @@ class LightingModel(QObject):
     def info(self):
         return self._info
 
-    @Property("QStringList", constant=True)
+    @Property("QStringList", notify=backendChanged)
     def effectNames(self):
-        return list(EFFECT_NAMES)
+        return list(LIGHT_EFFECTS if self._apex6 else EFFECT_NAMES)
 
     @Property(int, notify=effectChanged)
     def effect(self):
@@ -243,6 +286,8 @@ class LightingModel(QObject):
     @effect.setter
     def effect(self, value):
         value = int(value)
+        if not 0 <= value < len(self.effectNames):
+            return
         if self._effect_index == value:
             return
         self._effect_index = value
@@ -257,24 +302,29 @@ class LightingModel(QObject):
     def brightness(self, value):
         if self._edited is None:
             return
-        value = max(0, min(lighting.BRIGHTNESS_MAX, int(value)))
+        value = max(0, min(self.brightnessMax, int(value)))
         if self._edited.brightness == value:
             return
         self._edited.brightness = value
         self.brightnessChanged.emit()
         self._mark()
 
-    @Property(int, constant=True)
+    @Property(int, notify=backendChanged)
     def brightnessMax(self):
-        return lighting.BRIGHTNESS_MAX
+        return 100 if self._apex6 else lighting.BRIGHTNESS_MAX
 
     @Property(int, notify=cycleTimeChanged)
     def cycleTime(self):
         """As stored: bigger is slower."""
+        if self._apex6:
+            return 100 - self.speed
         return self._edited.cycle_time if self._edited else CYCLE_MIN
 
     @cycleTime.setter
     def cycleTime(self, value):
+        if self._apex6:
+            self.speed = 100 - int(value)
+            return
         if self._edited is None:
             return
         value = max(CYCLE_MIN, min(CYCLE_MAX, int(value)))
@@ -287,19 +337,27 @@ class LightingModel(QObject):
     @Property(int, notify=cycleTimeChanged)
     def speed(self):
         """The same number the other way up, so right is faster."""
+        if self._apex6:
+            return self._edited.speed if self._edited else 50
         return invert_cycle(self.cycleTime)
 
     @speed.setter
     def speed(self, value):
+        if self._apex6:
+            if self._edited is not None:
+                self._edited.speed = max(0, min(100, int(value)))
+                self.cycleTimeChanged.emit()
+                self._mark()
+            return
         self.cycleTime = invert_cycle(value)
 
-    @Property(int, constant=True)
+    @Property(int, notify=backendChanged)
     def speedMin(self):
-        return CYCLE_MIN
+        return 0 if self._apex6 else CYCLE_MIN
 
-    @Property(int, constant=True)
+    @Property(int, notify=backendChanged)
     def speedMax(self):
-        return CYCLE_MAX
+        return 100 if self._apex6 else CYCLE_MAX
 
     @Property(bool, notify=gripSyncChanged)
     def gripSync(self):
@@ -326,6 +384,7 @@ class LightingModel(QObject):
 
     @Slot(bytes)
     def configLoaded(self, blob):
+        self._apex6 = False
         self._stored = bytes(blob)
         self._edited = lighting.LedConfig(bytearray(blob))
         # Freshly read, so nothing is waiting to reach flash.
@@ -340,9 +399,39 @@ class LightingModel(QObject):
             "generator — choosing an effect rewrites the frames it plays.")
         for signal in (self.loadedChanged, self.effectChanged,
                        self.brightnessChanged, self.cycleTimeChanged,
-                       self.gripSyncChanged, self.infoChanged):
+                       self.gripSyncChanged, self.infoChanged, self.backendChanged):
             signal.emit()
         self._mark()
+
+    @Slot(bytes, str, int)
+    def apex6ConfigLoaded(self, blob, uid, slot):
+        # A reconnect must not replace an edit; explicit Reload clears first.
+        if self._apex6 and self.dirty and (uid, slot) == (self._uid, self._slot):
+            return
+        self._apex6 = True
+        self._uid, self._slot = uid, slot
+        self._stored = bytes(blob)
+        self._edited = Apex6LightingConfig(blob)
+        self._effect_index = self._edited.mode
+        self._saved = True
+        self._colours.setColours(self._edited.colours)
+        self._colours.setAllowed(self._max_colours())
+        self._info = "Lighting belongs to this profile. Applied changes may persist without an explicit save."
+        for signal in (self.backendChanged, self.loadedChanged, self.effectChanged,
+                       self.brightnessChanged, self.cycleTimeChanged,
+                       self.gripSyncChanged, self.infoChanged):
+            signal.emit()
+        self._mark(encode=False)
+
+    @Slot(bytes, bool, str, int)
+    def apex6Written(self, blob, saved, uid, slot):
+        if not self._apex6 or (uid, slot) != (self._uid, self._slot):
+            return
+        # Confirm precisely the submitted bytes, never edits made while the
+        # worker was busy. Those remain dirty and can be applied next.
+        self._stored = bytes(blob)
+        self._saved = bool(saved)
+        self._mark(encode=False)
 
     def _first_lit(self):
         for frame in range(self._edited.frames):
@@ -352,6 +441,8 @@ class LightingModel(QObject):
         return None
 
     def _max_colours(self):
+        if self._apex6:
+            return 1 if self.effect == 1 else 8 if self.effect in (2, 3) else 0
         index = self._effect_index - 1
         return EFFECTS[index][2] if 0 <= index < len(EFFECTS) else 1
 
@@ -360,13 +451,18 @@ class LightingModel(QObject):
         if self._edited is None:
             return
         self._colours.setAllowed(self._max_colours())
+        if self._apex6:
+            self._edited.mode = self.effect
+            self._edited.colours = self._colours.colours()
+            self._mark()
+            return
         index = self._effect_index - 1
         if 0 <= index < len(EFFECTS):
             _name, effect, _allowed = EFFECTS[index]
             self._edited.apply_effect(effect, self._colours.colours())
         self._mark()
 
-    def _mark(self):
+    def _mark(self, encode=True):
         """Recompute the derived dirty state, then announce it.
 
         **This is what guarantees `_dirty` cannot go stale, and it holds
@@ -381,13 +477,19 @@ class LightingModel(QObject):
         change: `saveNeeded` rides the same signal and moves without `dirty`
         moving, which is exactly what `confirmWritten(False)` does.
         """
+        if encode and self._apex6 and self._edited is not None:
+            self._edited.encode()
         self._dirty = (self._edited is not None
                        and bytes(self._edited.blob) != self._stored)
         self.dirtyChanged.emit()
 
     @Slot(bool)
     def write(self, save):
-        if self._edited is None:
+        if not self.canWrite:
+            return
+        if self._apex6:
+            self.apex6WriteRequested.emit(bytes(self._edited.blob), self._stored,
+                                         bool(save), self._uid, self._slot)
             return
         self.writeRequested.emit(
             bytes(self._edited.blob), self._stored or b"", bool(save))

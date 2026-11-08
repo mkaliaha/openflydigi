@@ -53,6 +53,7 @@ class DeviceModel(QObject):
         super().__init__(parent)
         self._connected = False
         self._battery = 0
+        self._battery_steps = BATTERY_STEPS
         self._charging = False
         self._connection_type = ""
         self._active_profile = -1
@@ -80,9 +81,9 @@ class DeviceModel(QObject):
             self._connected = value
             self.connectedChanged.emit()
 
-    @Property(int, constant=True)
+    @Property(int, notify=batteryChanged)
     def batterySteps(self):
-        return BATTERY_STEPS
+        return self._battery_steps
 
     @Property(int, notify=batteryChanged)
     def battery(self):
@@ -233,8 +234,8 @@ class DeviceModel(QObject):
     @Slot(dict)
     def versionsReceived(self, versions):
         self._firmware = str(versions.get("main") or "")
-        self._third_party_available = motion.version_at_least(
-            self._firmware, motion.THIRD_PARTY_MIN_FIRMWARE["k5"])
+        self._third_party_available = versions.get("third_party_available", motion.version_at_least(
+            self._firmware, motion.THIRD_PARTY_MIN_FIRMWARE["k5"]))
         self.thirdPartyChanged.emit()
 
     # -- slots the worker's signals land on --------------------------------
@@ -253,7 +254,8 @@ class DeviceModel(QObject):
         self._commit(
             (("_connected", True, self.connectedChanged),
              ("_error", "", self.errorChanged),
-             ("_battery", max(0, min(BATTERY_STEPS, int(info.get("battery_level", 0)))),
+             ("_battery_steps", int(info.get("battery_steps", BATTERY_STEPS)), self.batteryChanged),
+             ("_battery", max(0, min(int(info.get("battery_steps", BATTERY_STEPS)), int(info.get("battery_level", 0)))),
               self.batteryChanged),
              ("_charging", bool(info.get("charging")), self.chargingChanged),
              ("_connection_type", str(info.get("connect_type", "") or ""),

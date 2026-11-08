@@ -33,6 +33,12 @@ Kirigami.ScrollablePage {
             Controls.Label {
                 objectName: "lightingHint"
                 text: {
+                    if (App.lighting.apex6) {
+                        if (!App.lighting.canWrite)
+                            return "Select this profile on the pad or reload before applying.";
+                        return App.lighting.dirty ? "Unsaved changes. Apply may persist on the controller."
+                            : "Applied changes may persist without an explicit save.";
+                    }
                     if (App.lighting.dirty)
                         return "Unsaved changes.";
                     if (App.lighting.saveNeeded)
@@ -52,7 +58,7 @@ Kirigami.ScrollablePage {
                 objectName: "lightingApplyButton"
                 text: "Apply"
                 icon.name: "dialog-ok-apply"
-                enabled: App.lighting.dirty
+                enabled: App.lighting.dirty && App.lighting.canWrite
                 onClicked: App.lighting.write(false)
             }
 
@@ -64,7 +70,7 @@ Kirigami.ScrollablePage {
                 icon.name: "document-save"
                 // Also enabled once something has been applied but not yet
                 // committed, or applying would make saving impossible.
-                enabled: App.lighting.dirty || App.lighting.saveNeeded
+                enabled: (App.lighting.dirty || App.lighting.saveNeeded) && App.lighting.canWrite
                 onClicked: App.lighting.write(true)
             }
         }
@@ -92,7 +98,8 @@ Kirigami.ScrollablePage {
                 // The stored mode byte uses Space Station's numbering, so on
                 // load we cannot say which of our effects made what is on the
                 // pad. The picker starts on "keep" rather than claiming one.
-                description: App.lighting.effect === 0
+                description: App.lighting.apex6 ? "The controller generates the selected lighting effect"
+                             : App.lighting.effect === 0
                              ? "The pad's own frames are left alone until you pick one"
                              : "Choosing an effect rewrites the frames the pad plays"
                 model: App.lighting.effectNames
@@ -100,20 +107,22 @@ Kirigami.ScrollablePage {
                 onActivated: App.lighting.effect = currentIndex
             }
 
-            FormCard.FormDelegateSeparator {}
+            FormCard.FormDelegateSeparator { visible: App.lighting.hasBrightness }
 
             SliderRow {
                 objectName: "brightness"
+                visible: App.lighting.hasBrightness
                 label: "Brightness"
                 to: App.lighting.brightnessMax
                 value: App.lighting.brightness
                 onMoved: (newValue) => App.lighting.brightness = newValue
             }
 
-            FormCard.FormDelegateSeparator {}
+            FormCard.FormDelegateSeparator { visible: App.lighting.hasSpeed }
 
             SliderRow {
                 objectName: "speed"
+                visible: App.lighting.hasSpeed
                 label: "Speed"
                 from: App.lighting.speedMin
                 to: App.lighting.speedMax
@@ -134,7 +143,8 @@ Kirigami.ScrollablePage {
             ModelSwitch {
                 objectName: "gripSync"
                 text: "Vibration light effect"
-                description: "The pad dims part of the ring while a grip motor "
+                description: App.lighting.apex6 ? "Adds a light response while a grip motor vibrates."
+                             : "The pad dims part of the ring while a grip motor "
                              + "runs, on top of whatever effect is playing."
                 value: App.lighting.gripSync
                 onMoved: (wanted) => App.lighting.gripSync = wanted

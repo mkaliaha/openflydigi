@@ -133,7 +133,11 @@ class App(QObject):
         # re-evaluates, which makes it "the pad reported in" rather than "the
         # pad's connectedness moved".
         self._was_connected = False
+        self._backend_key = None
+        self._lighting_profile = -1
+        self._native_refresh_pending = False
         self._device.connectedChanged.connect(self._connection_changed)
+        self._profile.loadRequested.connect(self._profile_loading)
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -168,12 +172,15 @@ class App(QObject):
         self.requestScreen.connect(worker.refresh_screen)
         self.requestSettings.connect(worker.refresh_settings)
         self._settings.writeRequested.connect(worker.write_setting)
+        self._settings.apex6WriteRequested.connect(worker.write_apex6_setting)
+        self._lighting.apex6WriteRequested.connect(worker.write_apex6_lighting)
         self._screen.uploadRequested.connect(self._screen_upload_starting)
         self._screen.uploadRequested.connect(worker.upload_screen)
         self._screen.settingRequested.connect(worker.set_screen_setting)
         self._devices.refreshRequested.connect(worker.refresh_devices)
         self._devices.padSelected.connect(worker.select_pad)
         worker.pad_selected.connect(self._pad_selected)
+        worker.backend_changed.connect(self._backend_changed)
         self._dock.refreshRequested.connect(worker.load_dock)
         self._dock.switchRequested.connect(worker.set_dock_switch)
         self._dock.lightingRequested.connect(worker.write_dock_lighting)
@@ -186,8 +193,9 @@ class App(QObject):
         worker.info_changed.connect(self._screen.infoReceived)
         worker.failed.connect(self._device.failed)
         worker.status.connect(self._status)
-        worker.active_changed.connect(self._profile.setActive)
+        worker.active_changed.connect(self._active_changed)
         worker.profile_loaded.connect(self._profile.profileLoaded)
+        worker.profile_load_failed.connect(self._profile.loadFailed)
         worker.profiles_reset.connect(self._profile.forget)
         worker.profile_written.connect(self._written)
         worker.macro_recorded.connect(self._profile.macros.recorded)
@@ -196,6 +204,9 @@ class App(QObject):
         worker.versions_changed.connect(self._device.versionsReceived)
         worker.lighting_loaded.connect(self._lighting.configLoaded)
         worker.lighting_written.connect(self._lighting_written)
+        worker.apex6_lighting_loaded.connect(self._apex6_lighting_loaded)
+        worker.apex6_lighting_written.connect(self._lighting.apex6Written)
+        worker.apex6_lighting_written.connect(self._profile.apex6LightingWritten)
         worker.vibration_applied.connect(self._vibration_applied)
         worker.settings_changed.connect(self._settings.stateReceived)
         worker.setting_written.connect(self._settings.writeFinished)
@@ -358,6 +369,8 @@ class App(QObject):
         Other profiles stay unread until opened, because each read makes the
         pad audibly re-seat its trigger motors.
         """
+        if self._profile.apex6:
+            self._lighting.clear(apex6=True)
         self.requestInfo.emit()
         self._read_the_rest(keep_edits=False)
 
@@ -376,6 +389,12 @@ class App(QObject):
         be the app losing work nobody told it to lose -- and the pad does sleep,
         in minutes, while an editing session touches it not at all.
         """
+        if self._profile.apex6:
+            self._native_refresh_pending = not (keep_edits and self._lighting.dirty)
+            self.requestStatus.emit()
+            self.requestTransport.emit()
+            self.requestSettings.emit()
+            return
         self.requestStatus.emit()
         self.requestTransport.emit()
         # One read for both: the screen's two toggles are two bits of the
@@ -451,6 +470,13 @@ class App(QObject):
         to another would be the app inventing an intention.
         """
         self._device.connected = False
+        self._backend_key = None
+        self._native_refresh_pending = False
+        self._profile.clear()
+        self._lighting.clear(self._devices.currentCode == "k6")
+        self._settings.clear()
+        self._device.versionsReceived({})
+        self._device.transportReceived({})
         # Before the read, not after: which buttons the pad has decides how the
         # remap table, the gyro's enable-key picker and the macro binder are
         # built, and rebuilding them under a profile that has already landed
@@ -459,6 +485,36 @@ class App(QObject):
         self._profile.modelCode = self._devices.currentCode
         self.requestInfo.emit()
         self._read_the_rest(keep_edits=False)
+
+    def _backend_changed(self, code, uid):
+        key = (code, uid)
+        if self._backend_key == key:
+            return
+        self._backend_key = key
+        self._profile.clear()
+        self._profile.modelCode = code
+        self._lighting.clear(code == "k6")
+        self._settings.clear()
+        self._device.versionsReceived({})
+        self._device.transportReceived({})
+
+    def _profile_loading(self, slot):
+        if self._profile.apex6 and slot != self._lighting_profile:
+            self._lighting.clear(apex6=True)
+        self._lighting_profile = slot
+
+    def _active_changed(self, slot):
+        self._lighting.setActive(slot)
+        if self._profile.apex6 and self._native_refresh_pending:
+            self._native_refresh_pending = False
+            self._profile.reloadActive(slot)
+        else:
+            self._profile.setActive(slot)
+
+    def _apex6_lighting_loaded(self, blob, uid, slot):
+        if self._profile.cfgId >= 0 and slot != self._profile.cfgId:
+            return  # a read queued before a newer profile selection
+        self._lighting.apex6ConfigLoaded(blob, uid, slot)
 
     def _screen_upload_starting(self, _frames, _interval, _restore):
         self._info_timer.stop()
@@ -471,6 +527,11 @@ class App(QObject):
 
     def _written(self, cfg_id, packets, saved):
         self._profile.confirmWritten(cfg_id, saved)
+        if self._profile.apex6:
+            if saved:
+                self._lighting.profileSaved(cfg_id)
+            self._device.status = f"Profile {cfg_id + 1} save acknowledged"
+            return
         where = "saved to flash" if saved else "in memory only"
         self._device.status = (
             f"Profile {cfg_id + 1}: wrote {packets} packet(s), {where}")

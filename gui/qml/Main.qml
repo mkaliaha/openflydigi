@@ -114,6 +114,9 @@ Kirigami.ApplicationWindow {
         const kinds = section.kinds
         if (kinds && kinds.indexOf(App.devices.currentKind) < 0)
             return false
+        if (App.profile.apex6 && kinds && kinds.indexOf("pad") >= 0
+                && ["Controller", "Device", "Lighting"].indexOf(section.name) < 0)
+            return false
         // `needs` is hardware, where `kinds` is which sort of device. A Vader
         // is a pad and gets the pad's pages, but it has no screen and no force
         // triggers -- so a Screen page for a panel it does not have, or the six
@@ -135,6 +138,11 @@ Kirigami.ApplicationWindow {
     // a QAbstractListModel is one -- the generated qmltypes names the prototype
     // and stops there, so it reads as assigning the wrong type.
     readonly property string deviceKind: App.devices.currentKind
+    readonly property bool nativeProfile: App.profile.apex6
+    onNativeProfileChanged: {
+        if (currentSection >= 0 && !sectionVisible(currentSection))
+            openSection(indexOfSection("Controller"))
+    }
 
     onDeviceKindChanged: {
         if (deviceKind === shownKind)

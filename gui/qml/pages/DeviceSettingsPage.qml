@@ -59,7 +59,8 @@ Kirigami.ScrollablePage {
                 // The one setting here that gives a Linux user something they
                 // cannot get any other way: four profiles, changed on the pad,
                 // with nothing running on the host.
-                description: "FN + A, B, X or Y selects one of the four profiles — "
+                description: App.settings.apex6 ? "Allows the controller's profile shortcuts to select a saved profile."
+                             : "FN + A, B, X or Y selects one of the four profiles — "
                              + "no application needed, and it works in any game."
                 value: App.settings.quickSwitch
                 onMoved: (wanted) => App.settings.quickSwitch = wanted
@@ -104,7 +105,8 @@ Kirigami.ScrollablePage {
                 text: App.settings.sleepMinutes === 0
                       ? "The pad never sleeps on its own"
                       : "Sleeps after " + App.settings.sleepText + " idle"
-                description: "A sleeping pad disconnects from USB, and anything "
+                description: App.settings.apex6 ? "Zero disables automatic sleep."
+                             : "A sleeping pad disconnects from USB, and anything "
                              + "applied but not saved is lost with it. Zero means never."
             }
         }
@@ -132,13 +134,14 @@ Kirigami.ScrollablePage {
 
             ModelSwitch {
                 objectName: "autoCalibrationToggle"
-                visible: App.settings.stickDebounceUsable
-                text: "Auto-calibration"
+                visible: App.settings.apex6 || App.settings.stickDebounceUsable
+                text: App.settings.apex6 ? "Stick centre auto-adjust" : "Auto-calibration"
                 // Not our rule: Flydigi's own string for the debounce toggle
                 // says turning it off disables this. Greyed rather than hidden,
                 // so the dependency is visible instead of the row vanishing.
                 enabled: App.settings.autoCalibrationUsable
-                description: App.settings.stickDebounce
+                description: App.settings.apex6 ? "Lets the controller adjust its stick centres automatically."
+                             : App.settings.stickDebounce
                              ? "The pad re-learns its stick centres as they wear."
                              : "Needs stick debounce on — the pad cannot calibrate "
                                + "against a signal it is not filtering."
@@ -163,7 +166,8 @@ Kirigami.ScrollablePage {
             FormComboBox {
                 objectName: "precisionCombo"
                 text: "Resolution"
-                description: "How finely the sticks are quantised. It does not "
+                description: App.settings.apex6 ? "The controller's stored stick resolution."
+                             : "How finely the sticks are quantised. It does not "
                              + "rescale a profile's curve — measured: the stored "
                              + "bytes are identical at 10-bit and 12-bit."
                 model: App.settings.precisionNames
@@ -175,6 +179,7 @@ Kirigami.ScrollablePage {
 
             FormComboBox {
                 objectName: "sensitivityCombo"
+                visible: !App.settings.apex6
                 text: "Centre sensitivity"
                 description: "How far off centre a stick has to move before the "
                              + "pad reports it. Space Station offers three of these "
@@ -186,7 +191,7 @@ Kirigami.ScrollablePage {
         }
 
         FormCard.FormHeader {
-            title: "Reported"
+            title: App.settings.apex6 ? "Input" : "Reported"
             visible: App.settings.loaded
         }
 
@@ -195,6 +200,7 @@ Kirigami.ScrollablePage {
 
             FormCard.FormTextDelegate {
                 objectName: "reportRateRow"
+                visible: !App.settings.apex6
                 text: "Polling rate"
                 // Shown and not offered. This pad answers 0, which is not in
                 // Flydigi's map, and both its input endpoints already declare
@@ -205,26 +211,55 @@ Kirigami.ScrollablePage {
                              + "allows it, so there is no control here."
             }
 
+            FormComboBox {
+                objectName: "reportRateCombo"
+                visible: App.settings.apex6
+                text: "USB report rate"
+                description: "The controller's stored rate setting."
+                model: App.settings.reportRateNames
+                currentIndex: App.settings.reportRate
+                onActivated: App.settings.reportRate = currentIndex
+            }
+
             FormCard.FormDelegateSeparator { visible: App.settings.mappingSwitchUsable }
 
             ModelSwitch {
                 objectName: "mappingSwitchToggle"
                 visible: App.settings.mappingSwitchUsable
-                text: "Mapping switch"
+                text: App.settings.apex6 ? "Local mapping and Turbo" : "Mapping switch"
                 // Honest about not knowing. The pad reports it supported and
                 // on, and it has no interface string in any of the twelve
                 // locales Space Station ships -- so there is nothing to copy the
                 // wording from, and guessing a label would be worse than this.
-                description: "Undocumented. The pad supports it and Flydigi's own "
+                description: App.settings.apex6 ? "Enables the controller's local mapping and Turbo functions."
+                             : "Undocumented. The pad supports it and Flydigi's own "
                              + "application never names it, so what it changes is "
                              + "unknown — it is here because the pad has it."
                 value: App.settings.mappingSwitch
                 onMoved: (wanted) => App.settings.mappingSwitch = wanted
             }
+
+            ModelSwitch {
+                objectName: "xboxHomeToggle"
+                visible: App.settings.apex6
+                text: "Home button in XInput"
+                description: "Enables Home button output in XInput mode."
+                value: App.settings.xboxHome
+                onMoved: (wanted) => App.settings.xboxHome = wanted
+            }
+
+            ModelSwitch {
+                objectName: "apex6ThirdPartyToggle"
+                visible: App.settings.apex6
+                text: "Let other software take the pad over"
+                description: "Allows another driver to take control of the controller."
+                value: App.settings.thirdParty
+                onMoved: (wanted) => App.settings.thirdParty = wanted
+            }
         }
 
         FormCard.FormCard {
-            visible: App.settings.loaded
+            visible: App.settings.loaded && !App.settings.apex6
 
             FormCard.FormTextDelegate {
                 objectName: "screenSettingsPointer"

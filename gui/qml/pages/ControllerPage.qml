@@ -131,9 +131,11 @@ Kirigami.ScrollablePage {
 
         FormCard.FormHeader {
             title: "Selected profile"
+            visible: !App.profile.apex6
         }
 
         FormCard.FormCard {
+            visible: !App.profile.apex6
             FormCard.FormTextFieldDelegate {
                 id: nameField
 
@@ -143,7 +145,7 @@ Kirigami.ScrollablePage {
                 // would truncate on its own, the model truncates too, and the
                 // two chase each other into a binding loop. The model is the
                 // one that has to be right, so it is the only one that clips.
-                enabled: App.profile.loaded
+                enabled: App.profile.loaded && !App.profile.apex6
                 placeholderText: "unnamed"
 
                 // Deliberately not `text: App.profile.title`. The model caps
@@ -195,6 +197,7 @@ Kirigami.ScrollablePage {
 
             FormCard.FormButtonDelegate {
                 objectName: "switchCopyButton"
+                visible: !App.profile.apex6
                 text: "Copy to the Switch profile"
                 // Named rather than described as "apply to Switch", because
                 // what it copies into is a slot with a number the pad's own
@@ -243,6 +246,7 @@ Kirigami.ScrollablePage {
 
             FormCard.FormButtonDelegate {
                 objectName: "backupButton"
+                visible: !App.profile.apex6
                 text: "Back up this profile…"
                 icon.name: "document-save-as"
                 enabled: App.profile.loaded
@@ -253,6 +257,7 @@ Kirigami.ScrollablePage {
 
             FormCard.FormButtonDelegate {
                 objectName: "restoreButton"
+                visible: !App.profile.apex6
                 text: "Restore from a file…"
                 icon.name: "document-open"
                 enabled: App.profile.loaded
@@ -262,6 +267,7 @@ Kirigami.ScrollablePage {
 
         FormCard.FormCard {
             Layout.topMargin: Kirigami.Units.largeSpacing
+            visible: !App.profile.apex6
 
             FormCard.FormButtonDelegate {
                 objectName: "resetAllButton"

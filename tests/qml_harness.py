@@ -373,12 +373,53 @@ class Fixture(QObject):
         self._lighting_reads = 0
         self._screen_reads = 0
         self._settings_reads = 0
+        self._legacy_controller = app.thread.worker._controller
+        self._native = None
         # Connected after each model's own handler, so by the time a counter
         # moves the model already holds the new config.
         app.thread.worker.profile_loaded.connect(self._count_profile_read)
         app.thread.worker.lighting_loaded.connect(self._count_lighting_read)
         app.thread.worker.screen_status.connect(self._count_screen_read)
         app.thread.worker.settings_changed.connect(self._count_settings_read)
+        app.thread.worker.apex6_lighting_loaded.connect(self._count_lighting_read)
+        app.thread.worker.apex6_lighting_written.connect(self._count_lighting_read)
+
+    @Slot()
+    def useApex6(self):
+        from flydigi.mock.apex6 import FakeApex6
+        self._native = FakeApex6()
+        worker = self._app.thread.worker
+        worker._drop()
+        worker._controller = lambda: self._native
+        self._app._backend_key = None
+        self._app._backend_changed("k6", self._native.uid)
+        self._app.reload()
+
+    @Slot()
+    def useLegacy(self):
+        worker = self._app.thread.worker
+        worker._drop()
+        worker._controller = self._legacy_controller
+        self._app._backend_changed("k5", "")
+        self._app.reload()
+
+    @Property("QVariantMap", notify=changed)
+    def nativeSettings(self):
+        from flydigi import gpa6_config
+        return gpa6_config.global_config(self._native.ram(1), 22) if self._native else {}
+
+    @Property("QVariantMap", notify=changed)
+    def nativeLighting(self):
+        from flydigi import gpa6_config
+        return gpa6_config.lighting_config(self._native.ram(4)) if self._native else {}
+
+    @Property(int, notify=changed)
+    def nativeSlot(self):
+        return self._native.slot if self._native else -1
+
+    @Slot(result=int)
+    def nativeSaveCount(self):
+        return sum(cmd == 0xa7 for cmd, _ in self._native.history)
 
     def _count_profile_read(self, *_args):
         self._profile_reads += 1

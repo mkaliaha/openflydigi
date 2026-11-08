@@ -795,6 +795,45 @@ def test_leaving_a_section_destroys_its_page(qt_app):
     app_object.shutdown()
 
 
+def test_apex6_pages_and_switching_back_to_apex5(qt_app):
+    from unittest.mock import patch
+    from flydigi import registry
+    from flydigi.mock.apex6 import FakeApex6
+    native = FakeApex6()
+    native.change_profile(2)
+    legacy = TestPad()
+    active = [native]
+    native_entry = registry.probe_pad(native, registry.blank(native.path, "pad"), deep=True)
+    legacy_entry = dict(registry.blank("mock:legacy", "pad"), code="k5", model="Apex 5",
+                        uid="1234567890abcdef1234567890", supported=True)
+    with patch.object(registry, "list_devices", return_value=[native_entry, legacy_entry]):
+        app, engine, window = load_shell(qt_app, native, controller=lambda: active[0])
+        app._devices_timer.stop()
+        pump(qt_app)
+        check("native startup reads the current slot", app.profile.cfgId == native.slot == 2)
+        check("native startup loads settings and lighting", app.settings.loaded and app.lighting.loaded)
+        check("native sidebar offers only wired editors",
+              window.property("drawerSections").toVariant() == ["Devices", "Controller", "Device", "Lighting", "Setup"])
+        for name in ("Controller", "Device", "Lighting"):
+            window.openSection(ALL_SECTIONS.index(name))
+            pump(qt_app, rounds=5)
+            check(f"native {name} page opens", window.property("openPageTitle") == name)
+        app.lighting.effect = 2
+        active[0] = legacy
+        app.devices.select(1)
+        pump(qt_app)
+        check("Apex 5 model returns after switching", not app.profile.apex6 and app.profile.loaded)
+        check("Apex 5 lighting replaces native edits", not app.lighting.apex6 and not app.lighting.dirty)
+        check("Apex 5 sidebar returns", window.property("drawerSections").toVariant() == SECTIONS)
+        window.openSection(ALL_SECTIONS.index("Buttons"))
+        active[0] = native
+        app.devices.select(0)
+        pump(qt_app)
+        check("switching to native leaves the unavailable editor", window.property("openPageTitle") == "Controller")
+        check("native profile loads again", app.profile.apex6 and app.profile.loaded)
+        app.shutdown()
+
+
 def main():
     QQuickStyle.setStyle("org.kde.desktop")
     qt_app = QGuiApplication.instance() or QGuiApplication([])
@@ -819,6 +858,7 @@ def main():
                      test_a_pad_that_was_there_all_along_is_read_once,
                      test_a_dismissed_no_controller_message_stays_dismissed,
                      test_a_pad_that_comes_back_keeps_unsaved_edits,
+                     test_apex6_pages_and_switching_back_to_apex5,
                      test_loading_the_window_is_warning_free):
             try:
                 test(qt_app)

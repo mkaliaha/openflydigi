@@ -100,6 +100,7 @@ class SettingsModel(QObject):
     changed = Signal()
     # name, value -- the worker writes it and reads the block back.
     writeRequested = Signal(str, int)
+    apex6WriteRequested = Signal(str, int, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -108,6 +109,38 @@ class SettingsModel(QObject):
         # that write is in the air. See `_remember`.
         self._pending = {}
         self._loaded = False
+
+    def clear(self):
+        self._state = {}
+        self._pending.clear()
+        self._loaded = False
+        self.changed.emit()
+
+    @Property(bool, notify=changed)
+    def apex6(self):
+        return bool(self._state.get("apex6"))
+
+    def _write(self, name, value):
+        if self.apex6:
+            self.apex6WriteRequested.emit(name, value, self._state["uid"])
+        else:
+            self.writeRequested.emit(name, value)
+
+    @Property(bool, notify=changed)
+    def xboxHome(self):
+        return self._flag("xbox_home")
+
+    @xboxHome.setter
+    def xboxHome(self, value):
+        self._set_flag("xbox_home", value)
+
+    @Property(bool, notify=changed)
+    def thirdParty(self):
+        return self._flag("third_party")
+
+    @thirdParty.setter
+    def thirdParty(self, value):
+        self._set_flag("third_party", value)
 
     # -- what the worker hands back ----------------------------------------
 
@@ -163,7 +196,7 @@ class SettingsModel(QObject):
         if self._flag(name) != value:
             self._state[name] = value
             self.changed.emit()
-        self.writeRequested.emit(name, 1 if value else 0)
+        self._write(name, 1 if value else 0)
 
     @Property(bool, notify=changed)
     def quickSwitch(self):
@@ -206,7 +239,7 @@ class SettingsModel(QObject):
         invention here -- the page greys the row rather than leaving a switch
         that silently does nothing.
         """
-        return self._usable("auto_calibration") and self._flag("stick_debounce")
+        return self._usable("auto_calibration") and (self.apex6 or self._flag("stick_debounce"))
 
     @Property(bool, notify=changed)
     def stickRebound(self):
@@ -240,42 +273,49 @@ class SettingsModel(QObject):
 
     @sleepMinutes.setter
     def sleepMinutes(self, value):
-        value = max(0, min(settings.SLEEP_MAX_MINUTES, int(value)))
+        value = max(0, min(self.sleepMax, int(value)))
         self._remember("sleep_minutes")
         if self.sleepMinutes != value:
             self._state["sleep_minutes"] = value
             self.changed.emit()
-        self.writeRequested.emit("sleep_minutes", value)
+        self._write("sleep_minutes", value)
 
-    @Property(int, constant=True)
+    @Property(int, notify=changed)
     def sleepMax(self):
-        return settings.SLEEP_MAX_MINUTES
+        return 255 if self.apex6 else settings.SLEEP_MAX_MINUTES
 
     @Property(str, notify=changed)
     def sleepText(self):
-        return settings.describe(self._state)["sleep"] if self._loaded else ""
+        if not self._loaded:
+            return ""
+        return f"{self.sleepMinutes} min" if self.sleepMinutes else "never"
 
     # -- the two stick numbers ---------------------------------------------
 
-    @Property(list, constant=True)
+    @Property(list, notify=changed)
     def precisionNames(self):
-        return PRECISION_NAMES
+        return [f"{n}-bit" for n in range(8, 13)] if self.apex6 else PRECISION_NAMES
+
+    def _precision_values(self):
+        return tuple(range(8, 13)) if self.apex6 else PRECISION_WIRE
 
     @Property(int, notify=changed)
     def precision(self):
         """Index into `precisionNames`, or -1 for a value outside the enum."""
         wire = int(self._state.get("precision", -1))
-        return PRECISION_WIRE.index(wire) if wire in PRECISION_WIRE else -1
+        values = self._precision_values()
+        return values.index(wire) if wire in values else -1
 
     @precision.setter
     def precision(self, index):
-        if not 0 <= int(index) < len(PRECISION_WIRE) or self.precision == int(index):
+        values = self._precision_values()
+        if not 0 <= int(index) < len(values) or self.precision == int(index):
             return
         self._remember("precision")
-        wire = PRECISION_WIRE[int(index)]
+        wire = values[int(index)]
         self._state["precision"] = wire
         self.changed.emit()
-        self.writeRequested.emit("precision", wire)
+        self._write("precision", wire)
 
     @Property(list, constant=True)
     def sensitivityNames(self):
@@ -294,7 +334,27 @@ class SettingsModel(QObject):
         wire = SENSITIVITY_WIRE[int(index)]
         self._state["sensitivity"] = wire
         self.changed.emit()
-        self.writeRequested.emit("sensitivity", wire)
+        self._write("sensitivity", wire)
+
+    @Property("QStringList", constant=True)
+    def reportRateNames(self):
+        return [f"{hz} Hz" for hz in (125, 250, 500, 1000)]
+
+    @Property(int, notify=changed)
+    def reportRate(self):
+        rates = (125, 250, 500, 1000)
+        value = self._state.get("report_rate")
+        return rates.index(value) if value in rates else -1
+
+    @reportRate.setter
+    def reportRate(self, index):
+        if not self.apex6 or not 0 <= int(index) < 4 or self.reportRate == int(index):
+            return
+        self._remember("report_rate")
+        value = (125, 250, 500, 1000)[int(index)]
+        self._state["report_rate"] = value
+        self.changed.emit()
+        self._write("report_rate", value)
 
     # -- report rate, which is shown and not offered -----------------------
 
@@ -309,4 +369,10 @@ class SettingsModel(QObject):
         rate to lose. `tools/flydigi-settings report-rate --i-know` exists for
         the bench; a control here would be an invitation.
         """
-        return settings.describe(self._state)["report_rate"] if self._loaded else ""
+        if not self._loaded:
+            return ""
+        value = int(self._state.get("report_rate", 0))
+        if self.apex6:
+            return f"{value} Hz"
+        rate = settings.report_rate_hz(value)
+        return f"{rate} Hz" if rate else f"default ({value})"

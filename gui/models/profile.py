@@ -16,8 +16,7 @@ writes back on refresh, so the guard is gone.
 from PySide6.QtCore import (Property, QAbstractListModel, QModelIndex, QObject,
                             Qt, QUrl, Signal, Slot)
 from PySide6.QtQml import QmlElement
-
-from flydigi import effects, mapping
+from flydigi import effects, gpa6_backup, mapping
 
 # See gui/models/device.py for what these two names do.
 QML_IMPORT_NAME = "Apex5"
@@ -2282,6 +2281,47 @@ class ProfileModel(QObject):
         self._motion.keyNamesChanged.emit()
         self.keysChanged.emit()
 
+    @Property(bool, notify=keysChanged)
+    def apex6(self):
+        return self._model_code == "k6"
+
+    def clear(self):
+        """A new controller has its own active slot, cache and pending reads."""
+        self._replace(None)
+        self._cfg_id = -1
+        self._saved = True
+        self._slots.setCount(self._slots.count)
+        self._slots.setActive(-1)
+        self._slots.setCurrent(-1)
+        self._slots.setDirtySlot(-1)
+        self.cfgIdChanged.emit()
+        self.loadedChanged.emit()
+        self.titleChanged.emit()
+        self.markChanged()
+
+    def _pack(self):
+        return (gpa6_backup.pack_config(self._edited) if self.apex6
+                else mapping.pack_config(self._edited))
+
+    @Slot(int)
+    def loadFailed(self, cfg_id):
+        self._slots._pending.discard(cfg_id)
+
+    def reloadActive(self, cfg_id):
+        """Read the native active slot without switching back to a cached one."""
+        self._slots.forget()
+        self._slots.setActive(cfg_id)
+        self.select(cfg_id)
+
+    @Slot(bytes, bool, str, int)
+    def apex6LightingWritten(self, blob, saved, uid, slot):
+        if (self.apex6 and self._edited is not None and self._cfg_id == slot
+                and self._edited.source["uid"] == uid):
+            self._edited.lighting = bytes(blob)
+            self._slots.setStored(slot, self._pack(), self.title)
+            self._saved = bool(saved)
+            self.markChanged()
+
     @Property("QStringList", notify=keysChanged)
     def keyLabels(self):
         """Every key of this pad, labelled, in the order a UI should show them."""
@@ -2293,7 +2333,9 @@ class ProfileModel(QObject):
     @property
     def config(self):
         """The open config, to read from. See `edited` for writing to it."""
-        return self._edited
+        # Legacy sub-models are deliberately inert until each editor has a
+        # native adapter. The complete package still lives in this model.
+        return None if self.apex6 else self._edited
 
     @property
     def generation(self):
@@ -2317,7 +2359,7 @@ class ProfileModel(QObject):
         screen until the next unrelated edit.
         """
         self._generation += 1
-        return self._edited
+        return self.config
 
     def _replace(self, config):
         """Swap the open profile out. Nothing else may assign `_edited`.
@@ -2381,7 +2423,7 @@ class ProfileModel(QObject):
 
     def _recompute_dirty(self):
         self._dirty = (self._edited is not None and self._cfg_id >= 0
-                       and mapping.pack_config(self._edited)
+                       and self._pack()
                        != self._slots.stored(self._cfg_id))
         return self._dirty
 
@@ -2414,10 +2456,14 @@ class ProfileModel(QObject):
 
     @Property(str, notify=titleChanged)
     def title(self):
+        if self.apex6:
+            return f"Profile {self._cfg_id + 1}" if self._edited else ""
         return self._edited.title if self._edited else ""
 
     @title.setter
     def title(self, value):
+        if self.apex6:
+            return
         value = str(value)[:TITLE_MAX_CHARS]
         if self._edited is None or self._edited.title == value:
             return
@@ -2431,6 +2477,9 @@ class ProfileModel(QObject):
 
     @Property(str, notify=dirtyChanged)
     def hint(self):
+        if self.apex6:
+            return ("Select a profile to read it." if not self.loaded else
+                    "Applied changes may persist without saving. Save commits the active profile.")
         if self._edited is None:
             return "Reading this profile from the pad…"
         if self.dirty:
@@ -2458,7 +2507,7 @@ class ProfileModel(QObject):
     @Slot(int)
     def select(self, cfg_id):
         cfg_id = int(cfg_id)
-        if cfg_id < 0:
+        if not 0 <= cfg_id < self._slots.count:
             return
         # Re-selecting the open profile would rebuild it from the cached blob
         # and throw away every unsaved edit -- silently, with no device traffic
@@ -2498,7 +2547,8 @@ class ProfileModel(QObject):
             self.loadRequested.emit(cfg_id)
 
     def _open(self, blob):
-        self._replace(mapping.unpack_config(blob, self._cfg_id))
+        self._replace(gpa6_backup.unpack_config(blob, self._cfg_id) if self.apex6
+                      else mapping.unpack_config(blob, self._cfg_id))
         # Freshly read from the pad, so there is nothing waiting to be
         # committed to flash.
         self._saved = True
@@ -2579,7 +2629,9 @@ class ProfileModel(QObject):
                 "would save the wrong one. Switch the pad to this profile "
                 "first, then save.")
             return
-        self.writeRequested.emit(self._cfg_id, mapping.pack_config(self._edited),
+        if self.apex6 and not save:
+            return
+        self.writeRequested.emit(self._cfg_id, self._pack(),
                                  self._slots.stored(self._cfg_id) or b"",
                                  bool(save))
 
@@ -2591,8 +2643,7 @@ class ProfileModel(QObject):
         is only in the pad's working memory and dies with the next sleep.
         """
         if self._edited is not None and cfg_id == self._cfg_id:
-            self._slots.setStored(cfg_id, mapping.pack_config(self._edited),
-                                  self._edited.title)
+            self._slots.setStored(cfg_id, self._pack(), self.title)
             self._saved = bool(saved)
             self.markChanged()
 
@@ -2605,7 +2656,7 @@ class ProfileModel(QObject):
         describing. A slot id from QML could name a profile the user is not
         looking at.
         """
-        if self._cfg_id < 0 or self._edited is None:
+        if self.apex6 or self._cfg_id < 0 or self._edited is None:
             return
         self.resetRequested.emit(self._cfg_id)
 
@@ -2618,7 +2669,8 @@ class ProfileModel(QObject):
         here would be repeating Flydigi's own mistake, whose UI has a
         per-profile item wired to this and loses the other three.
         """
-        self.resetAllRequested.emit()
+        if not self.apex6:
+            self.resetAllRequested.emit()
 
     @Slot()
     def copyToSwitch(self):
@@ -2628,7 +2680,7 @@ class ProfileModel(QObject):
         constraint behind it: 171 commits whatever the pad is *running*, so a
         slot id that was not the open one would copy the wrong profile.
         """
-        if self._cfg_id < 0 or self._edited is None:
+        if self.apex6 or self._cfg_id < 0 or self._edited is None:
             return
         self.switchCopyRequested.emit(self._cfg_id)
 
@@ -2643,7 +2695,7 @@ class ProfileModel(QObject):
 
     @Slot(str)
     def backup(self, where):
-        if self._edited is None:
+        if self.apex6 or self._edited is None:
             return
         # Packed, so a v3.2 pad's backup carries its macros too -- they are
         # not in the profile blob, and a backup without them would restore a
@@ -2654,7 +2706,7 @@ class ProfileModel(QObject):
 
     @Slot(str)
     def restore(self, where):
-        if self._edited is None:
+        if self.apex6 or self._edited is None:
             return
         try:
             with open(local_path(where), "rb") as fh:

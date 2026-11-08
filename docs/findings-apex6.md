@@ -4,7 +4,7 @@ Initial research: 2026-09-22. **Hardware update: 2026-11-07, Apex 6 Pro over rec
 and direct USB, firmware 9.0.6.8.** Identity, snapshots, global setting writes,
 lighting, physical button remapping, quick profile switching, stick precision
 and XInput Home are verified on that unit.
-CLI settings/profile editing is implemented; GUI editing is not.
+CLI settings/profile editing is implemented. The GUI now covers settings, profile selection/save and lighting; richer editors remain pending.
 Left/right/stereo grip output stopped correctly, but mode-1 restoration was
 refused. Ordinary game rumble still worked afterward. Some setting effects and
 the complete USB DualSense relay remain unverified. See the hardware findings
@@ -15,6 +15,45 @@ looks feasible, including a route from our virtual DualSense audio to linear
 grip haptics. It requires a new transport/configuration dialect and a waveform
 output backend. Merely accepting `k6` or reusing the old SDK's `K6Trigger*`
 packets would be insufficient.
+
+## Desktop foundation (2026-11-08)
+
+`gui/apex6.py` adapts the native backend to the existing worker/model graph.
+It reuses global-field verification, complete profile packages and guarded
+lighting edits; it introduces no new wire protocol. `identity.SUPPORTED` remains
+`k5`/`f5`, and legacy worker operations reject a GPA6 handle before sending any
+legacy command. Native mutations are not replayed by the legacy reconnect loop.
+
+The existing Controller page selects the four resident slots and explicitly
+saves an unchanged, freshly checked profile package. It does not pretend that
+package names are on-device profile names. Rename, reset, Switch copy and
+file/library actions remain hidden until their native workflows are implemented.
+The Device page exposes sleep, quick-switch, stick centre auto-adjust, local
+mapping/Turbo, 8–12-bit resolution, 125/250/500/1000 Hz stored report rate,
+XInput Home and third-party permission. Legacy-only debounce/sensitivity/display
+controls are hidden. Settings use verified native read-back, with failed writes
+restoring the model's optimistic controls.
+
+Lighting reuses the page, sliders and colour list with native Off, Solid,
+Breathing, Gradient, Streaming and Default modes, 0–100 brightness/speed,
+up to eight colours where supported, and the vibration-response flag. Loads
+retain exact original bytes until an edit. Writes carry the full UUID, slot and
+previous blob; a changed slot, UUID or lighting block refuses the write. A late
+acknowledgement confirms only the submitted bytes, preserving newer edits.
+Applying may persist without A7, which both native footers explain.
+
+Reconnect reads follow the actual active slot without reselecting a cached one.
+Unsent lighting edits are retained; an active-slot mismatch disables Apply.
+Explicit Reload discards those edits. Selecting another device clears caches,
+settings and pending profile reads; returning to Apex 5 restores its pages and
+protocol. Native selection does not redirect the legacy daemon preference.
+
+`tests/test_apex6_gui.py` covers these flows and failure cases against the native
+fake controller. The shell suite checks sidebar gating and protocol switching;
+`tests/qml/tst_apex6.qml` exercises all three pages and fails on QML warnings.
+These are software checks over the already verified backend, not a new
+hardware GUI acceptance run. Richer editors, backup/library GUI, screen GUI and
+Linux game integration remain separate work.
 
 ## Restorable profile packages and library
 

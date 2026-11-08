@@ -9,9 +9,22 @@ Implementation sources: [profile model](../gui/models/profile.py),
 [device worker](../gui/worker.py), and
 [mapping protocol](../flydigi/mapping.py).
 
+## Apex 6 foundation
+
+The existing Controller, Device and Lighting pages also have an explicit GPA6
+route. Profiles support reading, selecting and saving; richer editing and
+file/library actions are not yet exposed. Settings are verified immediately.
+Lighting uses native effect parameters and retains dirty edits through a
+reconnect. Writes check the UUID, active slot and original bytes, and successful
+replies confirm the submitted bytes rather than any newer local edits.
+
+Unlike Apex 5, **Apex 6 Apply may persist without a separate save**. The native
+footers say so. Save sends A7 for the active profile; it is never implemented
+by sending legacy command 166. See [native GUI scope](findings-apex6.md#desktop-foundation-2026-11-08).
+
 ## Apply and save
 
-Profile changes have two persistence levels:
+For Apex 5 and Vader 5, profile changes have two persistence levels:
 
 | Action | Commands | Result |
 |---|---|---|

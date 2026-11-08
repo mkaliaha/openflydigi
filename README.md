@@ -16,7 +16,7 @@ application adds PySide6, Qt, Kirigami, and Kirigami Addons.
 |---|---|---|---|
 | Flydigi Apex 5 | Hardware-validated | All controller features, adaptive triggers, display, game routes, and both virtual-DualSense relays | Display uploads require a wired connection. Steam Input must be disabled for virtual-DualSense games. |
 | Flydigi Vader 5 Pro | Experimental, partially implemented | Identity, profiles, buttons, sticks, gyro, vibration, lighting, settings, the v3.2 macro-store implementation, and a derived factory profile | No Vader 5 has been tested. It has trigger motors rather than force triggers and has no display. The trigger-motor editor is not built. The v3.2 macro store is unverified on hardware. The DualSense relay, evdev discovery, permissions, and SDL ignore identifier are not validated end to end. |
-| Flydigi Apex 6 / Apex 6 Pro | Experimental; Pro partly verified over receiver and direct USB | SKU/UUID/capabilities, active-RAM snapshots, CLI global settings, button remapping, press timings, lighting, profile selection/saving, stick and trigger response curves, macros, gyro configuration, native vibration and trigger scenes, restorable profile packages and local library; experimental grip waveforms and USB DualSense relay | Tested on Pro firmware 9.0.6.8; selected stick/trigger response effects are physically verified through evdev. GUI editing, diagnostic-snapshot restoration, adaptive-trigger translation and relay motion remain unavailable. Grip cleanup follows native best-effort mode replay; exact live-mode restoration is unverified, although ordinary rumble worked afterward. Some setting effects and the complete DualSense relay remain unverified. |
+| Flydigi Apex 6 / Apex 6 Pro | Experimental; Pro partly verified over receiver and direct USB | SKU/UUID/capabilities, active-RAM snapshots, CLI global settings, button remapping, press timings, lighting, profile selection/saving, stick and trigger response curves, macros, gyro configuration, native vibration and trigger scenes, restorable profile packages and local library; experimental grip waveforms and USB DualSense relay | Tested on Pro firmware 9.0.6.8; selected stick/trigger response effects are physically verified through evdev. The GUI supports settings, profile selection/save and lighting with fake-controller coverage; richer GUI editors, diagnostic-snapshot restoration, adaptive-trigger translation and relay motion remain unavailable. Grip cleanup follows native best-effort mode replay; exact live-mode restoration is unverified, although ordinary rumble worked afterward. Some setting effects and the complete DualSense relay remain unverified. |
 | Flydigi CD2 charging dock | Hardware-validated with one noted gap | Identity, four settings, eight generated lighting effects, and picture/GIF sampling onto 162 LEDs; nickname read/write is implemented | Nickname writing is not hardware-verified. The dock is a separate USB device and uses its own selector. |
 | Other Flydigi controllers and accessories | Not driven | Devices may be discovered and identified when they use the current transport | Normal configuration commands, including nickname writes, refuse unsupported models. Developer bench tools explicitly documented as ungated can send raw commands. |
 
@@ -369,6 +369,21 @@ and `gui/i18n.py` before relying on `pyside6-project build` or its static checks
 
 ## Experimental Apex 6 / Apex 6 Pro
 
+The desktop app now reuses its **Controller**, **Device** and **Lighting** pages
+for Apex 6. It reads the active profile, selects any of the four slots, saves
+the selected profile, edits supported global settings, and configures all six
+native lighting effects with up to eight colours. Settings apply immediately;
+lighting retains the existing Apply / Apply and save workflow. **Applied Apex 6
+changes may persist even without an explicit save.**
+
+The native GUI route checks the controller UUID, active slot and previously
+read lighting before writing. Reconnects retain unsent lighting edits; Reload
+reads the controller's current active slot. Profile names, factory reset,
+Switch copying, richer profile editors, file/library workflows, screen uploads
+and DualSense remain outside this GUI slice; their existing CLI support is
+unchanged. The new GUI flow is fake-controller and QML-tested, with no new
+hardware GUI acceptance claim.
+
 The Apex 6 implementation is **experimental**, with receiver and direct-USB
 Apex 6 Pro checks on firmware **9.0.6.8**. All supported global setting writes
 read back and restore correctly. Lighting modes and controls, physical button
@@ -426,7 +441,7 @@ reselecting it and when switching away and back. Profile selection is not an
 undo operation. Global settings apply directly. `map m1 default` removes the M1 override;
 `--layer` selects an existing layer (0–3). Remapping replaces all activators for
 that one button while preserving other mappings, macros, zones, curves and
-metadata. The Apex 6 GUI editor is not implemented.
+metadata. These mapping controls remain CLI-only for Apex 6.
 
 `macros` lists definitions in the selected `--layer` (default 0). `macro ID`
 reads one definition; editing flags create or update it. IDs are 0–255, with
