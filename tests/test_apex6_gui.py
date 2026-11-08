@@ -5,6 +5,7 @@
 """Desktop foundation against the native fake controller and real Qt models."""
 from collections import deque
 import os
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -21,10 +22,12 @@ except ImportError:
     print("PySide6 not installed -- skipping Apex 6 GUI tests")
     sys.exit(0)
 
-from flydigi import gpa6, gpa6_backup, gpa6_config, identity
+from flydigi import gpa6, gpa6_actions, gpa6_backup, gpa6_config, gpa6_profile, identity
 from flydigi.mock.apex6 import FakeApex6
 from gui.app import App
 from gui.models.lighting import LightingModel
+from gui.models.profile import ProfileModel
+from gui.models.apex6_buttons import SOURCES
 from gui.worker import DeviceWorker
 from tests.qml_harness import TestPad
 
@@ -252,6 +255,283 @@ class FoundationTests(unittest.TestCase):
         self.app.profile.select(2)
         until(lambda: self.app.profile.loaded)
         self.assertEqual(self.pad.slot, 2)
+
+    def test_native_button_apply_and_save_preserve_other_blocks(self):
+        before = {ram: self.pad.ram(ram) for ram in (1, 4, 6)}
+        editor = self.app.profile.nativeButtons
+        editor.source = SOURCES.index("m4")
+        editor.addAction()
+        editor.activator = 2
+        editor.setField(0, list(gpa6_actions.BUTTONS).index("b"))
+        self.app.profile.write(False)
+        until(lambda: not self.app.profile.writing)
+        self.assertFalse(self.errors)
+        self.assertFalse(self.app.profile.dirty)
+        self.assertTrue(self.app.profile.saveNeeded)
+        self.assertEqual(gpa6_profile.MappingConfig(self.pad.ram(5)).activators("m4"),
+                         [{"type": "timing_long", "target": {"type": "btn_gamepad", "id": "b"}}])
+        self.assertEqual({ram: self.pad.ram(ram) for ram in before}, before)
+        self.app.profile.write(True)
+        until(lambda: not self.app.profile.writing)
+        self.assertFalse(self.errors)
+        self.assertFalse(self.app.profile.saveNeeded)
+        self.assertEqual(self.pad.stored_configs[0][5], self.pad.ram(5))
+
+    def test_native_apply_refuses_stale_slot_uid_or_mapping(self):
+        self.app.profile.nativeButtons.addAction()
+        for change in ("slot", "uid", "mapping"):
+            with self.subTest(change=change):
+                original_uid = self.pad.uid
+                original = self.pad.ram(5)
+                if change == "slot":
+                    self.pad.change_profile(1)
+                elif change == "uid":
+                    self.pad.uid = "ff" * 16
+                else:
+                    self.pad.configs[0][5] = gpa6_profile.timing(original, long_ms=4321)
+                self.pad.history.clear()
+                self.errors.clear()
+                self.app.profile.write(False)
+                until(lambda: not self.app.profile.writing)
+                self.assertTrue(self.errors)
+                self.assertTrue(self.app.profile.dirty)
+                self.assertFalse(any(cmd in (0xa4, 0xa7) for cmd, _ in self.pad.history))
+                self.pad.uid = original_uid
+                self.pad.change_profile(0)
+                self.pad.configs[0][5] = original
+
+    def test_mapping_write_failure_preserves_edits_and_allows_retry(self):
+        self.app.profile.nativeButtons.addAction()
+        before = self.pad.ram(5)
+        self.pad.faults[0xa4] = deque(["error"])
+        self.app.profile.write(False)
+        until(lambda: not self.app.profile.writing)
+        self.assertTrue(self.errors)
+        self.assertEqual(self.pad.ram(5), before)
+        self.assertTrue(self.app.profile.dirty)
+        self.errors.clear()
+        self.app.profile.write(False)
+        until(lambda: not self.app.profile.writing)
+        self.assertFalse(self.errors)
+        self.assertFalse(self.app.profile.dirty)
+
+    def test_connection_failure_releases_pending_profile_write(self):
+        self.app.profile.nativeButtons.addAction()
+        self.worker._drop()
+        self.pad.present = False
+        self.app.profile.write(False)
+        until(lambda: not self.app.profile.writing)
+        self.assertTrue(self.errors)
+        self.assertTrue(self.app.profile.dirty)
+
+    def test_reconnect_keeps_mapping_edits_and_reload_discards_them(self):
+        self.app.profile.nativeButtons.addAction()
+        edited = self.app.profile._pack()
+        self.pad.change_profile(3)
+        self.app._read_the_rest(keep_edits=True)
+        until(lambda: self.app.profile.slots.active == 3)
+        self.assertEqual(self.app.profile._pack(), edited)
+        self.assertFalse(self.app.profile.canSaveToFlash)
+        self.assertTrue(self.app.profile.dirty)
+        self.app.profile.write(False)
+        self.assertFalse(self.app.profile.writing)
+        self.app.reload()
+        until(lambda: self.app.profile.cfgId == 3 and self.app.profile.loaded)
+        self.assertFalse(self.app.profile.dirty)
+
+    def test_lighting_acknowledgement_does_not_confirm_mapping_edits(self):
+        self.app.profile.nativeButtons.addAction()
+        edited_mapping = bytes(self.app.profile.nativeConfig.mapping.blob)
+        self.app.lighting.effect = 2
+        self.app.lighting.write(False)
+        until(lambda: not self.app.lighting.dirty)
+        self.assertTrue(self.app.profile.dirty)
+        self.assertEqual(bytes(self.app.profile.nativeConfig.mapping.blob), edited_mapping)
+        self.app.profile.write(False)
+        until(lambda: not self.app.profile.writing)
+        self.assertFalse(self.errors)
+        self.assertFalse(self.app.profile.dirty)
+        self.assertEqual(self.pad.ram(5), edited_mapping)
+
+
+class ButtonModelTests(unittest.TestCase):
+    def setUp(self):
+        self.model = ProfileModel()
+        self.model.modelCode = "k6"
+        self.model.setSlotCount(4)
+        self.model.setActive(0)
+        self.package = gpa6_backup.read_config(FakeApex6())
+        self.load(self.package)
+        self.editor = self.model.nativeButtons
+
+    def load(self, package):
+        self.model.profileLoaded(0, gpa6_backup.pack_config(package), "Profile 1")
+
+    def test_native_source_names_do_not_use_legacy_trigger_or_home_ids(self):
+        self.assertEqual(len(self.editor.sourceNames), 20)
+        self.assertFalse(set(SOURCES) & {"lt", "rt", "home", "c", "z"})
+        self.assertIn("Select", self.editor.sourceNames)
+
+    def test_layer_create_and_shift_binding(self):
+        self.editor.layer = 3
+        self.assertFalse(self.editor.layerExists)
+        self.editor.addAction()
+        self.assertFalse(self.model.dirty)
+        self.editor.createLayer()
+        self.assertTrue(self.editor.layerExists)
+        self.editor.addAction()
+        self.editor.layer = 0
+        self.editor.source = SOURCES.index("m4")
+        self.editor.addAction()
+        self.editor.target = list(gpa6_actions.TARGETS).index("layer_hold")
+        self.assertEqual(self.model.nativeConfig.mapping.activators("m4")[0]["target"],
+                         {"type": "layer_hold", "layer_id": 3})
+        self.assertEqual(self.editor.field(0)["choices"], ["Base", "Shift 3"])
+        self.assertTrue(self.model.nativeConfig.mapping.activators("a", layer=3))
+
+    def test_five_actions_empty_override_and_reset_are_distinct(self):
+        self.editor.source = SOURCES.index("m4")
+        for _ in range(6):
+            self.editor.addAction()
+        self.assertEqual(len(self.editor.actionNames), 5)
+        for _ in range(5):
+            self.editor.removeAction()
+        self.assertEqual(self.model.nativeConfig.mapping.activators("m4"), [])
+        self.editor.resetButton()
+        self.assertIsNone(self.model.nativeConfig.mapping.activators("m4"))
+        self.assertFalse(self.model.dirty)
+
+    def test_each_typed_output_and_press_behavior(self):
+        self.model.nativeConfig.mapping.ensure_layer(1)
+        self.model.nativeConfig.mapping.set_macro(3, steps=[
+            {"key": "a", "event": 1, "delay": 0},
+            {"key": "a", "event": 0, "delay": 10}], name="Test")
+        self.model.setNativeMapping(self.model.nativeConfig.mapping)
+        self.editor.addAction()
+        for index, kind in enumerate(gpa6_actions.TARGETS):
+            self.editor.target = index
+            self.assertFalse(self.editor.error, kind)
+            self.assertEqual(self.model.nativeConfig.mapping.activators("a")[0]["target"]["type"], kind)
+        for index, kind in enumerate(gpa6_actions.ACTIVATORS):
+            self.editor.activator = index
+            self.assertEqual(self.model.nativeConfig.mapping.activators("a")[0]["type"], kind)
+
+    def test_missing_macro_and_invalid_values_are_atomic(self):
+        self.editor.addAction()
+        before = self.model._pack()
+        self.editor.target = list(gpa6_actions.TARGETS).index("macro")
+        self.assertIn("no macros", self.editor.error)
+        self.assertEqual(self.model._pack(), before)
+        self.editor.target = list(gpa6_actions.TARGETS).index("simulate_mouse_move")
+        before = self.model._pack()
+        self.editor.setField(0, -129)
+        self.assertTrue(self.editor.error)
+        self.assertEqual(self.model._pack(), before)
+        self.editor.longPress = 0
+        self.assertEqual(self.model._pack(), before)
+        self.editor.target = list(gpa6_actions.TARGETS).index("turbo_gamepad")
+        before = self.model._pack()
+        self.editor.setField(1, 15)
+        self.assertIn("multiple of 10", self.editor.error)
+        self.assertEqual(self.model._pack(), before)
+        self.editor.setField(1, 170)
+        self.assertEqual(self.editor.field(1)["value"], 170)
+        self.assertEqual(self.model.nativeConfig.mapping.activators("a")[0]["target"]["turbo_interval_10ms"], 17)
+
+    def test_timings_are_profile_wide(self):
+        self.editor.longPress = 987
+        self.editor.doublePress = 234
+        self.editor.layer = 2
+        self.editor.longPress = 987
+        self.assertEqual(self.editor.layer, 2)
+        self.editor.createLayer()
+        self.assertEqual((self.editor.longPress, self.editor.doublePress), (987, 234))
+
+    def test_gui_edits_match_complete_independent_vendor_fixtures(self):
+        fixture = json.loads((Path(__file__).parent / "fixtures/apex6-activators.json").read_text())
+        checked = 0
+        for case in fixture["cases"]:
+            args = case["args"]
+            if case["operation"] != "bind" or args.get("source") not in SOURCES:
+                continue
+            entries = args["activators"]
+            if not entries:  # Resets and empty overrides have separate coverage.
+                continue
+            self.package.mapping = gpa6_profile.MappingConfig(bytes.fromhex(case["before_hex"]))
+            version = gpa6_config.mapping_header(self.package.mapping.blob)["version"]
+            self.package.source["format_versions"][1] = int(version.replace(".", ""))
+            self.load(self.package)
+            self.editor.layer = args.get("layer", 0)
+            self.editor.source = SOURCES.index(args["source"])
+            while len(self.editor.actionNames) > len(entries):
+                self.editor.removeAction()
+            while len(self.editor.actionNames) < len(entries):
+                self.editor.addAction()
+            for action_index, entry in enumerate(entries):
+                self.editor.action = action_index
+                self.editor.activator = gpa6_actions.ACTIVATORS.index(entry["type"])
+                target = gpa6_actions.decode_target(gpa6_actions.encode_target(entry["target"]))
+                self.editor.target = list(gpa6_actions.TARGETS).index(target["type"])
+                for i, (field, _, _) in enumerate(gpa6_actions.TARGETS[target["type"]][1]):
+                    choices = self.editor._choices(field)
+                    value = [v for v, _ in choices].index(target[field]) if choices else target[field]
+                    if field == "turbo_interval_10ms":
+                        value *= 10
+                    self.editor.setField(i, value)
+                self.assertFalse(self.editor.error, case["name"])
+            self.assertEqual(gpa6_config.unwrap_blob(self.model.nativeConfig.mapping.blob, b"XMUL").hex(),
+                             case["after_hex"], case["name"])
+            checked += 1
+        self.assertGreaterEqual(checked, 10)
+
+    def test_unknown_actions_are_read_only_until_explicit_reset(self):
+        config = self.package.mapping
+        config.set_activators("a", [{"type": "simple", "target": "b"}])
+        raw, layers = gpa6_profile._layers(config.blob)
+        raw = bytearray(raw)
+        entry = next(e for e in layers[0][3] if e[0] == 0)
+        raw[entry[1] + 4:entry[1] + 9] = b"\x81\x82\x83\x84\x85"
+        config.blob[:] = gpa6_config.wrap_blob(raw)
+        self.load(self.package)
+        self.assertFalse(self.editor.editable)
+        self.assertIn("Unknown", self.editor.actionNames[0])
+        before = self.model._pack()
+        self.editor.addAction()
+        self.editor.removeAction()
+        self.editor.activator = 2
+        self.assertEqual(self.model._pack(), before)
+        self.editor.source = SOURCES.index("m4")
+        self.editor.addAction()
+        self.assertEqual(self.model.nativeConfig.mapping.activators("a")[0]["type"], 0x81)
+        self.editor.source = 0
+        self.editor.resetButton()
+        self.assertTrue(self.editor.editable)
+
+    def test_pending_write_confirms_submitted_bytes_and_blocks_duplicates(self):
+        requests = []
+        self.model.writeRequested.connect(lambda *args: requests.append(args))
+        self.editor.addAction()
+        self.model.write(False)
+        self.model.write(True)
+        self.assertEqual(len(requests), 1)
+        slot, blob, _, _ = requests[0]
+        self.editor.activator = 2
+        self.assertTrue(self.model.apex6Written(slot, blob, False))
+        self.assertTrue(self.model.dirty)
+        self.assertFalse(self.model.writing)
+        self.assertEqual(gpa6_backup.unpack_config(self.model.slots.stored(0)).mapping.activators("a")[0]["type"], "simple")
+        self.assertEqual(self.model.nativeConfig.mapping.activators("a")[0]["type"], "timing_long")
+
+    def test_old_acknowledgement_after_device_switch_is_ignored(self):
+        self.editor.addAction()
+        self.model.write(False)
+        slot, blob = self.model._native_pending
+        self.model.clear()
+        self.model.setActive(0)
+        self.package.source["uid"] = "ff" * 16
+        self.load(self.package)
+        self.assertFalse(self.model.apex6Written(slot, blob, True))
+        self.assertEqual(self.model.nativeConfig.source["uid"], "ff" * 16)
 
 
 class ValueTests(unittest.TestCase):

@@ -29,6 +29,7 @@ Kirigami.ScrollablePage {
             text: "Reset all to default"
             icon.name: "edit-undo"
             enabled: App.profile.loaded
+            visible: !App.profile.apex6
             onTriggered: App.profile.resetAll()
         }
     ]
@@ -46,7 +47,7 @@ Kirigami.ScrollablePage {
         anchors.right: parent.right
         anchors.margins: Kirigami.Units.largeSpacing
         z: 10
-        visible: App.device.thirdParty
+        visible: !App.profile.apex6 && App.device.thirdParty
         type: Kirigami.MessageType.Warning
         text: "Other software is allowed to take the pad over"
               + (App.device.controlBy !== ""
@@ -58,11 +59,16 @@ Kirigami.ScrollablePage {
     ListView {
         id: keyList
         objectName: "keyList"
-        enabled: !App.device.thirdParty
+        enabled: App.profile.apex6 || !App.device.thirdParty
         // Null, not merely hidden. KeyMapModel reports a constant 23 rows and
         // invents an identity mapping when no config is open, so a view bound
         // to it with nothing to show renders 23 editable rows of fiction.
-        model: App.profile.loaded ? App.profile.keys : null
+        model: App.profile.loaded && !App.profile.apex6 ? App.profile.keys : null
+        header: Loader {
+            width: keyList.width
+            active: App.profile.apex6 && App.profile.loaded
+            sourceComponent: Apex6ButtonsEditor {}
+        }
         currentIndex: -1
         reuseItems: true
 

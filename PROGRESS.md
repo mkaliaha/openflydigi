@@ -25,7 +25,7 @@ Detailed evidence lives in [PROTOCOL.md](PROTOCOL.md) and
 |---|---|---|
 | Flydigi Apex 5 | Hardware-validated | Reference controller. Profiles, mappings, macros, sticks, gyro-to-stick, vibration, adaptive triggers, lighting, settings, display, game routes, and virtual-DualSense relays are implemented. |
 | Flydigi Vader 5 Pro | Experimental and partial | Identity, capability gating, profiles, mappings, sticks, gyro, vibration, lighting, settings, v3.2 macro-store handling, and a derived factory profile are implemented. No Vader 5 hardware has been tested. |
-| Flydigi Apex 6 / Apex 6 Pro | Experimental; Pro configuration partly hardware-validated | GPA6 identity and snapshots; global settings, simple remapping, timing fields, lighting and profile selection/save verified on Pro firmware 9.0.6.8. Stick/trigger response editing has independent codec, fake-pad, hardware write/read-back and guided physical-input coverage. Native vibration and scene settings have storage and selected physical acceptance. Macro editing has independent codec, fake-pad, hardware storage and selected guided playback checks. Grip waveforms were felt on hardware; the motor lifecycle matches the native engine's grip-only route, including trigger handling, fresh motor-RAM replay and no mode ACK waits. Exact live-mode restoration remains unverified. Opt-in USB DualSense input/audio/rumble has software coverage; a full game run, motion, trigger translation, uhid and richer GUI editors remain outstanding; the desktop settings/profile-selection/lighting foundation is implemented and fake-controller-tested. See [findings](docs/findings-apex6.md). |
+| Flydigi Apex 6 / Apex 6 Pro | Experimental; Pro configuration partly hardware-validated | GPA6 identity and snapshots; global settings, simple remapping, timing fields, lighting and profile selection/save verified on Pro firmware 9.0.6.8. Stick/trigger response editing has independent codec, fake-pad, hardware write/read-back and guided physical-input coverage. Native vibration and scene settings have storage and selected physical acceptance. Macro editing has independent codec, fake-pad, hardware storage and selected guided playback checks. Grip waveforms were felt on hardware; the motor lifecycle matches the native engine's grip-only route, including trigger handling, fresh motor-RAM replay and no mode ACK waits. Exact live-mode restoration remains unverified. Opt-in USB DualSense input/audio/rumble has software coverage; a full game run, motion, trigger translation, uhid and richer GUI editors remain outstanding; the desktop settings/profile-selection/button/Shift/lighting workflow is implemented and fake-controller-tested. See [findings](docs/findings-apex6.md). |
 | Flydigi CD2 dock | Hardware-validated with one noted gap | Device identity, four settings, generated lighting, and picture/GIF sampling are hardware-validated. Nickname read/write is implemented, but nickname writing is not hardware-verified. |
 | Other Flydigi hardware | Unsupported | It may be discovered by the shared transport. Normal configuration commands refuse unsupported models; explicitly ungated developer bench tools are outside that guarantee. |
 
@@ -158,10 +158,15 @@ identity/profile/configuration snapshots match the baseline exactly. Recovery
 after an interrupted transfer is software-tested only; GUI wiring is pending.
 
 The GUI foundation now routes Apex 6 explicitly through its native backend.
-The existing Controller, Device and Lighting pages handle active-profile reads,
+The existing Controller, Device, Buttons and Lighting pages handle active-profile reads,
 slot selection/save, all supported global fields and all six lighting effects.
 Read-back, UUID/slot guards, stale-edit refusal, dirty reconnect preservation and
-late lighting acknowledgements are covered by fake-controller tests. Window and
+late acknowledgements are covered by fake-controller tests. The native Buttons
+editor now supports four layers, seven activator types, up to five actions per
+button, typed outputs and profile-wide long/double-press timings. The GUI edits
+match 50 complete independent vendor fixtures. Apply/save uses the package
+transaction's full prior-state checks; edits made during a write remain dirty,
+and lighting replies cannot confirm unsent mappings. Window and
 interaction checks cover native pages and returning to Apex 5. No new hardware
 GUI acceptance run is claimed. The remaining editors, library and screen GUI
 workflows are still separate work. Apex 6 remains outside the legacy backend

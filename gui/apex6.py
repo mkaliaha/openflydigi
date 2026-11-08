@@ -122,15 +122,15 @@ class Backend:
         self.worker.status.emit(f"Profile {slot + 1} read")
 
     def write_profile(self, slot, blob, previous, save):
-        # This foundation supports slot selection and saving; profile editors
-        # and package restoration are enabled separately as their UI is adapted.
-        if not save or blob != previous:
-            raise gpa6.ProtocolError("Apex 6 profile editing is not available in this view")
-        config = gpa6_backup.unpack_config(previous, slot)
-        self._check(config.source["uid"], slot)
-        gpa6_backup.write_config(self.ctrl, config, save=True, expected_uid=self.uid,
-                                expected_slot=slot, expected_config=config)
-        self.worker.profile_written.emit(slot, 0, True)
+        old = gpa6_backup.unpack_config(previous, slot)
+        config = gpa6_backup.unpack_config(blob, slot)
+        self._check(old.source["uid"], slot)
+        if (config.source != old.source or config.lighting != old.lighting
+                or config.motors.blob != old.motors.blob):
+            raise gpa6.ProtocolError("This editor only changes the current profile's mappings")
+        gpa6_backup.write_config(self.ctrl, config, save=save, expected_uid=self.uid,
+                                expected_slot=slot, expected_config=old)
+        self.worker.apex6_profile_written.emit(slot, blob, save)
 
     def load_lighting(self):
         with self.ctrl.claim(timeout=0):

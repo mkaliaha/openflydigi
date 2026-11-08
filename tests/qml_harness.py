@@ -421,6 +421,11 @@ class Fixture(QObject):
     def nativeSaveCount(self):
         return sum(cmd == 0xa7 for cmd, _ in self._native.history)
 
+    @Slot(int, str, result="QVariantList")
+    def nativeActions(self, layer, source):
+        from flydigi.gpa6_profile import MappingConfig
+        return MappingConfig(self._native.ram(5)).activators(source, layer=layer) or []
+
     def _count_profile_read(self, *_args):
         self._profile_reads += 1
         self.changed.emit()

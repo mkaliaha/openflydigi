@@ -198,6 +198,8 @@ class App(QObject):
         worker.profile_load_failed.connect(self._profile.loadFailed)
         worker.profiles_reset.connect(self._profile.forget)
         worker.profile_written.connect(self._written)
+        worker.apex6_profile_written.connect(self._apex6_profile_written)
+        worker.apex6_profile_write_failed.connect(self._profile.apex6WriteFailed)
         worker.macro_recorded.connect(self._profile.macros.recorded)
         worker.transport_changed.connect(self._device.transportReceived)
         worker.third_party_written.connect(self._device.thirdPartyFinished)
@@ -390,7 +392,8 @@ class App(QObject):
         in minutes, while an editing session touches it not at all.
         """
         if self._profile.apex6:
-            self._native_refresh_pending = not (keep_edits and self._lighting.dirty)
+            self._native_refresh_pending = not (keep_edits and (
+                self._lighting.dirty or self._profile.dirty or self._profile.writing))
             self.requestStatus.emit()
             self.requestTransport.emit()
             self.requestSettings.emit()
@@ -527,14 +530,16 @@ class App(QObject):
 
     def _written(self, cfg_id, packets, saved):
         self._profile.confirmWritten(cfg_id, saved)
-        if self._profile.apex6:
-            if saved:
-                self._lighting.profileSaved(cfg_id)
-            self._device.status = f"Profile {cfg_id + 1} save acknowledged"
-            return
         where = "saved to flash" if saved else "in memory only"
         self._device.status = (
             f"Profile {cfg_id + 1}: wrote {packets} packet(s), {where}")
+
+    def _apex6_profile_written(self, cfg_id, blob, saved):
+        if self._profile.apex6Written(cfg_id, blob, saved):
+            if saved:
+                self._lighting.profileSaved(cfg_id)
+            self._device.status = (f"Profile {cfg_id + 1} save acknowledged" if saved else
+                                   f"Profile {cfg_id + 1} applied and verified")
 
     def _lighting_written(self, packets, saved):
         self._lighting.confirmWritten(saved)

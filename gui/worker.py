@@ -57,6 +57,8 @@ class DeviceWorker(QObject):
     backend_changed = Signal(str, str)   # device code, native UUID (legacy: empty)
     apex6_lighting_loaded = Signal(bytes, str, int)
     apex6_lighting_written = Signal(bytes, bool, str, int)
+    apex6_profile_written = Signal(int, bytes, bool)
+    apex6_profile_write_failed = Signal(int, bytes)
     profile_load_failed = Signal(int)
     dock_state = Signal(dict)            # one dock's whole state
     dock_switch = Signal(str, str, bool)  # selector, switch name, did it land
@@ -148,6 +150,8 @@ class DeviceWorker(QObject):
                 self.profile_load_failed.emit(args[0])
             elif operation == "write_setting":
                 self.setting_written.emit(args[0], False)
+            elif operation == "write_profile":
+                self.apex6_profile_write_failed.emit(args[0], args[1])
         return True
 
     def _drop(self):

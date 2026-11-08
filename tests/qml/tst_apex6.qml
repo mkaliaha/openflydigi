@@ -17,6 +17,7 @@ TestCase {
     Component { id: controller; ControllerPage { anchors.fill: parent } }
     Component { id: settings; DeviceSettingsPage { anchors.fill: parent } }
     Component { id: lighting; LightingPage { anchors.fill: parent } }
+    Component { id: buttons; ButtonsPage { anchors.fill: parent } }
 
     function init() {
         failOnWarning(/.*/);
@@ -103,5 +104,76 @@ TestCase {
         mouseClick(findChild(page, "lightingSaveButton"));
         tryCompare(App.lighting, "saveNeeded", false, 5000);
         compare(Fixture.nativeSaveCount(), 1);
+    }
+
+    function choose(page, name, index) {
+        let control = findChild(page, name);
+        verify(control, name);
+        control.currentIndex = index;
+        control.activated(index);
+    }
+
+    function test_buttons_layer_and_hold_shift_apply() {
+        let page = createTemporaryObject(buttons, suite);
+        verify(page);
+        waitForRendering(page);
+        verify(!App.profile.dirty); // Constructing the controls must not edit.
+        choose(page, "nativeLayer", 1);
+        verify(findChild(page, "nativeCreateLayer").visible);
+        mouseClick(findChild(page, "nativeCreateLayer"));
+        verify(App.profile.nativeButtons.layerExists);
+        choose(page, "nativeSource", 0);
+        findChild(page, "nativeAddAction").clicked();
+        choose(page, "nativeFieldChoice0", 3); // Shift A -> Y
+        choose(page, "nativeLayer", 0);
+        choose(page, "nativeSource", 17); // M4
+        findChild(page, "nativeAddAction").clicked();
+        choose(page, "nativeTarget", 5); // Hold Shift
+        compare(App.profile.nativeButtons.fields[0].choices.length, 2);
+        compare(App.profile.nativeButtons.fields[0].selected, 1);
+        let apply = findChild(page, "applyButton");
+        verify(apply.visible && apply.enabled);
+        mouseClick(apply);
+        tryCompare(App.profile, "writing", false, 5000);
+        compare(App.profile.dirty, false);
+        compare(Fixture.nativeActions(0, "m4")[0].target.type, "layer_hold");
+        compare(Fixture.nativeActions(0, "m4")[0].target.layer_id, 1);
+        compare(Fixture.nativeActions(1, "a")[0].target.id, "y");
+        mouseClick(findChild(page, "saveButton"));
+        tryVerify(() => Fixture.nativeSaveCount() === 1, 5000);
+    }
+
+    function test_buttons_action_parameters_and_press_timing() {
+        let page = createTemporaryObject(buttons, suite);
+        verify(page);
+        waitForRendering(page);
+        findChild(page, "nativeAddAction").clicked();
+        choose(page, "nativeActivator", 2); // Long press
+        choose(page, "nativeTarget", 4); // Turbo
+        choose(page, "nativeFieldChoice0", 1); // B
+        let interval = findChild(page, "nativeFieldValue1");
+        interval.value = 170;
+        interval.valueModified();
+        let timing = findChild(page, "nativeLongPress");
+        timing.value = 750;
+        timing.valueModified();
+        compare(App.profile.nativeButtons.longPress, 750);
+        verify(!interval.wheelEnabled);
+        verify(!timing.wheelEnabled);
+        choose(page, "nativeTarget", 7); // No macros: retain the existing action.
+        verify(findChild(page, "nativeMappingError").visible);
+        compare(App.profile.nativeButtons.target, 4);
+        findChild(page, "applyButton").clicked();
+        tryCompare(App.profile, "writing", false, 5000);
+        compare(App.profile.dirty, false);
+        let stored = Fixture.nativeActions(0, "a")[0];
+        compare(stored.type, "timing_long");
+        compare(stored.target.button_id, "b");
+        compare(stored.target.turbo_interval_10ms, 17);
+        findChild(page, "nativeRemoveAction").clicked();
+        compare(App.profile.nativeButtons.actionNames.length, 0);
+        verify(App.profile.nativeButtons.bindingState.indexOf("Empty override") >= 0);
+        findChild(page, "nativeResetButton").clicked();
+        compare(App.profile.nativeButtons.bindingState, "No override in this layer.");
     }
 }

@@ -34,14 +34,16 @@ Controls.ToolBar {
 
         Controls.Button {
             objectName: "applyButton"
-            visible: !App.profile.apex6
             text: "Apply"
             icon.name: "dialog-ok-apply"
-            enabled: App.profile.dirty
+            enabled: App.profile.dirty && !App.profile.writing
+                     && (!App.profile.apex6 || App.profile.canSaveToFlash)
             onClicked: App.profile.write(false)
 
             Controls.ToolTip.visible: hovered
-            Controls.ToolTip.text: "Takes effect at once. Confirmed on hardware: "
+            Controls.ToolTip.text: App.profile.apex6
+                ? "Takes effect at once. The controller may retain applied changes without saving."
+                : "Takes effect at once. Confirmed on hardware: "
                                    + "an applied change is lost when the pad sleeps."
         }
 
@@ -60,6 +62,7 @@ Controls.ToolBar {
             // one is running. See ProfileModel.canSaveToFlash.
             enabled: (App.profile.dirty || App.profile.saveNeeded || (App.profile.apex6 && App.profile.loaded))
                      && App.profile.canSaveToFlash
+                     && !App.profile.writing
             onClicked: App.profile.write(true)
 
             Controls.ToolTip.visible: hovered

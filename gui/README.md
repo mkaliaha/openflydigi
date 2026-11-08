@@ -205,13 +205,27 @@ refuses GPA6 before invoking a legacy operation. Do not expand
 backend, with UUID and slot context carried from the read; a reconnect must not
 turn an old edit into a write to a different controller or profile.
 
-`ProfileModel` holds a native `gpa6_backup.ProfileConfig` package for selection
-and save. Its legacy sub-models receive no config until they gain native editor
-adapters. `LightingModel` shares its QML-facing properties and colour list while
+`ProfileModel` holds a native `gpa6_backup.ProfileConfig` package for selection,
+editing and save. `Apex6ButtonsModel` edits a copy of the native mapping through
+the shared backend methods; legacy sub-models still receive no native config.
+The Buttons page uses a native editor for layers, up to five activators per
+button, typed output parameters and profile-wide press timings. Unknown
+activators/targets remain readable and unchanged until an explicit button reset.
+The native source picker excludes Home, LT/RT and C/Z, which are not physical
+native Apex button sources; unrelated stored entries remain intact. Turbo
+intervals display milliseconds in steps of 10. Macros can be bound only when
+they already exist in the selected layer; macro authoring is separate work.
+`LightingModel` shares its QML-facing properties and colour list while
 using native effect parameters. Native write replies include the bytes actually
-submitted, so later edits remain dirty. The app coordinates active-slot reads
+submitted, so later edits remain dirty. Profile writes use the existing package
+transaction with complete prior-state checks and rollback. The adapter accepts
+mapping changes only; lighting and motor changes cannot enter through that route.
+Only one native profile write may be pending. Failures release that pending state
+without discarding edits, and late replies after a device switch are ignored.
+Lighting acknowledgements update only lighting in the profile's baseline, so
+they cannot confirm unsent mapping edits. The app coordinates active-slot reads
 and lighting refreshes; explicit reload discards edits, reconnect keeps them.
-The native sidebar currently exposes Controller, Device and Lighting, alongside
+The native sidebar currently exposes Controller, Device, Buttons and Lighting, alongside
 installation-wide sections. Apex 5/Vader pages retain their existing routes.
 
 ## The QML shell

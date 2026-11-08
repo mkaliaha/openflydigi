@@ -17,6 +17,7 @@ from PySide6.QtCore import (Property, QAbstractListModel, QModelIndex, QObject,
                             Qt, QUrl, Signal, Slot)
 from PySide6.QtQml import QmlElement
 from flydigi import effects, gpa6_backup, mapping
+from .apex6_buttons import Apex6ButtonsModel
 
 # See gui/models/device.py for what these two names do.
 QML_IMPORT_NAME = "Apex5"
@@ -2207,6 +2208,7 @@ class ProfileModel(QObject):
     titleChanged = Signal()
     dirtyChanged = Signal()
     loadedChanged = Signal()
+    writingChanged = Signal()
 
     # These mirror the worker's slot signatures exactly, so wiring is a
     # straight connect with no adapter in between.
@@ -2225,6 +2227,7 @@ class ProfileModel(QObject):
         self._saved = True
         self._generation = 0
         self._dirty = False
+        self._native_pending = None
         # Which pad's buttons these pages are editing. The Apex 5 until told
         # otherwise, because that is the only model this project drives and a
         # window with no device chosen yet still has to draw something.
@@ -2236,6 +2239,7 @@ class ProfileModel(QObject):
         self._triggers = TriggerModel(self)
         self._sticks = StickModel(self)
         self._motion = MotionModel(self)
+        self._native_buttons = Apex6ButtonsModel(self)
 
     # -- which pad's buttons ------------------------------------------------
     #
@@ -2288,6 +2292,9 @@ class ProfileModel(QObject):
     def clear(self):
         """A new controller has its own active slot, cache and pending reads."""
         self._replace(None)
+        self._native_pending = None
+        self.writingChanged.emit()
+        self._native_buttons.clear()
         self._cfg_id = -1
         self._saved = True
         self._slots.setCount(self._slots.count)
@@ -2318,9 +2325,52 @@ class ProfileModel(QObject):
         if (self.apex6 and self._edited is not None and self._cfg_id == slot
                 and self._edited.source["uid"] == uid):
             self._edited.lighting = bytes(blob)
-            self._slots.setStored(slot, self._pack(), self.title)
+            stored = self._slots.stored(slot)
+            if stored is not None:
+                baseline = gpa6_backup.unpack_config(stored, slot)
+                baseline.lighting = bytes(blob)
+                self._slots.setStored(slot, gpa6_backup.pack_config(baseline), self.title)
             self._saved = bool(saved)
             self.markChanged()
+
+    @property
+    def nativeConfig(self):
+        return self._edited if self.apex6 else None
+
+    def setNativeMapping(self, config):
+        if self.nativeConfig is not None:
+            self._edited.mapping = config
+            self._generation += 1
+            self.markChanged()
+
+    @Property(Apex6ButtonsModel, constant=True)
+    def nativeButtons(self):
+        return self._native_buttons
+
+    @Property(bool, notify=writingChanged)
+    def writing(self):
+        return self._native_pending is not None
+
+    @Slot(int, bytes)
+    def apex6WriteFailed(self, slot, blob):
+        if self._native_pending == (slot, blob):
+            self._native_pending = None
+            self.writingChanged.emit()
+
+    def apex6Written(self, slot, blob, saved):
+        if not self.apex6 or self._native_pending != (slot, blob):
+            return False
+        self._native_pending = None
+        self.writingChanged.emit()
+        if self._edited is None or slot != self._cfg_id:
+            return False
+        submitted = gpa6_backup.unpack_config(blob, slot)
+        if submitted.source["uid"] != self._edited.source["uid"]:
+            return False
+        self._slots.setStored(slot, blob, self.title)
+        self._saved = bool(saved)
+        self.markChanged()
+        return True
 
     @Property("QStringList", notify=keysChanged)
     def keyLabels(self):
@@ -2479,6 +2529,8 @@ class ProfileModel(QObject):
     def hint(self):
         if self.apex6:
             return ("Select a profile to read it." if not self.loaded else
+                    "Profile changed on the pad. Reload before applying edits." if not self.canSaveToFlash else
+                    "Unapplied edits. Applied changes may persist without saving." if self.dirty else
                     "Applied changes may persist without saving. Save commits the active profile.")
         if self._edited is None:
             return "Reading this profile from the pad…"
@@ -2522,6 +2574,8 @@ class ProfileModel(QObject):
                 and self._slots.stored(cfg_id) is not None):
             return
         self._cfg_id = cfg_id
+        self._native_pending = None
+        self.writingChanged.emit()
         self._slots.setCurrent(cfg_id)
         self.cfgIdChanged.emit()
         # Deliberately not served from the cache, however recently the profile
@@ -2560,6 +2614,7 @@ class ProfileModel(QObject):
         self._triggers.refresh()
         self._sticks.refresh()
         self._motion.refresh()
+        self._native_buttons.refresh()
         self.markChanged()
 
     @Slot()
@@ -2586,6 +2641,8 @@ class ProfileModel(QObject):
     def setActive(self, cfg_id):
         self._slots.setActive(cfg_id)
         self.cfgIdChanged.emit()
+        if self.apex6:
+            self.dirtyChanged.emit()
         # The first time we learn what the pad is running, open that one. It is
         # already loaded on the pad, so reading it switches nothing -- whereas
         # opening slot 0 by default would switch the pad away from the profile
@@ -2629,11 +2686,17 @@ class ProfileModel(QObject):
                 "would save the wrong one. Switch the pad to this profile "
                 "first, then save.")
             return
-        if self.apex6 and not save:
-            return
-        self.writeRequested.emit(self._cfg_id, self._pack(),
-                                 self._slots.stored(self._cfg_id) or b"",
-                                 bool(save))
+        blob = self._pack()
+        previous = self._slots.stored(self._cfg_id) or b""
+        if self.apex6:
+            if self.writing:
+                return
+            if not self.canSaveToFlash:
+                self.saveRefused.emit("The active profile changed. Reload before applying edits.")
+                return
+            self._native_pending = (self._cfg_id, blob)
+            self.writingChanged.emit()
+        self.writeRequested.emit(self._cfg_id, blob, previous, bool(save))
 
     @Slot(int, bool)
     def confirmWritten(self, cfg_id, saved=False):
