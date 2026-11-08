@@ -16,7 +16,7 @@ application adds PySide6, Qt, Kirigami, and Kirigami Addons.
 |---|---|---|---|
 | Flydigi Apex 5 | Hardware-validated | All controller features, adaptive triggers, display, game routes, and both virtual-DualSense relays | Display uploads require a wired connection. Steam Input must be disabled for virtual-DualSense games. |
 | Flydigi Vader 5 Pro | Experimental, partially implemented | Identity, profiles, buttons, sticks, gyro, vibration, lighting, settings, the v3.2 macro-store implementation, and a derived factory profile | No Vader 5 has been tested. It has trigger motors rather than force triggers and has no display. The trigger-motor editor is not built. The v3.2 macro store is unverified on hardware. The DualSense relay, evdev discovery, permissions, and SDL ignore identifier are not validated end to end. |
-| Flydigi Apex 6 / Apex 6 Pro | Experimental; Pro partly verified over receiver and direct USB | SKU/UUID/capabilities, active-RAM snapshots, CLI global settings, button remapping, press timings, lighting, profile selection/saving, stick and trigger response curves, native vibration and trigger scenes; experimental grip waveforms and USB DualSense relay | Tested on Pro firmware 9.0.6.8; selected stick/trigger response effects are physically verified through evdev. GUI editing, snapshot restoration, adaptive-trigger translation and motion remain unavailable. Grip cleanup follows native best-effort mode replay; exact live-mode restoration is unverified, although ordinary rumble worked afterward. Some setting effects and the complete DualSense relay remain unverified. |
+| Flydigi Apex 6 / Apex 6 Pro | Experimental; Pro partly verified over receiver and direct USB | SKU/UUID/capabilities, active-RAM snapshots, CLI global settings, button remapping, press timings, lighting, profile selection/saving, stick and trigger response curves, macro editing, native vibration and trigger scenes; experimental grip waveforms and USB DualSense relay | Tested on Pro firmware 9.0.6.8; selected stick/trigger response effects are physically verified through evdev. GUI editing, snapshot restoration, adaptive-trigger translation and motion remain unavailable. Grip cleanup follows native best-effort mode replay; exact live-mode restoration is unverified, although ordinary rumble worked afterward. Some setting effects and the complete DualSense relay remain unverified. |
 | Flydigi CD2 charging dock | Hardware-validated with one noted gap | Identity, four settings, eight generated lighting effects, and picture/GIF sampling onto 162 LEDs; nickname read/write is implemented | Nickname writing is not hardware-verified. The dock is a separate USB device and uses its own selector. |
 | Other Flydigi controllers and accessories | Not driven | Devices may be discovered and identified when they use the current transport | Normal configuration commands, including nickname writes, refuse unsupported models. Developer bench tools explicitly documented as ungated can send raw commands. |
 
@@ -426,7 +426,48 @@ reselecting it and when switching away and back. Profile selection is not an
 undo operation. Global settings apply directly. `map m1 default` removes the M1 override;
 `--layer` selects an existing layer (0–3). Remapping replaces all activators for
 that one button while preserving other mappings, macros, zones, curves and
-metadata. Macro editing and the Apex 6 GUI editor are not implemented.
+metadata. The Apex 6 GUI editor is not implemented.
+
+`macros` lists definitions in the selected `--layer` (default 0). `macro ID`
+reads one definition; editing flags create or update it. IDs are 0–255, with
+up to ten definitions per layer and 32 steps per definition, matching the web
+editor. Macros and their bindings are separate; `--bind BUTTON` replaces that
+button's activators with this macro in the same verified write.
+
+~~~bash
+tools/flydigi-apex6 --device uid:YOUR_UUID macros
+tools/flydigi-apex6 --device uid:YOUR_UUID --experimental macro 5 --name 'A then B' --step 0 press a --step 80 release a --step 100 press b --step 80 release b --bind m4
+tools/flydigi-apex6 --device uid:YOUR_UUID --experimental macro 5 --mode press_loop_wait --interval 250
+tools/flydigi-apex6 --device uid:YOUR_UUID --experimental macro 6 --copy-from 5 --name 'Copy'
+tools/flydigi-apex6 --device uid:YOUR_UUID --experimental macro 5 --clear
+~~~
+
+Each `--step` specifies the delay **before** the step in milliseconds, then
+`press`/`release` and a button name or native target JSON. The shared recorder
+format is also accepted through `--steps-file`: a JSON list of
+`{"delay":0,"event":1,"key":"a"}` entries, where event 1 means press and 0 means
+release. Use `target` instead of `key` for keyboard, mouse, consumer, trigger
+or stick targets. `select`/`thl`/`thr` retain their existing recorder meanings;
+`lt`/`rt` become native trigger targets. Home has no supported native target ID
+and is refused. Total duration must fit 65,535 ms; delays are not quantized.
+
+Playback modes are `press_once`, `press_loop_immediate`, `press_loop_wait` and
+`press_hold`. These native modes are separate from the legacy playback enums.
+The repeat interval accepts 0–10,000 ms. Normal sequences require paired
+presses/releases (stick movements end at center); hold mode accepts press
+steps and excludes stick movement. Changing modes does not silently rewrite
+the steps. `--empty` creates an empty definition or clears its steps.
+`--clear` removes the definition and matching button/trigger/stick-zone
+references in that layer, preserving unrelated actions. Names require XMUL
+v1.9; all profile/macro labels together must fit its 255-byte metadata value.
+
+The macro editor has independent vendor fixtures, fake-pad failure tests,
+eight hardware storage/restoration checks and six guided playback checks on Pro
+9.0.6.8. Selected checks verified all four playback modes, Shift-layer trigger
+and stick output, and deletion preserving an unrelated button action. Each
+check restored the original settings. Other typed targets, GUI wiring and an
+Apex 6 recording command remain separate work. See the
+[macro interface and validation](docs/findings-apex6.md#macro-editor).
 
 `bind BUTTON` reads its explicit activators; add repeated `--action TYPE TARGET`
 to replace the complete list (up to five). Types are `simple`, `timing_single`,

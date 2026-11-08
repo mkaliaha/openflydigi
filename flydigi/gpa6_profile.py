@@ -1,15 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
 # SPDX-License-Identifier: MIT
 
-"""Lossless edits to XMUL v1.8/v1.9 mappings, zones, timings and response curves.
+"""Lossless XMUL v1.8/v1.9 mappings, macros, zones, timings and response curves.
 
-Edits touch only the selected activator entry, timing field or response
-extension or zone section, or append an empty layer. Other sections, metadata and reserved
-bytes keep their exact bytes.
+Edits touch the selected activator, macro, timing, response or zone section,
+or append an empty layer. Macro deletion also removes its bindings. Other
+sections, metadata and reserved bytes keep their exact bytes.
 """
 import struct
 
-from . import gpa6, mapping
+from . import gpa6, gpa6_macros, mapping
 from .gpa6_config import mapping_header, unwrap_blob, wrap_blob
 from .gpa6_actions import ACTIVATORS, BUTTONS, decode_target, encode_target
 
@@ -17,7 +17,7 @@ ANGLE_MODES = ("4way", "8way", "4way_overlap")
 DIRECTIONS = ("up", "down", "left", "right", "up_left", "up_right", "down_left", "down_right")
 
 
-def _layout(blob, *, zone_sections=None):
+def _layout(blob, *, zone_sections=None, macro_sections=None):
     mapping_header(blob)
     data = unwrap_blob(blob, b"XMUL")
     position = 28
@@ -53,9 +53,14 @@ def _layout(blob, *, zone_sections=None):
             activators = take(count * 5)  # type:u8 and four-byte target
             entries.append((source, entry_start, position, activators))
         entries_end = position
+        records = []
         for _ in range(macros):
+            record_start = position
             header = take(6)
             take(header[4] * 7)  # action, target[4], timestamp:u16
+            records.append((header[0], record_start, position))
+        if macro_sections is not None:
+            macro_sections[layer_id] = records
         for side in mapping.SIDES:
             zone_start = position
             present = take(1)[0]
@@ -109,7 +114,7 @@ def describe(blob):
     data, layers = _layers(blob)
     result = mapping_header(data)
     names = {value: key for key, value in BUTTONS.items()}
-    result["decoded_scope"] = "button activators, zones, timing and stick/trigger response; other sections preserved"
+    result["decoded_scope"] = "button activators, macros, zones, timing and stick/trigger response; other sections preserved"
     result["layers"] = []
     config = MappingConfig(blob)
     for layer_id, _, _, entries in layers:
@@ -120,7 +125,12 @@ def describe(blob):
             else:
                 mappings[names[source]] = {"activators_hex": activators.hex(),
                                            "activators": _decode_activators(activators)}
+        try:
+            macros = config.macros(layer=layer_id)
+        except gpa6.ProtocolError as exc:
+            macros = {"decode_error": str(exc)}
         result["layers"].append({"id": layer_id, "overrides": mappings,
+            "macros": macros,
             "trigger_zones": {side: config.trigger_zones(side, layer=layer_id) for side in mapping.SIDES},
             "stick_zones": {side: config.stick_zones(side, layer=layer_id) for side in mapping.SIDES}})
     result["response"] = {}
@@ -266,7 +276,9 @@ class MappingConfig:
     exact absolute 0..255 coordinates for richer Apex 6 editors. Activators use
     the shared native action model; their setters touch only the chosen entry.
     Zone setters touch only the selected control, side and layer's zone section.
-    Response setters touch only the selected TLV. All setters are atomic.
+    Macro methods share the existing delay/event conventions with native IDs,
+    layers and playback modes. Response setters touch only the selected TLV.
+    All setters are atomic.
     This is not a legacy wire config:
     submit it through gpa6_config.edit_ram, never mapping.write_config.
     """
@@ -281,6 +293,170 @@ class MappingConfig:
 
     def layer_ids(self):
         return [layer[0] for layer in _layers(self.blob)[1]]
+
+    @property
+    def macro_limits(self):
+        """Native limits: slots per layer, steps per macro, millisecond timing."""
+        return gpa6_macros.LIMITS
+
+    def _macro_layout(self, layer):
+        _integer(layer, 3, "layer")
+        sections = {}
+        data, layers, extensions = _layout(self.blob, macro_sections=sections)
+        selected = next((item for item in layers if item[0] == layer), None)
+        if selected is None:
+            raise ValueError("selected mapping layer does not exist")
+        records = sections[layer]
+        ids = [item[0] for item in records]
+        if len(ids) != len(set(ids)):
+            raise gpa6.ProtocolError("duplicate macro IDs in selected layer")
+        return data, selected, records, extensions
+
+    def macros(self, *, layer=0):
+        """Definitions in storage order, using delay/event/key-or-target steps.
+
+        Unlike legacy macros, these are identified by macro_id, not a source
+        button. Bind definitions with set_activators or a zone target. Native
+        playback modes are strings; legacy numeric playback modes do not apply.
+        """
+        data, _, records, extensions = self._macro_layout(layer)
+        _, _, names = gpa6_macros.names(data, extensions)
+        labels = {(a, b): raw.decode("utf-8", errors="replace") for a, b, raw in names}
+        return [gpa6_macros.decode_record(data[start:end], labels.get((layer, macro_id)))
+                for macro_id, start, end in records]
+
+    def macro(self, macro_id, *, layer=0):
+        _integer(macro_id, 255, "macro ID")
+        return next((item for item in self.macros(layer=layer) if item["macro_id"] == macro_id), None)
+
+    def set_macro(self, macro_id, steps=None, macro_type=None, interval=None, name=None, *, layer=0):
+        """Create/update one definition atomically; None preserves each field.
+
+        New definitions default to press_once, zero interval and no steps.
+        Empty steps clear the body; an empty name clears its v1.9 label.
+        Existing bindings and every unselected macro remain byte-exact.
+        """
+        _integer(macro_id, 255, "macro ID")
+        data, selected, records, _ = self._macro_layout(layer)
+        old = next((item for item in records if item[0] == macro_id), None)
+        if old is None and len(records) >= self.macro_limits.slots:
+            raise ValueError(f"all {self.macro_limits.slots} macro slots in this layer are taken")
+        if macro_type is not None and macro_type not in gpa6_macros.MODES:
+            raise ValueError("unsupported native macro playback mode")
+        if interval is not None:
+            _integer(interval, self.macro_limits.interval_max, "macro interval")
+        raw = data[old[1]:old[2]] if old else None
+        if raw is None or steps is not None or macro_type is not None:
+            previous = gpa6_macros.decode_record(raw) if raw else None
+            mode = macro_type if macro_type is not None else previous["type"] if previous else "press_once"
+            gap = interval if interval is not None else previous["interval"] if previous else 0
+            body = steps if steps is not None else previous["steps"] if previous else []
+            replacement = gpa6_macros.encode_record(macro_id, body, mode, gap, previous=raw)
+        else:
+            replacement = bytearray(raw)
+            if interval is not None:
+                struct.pack_into("<H", replacement, 2, interval)
+        start, end = old[1:] if old else ((records[-1][2] if records else selected[2]),) * 2
+        result = bytearray(data[:start] + replacement + data[end:])
+        if old is None:
+            struct.pack_into("<H", result, selected[1] + 4, len(records) + 1)
+        if name is not None:
+            result = gpa6_macros.patch_name(result, _layout(result)[2], layer, macro_id, name)
+        _layout(result)
+        if result != data:
+            self.blob[:] = wrap_blob(result)
+
+    def clear_macro(self, macro_id, *, layer=0):
+        """Delete a definition and its same-layer button/zone references.
+
+        Remove only matching activators/zones; retain unrelated actions and
+        reserved bytes. Nested macro references are refused rather than broken.
+        """
+        _integer(macro_id, 255, "macro ID")
+        data, selected, records, _ = self._macro_layout(layer)
+        old = next((item for item in records if item[0] == macro_id), None)
+        if old is None:
+            return
+        def references(raw):
+            return raw[:2] == bytes([30, macro_id])
+        for other_id, start, end in records:
+            if other_id != macro_id and any(references(data[p + 1:p + 5]) for p in range(start + 6, end, 7)):
+                raise ValueError("macro is referenced by another macro; edit that definition first")
+        edits = [(old[1], old[2], b"")]
+        removed_entries = 0
+        for _, start, end, actions in selected[3]:
+            kept = [actions[p:p + 5] for p in range(0, len(actions), 5) if not references(actions[p + 1:p + 5])]
+            if len(kept) == len(actions) // 5:
+                continue
+            if kept:
+                replacement = bytes([data[start], len(kept)]) + data[start + 2:start + 4] + b"".join(kept)
+            else:
+                replacement = b""
+                removed_entries += 1
+            edits.append((start, end, replacement))
+        zones = {}
+        _layout(data, zone_sections=zones)
+        for (zone_layer, kind, _), (start, end) in zones.items():
+            if zone_layer != layer or not data[start]:
+                continue
+            prefix, size, target_at = (2, 6, 2) if kind == "trigger" else (3, 7, 3)
+            count = data[start + prefix - 1]
+            active = [data[p:p + size] for p in range(start + prefix, start + prefix + count * size, size)]
+            kept = [record for record in active if not references(record[target_at:target_at + 4])]
+            if len(kept) == count:
+                continue
+            if not kept:
+                replacement = b"\0"
+            else:
+                replacement = bytearray(data[start:end])
+                replacement[prefix - 1] = len(kept)
+                replacement[prefix:prefix + len(kept) * size] = b"".join(kept)
+                if kind == "trigger":
+                    del replacement[prefix + len(kept) * size:]
+            edits.append((start, end, replacement))
+        result = bytearray(data)
+        for start, end, replacement in sorted(edits, reverse=True):
+            result[start:end] = replacement
+        struct.pack_into("<H", result, selected[1] + 2, len(selected[3]) - removed_entries)
+        struct.pack_into("<H", result, selected[1] + 4, len(records) - 1)
+        result = gpa6_macros.patch_name(result, _layout(result)[2], layer, macro_id, "")
+        self.blob[:] = wrap_blob(result)
+
+    def set_macros(self, macros, *, layer=0):
+        """Replace a layer's definition list atomically using shared macro fields.
+
+        Removing a definition also removes its bindings, as in clear_macro.
+        Other layers, mappings, zones and extensions remain intact.
+        """
+        if not isinstance(macros, (list, tuple)) or len(macros) > self.macro_limits.slots:
+            raise ValueError(f"a layer supports at most {self.macro_limits.slots} macros")
+        ids = []
+        for macro in macros:
+            if (not isinstance(macro, dict) or "macro_id" not in macro
+                    or set(macro) - {"macro_id", "steps", "type", "interval", "name"}):
+                raise ValueError("invalid macro definition fields")
+            ids.append(_integer(macro["macro_id"], 255, "macro ID"))
+        if len(ids) != len(set(ids)):
+            raise ValueError("duplicate macro IDs")
+        candidate = self.copy()
+        for item in self.macros(layer=layer):
+            if item["macro_id"] not in ids:
+                candidate.clear_macro(item["macro_id"], layer=layer)
+        for item in macros:
+            previous = candidate.macro(item["macro_id"], layer=layer)
+            # List-based UI edits often resubmit the decoded record. Only
+            # changed fields should be rebuilt, especially opaque body/name data.
+            changes = {key: value for key, value in item.items() if key != "macro_id"
+                       and (previous is None or value != previous[key])}
+            candidate.set_macro(item["macro_id"], changes.get("steps"), changes.get("type"),
+                                changes.get("interval"), changes.get("name"), layer=layer)
+        data, selected, records, _ = candidate._macro_layout(layer)
+        by_id = {macro_id: data[start:end] for macro_id, start, end in records}
+        start = selected[2]
+        end = records[-1][2] if records else start
+        result = data[:start] + b"".join(by_id[macro_id] for macro_id in ids) + data[end:]
+        if result != unwrap_blob(self.blob, b"XMUL"):
+            self.blob[:] = wrap_blob(result)
 
     def ensure_layer(self, layer):
         """Append an empty layer if absent, preserving all existing sections."""

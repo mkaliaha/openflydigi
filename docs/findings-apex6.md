@@ -743,7 +743,7 @@ Each **macro definition** has `macroId:u8, triggerMode:u8, loopIntervalMs:u16,
 actionCount:u8, reserved:u8`, followed by `actionCount` seven-byte actions:
 `actionType:u8, target[4], timestampMs:u16`. Action types are press (0) and
 release (1). Trigger modes are press-once (0), immediate-loop (1), wait-loop (2)
-and press-hold (3). Macro definitions are traversed and preserved, not edited.
+and press-hold (3). The macro editor below now edits these definitions.
 
 Each **trigger-zone section** starts with a presence byte. Zero ends the section;
 one is followed by `count:u8` and `count` six-byte records: `start:u8, stop:u8,
@@ -769,7 +769,7 @@ entry. `none` is gamepad target ID 255, distinct from removing an entry.
 `layer_ids()` lists existing IDs; `ensure_layer(id)` appends an empty layer if
 absent. Existing layers and extension order remain intact. New layer references
 must resolve in this profile; macro references must resolve uniquely in the
-selected layer. Macro definitions are still preserved rather than edited.
+selected layer. Macro definitions have a separate editor described below.
 
 The shared `gpa6_actions` codec uses these four-byte targets:
 
@@ -974,6 +974,122 @@ These layouts are vendor-derived. The response editor decodes and edits types
 Type 32 contains `nameLength:u8, UTF8Name[nameLength], namedMacroCount:u8`,
 then records `layerId:u8, macroId:u8, nameLength:u8, UTF8Name[nameLength]`.
 The whole value must fit the one-byte TLV length. v1.8 has no such name metadata.
+
+### Macro editor
+
+Added 2026-11-08. The current public [web macro page](https://space_station.flydigi.com/assets/MacroPage-BQP-6oDL.js)
+matched the previous local capture. The current contract and configuration
+codec were also downloaded and pinned for independent fixture execution.
+The contract limits the editor to **10 definitions per layer and 32 actions
+per definition**. The UI bounds repeat intervals to 0–10,000 ms; absolute
+timestamps have a 16-bit millisecond ceiling. These editor limits are narrower
+than the storage field widths and are not inferred firmware capacities.
+
+`gpa6_profile.MappingConfig` adds `macros(layer=0)`, `macro(macro_id, layer=0)`,
+`set_macro(macro_id, steps=None, macro_type=None, interval=None, name=None,
+layer=0)`, `set_macros(definitions, layer=0)` and `clear_macro(macro_id, layer=0)`.
+The layer arguments are keyword-only. `macro_limits` reuses `mapping.MacroLimits`
+with native values; its step limit is per macro, not the shared Apex 5 budget.
+All setters are atomic. `None` preserves a field; empty steps clear the body,
+and an empty name removes that name. New definitions default to an empty
+press-once macro with interval zero. Read/copy/no-op operations preserve the
+original envelope and bytes.
+
+Definitions use `macro_id`, `type`, `interval`, `name`, `steps`. `type` is one
+of the four native strings, **not** the legacy numeric macro enum:
+`press_once`, `press_loop_immediate`, `press_loop_wait`, `press_hold`.
+Bindings remain independent typed macro targets in the selected layer. This
+does not make the legacy Qt MacroModel or its key-based identity directly
+compatible; GPA6 loading, routing and UI adaptation remain separate work.
+
+Steps reuse the existing recorder's relative `delay` and `event` conventions:
+`mapping.MACRO_PRESS == 1`, `MACRO_RELEASE == 0`. The wire values are the reverse
+and are translated explicitly. A step carries either `key` or native `target`.
+Gamepad keys, keyboard/modifiers, mouse buttons, consumer actions, trigger
+values and stick vectors use the shared four-byte action codec. Recorder
+`select`/`thl`/`thr` map to back/LS/RS, and LT/RT become linear targets.
+Home has no supported target in the recovered codec and is refused. Macro,
+layer, turbo and motor targets are not offered as macro steps merely because
+the shared wire codec can encode them.
+
+The timeline rejects negative/noninteger delays, duration overflow, repeated
+presses and releases without preceding presses. Normal modes require all
+pressed targets to be released; sticks may change direction while held but
+must return to center. Hold mode accepts presses only and refuses sticks,
+matching the UI's mode conversion constraints. Mode changes require callers
+to supply suitable steps; the backend does not silently synthesize releases
+or discard them. Empty definitions are valid, as in the web editor.
+
+Untouched definitions, layers, zones, extension TLVs, header bytes and reserved
+target bytes are preserved. Names patch only the selected v1.9 metadata record,
+retaining the profile title and other raw names. Ambiguous IDs/names and malformed
+selected metadata are refused. Unknown stored modes/events/targets remain
+readable; name/interval-only edits preserve their body. `set_macros` can retain
+unchanged opaque definitions. Names on v1.8 are explicitly refused rather than
+discarded. The total metadata payload must fit one byte; oversized UTF-8 names
+are refused without truncation or a partial edit.
+
+Deletion removes only the selected definition and matching same-layer button
+activators and trigger/stick zones. Remaining actions keep their raw bytes;
+empty mapping entries are removed. Other layers with the same macro ID remain
+intact. A pre-existing nested reference from another macro causes refusal.
+This avoids dangling stick-zone references too; the examined web removal helper
+only cleaned button and trigger-zone references.
+
+`tools/flydigi-apex6` exposes `macros` and `macro ID`, repeated `--step`, a
+shared-format `--steps-file`, `--mode`, `--interval`, `--name`, `--empty`,
+`--copy-from`, `--clear`, `--bind`, `--layer` and `--save`. Creation plus binding
+is one `gpa6_config.edit_ram` transaction with UUID/slot checks, full read-back
+and exact-candidate rollback. Writes require `--experimental`; A4 persistence
+rules are unchanged. No legacy write path or GUI allowlist was widened.
+
+`tools/gen-apex6-macro-fixtures` executes pinned vendor code offline, without
+importing the Python implementation. `tests/fixtures/apex6-macros.json` contains
+43 complete-profile comparisons across v1.8/v1.9, both layers, all four modes,
+all supported target kinds, timestamps, names, insertion, edits and deletion.
+It also captures the web's sequence validator results and editor limits.
+The 23 focused tests cover these plus reserved/unknown bytes, duplicate and
+malformed data, atomic failures, binding cleanup, recorder compatibility,
+guarded writes, lost commit ACK rollback and CLI opt-in.
+
+Eight storage cases passed on Apex 6 Pro SKU 150, firmware 9.0.6.8:
+all four playback modes with an M4 binding, step/name edits, a layer containing
+ten definitions with one 32-step body, deletion with binding/zone cleanup, and
+typed target bodies. Every case verified the full candidate and then restored
+the original slot and all four RAM blocks exactly. Evidence is in ignored
+`work/apex6-macros-20261108/readback/`. Storage verification is distinct from
+the subsequent guided playback checks below.
+
+#### Guided macro playback acceptance
+
+Six held-state phases completed on the same Pro 9.0.6.8. The user performed
+the requested presses while a reader captured evdev events from the gamepad
+under the selected HID USB root. Each configuration remained active until the
+user reported completion. No host synthesized the tested input events.
+
+| Phase | Recorded behavior |
+|---|---|
+| Press once | A 100-ms press, a 400-ms gap and B 100-ms press, once per M4 press. A tap and a roughly two-second hold each produced one sequence. |
+| Immediate-stop loop | Three complete A/B cycles at approximately 900-ms start intervals (600-ms sequence plus 300-ms repeat interval). A subsequent quick tap produced A but cancelled the later B step on release. |
+| Finish-current-sequence loop | Repeated A/B cycles at approximately 900 ms. The subsequent quick tap still completed the whole A/B sequence after release. |
+| Press hold | X followed by Y about 5 ms later; both stayed down until M4 release. Two holds ended with simultaneous releases and no stuck keys. |
+| Shift-layer analog macro | M4 alone produced B before/after the Shift test. With M1 holding layer 1, M4 produced LT 255 for 250 ms, then right-stick X 32512 for 250 ms, returning to zero. The user left sticks/triggers untouched. |
+| Delete with another action retained | Removing the macro left M4's unrelated simple Y action. Two taps produced only Y press/release events, with no A macro output. |
+
+Every phase restored the same original active slot and all four RAM blocks
+exactly. Both sessions' fresh baselines and final cleanup snapshots also match.
+The first recorder exited after detecting an **idle** SYN_DROPPED following
+the third phase's completed restoration; all three captured phases and cleanup
+were already verified. The local harness now drains/resynchronizes idle events
+after slow configuration operations, while still treating an active-phase
+overrun as invalid evidence. Only the remaining three phases were run in the
+second session, which exited 0. No production input-reader change was needed.
+
+Raw events, applied/restored snapshots and user confirmations are under
+`work/apex6-macros-20261108/physical/` and `physical-2/`; the aggregate is
+`physical-results.json`. These checks establish selected gamepad playback on
+this unit, not exhaustive keyboard/mouse/consumer behavior, every binding or
+firmware variant. No process, held output or temporary setting remains active.
 
 ### Stick and trigger response editor
 
@@ -1204,8 +1320,8 @@ Local mapping and center auto-adjust have only been verified by
 write/read-back/restoration, accepted for settings support without further
 physical checks. Third-party permission was subsequently tested as described
 below. Stick/trigger response editing was subsequently added with independent
-codec, fake-pad and guided physical-input coverage as described above. Snapshot import, macro editing,
-GUI configuration remains outside this implementation. Native motor configuration
+codec, fake-pad and guided physical-input coverage as described above. Snapshot import
+and GUI configuration remain outside this implementation. Native motor configuration
 editing was added later; see [native feedback](#native-vibration-and-trigger-scenes).
 
 ### Third-party takeover permission

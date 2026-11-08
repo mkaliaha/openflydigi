@@ -25,7 +25,7 @@ Detailed evidence lives in [PROTOCOL.md](PROTOCOL.md) and
 |---|---|---|
 | Flydigi Apex 5 | Hardware-validated | Reference controller. Profiles, mappings, macros, sticks, gyro-to-stick, vibration, adaptive triggers, lighting, settings, display, game routes, and virtual-DualSense relays are implemented. |
 | Flydigi Vader 5 Pro | Experimental and partial | Identity, capability gating, profiles, mappings, sticks, gyro, vibration, lighting, settings, v3.2 macro-store handling, and a derived factory profile are implemented. No Vader 5 hardware has been tested. |
-| Flydigi Apex 6 / Apex 6 Pro | Experimental; Pro configuration partly hardware-validated | GPA6 identity and snapshots; global settings, simple remapping, timing fields, lighting and profile selection/save verified on Pro firmware 9.0.6.8. Stick/trigger response editing has independent codec, fake-pad, hardware write/read-back and guided physical-input coverage. Native vibration and scene settings have storage and selected physical acceptance. Grip waveforms were felt on hardware; the motor lifecycle matches the native engine's grip-only route, including trigger handling, fresh motor-RAM replay and no mode ACK waits. Exact live-mode restoration remains unverified. Opt-in USB DualSense input/audio/rumble has software coverage; a full game run, motion, trigger translation, uhid and GUI integration remain outstanding. See [findings](docs/findings-apex6.md). |
+| Flydigi Apex 6 / Apex 6 Pro | Experimental; Pro configuration partly hardware-validated | GPA6 identity and snapshots; global settings, simple remapping, timing fields, lighting and profile selection/save verified on Pro firmware 9.0.6.8. Stick/trigger response editing has independent codec, fake-pad, hardware write/read-back and guided physical-input coverage. Native vibration and scene settings have storage and selected physical acceptance. Macro editing has independent codec, fake-pad, hardware storage and selected guided playback checks. Grip waveforms were felt on hardware; the motor lifecycle matches the native engine's grip-only route, including trigger handling, fresh motor-RAM replay and no mode ACK waits. Exact live-mode restoration remains unverified. Opt-in USB DualSense input/audio/rumble has software coverage; a full game run, motion, trigger translation, uhid and GUI integration remain outstanding. See [findings](docs/findings-apex6.md). |
 | Flydigi CD2 dock | Hardware-validated with one noted gap | Device identity, four settings, generated lighting, and picture/GIF sampling are hardware-validated. Nickname read/write is implemented, but nickname writing is not hardware-verified. |
 | Other Flydigi hardware | Unsupported | It may be discovered by the shared transport. Normal configuration commands refuse unsupported models; explicitly ungated developer bench tools are outside that guarantee. |
 
@@ -106,7 +106,19 @@ overrun recovery was also fixed. All sessions exited and original settings were
 restored exactly. GUI integration remains pending; precise physical limits and
 diagnostic observations are retained in the findings.
 
-Remaining configuration work includes macro editing, gyro mapping,
+Macro editing now has a lossless backend and CLI. The profile object reuses
+`macros`, `macro`, `set_macro`, `set_macros`, `clear_macro` and `macro_limits`,
+plus the existing delay/event step conventions and typed action codec. Native
+IDs, layers and four playback modes stay explicit. It supports names, copying,
+atomic create-and-bind, and deletion with matching binding/zone cleanup.
+Twenty-three focused tests include 43 independent full-profile encoder fixtures;
+eight hardware storage cases passed with all original RAM blocks restored.
+Six guided playback checks also passed: once, immediate-stop loop,
+finish-current-sequence loop, held chord, Shift-layer trigger/stick output and
+deletion preserving an unrelated action. All phases restored the original slot
+and four RAM blocks. Other typed targets and GUI wiring remain unverified.
+
+Remaining configuration work includes gyro mapping,
 restorable profile backups/library, screen support and GUI wiring. Apex 6 remains
 outside the legacy configuration allowlist, so Apex 5 wire paths stay separate.
 
@@ -190,13 +202,13 @@ Qt-dependent Python scripts.
 
 Current inventory:
 
-- 21 backend `tests/test_*.py` scripts;
+- 28 backend `tests/test_*.py` scripts;
 - 3 Qt-dependent Python scripts: `test_models.py`, `test_shell.py`, and
   `test_qml.py`;
 - 13 QML cases under `tests/qml/tst_*.qml`.
 
 Run the [discovered backend set](README.md#tests) rather than maintaining a
-hand-written filename list. All 21 backend scripts are hardware-free. The
+hand-written filename list. All 28 backend scripts are hardware-free. The
 documented loop continues after failures and returns nonzero if any script
 fails.
 

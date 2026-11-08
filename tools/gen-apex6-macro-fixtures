@@ -1,0 +1,101 @@
+#!/usr/bin/env node
+// SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+// SPDX-License-Identifier: MIT
+
+// Execute the pinned, public web codec on synthetic macro edits. The ignored
+// vendor files are needed only for regeneration, never for production/tests.
+const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
+const crypto = require('node:crypto');
+const base = path.resolve(__dirname, '../work/apex6-macros-20261108');
+const sources = [
+  ['vendor-gpa6-codec-Cyklfcgj.js', 'a354da500ad9e90c724ec370eef7c8e9fdcacac9ee0bd33affbce25af70ca7f8'],
+  ['vendor-gpa6-contract-DI2SkAtw.js', '4e456d39ec9f010fc35de1e9b94f4e2f71c07a99337c82f460d34ca6de0f95d7'],
+  ['MacroPage-BQP-6oDL.js', '1b0987a15022c2ea915c99715bc388532a15a7eaf5a5fafc175d72c111bfdb48'],
+].map(([file, sha256]) => {
+  const data = fs.readFileSync(path.join(base, file));
+  if (crypto.createHash('sha256').update(data).digest('hex') !== sha256) throw Error('Pinned source mismatch: ' + file);
+  return {file, sha256};
+});
+const read = i => fs.readFileSync(path.join(base, sources[i].file), 'utf8');
+const codec = read(0), contract = read(1), page = read(2);
+const unmodule = s => s.replace(/import\s*[\s\S]*?;\s*/g, '').replace(/export\s*\{[\s\S]*?\};?\s*$/, '');
+const limit = contract.match(/\bQt=(\d+)/)[1];
+const encode = vm.runInNewContext(`const L=${limit};\n${unmodule(codec)}; Bn`,
+  {Uint8Array, DataView, TextEncoder, TextDecoder});
+const validate = vm.runInNewContext(page.slice(page.indexOf('function pe('), page.indexOf('const Lt=')) + '; pe');
+const limits = {slots: Number(contract.match(/\btt=(\d+)/)[1]), steps: Number(contract.match(/\bue=(\d+)/)[1]),
+                interval_max: Number(page.match(/value:l.loop_interval_ms,min:0,max:([^,]+)/)[1])};
+const hex = input => Buffer.from(encode(input)).toString('hex');
+const button = id => ({type:'btn_gamepad',id:'button_'+id});
+const action = (target, action_type, timestamp_ms) => ({target, action_type, timestamp_ms});
+const pair = (target, releaseTarget=target) => [action(target,'press',0),action(releaseTarget,'release',73)];
+const modes = ['press_once','press_loop_immediate','press_loop_wait','press_hold'];
+function input(version) {
+  return {version,name:'Keep profile',runtime_policies:{long_ms:513,double_ms:257},layer_count:2,
+    layers:[{layer_id:0,activator_mappings:[{source:'button_m2',activators:[{type:'simple',target:button('y')}]}],
+      macro_definitions:[{macro_id:7,name:'Keep macro',trigger_mode:'press_once',loop_interval_ms:50,actions:pair(button('b'))}],
+      trigger_zones_right:[{start:12,stop:80,target:button('a')}],
+      stick_zones_left:{angle_mode:'8way',zones:[{start:20,stop:200,dir:'up',target:button('x')}]}},
+      {layer_id:1,activator_mappings:[],macro_definitions:[]}],
+    joystick_left:{curve:{start_x:0,start_y:0,end_x:255,end_y:255,mid_points:[]},is_round:true,invert_x:false,invert_y:false}};
+}
+function steps(actions) {
+  let last=0;
+  return actions.map(a=>{const delay=a.timestamp_ms-last;last=a.timestamp_ms;
+    const target={...a.target};
+    if(target.type==='btn_gamepad')target.id=target.id.replace('button_','');
+    return {delay,event:a.action_type==='press'?1:0,target};});
+}
+const cases=[];
+function add(name, before, after, operation, args) {cases.push({name,operation,args,before_hex:hex(before),after_hex:hex(after)});}
+for(const version of ['1.8','1.9']) {
+  for(const layer of [0,1]) for(const mode of modes) {
+    const before=input(version), after=structuredClone(before);
+    const actions=mode==='press_hold'?[action(button('a'),'press',0),action(button('x'),'press',5)]:pair(button('a'));
+    const name=version==='1.9'?'Комбо 🐾':undefined;
+    after.layers[layer].macro_definitions.push({macro_id:5,name,trigger_mode:mode,loop_interval_ms:123,actions});
+    add(`${version}-${layer}-${mode}`,before,after,'set',{macro_id:5,steps:steps(actions),macro_type:mode,interval:123,layer,...name?{name}:{}});
+  }
+  for(const target of [button('a'),{type:'btn_keyboard',key_id:4,modifier:2},{type:'btn_mouse',mouse_id:1},
+    {type:'btn_consumer',consumer_id:7}, {type:'simulate_linear_left',linear_value:255},
+    {type:'simulate_linear_right',linear_value:255},{type:'simulate_joystick_left',axis_x:127,axis_y:-127},
+    {type:'simulate_joystick_right',axis_x:-127,axis_y:0}]) {
+    const before=input(version), after=structuredClone(before), release={...target};
+    if('linear_value' in release)release.linear_value=0;
+    if('axis_x' in release){release.axis_x=0;release.axis_y=0;}
+    const actions=pair(target,release);after.layers[0].macro_definitions[0].actions=actions;
+    add(`${version}-${target.type}`,before,after,'set',{macro_id:7,steps:steps(actions)});
+  }
+  for(const operation of ['empty','interval','clear','rename']) {
+    if(operation==='rename'&&version==='1.8')continue;
+    const before=input(version),after=structuredClone(before);let args={macro_id:7};
+    if(operation==='empty'){after.layers[0].macro_definitions[0].actions=[];args.steps=[];}
+    if(operation==='interval'){after.layers[0].macro_definitions[0].loop_interval_ms=10000;args.interval=10000;}
+    if(operation==='clear')after.layers[0].macro_definitions=[];
+    if(operation==='rename'){after.layers[0].macro_definitions[0].name='New label';args.name='New label';}
+    add(`${version}-${operation}`,before,after,operation==='clear'?'clear':'set',args);
+  }
+  const before=input(version),after=structuredClone(before);
+  after.layers[0].macro_definitions[0].actions=pair(button('x'));after.layers[0].macro_definitions[0].actions[1].timestamp_ms=65535;
+  add(`${version}-timestamp-boundary`,before,after,'set',{macro_id:7,steps:steps(after.layers[0].macro_definitions[0].actions)});
+  const bound=input(version), removed=structuredClone(bound), target={type:'macro',macro_id:7};
+  bound.layers[0].activator_mappings.push({source:'button_m4',activators:[{type:'simple',target},{type:'timing_long',target:button('x')}]});
+  bound.layers[0].activator_mappings.push({source:'button_a',activators:[{type:'simple',target}]});
+  bound.layers[0].trigger_zones_left=[{start:40,stop:80,target}];
+  bound.layers[0].stick_zones_right={angle_mode:'4way',zones:[{start:100,stop:255,dir:'up',target}]};
+  removed.layers[0].macro_definitions=[];
+  removed.layers[0].activator_mappings.push({source:'button_m4',activators:[{type:'timing_long',target:button('x')}]});
+  add(`${version}-delete-with-bindings`,bound,removed,'clear',{macro_id:7});
+}
+const validation=[];
+for(const [name,actions] of [
+  ['pair',pair(button('a'))],['missing-release',[action(button('a'),'press',0)]],
+  ['release-first',[action(button('a'),'release',0)]],
+  ['repeated-press',[action(button('a'),'press',0),action(button('a'),'press',1)]],
+  ['stick-moves',[action({type:'simulate_joystick_left',axis_x:1,axis_y:0},'press',0),
+     action({type:'simulate_joystick_left',axis_x:0,axis_y:1},'press',1),
+     action({type:'simulate_joystick_left',axis_x:0,axis_y:0},'release',2)]],
+  ['trigger',pair({type:'simulate_linear_left',linear_value:255},{type:'simulate_linear_left',linear_value:0})]]) {
+  for(const hold of [false,true])validation.push({name,hold,steps:steps(actions),error:validate(actions,hold)});
+}
+process.stdout.write(JSON.stringify({sources,limits,cases,validation},null,2)+'\n');

@@ -16,7 +16,7 @@ import wave
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flydigi import device, gpa6, gpa6_config, gpa6_profile, gpa6_haptics, identity, registry, waveform
+from flydigi import device, gpa6, gpa6_config, gpa6_profile, gpa6_haptics, gpa6_macros, identity, mapping, registry, waveform
 
 
 def action_target(text):
@@ -69,6 +69,23 @@ def main():
     sub.add_parser("info", help="read identity, capabilities and format versions")
     sub.add_parser("settings", help="read global controller settings")
     sub.add_parser("profile", help="read active profile buttons, timings and response curves")
+    macros = sub.add_parser("macros", help="list macro definitions in one layer")
+    macros.add_argument("--layer", type=int, choices=range(4), default=0)
+    macro = sub.add_parser("macro", help="read, create, edit or delete a native macro definition")
+    macro.add_argument("id", type=int, choices=range(256), metavar="ID")
+    macro.add_argument("--layer", type=int, choices=range(4), default=0)
+    body = macro.add_mutually_exclusive_group()
+    body.add_argument("--step", nargs=3, action="append", metavar=("DELAY_MS", "EVENT", "TARGET"),
+                      help="replace steps; repeat up to 32 times; EVENT is press/release, TARGET is a button or native JSON")
+    body.add_argument("--steps-file", help="JSON list of delay/event/key-or-target steps, using the existing recorder format")
+    body.add_argument("--empty", action="store_true", help="create an empty macro or clear its steps")
+    body.add_argument("--copy-from", type=int, choices=range(256), metavar="ID", help="copy a definition in this layer to a new ID")
+    body.add_argument("--clear", action="store_true", help="delete the macro and its same-layer button/zone bindings")
+    macro.add_argument("--mode", choices=gpa6_macros.MODES)
+    macro.add_argument("--interval", type=int, help="repeat interval in milliseconds, 0..10000")
+    macro.add_argument("--name", help="v1.9 macro name; an empty string clears it")
+    macro.add_argument("--bind", choices=tuple(gpa6_profile.BUTTONS), help="replace this button's activators with the macro binding")
+    macro.add_argument("--save", action="store_true", help="also explicitly save; edits may already persist")
     vibration = sub.add_parser("vibration", help="read/edit native grip vibration or trigger-bound feedback")
     vibration.add_argument("target", choices=("grips", "left", "right"), nargs="?")
     vibration.add_argument("--enabled", choices=("on", "off"))
@@ -157,6 +174,10 @@ def main():
     play = sub.add_parser("play", help="play 48 kHz s16 PCM WAV; stereo or four-channel DualSense capture")
     play.add_argument("wav")
     args = parser.parse_args()
+    macro_write = args.command == "macro" and (any(getattr(args, key) is not None
+        for key in ("step", "steps_file", "copy_from", "mode", "interval", "name", "bind")) or args.empty or args.clear or args.save)
+    if args.command == "macro" and args.clear and any(getattr(args, key) is not None for key in ("mode", "interval", "name", "bind")):
+        parser.error("--clear cannot be combined with macro edits or --bind")
     vibration_write = args.command == "vibration" and (args.enabled is not None or args.level is not None or args.save)
     scene_write = args.command == "trigger-scene" and (args.scene is not None or args.travel is not None or args.frequency is not None or args.save)
     if vibration_write and args.target is None:
@@ -215,7 +236,7 @@ def main():
         if native and facade_write:
             parser.error("edit either exact curve coordinates or preset/deadzone/travel controls in one command")
     if (args.command in ("tone", "play", "set-setting", "map", "timing", "slot", "save", "layer-add", "vibration-test")
-            or light_write or response_write or bind_write or zone_write or vibration_write or scene_write
+            or light_write or response_write or bind_write or zone_write or vibration_write or scene_write or macro_write
             or ((args.command == "light" or response_command) and args.save)) and not args.experimental:
         parser.error("configuration writes and grip output require --experimental")
     if args.command == "vibration-test" and (not math.isfinite(args.duration) or not 0 < args.duration <= 3600):
@@ -231,6 +252,23 @@ def main():
     source = None
     ctrl = session = None
     try:
+        macro_steps = None
+        if args.command == "macro":
+            if args.steps_file is not None:
+                with open(args.steps_file, encoding="utf-8") as stream:
+                    macro_steps = json.load(stream)
+                if not isinstance(macro_steps, list):
+                    raise ValueError("macro steps file must contain a JSON list")
+            elif args.empty:
+                macro_steps = []
+            elif args.step is not None:
+                macro_steps = []
+                for delay, event, target in args.step:
+                    if event not in ("press", "release"):
+                        raise ValueError("macro step event must be press or release")
+                    step = {"delay": int(delay), "event": mapping.MACRO_PRESS if event == "press" else mapping.MACRO_RELEASE}
+                    step["target" if target.startswith("{") else "key"] = json.loads(target) if target.startswith("{") else target
+                    macro_steps.append(step)
         if args.command == "snapshot" and os.path.lexists(args.output):
             raise FileExistsError(f"snapshot already exists: {args.output}")
         channels = 2
@@ -245,6 +283,36 @@ def main():
         ctrl = open_selected(args.device)
         protocol = gpa6.Protocol(ctrl)
         uid = protocol.uid()
+        if args.command in ("macros", "macro"):
+            def edit_macro(data):
+                config = gpa6_profile.MappingConfig(data)
+                if args.clear:
+                    config.clear_macro(args.id, layer=args.layer)
+                else:
+                    steps, mode, interval, name = macro_steps, args.mode, args.interval, args.name
+                    if args.copy_from is not None:
+                        original = config.macro(args.copy_from, layer=args.layer)
+                        if original is None:
+                            raise ValueError("source macro does not exist")
+                        if config.macro(args.id, layer=args.layer) is not None:
+                            raise ValueError("copy destination macro already exists")
+                        steps = original["steps"]
+                        mode = mode if mode is not None else original["type"]
+                        interval = interval if interval is not None else original["interval"]
+                        name = name if name is not None else original["name"]
+                    if steps is not None or any(value is not None for value in (mode, interval, name)):
+                        config.set_macro(args.id, steps, mode, interval, name, layer=args.layer)
+                    if args.bind is not None:
+                        config.set_activators(args.bind, [{"type": "simple", "target": {"type": "macro", "macro_id": args.id}}], layer=args.layer)
+                return config.blob
+            data = (gpa6_config.edit_ram(ctrl, 5, edit_macro, save=args.save, expected_uid=uid)
+                    if macro_write else protocol.read_ram(5))
+            config = gpa6_profile.MappingConfig(data)
+            result = config.macros(layer=args.layer) if args.command == "macros" else config.macro(args.id, layer=args.layer)
+            if macro_write:
+                print("Profile save acknowledged." if args.save else "Applied and verified; this firmware can retain edits without explicit save.", file=sys.stderr)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
         if args.command == "trigger-scene":
             if scene_write:
                 config = gpa6_haptics.edit(ctrl, lambda c: c.set_trigger_scene(args.side, args.scene,
