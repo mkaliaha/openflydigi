@@ -1,15 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
 # SPDX-License-Identifier: MIT
 
-"""Lossless XMUL v1.8/v1.9 mappings, macros, zones, timings and response curves.
+"""Lossless XMUL v1.8/v1.9 mappings, macros, zones, gyro, timings and response curves.
 
-Edits touch the selected activator, macro, timing, response or zone section,
+Edits touch the selected activator, macro, gyro, timing, response or zone section,
 or append an empty layer. Macro deletion also removes its bindings. Other
 sections, metadata and reserved bytes keep their exact bytes.
 """
 import struct
 
-from . import gpa6, gpa6_macros, mapping
+from . import gpa6, gpa6_gyro, gpa6_macros, mapping
 from .gpa6_config import mapping_header, unwrap_blob, wrap_blob
 from .gpa6_actions import ACTIVATORS, BUTTONS, decode_target, encode_target
 
@@ -114,7 +114,7 @@ def describe(blob):
     data, layers = _layers(blob)
     result = mapping_header(data)
     names = {value: key for key, value in BUTTONS.items()}
-    result["decoded_scope"] = "button activators, macros, zones, timing and stick/trigger response; other sections preserved"
+    result["decoded_scope"] = "button activators, macros, zones, gyro, timing and stick/trigger response; other sections preserved"
     result["layers"] = []
     config = MappingConfig(blob)
     for layer_id, _, _, entries in layers:
@@ -142,6 +142,10 @@ def describe(blob):
             except gpa6.ProtocolError as exc:
                 value = {"decode_error": str(exc)}
             result["response"][control][side] = value
+    try:
+        result["motion"] = {**config.motion(), "curve": config.motion_curve()}
+    except gpa6.ProtocolError as exc:
+        result["motion"] = {"decode_error": str(exc)}
     return result
 
 
@@ -293,6 +297,105 @@ class MappingConfig:
 
     def layer_ids(self):
         return [layer[0] for layer in _layers(self.blob)[1]]
+
+    def _motion_record(self):
+        data, _, extensions = _layout(self.blob)
+        matches = [(a, b) for kind, a, b in extensions if kind == 5]
+        if len(matches) > 1:
+            raise gpa6.ProtocolError("ambiguous duplicate gyro extension")
+        raw = data[matches[0][0] + 2:matches[0][1]] if matches else gpa6_gyro.DEFAULT
+        gpa6_gyro.offsets(raw)
+        return raw, matches
+
+    def _store_motion(self, raw):
+        old, matches = self._motion_record()
+        if raw == old:
+            return
+        gpa6_gyro.offsets(raw)
+        data, _, extensions = _layout(self.blob)
+        if matches:
+            start, stop = matches[0]
+        else:
+            start = stop = next((a for kind, a, _ in extensions
+                                 if kind in (6, 7, 8, 9, 32, 255)), len(data))
+        replacement = bytes([5, 24]) + raw + (b"" if extensions else b"\xff\0")
+        self.blob[:] = wrap_blob(data[:start] + replacement + data[stop:])
+
+    def motion(self):
+        """Shared target/enable-type IDs and key names, with native gyro fields.
+
+        Four native activation slots are reported; the web exposes the first
+        two. Mixed activation types return enable_type=None. Legacy sensitivity,
+        dead_zone and use_mode have no equivalent here and are not fabricated.
+        This configuration is profile-wide, not a Shift-layer setting.
+        """
+        raw, matches = self._motion_record()
+        return {**gpa6_gyro.decode(raw), "present": bool(matches)}
+
+    def set_motion(self, target=None, enable_type=None, keys=None, *,
+                   invert_x=None, invert_y=None, mouse_window_radius=None):
+        """Edit the web gyro controls atomically; None preserves a field.
+
+        Target changes use the web's first-use curve defaults (stick end 145,255;
+        mouse end 255,51). Same target/off keeps the curve. The browser's separate
+        per-target curve cache is not stored on the pad. Any explicit target
+        selection resets axis routing to imu_x/imu_y, as the web does.
+        keys is a primary key or a (primary, optional secondary) pair; slots 3/4
+        survive. enable_type applies to every active slot, matching the web.
+        """
+        raw, _ = self._motion_record()
+        result = bytearray(raw)
+        curve, flags = gpa6_gyro.offsets(raw)
+        if target is not None:
+            target = gpa6_gyro.target_id(target)
+            if target != raw[flags + 1] and target != mapping.MOTION_OFF:
+                end = (255, 51) if target == mapping.MOTION_MOUSE else (145, 255)
+                result[curve:curve + 11] = _patch_curve(raw[curve:curve + 11], start=(0, 0), end=end, points=[])
+            result[flags + 1] = target
+            result[flags + 10:flags + 12] = b"\x01\x02"
+        if keys is not None:
+            if isinstance(keys, (str, int)):
+                keys = (keys, None)
+            if not isinstance(keys, (tuple, list)) or len(keys) != 2:
+                raise ValueError("gyro keys require a primary and optional secondary key")
+            first, second = map(gpa6_gyro.key_id, keys)
+            if first == 255:
+                raise ValueError("a primary gyro activation key is required")
+            if result[flags + 3] == 255:
+                result[flags + 2] = 0
+            result[flags + 3] = first
+            if second != 255:
+                result[flags + 4] = result[flags + 2]
+            result[flags + 5] = second
+        if enable_type is not None:
+            activation = gpa6_gyro.activation_id(enable_type)
+            for p in range(flags + 2, flags + 10, 2):
+                if result[p + 1] != 255:
+                    result[p] = activation
+        for bit, value in ((1, invert_x), (2, invert_y)):
+            if value is not None:
+                if type(value) is not bool:
+                    raise ValueError("gyro inversion flags must be boolean")
+                result[flags] = (result[flags] & ~bit) | (bit if value else 0)
+        if mouse_window_radius is not None:
+            result[flags + 12] = _integer(mouse_window_radius, 255, "mouse window radius")
+        self._store_motion(result)
+
+    def motion_curve(self):
+        """Native absolute 0..255 curve, using the shared response-curve shape."""
+        raw, _ = self._motion_record()
+        curve, _ = gpa6_gyro.offsets(raw)
+        return _decode_curve(raw[curve:curve + 11])
+
+    def set_motion_curve(self, *, start=None, end=None, points=None):
+        """Edit native curve endpoints/midpoints; points=[] clears midpoints."""
+        raw, _ = self._motion_record()
+        if start is None and end is None and points is None:
+            return
+        curve, _ = gpa6_gyro.offsets(raw)
+        result = bytearray(raw)
+        result[curve:curve + 11] = _patch_curve(raw[curve:curve + 11], start=start, end=end, points=points)
+        self._store_motion(result)
 
     @property
     def macro_limits(self):

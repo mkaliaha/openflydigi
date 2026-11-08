@@ -1,0 +1,76 @@
+#!/usr/bin/env node
+// SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
+// SPDX-License-Identifier: MIT
+
+// Independent expected profiles: execute pinned vendor JS, never Python.
+const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
+const crypto = require('node:crypto');
+const base = path.resolve(__dirname, '../work/apex6-gyro-20261108');
+const sources = [
+  ['vendor-gpa6-codec-Cyklfcgj.js', 'a354da500ad9e90c724ec370eef7c8e9fdcacac9ee0bd33affbce25af70ca7f8'],
+  ['vendor-gpa6-contract-DI2SkAtw.js', '4e456d39ec9f010fc35de1e9b94f4e2f71c07a99337c82f460d34ca6de0f95d7'],
+  ['GyroBody-BIyVvjD1.js', '293b981968572da4d156007b0e9ca2b5038f8e8143e6cd3365d1765e3eabb380'],
+  ['router-P2Tx6fpK.js', '3ab5d065dd67bec6e7df912a6c16ac73f78180a2506e940113a8ea799e626891'],
+  ['useGyroModeCurveSwitch-BlThQMeF.js', '581214b5b791b01b2163222a93c6cd54cfa566600a1a1537dff46a14096211b8'],
+].map(([file, sha256]) => {
+  const data = fs.readFileSync(path.join(base, file));
+  if (crypto.createHash('sha256').update(data).digest('hex') !== sha256) throw Error('Pinned source mismatch: ' + file);
+  return {file, sha256};
+});
+const read = i => fs.readFileSync(path.join(base, sources[i].file), 'utf8');
+const unmodule = s => s.replace(/import\s*[\s\S]*?;\s*/g, '').replace(/export\s*\{[\s\S]*?\};?\s*$/, '');
+const encode = vm.runInNewContext(`const L=${read(1).match(/\bQt=(\d+)/)[1]};\n${unmodule(read(0))}; Bn`,
+  {Uint8Array, DataView, TextEncoder, TextDecoder});
+const router = read(3), start = router.indexOf('const Xn=');
+const switchMode = vm.runInNewContext(router.slice(start, router.indexOf('function ys(', start)) + '; Ml', {structuredClone});
+const hex = value => Buffer.from(encode(value)).toString('hex');
+const curve = {start_x:0,start_y:0,end_x:255,end_y:255,mid_points:[]};
+const unit = vm.runInNewContext(read(2).slice(read(2).indexOf('const p='), read(2).indexOf('function H(')) + '; p', {D:curve});
+function input(version, present=true) {
+  return {version,name:'Keep profile',runtime_policies:{long_ms:513,double_ms:257},layer_count:2,
+    layers:[{layer_id:0,activator_mappings:[{source:'button_m2',activators:[{type:'simple',target:{type:'btn_gamepad',id:'button_y'}}]}],
+      macro_definitions:[],trigger_zones_right:[{start:12,stop:80,target:{type:'btn_gamepad',id:'button_a'}}]},
+      {layer_id:1,activator_mappings:[],macro_definitions:[]}],
+    joystick_left:{curve,is_round:true,invert_x:false,invert_y:false},
+    vibration_motor_right:{enabled:true,curve},
+    ...(present ? {gyroscope:structuredClone(unit)} : {})};
+}
+const cases=[];
+function add(name,before,after,args,operation='motion') {
+  cases.push({name,operation,args,before_hex:hex(before),after_hex:hex(after)});
+}
+const modes=['disable','left_joystick','right_joystick','mouse'];
+const facade=['off','left stick','right stick','mouse'];
+for (const version of ['1.8','1.9']) {
+  for (let from=0;from<4;from++) for(let to=0;to<4;to++) {
+    const before=input(version); before.gyroscope.mode=modes[from];
+    const after=structuredClone(before); after.gyroscope=switchMode(before.gyroscope,modes[to],{}).unit;
+    add(`${version}-mode-${from}-${to}`,before,after,{target:facade[to]});
+  }
+  for(const key of ['a','b','x','y','lb','rb','back','start','ls','rs','up','down','left','right','c','z','m1','m2','m3','m4','m5','m6','lt','rt']) {
+    const before=input(version),after=structuredClone(before);
+    after.gyroscope.activation_slots=[{activation:'hold',button:'button_'+key+(['lt','rt'].includes(key)?'_active':'')}];
+    add(`${version}-key-${key}`,before,after,{keys:key});
+  }
+  for(const enable of ['hold','toggle']) {
+    const before=input(version),after=structuredClone(before);
+    after.gyroscope.activation_slots=[{activation:enable,button:'button_m4'},{activation:enable,button:'button_lt_active'}];
+    add(`${version}-activation-${enable}`,before,after,{keys:['m4','lt'],enable_type:enable==='toggle'?'click':'hold'});
+  }
+  for(const flag of ['invert_x','invert_y']) {
+    const before=input(version),after=structuredClone(before);after.gyroscope[flag]=true;
+    add(`${version}-${flag}`,before,after,{[flag]:true});
+  }
+  for(const radius of [0,1,128,255]) {
+    const before=input(version),after=structuredClone(before);after.gyroscope.mouse_window_radius=radius;
+    add(`${version}-radius-${radius}`,before,after,{mouse_window_radius:radius});
+  }
+  for(const points of [[],[[63,31]],[[63,100],[180,200]]]) {
+    const before=input(version),after=structuredClone(before);
+    after.gyroscope.curve={start_x:10,start_y:20,end_x:230,end_y:240,mid_points:points.map(([x,y])=>({x,y}))};
+    add(`${version}-curve-${points.length}`,before,after,{start:[10,20],end:[230,240],points},'curve');
+  }
+  const before=input(version,false),after=structuredClone(before);after.gyroscope={...structuredClone(unit),invert_x:true};
+  add(`${version}-missing`,before,after,{invert_x:true});
+}
+process.stdout.write(JSON.stringify({sources,cases},null,2)+'\n');

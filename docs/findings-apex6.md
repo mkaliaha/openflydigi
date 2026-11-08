@@ -975,6 +975,96 @@ Type 32 contains `nameLength:u8, UTF8Name[nameLength], namedMacroCount:u8`,
 then records `layerId:u8, macroId:u8, nameLength:u8, UTF8Name[nameLength]`.
 The whole value must fit the one-byte TLV length. v1.8 has no such name metadata.
 
+### Gyro configuration
+
+The gyro backend/CLI reuses `MappingConfig.motion`, `set_motion`,
+`motion_curve` and `set_motion_curve`. Target and activation IDs follow the
+legacy facade, but serialization remains entirely GPA6. Native activation
+hold/toggle bytes are 0/1; legacy hold/click constants are 1/0. `keys` exposes
+the first two native activation buttons, with LT/RT using IDs 22/23. The full
+four-slot view is available in `activation_slots`; mixed activation types return
+`enable_type=None`. These settings apply across the profile, not per Shift layer.
+The Apex 5 sensitivity/deadzone/use-mode fields have no direct native equivalents
+and are not exposed. Existing GUI models still need an Apex 6 adapter.
+
+The web controls are off/left stick/right stick/mouse, hold/toggle, primary and
+optional secondary button, two inversion flags, a response curve with at most
+two midpoints, and mouse window radius. Curves use the same absolute 0..255
+`start`, `end`, `points` representation as other native response editors. Radius
+uses 0..255 (the web presents a rounded percentage). There is no new always-on,
+axis-routing or four-button editor merely because the wire can express it.
+
+XMUL TLV 5 has 24 payload bytes: an 11-byte curve, inversion flags, target,
+four activation/button pairs, X/Y axis routing and mouse window radius. Both
+current curve-first and older prefix-first layouts are recognized, in the same
+order as the vendor decoder, and edits retain their original ordering. Duplicate,
+wrong-length or unrecognized gyro records refuse gyro edits; unrelated editors
+preserve them and the profile report marks a gyro decode error. Unknown TLVs,
+reserved flags/curve bytes, inactive midpoint bytes, extra activation slots and
+all other layers/sections remain byte-exact. An absent extension has the web
+editor's off/A-hold defaults and is created only when values change.
+
+Selecting a different enabled target uses the web's first-use default curve:
+stick `(0,0)..(145,255)` or mouse `(0,0)..(255,51)`. Selecting off or the same
+target preserves the curve. Explicit target selection resets axis routing to
+`imu_x`/`imu_y`, as the web does. The web's per-profile, per-target remembered
+curves live in a separate host cache; this CLI does not implement that library.
+Use explicit curve options to select a custom curve in the same transaction.
+Keys-only changes preserve native slots 3/4; changing activation type applies
+to every active slot, matching the web control.
+
+`tools/flydigi-apex6 gyro` reads without opt-in. Target/activation/key, curve,
+inversion, radius and save edits require `--experimental` and use the existing
+UUID/slot/fingerprint checks, read-back and exact-candidate rollback. A composed
+CLI edit validates its full candidate before a write. `--save` explicitly saves;
+omitting it is not a temporary-preview guarantee on the tested firmware.
+
+Independent evidence was refreshed from the official web assets on 2026-11-08.
+`tools/gen-apex6-gyro-fixtures` pins the codec, contract, gyro page, router and
+mode-switch hook by SHA-256. It executes the vendor encoder and mode-switch
+function without importing the Python implementation. The 104 complete-profile
+fixtures cover both XMUL versions, all target transitions, all 24 activation
+buttons, hold/toggle and secondary activation, inversion, radius boundaries,
+curves and absent-extension insertion. Sixteen focused tests also cover atomic
+refusal, lossless preservation, prefix-first records, CLI composition, save and
+lost-commit-ACK rollback. All 29 backend scripts and 772 GUI model checks pass;
+the local-socket suite required host access, and GUI previews used a writable
+`XDG_CACHE_HOME`.
+
+Six hardware storage cases passed on the same Pro 9.0.6.8: right-hold,
+left-toggle with secondary button, LT/RT activation, mouse radius, custom curve
+plus inversion, and disable/clear-secondary. Every completed case restored the
+original active slot and all four RAM blocks exactly. An A1 timeout before
+commit interrupted the third case; abort/cleanup verified the baseline, and
+only the four unfinished cases resumed after an independent baseline check.
+Evidence: `work/apex6-gyro-20261108/readback/` and `readback-2/`.
+Guided physical acceptance completed eight held-state phases across two
+sessions, both exiting 0. Every phase, both final snapshots and both cleanup
+snapshots matched the same original slot and all four RAM blocks. No test
+process or temporary setting remains active. Raw evdev evidence and summaries
+are in `work/apex6-gyro-20261108/physical/`, `physical-2/` and
+`physical-results.json`.
+
+| Check | Observation |
+|---|---|
+| Right stick, M4 hold | Full-travel output while held; inactive peak 121/32768 outside 150-ms transition windows |
+| Right stick, M4 toggle | Three on/off pairs; output continues after activation release, inactive peak 201/32768 |
+| Left stick, M4 hold | Selected left axes respond, right axes remain near center; focused repeat inactive peak 137/32768 and active peak 20831/32768 |
+| LT and RT activation | Each trigger separately activates right-stick output; both release to near-center final state |
+| Direction inversion | First rightward yaw reverses horizontal output; both upward-tilt trials reverse vertical output |
+| Zero-output curve | With M4 held and pad moving, right-stick peak remains 121/32768, compared with full travel under the normal curve |
+
+The initial left-hold recording included a brief 9034/32768 excursion after
+release. It did not recur during the focused repeat with fingers kept clear of
+the stick caps; its cause is unconfirmed. The trigger recording included one
+brief 2729/32768 inactive excursion about thirteen seconds before the first
+trigger pull; its cause is likewise unconfirmed. The second horizontal inversion
+trial contained mixed motion, so only the first is clear directional evidence;
+both vertical trials were clear. These are human movement checks, not calibrated
+response measurements. Mouse output/window-radius behavior and precise nonlinear
+curve shapes have storage verification only. No firmware workaround was added
+for ambiguous observations.
+
 ### Macro editor
 
 Added 2026-11-08. The current public [web macro page](https://space_station.flydigi.com/assets/MacroPage-BQP-6oDL.js)

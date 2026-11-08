@@ -533,6 +533,31 @@ when the same controller/profile still contains the exact bytes we wrote.
 An uncertain save acknowledgment is reported as an error. Omitting `--save`
 does not provide a temporary preview; restore the original values explicitly.
 
+Gyro configuration uses the native web controls:
+
+```bash
+tools/flydigi-apex6 --device uid:YOUR_UUID gyro
+tools/flydigi-apex6 --experimental --device uid:YOUR_UUID gyro right --key m4 --enable hold
+tools/flydigi-apex6 --experimental --device uid:YOUR_UUID gyro --key2 lt --enable toggle
+tools/flydigi-apex6 --experimental --device uid:YOUR_UUID gyro --curve-end 200 240 --point 100 120
+tools/flydigi-apex6 --experimental --device uid:YOUR_UUID gyro --invert-x on
+tools/flydigi-apex6 --experimental --device uid:YOUR_UUID gyro mouse --mouse-window-radius 32
+tools/flydigi-apex6 --experimental --device uid:YOUR_UUID gyro off
+```
+
+Targets are `off`, `left`, `right` and `mouse`. `--enable hold` activates while
+an assigned button is held; `toggle`/`click` toggles with a press. `--key2 none`
+clears the secondary button. LT/RT can activate gyro. Settings are profile-wide.
+Curves and mouse radius use native 0..255 values; `--clear-points` removes active
+midpoints. A target change selects the web's default curve for that target;
+explicit curve options in the same command override it. Selecting off or the
+same target retains the curve. The web's separate remembered-curve cache is not
+implemented. Read-only queries need no opt-in; edits require `--experimental`.
+Original settings must be explicitly restored for a temporary test because
+writes may persist without `--save`. See the [gyro findings](docs/findings-apex6.md#gyro-configuration)
+for independent fixtures, hardware verification and physical scope. GUI wiring
+remains pending.
+
 Native feedback settings match the web Space Station controls:
 
 ```bash

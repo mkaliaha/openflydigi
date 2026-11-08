@@ -118,8 +118,22 @@ finish-current-sequence loop, held chord, Shift-layer trigger/stick output and
 deletion preserving an unrelated action. All phases restored the original slot
 and four RAM blocks. Other typed targets and GUI wiring remain unverified.
 
-Remaining configuration work includes gyro mapping,
-restorable profile backups/library, screen support and GUI wiring. Apex 6 remains
+Gyro configuration now has a backend/CLI with shared motion method names,
+target/activation IDs and button names. Native curves, LT/RT activation,
+secondary keys, inversion and mouse radius remain explicit; incompatible legacy
+sensitivity fields are not exposed. Sixteen focused tests include 104 independent
+vendor encoder fixtures. All 29 backend scripts, 772 GUI model checks and REUSE
+lint pass. Six Pro 9.0.6.8 hardware storage cases verified exact read-back and
+restoration; one pre-commit status timeout was cleaned up before resuming only
+unfinished cases. Eight guided movement phases covered hold/toggle activation,
+both stick targets, LT/RT activation, direction inversion and the zero-output
+curve. Both sessions exited with exact restoration. Two brief inactive
+excursions and one mixed horizontal inversion trial remain documented without
+assigning a cause; the focused left-release repeat passed. Mouse output and
+precise nonlinear response remain physically unverified.
+
+Remaining configuration work includes restorable profile backups/library,
+screen support and GUI wiring. Apex 6 remains
 outside the legacy configuration allowlist, so Apex 5 wire paths stay separate.
 
 ## Feature status
