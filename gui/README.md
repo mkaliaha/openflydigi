@@ -24,6 +24,7 @@ access to the physical controller and its input nodes. PySide6 is imported by
 this directory, by `tools/generate-qmltypes` and by the GUI test files
 (`tests/test_models.py`, `tests/test_shell.py`, `tests/test_qml.py`,
 `tests/test_apex6_gui.py`, `tests/test_apex6_analog_gui.py`, `tests/test_apex6_macros_gui.py`,
+`tests/test_apex6_haptics_gui.py`,
 `tests/qml_harness.py`), and nowhere else. Code outside `gui/` that needs to
 know whether PySide6 is present asks a subprocess (`python3 -c "import
 PySide6"`) rather than importing it.
@@ -235,20 +236,33 @@ Drafts count as profile edits for reconnect, survive page navigation and block
 Apply/Save until updated or discarded. Selection cannot silently abandon a
 draft. Explicit reload, profile selection and controller changes discard it.
 Native recording is not routed through the legacy recorder.
+`Apex6HapticsModel` and its three `Apex6FeedbackModel` children adapt the native
+`HapticConfig` without duplicating its codecs or transition rules. Grip controls
+apply to both motors, with strength tables selected by the captured capability
+flag. Trigger binding/strength and scenes remain independent per side. Scenes
+offer three travel levels and frequency for the four repeating presets. Returning
+to Normal from a scene resets response/Base zones through the backend; all native
+editors refresh together. Mapping and motor bytes enter the staged package before
+any notification, so a view never sees half an edit. Unsupported/non-restorable
+motor records disable their own controls. Zero trigger feedback strength is shown
+explicitly, with a level-1 action that preserves the current mode.
 `LightingModel` shares its QML-facing properties and colour list while
 using native effect parameters. Native write replies include the bytes actually
 submitted, so later edits remain dirty. Profile writes use the existing package
 transaction with complete prior-state checks and rollback. The adapter accepts
-mapping changes only; lighting and motor changes cannot enter through that route.
+mapping and supported motor changes; lighting remains on its separate route.
+The package backend preflights both domains, quiesces triggers before mapping
+changes, and verifies each write. Unknown motor-tail changes are refused before
+any write. Persistent motor commands use GPA6 area 0, not streaming area 1.
 Only one native profile write may be pending. Failures release that pending state
 without discarding edits, and late replies after a device switch are ignored.
 Lighting acknowledgements update only lighting in the profile's baseline, so
-they cannot confirm unsent mapping edits. The app coordinates active-slot reads
+they cannot confirm unsent mapping or motor edits. The app coordinates active-slot reads
 and lighting refreshes; explicit reload discards edits, reconnect keeps them.
-The native sidebar currently exposes Controller, Device, Buttons, Macros, Sticks, Triggers and Lighting, alongside
+The native sidebar currently exposes Controller, Device, Buttons, Macros, Sticks, Vibration, Triggers and Lighting, alongside
 installation-wide sections. Apex 5/Vader pages retain their existing routes.
-Native Triggers exposes response/zones and does not depend on the legacy force
-effect capability flag. Native trigger scenes and vibration remain separate work.
+Native Triggers exposes scenes and response/zones without depending on the legacy
+force-effect capability flag. Gyro, library and screen workflows remain separate work.
 
 ## The QML shell
 
@@ -366,14 +380,15 @@ python3 tests/test_models.py           # headless, no engine
 python3 tests/test_apex6_gui.py         # native worker/model integration and failures
 python3 tests/test_apex6_analog_gui.py  # response/zone fixtures and profile lifecycle
 python3 tests/test_apex6_macros_gui.py  # macro fixtures, drafts, bindings and transactions
+python3 tests/test_apex6_haptics_gui.py # feedback fixtures, transitions and motor transactions
 python3 tests/test_shell.py            # window smoke test, the way main.py loads it
 python3 tests/test_qml.py              # QtQuickTest: real clicks on real delegates
 python3 tests/test_qml.py -functions   # list the cases
 ```
 
 `test_shell.py` and `test_qml.py` need Kirigami and so run inside `apex-dev`;
-the four model/worker suites need PySide6 only, and no test needs a display or a
-controller. All six print a message and exit 0 when PySide6 is absent, so a
+the five model/worker suites need PySide6 only, and no test needs a display or a
+controller. All seven print a message and exit 0 when PySide6 is absent, so a
 backend-only run stays dependency-free. The two window suites set
 `QT_QPA_PLATFORM=offscreen`, `QT_QUICK_BACKEND=software` and
 `QSG_RENDER_LOOP=basic` with `setdefault` in both test entry points, so a value

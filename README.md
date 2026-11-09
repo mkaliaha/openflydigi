@@ -16,7 +16,7 @@ application adds PySide6, Qt, Kirigami, and Kirigami Addons.
 |---|---|---|---|
 | Flydigi Apex 5 | Hardware-validated | All controller features, adaptive triggers, display, game routes, and both virtual-DualSense relays | Display uploads require a wired connection. Steam Input must be disabled for virtual-DualSense games. |
 | Flydigi Vader 5 Pro | Experimental, partially implemented | Identity, profiles, buttons, sticks, gyro, vibration, lighting, settings, the v3.2 macro-store implementation, and a derived factory profile | No Vader 5 has been tested. It has trigger motors rather than force triggers and has no display. The trigger-motor editor is not built. The v3.2 macro store is unverified on hardware. The DualSense relay, evdev discovery, permissions, and SDL ignore identifier are not validated end to end. |
-| Flydigi Apex 6 / Apex 6 Pro | Experimental; Pro partly verified over receiver and direct USB | SKU/UUID/capabilities, active-RAM snapshots, CLI global settings, button remapping, press timings, lighting, profile selection/saving, stick and trigger response curves, macros, gyro configuration, native vibration and trigger scenes, restorable profile packages and local library; experimental grip waveforms and USB DualSense relay | Tested on Pro firmware 9.0.6.8; selected stick/trigger response effects are physically verified through evdev. The GUI supports settings, profile selection/save, button/Shift mappings, stick/trigger response and zones, macro authoring and lighting with fake-controller coverage; richer GUI editors, diagnostic-snapshot restoration, adaptive-trigger translation and relay motion remain unavailable. Grip cleanup follows native best-effort mode replay; exact live-mode restoration is unverified, although ordinary rumble worked afterward. Some setting effects and the complete DualSense relay remain unverified. |
+| Flydigi Apex 6 / Apex 6 Pro | Experimental; Pro partly verified over receiver and direct USB | SKU/UUID/capabilities, active-RAM snapshots, CLI global settings, button remapping, press timings, lighting, profile selection/saving, stick and trigger response curves, macros, gyro configuration, native vibration and trigger scenes, restorable profile packages and local library; experimental grip waveforms and USB DualSense relay | Tested on Pro firmware 9.0.6.8; selected stick/trigger response effects are physically verified through evdev. The GUI supports settings, profile selection/save, button/Shift mappings, stick/trigger response and zones, macro authoring, native vibration/scenes and lighting with fake-controller coverage; richer GUI editors, diagnostic-snapshot restoration, adaptive-trigger translation and relay motion remain unavailable. Grip cleanup follows native best-effort mode replay; exact live-mode restoration is unverified, although ordinary rumble worked afterward. Some setting effects and the complete DualSense relay remain unverified. |
 | Flydigi CD2 charging dock | Hardware-validated with one noted gap | Identity, four settings, eight generated lighting effects, and picture/GIF sampling onto 162 LEDs; nickname read/write is implemented | Nickname writing is not hardware-verified. The dock is a separate USB device and uses its own selector. |
 | Other Flydigi controllers and accessories | Not driven | Devices may be discovered and identified when they use the current transport | Normal configuration commands, including nickname writes, refuse unsupported models. Developer bench tools explicitly documented as ungated can send raw commands. |
 
@@ -370,7 +370,7 @@ and `gui/i18n.py` before relying on `pyside6-project build` or its static checks
 ## Experimental Apex 6 / Apex 6 Pro
 
 The desktop app now reuses its **Controller**, **Device**, **Buttons**, **Sticks**,
-**Triggers**, **Macros** and **Lighting** pages
+**Triggers**, **Macros**, **Vibration** and **Lighting** pages
 for Apex 6. It reads the active profile, selects any of the four slots, saves
 the selected profile, edits supported global settings, and configures all six
 native lighting effects with up to eight colours. Settings apply immediately;
@@ -390,7 +390,19 @@ Each trigger supports four travel zones; each stick supports eight direction/rad
 zones and three direction modes. Zone outputs share the Buttons editor's typed
 fields and existing layer/macro references. Unsupported response records or zones
 remain preserved; clearing zones explicitly removes only the selected side/layer.
-These trigger controls edit response and zones, not resistance or vibration.
+The response and zone controls are separate from trigger scenes on the same page.
+
+Vibration controls paired grip enable/strength and each trigger's independent
+rumble binding and strength, using five native levels. Grip strength selection
+also enables the grips. Enabling trigger feedback replaces that trigger's scene;
+changing strength alone keeps its mode. The Triggers page offers all 12 native
+scenes, three travel levels and frequency levels for the four repeating scenes.
+Selecting a scene clears its trigger-feedback strength curve. Returning from a
+scene to Normal resets the selected trigger's response and Base-layer zones;
+Shift-layer zones remain intact. A zero feedback curve is shown explicitly and
+can be restored to level 1 without changing mode. Unknown non-restorable motor
+settings remain read-only. These edits share **Apply / Save profile** with
+mapping edits, including full prior-state checks, read-back and rollback.
 
 Macros supports manual creation, copying and deletion by ID in each layer, all
 four native playback modes, repeat gaps, names on compatible profiles, and up to
@@ -405,10 +417,10 @@ layer. Unsupported stored bodies remain readable and unchanged when renamed or
 given a new repeat gap. Native recording is not part of this editor.
 
 The native GUI route checks the controller UUID, active slot and previously
-read profile bytes before writing. Reconnects retain unsent mapping and lighting edits; Reload
+read profile bytes before writing. Reconnects retain unsent mapping, feedback
+and lighting edits; Reload
 reads the controller's current active slot. Profile names, factory reset,
-Switch copying, gyro, native
-vibration/scenes, file/library workflows, screen uploads
+Switch copying, gyro, file/library workflows, screen uploads
 and DualSense remain outside this GUI slice; their existing CLI support is
 unchanged. The new GUI flow is fake-controller and QML-tested, with no new
 hardware GUI acceptance claim.
@@ -806,7 +818,7 @@ Run every backend test, including newly added files, with:
 status=0
 for t in tests/test_*.py; do
     case "$t" in
-        tests/test_models.py|tests/test_qml.py|tests/test_shell.py|tests/test_apex6_gui.py|tests/test_apex6_analog_gui.py|tests/test_apex6_macros_gui.py) continue ;;
+        tests/test_models.py|tests/test_qml.py|tests/test_shell.py|tests/test_apex6_gui.py|tests/test_apex6_analog_gui.py|tests/test_apex6_macros_gui.py|tests/test_apex6_haptics_gui.py) continue ;;
     esac
     python3 "$t" || status=1
 done
@@ -820,7 +832,8 @@ no controller or dock.
 The Qt-dependent tests are:
 
 - `tests/test_models.py`, `tests/test_apex6_gui.py`,
-  `tests/test_apex6_analog_gui.py`, and `tests/test_apex6_macros_gui.py`:
+  `tests/test_apex6_analog_gui.py`, `tests/test_apex6_macros_gui.py`, and
+  `tests/test_apex6_haptics_gui.py`:
   distribution PySide6;
 - `tests/test_shell.py` and `tests/test_qml.py`: PySide6 and Kirigami.
 

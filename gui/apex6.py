@@ -125,9 +125,8 @@ class Backend:
         old = gpa6_backup.unpack_config(previous, slot)
         config = gpa6_backup.unpack_config(blob, slot)
         self._check(old.source["uid"], slot)
-        if (config.source != old.source or config.lighting != old.lighting
-                or config.motors.blob != old.motors.blob):
-            raise gpa6.ProtocolError("This editor only changes the current profile's mappings")
+        if config.source != old.source or config.lighting != old.lighting:
+            raise gpa6.ProtocolError("This editor only changes the current profile's mappings and feedback")
         gpa6_backup.write_config(self.ctrl, config, save=save, expected_uid=self.uid,
                                 expected_slot=slot, expected_config=old)
         self.worker.apex6_profile_written.emit(slot, blob, save)

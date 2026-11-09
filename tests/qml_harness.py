@@ -432,6 +432,16 @@ class Fixture(QObject):
         from flydigi.gpa6_profile import MappingConfig
         return MappingConfig(self._native.ram(5)).macros(layer=layer)
 
+    @Slot(str, result="QVariantMap")
+    def nativeFeedback(self, target):
+        from flydigi.gpa6_haptics import HapticConfig
+        config = HapticConfig(self._native.ram(5), self._native.ram(6),
+                              haptic_grip=bool(self._native.features & 128))
+        result = {"vibration": config.vibration(target)}
+        if target != "grips":
+            result["scene"] = config.trigger_scene(target)
+        return json.loads(json.dumps(result))
+
     @Slot(str, str, int, result="QVariantMap")
     def nativeAnalog(self, control, side, layer):
         from flydigi.gpa6_profile import MappingConfig

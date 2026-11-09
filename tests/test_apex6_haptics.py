@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -23,6 +24,14 @@ FIXTURES = json.loads((ROOT / 'tests/fixtures/apex6-haptics.json').read_text())
 
 
 class HapticTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        directory = tempfile.TemporaryDirectory(prefix="apex6-haptics-tests-")
+        cls.addClassCleanup(directory.cleanup)
+        cls.mock_bus = str(Path(directory.name) / "bus.json")
+        Path(cls.mock_bus).write_text(json.dumps({"hide_real": True,
+            "devices": [{"kind": "pad", "code": "k6"}]}))
+
     def config(self):
         pad = captured_pad()
         return haptics.HapticConfig(pad.ram(5), pad.ram(6), haptic_grip=True)
@@ -155,7 +164,7 @@ class HapticTests(unittest.TestCase):
         self.assertTrue(pad.ram(5).endswith(b'changed'))
 
     def test_cli_requires_opt_in_and_accepts_vendor_controls(self):
-        env={**os.environ,'FLYDIGI_MOCK_BUS':'pad:k6'}
+        env={**os.environ,'FLYDIGI_MOCK_BUS':self.mock_bus}
         def run(*args):return subprocess.run([sys.executable,str(ROOT/'tools/flydigi-apex6'),*args],env=env,capture_output=True,text=True)
         result=run('vibration');self.assertEqual(result.returncode,0,result.stderr)
         self.assertIn('grips',json.loads(result.stdout)['vibration'])
@@ -234,7 +243,7 @@ class HapticTests(unittest.TestCase):
         self.assertEqual({ram:pad.ram(ram) for ram in (5,6)},before)
 
     def test_scene_cli(self):
-        env={**os.environ,'FLYDIGI_MOCK_BUS':'pad:k6'}
+        env={**os.environ,'FLYDIGI_MOCK_BUS':self.mock_bus}
         def run(*args):return subprocess.run([sys.executable,str(ROOT/'tools/flydigi-apex6'),*args],env=env,capture_output=True,text=True)
         self.assertNotEqual(run('trigger-scene','left','--scene','rifle').returncode,0)
         result=run('--experimental','trigger-scene','both','--scene','rifle','--travel','3','--frequency','1')

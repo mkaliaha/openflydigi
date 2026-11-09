@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Legacy adaptive-trigger settings, or native response curves and action zones.
+// Legacy adaptive-trigger settings, or native scenes, response and action zones.
 
 import QtQuick
 import QtQuick.Layouts
@@ -40,6 +40,18 @@ Kirigami.ScrollablePage {
         // that block only when the flag is on, so on an Apex 5 nobody touches
         // it. Trigger *haptics* do exist here -- they come out of the force
         // triggers above, via the effect vocabulary, not a separate motor.
+
+        Loader {
+            Layout.fillWidth: true
+            active: App.profile.apex6 && App.profile.loaded
+            visible: active
+            sourceComponent: Apex6TriggerScenesEditor {}
+        }
+
+        FormCard.FormHeader {
+            visible: App.profile.apex6 && App.profile.loaded
+            title: "Response and action zones"
+        }
 
         Loader {
             Layout.fillWidth: true

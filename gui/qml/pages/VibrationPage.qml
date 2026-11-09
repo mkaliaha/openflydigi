@@ -32,8 +32,15 @@ Kirigami.ScrollablePage {
             explanation: "Pick a profile on the Controller page."
         }
 
+        Loader {
+            Layout.fillWidth: true
+            active: App.profile.apex6 && App.profile.loaded
+            visible: active
+            sourceComponent: Apex6VibrationEditor {}
+        }
+
         FormCard.FormCard {
-            visible: App.profile.loaded
+            visible: App.profile.loaded && !App.profile.apex6
 
             ModelSwitch {
                 objectName: "vibrationMaster"
@@ -45,31 +52,31 @@ Kirigami.ScrollablePage {
         }
 
         FormCard.FormHeader {
-            visible: App.profile.loaded
+            visible: App.profile.loaded && !App.profile.apex6
             title: "Left grip"
         }
 
         VibrationSide {
             objectName: "leftGrip"
-            visible: App.profile.loaded
+            visible: App.profile.loaded && !App.profile.apex6
             side: App.profile.vibration.left
             sideName: "left"
         }
 
         FormCard.FormHeader {
-            visible: App.profile.loaded
+            visible: App.profile.loaded && !App.profile.apex6
             title: "Right grip"
         }
 
         VibrationSide {
             objectName: "rightGrip"
-            visible: App.profile.loaded
+            visible: App.profile.loaded && !App.profile.apex6
             side: App.profile.vibration.right
             sideName: "right"
         }
 
         FormCard.FormCard {
-            visible: App.profile.loaded
+            visible: App.profile.loaded && !App.profile.apex6
             Layout.topMargin: Kirigami.Units.largeSpacing
 
             FormCard.FormTextDelegate {

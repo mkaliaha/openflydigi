@@ -158,7 +158,7 @@ identity/profile/configuration snapshots match the baseline exactly. Recovery
 after an interrupted transfer is software-tested only; GUI wiring is pending.
 
 The GUI foundation now routes Apex 6 explicitly through its native backend.
-The existing Controller, Device, Buttons, Macros, Sticks, Triggers and Lighting pages handle active-profile reads,
+The existing Controller, Device, Buttons, Macros, Sticks, Vibration, Triggers and Lighting pages handle active-profile reads,
 slot selection/save, all supported global fields and all six lighting effects.
 Read-back, UUID/slot guards, stale-edit refusal, dirty reconnect preservation and
 late acknowledgements are covered by fake-controller tests. The native Buttons
@@ -181,7 +181,15 @@ are validated before entering the profile; pending drafts survive navigation
 and reconnect and block Apply/Save. Unknown bodies remain readable and preserved
 during metadata-only edits. Deletion cleans matching same-layer bindings.
 GUI edits match all 43 independent macro fixtures. Native recording remains
-separate. No new hardware
+separate. Native Vibration now edits paired grip levels and independent trigger
+feedback, while Triggers adds the 12 native scenes and travel/frequency controls.
+The editors use the existing haptics backend and share the guarded profile
+transaction for mapping and motor changes. Scene/feedback conflicts and Normal's
+response/Base-zone reset update every native view; Shift zones stay intact.
+All 160 vibration fixtures and 60 scene combinations match, with both sides
+checked. Model/worker tests cover failed-write rollback, stale state, newer edits
+after acknowledgements and motor-only reconnect preservation. Unknown motor
+records remain read-only and zero feedback strength is explicit. No new hardware
 GUI acceptance run is claimed. The remaining editors, library and screen GUI
 workflows are still separate work. Apex 6 remains outside the legacy backend
 allowlist and selecting it does not change the daemon's legacy pad preference.
@@ -267,10 +275,10 @@ Qt-dependent Python scripts.
 Current inventory:
 
 - 31 backend `tests/test_*.py` scripts;
-- 6 Qt-dependent Python scripts: `test_models.py`, `test_shell.py`,
+- 7 Qt-dependent Python scripts: `test_models.py`, `test_shell.py`,
   `test_qml.py`, `test_apex6_gui.py`, `test_apex6_analog_gui.py`,
-  and `test_apex6_macros_gui.py`;
-- 15 QML files under `tests/qml/tst_*.qml`.
+  `test_apex6_macros_gui.py`, and `test_apex6_haptics_gui.py`;
+- 16 QML files under `tests/qml/tst_*.qml`.
 
 Run the [discovered backend set](README.md#tests) rather than maintaining a
 hand-written filename list. All 31 backend scripts are hardware-free. The
@@ -285,6 +293,7 @@ python3 tests/test_models.py
 python3 tests/test_apex6_gui.py
 python3 tests/test_apex6_analog_gui.py
 python3 tests/test_apex6_macros_gui.py
+python3 tests/test_apex6_haptics_gui.py
 python3 tests/test_shell.py
 python3 tests/test_qml.py
 tools/generate-qmltypes

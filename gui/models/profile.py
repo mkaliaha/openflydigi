@@ -20,6 +20,7 @@ from flydigi import effects, gpa6_backup, mapping
 from .apex6_buttons import Apex6ButtonsModel
 from .apex6_analog import Apex6AnalogModel
 from .apex6_macros import Apex6MacrosModel
+from .apex6_haptics import Apex6HapticsModel
 
 # See gui/models/device.py for what these two names do.
 QML_IMPORT_NAME = "Apex5"
@@ -2245,6 +2246,7 @@ class ProfileModel(QObject):
         self._native_sticks = Apex6AnalogModel(self, "stick")
         self._native_triggers = Apex6AnalogModel(self, "trigger")
         self._native_macros = Apex6MacrosModel(self)
+        self._native_haptics = Apex6HapticsModel(self)
 
     # -- which pad's buttons ------------------------------------------------
     #
@@ -2302,6 +2304,7 @@ class ProfileModel(QObject):
         self._native_buttons.clear()
         self._native_sticks.clear()
         self._native_triggers.clear()
+        self._native_haptics.refresh()
         self._cfg_id = -1
         self._saved = True
         self._slots.setCount(self._slots.count)
@@ -2351,6 +2354,12 @@ class ProfileModel(QObject):
             self._refresh_native()
             self.markChanged()
 
+    def setNativeHaptics(self, config):
+        if self.nativeConfig is not None:
+            # Publish both domains before notifying any of their shared views.
+            self._edited.motors = config.motors
+            self.setNativeMapping(config.mapping)
+
     @Property(Apex6ButtonsModel, constant=True)
     def nativeButtons(self):
         return self._native_buttons
@@ -2367,9 +2376,13 @@ class ProfileModel(QObject):
     def nativeMacros(self):
         return self._native_macros
 
+    @Property(Apex6HapticsModel, constant=True)
+    def nativeHaptics(self):
+        return self._native_haptics
+
     def _refresh_native(self):
         for editor in (self._native_buttons, self._native_sticks,
-                       self._native_triggers, self._native_macros):
+                       self._native_triggers, self._native_macros, self._native_haptics):
             editor.refresh()
 
     @Property(bool, notify=writingChanged)
