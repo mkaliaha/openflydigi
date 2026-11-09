@@ -442,6 +442,12 @@ class Fixture(QObject):
             result["scene"] = config.trigger_scene(target)
         return json.loads(json.dumps(result))
 
+    @Slot(result="QVariantMap")
+    def nativeGyro(self):
+        from flydigi.gpa6_profile import MappingConfig
+        config = MappingConfig(self._native.ram(5))
+        return json.loads(json.dumps({**config.motion(), "curve": config.motion_curve()}))
+
     @Slot(str, str, int, result="QVariantMap")
     def nativeAnalog(self, control, side, layer):
         from flydigi.gpa6_profile import MappingConfig

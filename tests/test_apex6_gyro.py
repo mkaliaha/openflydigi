@@ -12,6 +12,7 @@ from pathlib import Path
 import runpy
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -216,9 +217,17 @@ class TransactionTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        directory = tempfile.TemporaryDirectory(prefix="apex6-gyro-tests-")
+        cls.addClassCleanup(directory.cleanup)
+        cls.mock_bus = str(Path(directory.name) / "bus.json")
+        Path(cls.mock_bus).write_text(json.dumps({"hide_real": True,
+            "devices": [{"kind": "pad", "code": "k6"}]}))
+
     def run_command(self, *args):
         return subprocess.run([sys.executable, str(ROOT / 'tools/flydigi-apex6'), '--device', 'mock:pad0', *args],
-                              env={**os.environ, 'FLYDIGI_MOCK_BUS':'pad:k6'}, capture_output=True, text=True)
+                              env={**os.environ, 'FLYDIGI_MOCK_BUS':self.mock_bus}, capture_output=True, text=True)
 
     def test_read_and_every_write_opt_in(self):
         result = self.run_command('gyro')

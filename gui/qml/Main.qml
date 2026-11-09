@@ -116,7 +116,7 @@ Kirigami.ApplicationWindow {
             return false
         if (App.profile.apex6 && kinds && kinds.indexOf("pad") >= 0)
             // Native Triggers uses scenes and response/zones through GPA6.
-            return ["Controller", "Device", "Buttons", "Macros", "Sticks", "Vibration", "Triggers", "Lighting"].indexOf(section.name) >= 0
+            return ["Controller", "Device", "Buttons", "Macros", "Sticks", "Gyro", "Vibration", "Triggers", "Lighting"].indexOf(section.name) >= 0
         // `needs` is hardware, where `kinds` is which sort of device. A Vader
         // is a pad and gets the pad's pages, but it has no screen and no force
         // triggers -- so a Screen page for a panel it does not have, or the six

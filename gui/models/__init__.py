@@ -13,6 +13,7 @@ from .apex6_buttons import Apex6ButtonsModel
 from .apex6_analog import Apex6AnalogModel
 from .apex6_macros import Apex6MacrosModel
 from .apex6_haptics import Apex6FeedbackModel, Apex6HapticsModel
+from .apex6_gyro import Apex6GyroModel
 from .devices import DevicesModel
 from .dock import (DIRECTION_NAMES, MODE_NAMES, SWITCH_LABELS, SWITCHES,
                    DockColoursModel, DockModel)
@@ -41,7 +42,7 @@ from .setup import SetupChecksModel, SetupModel
 
 __all__ = [
     "Apex6ButtonsModel", "Apex6AnalogModel", "Apex6MacrosModel",
-    "Apex6FeedbackModel", "Apex6HapticsModel",
+    "Apex6FeedbackModel", "Apex6HapticsModel", "Apex6GyroModel",
     "ALL_ROUTES", "APPLIABLE_ROUTE", "BATTERY_STEPS", "CURVE_PRESETS",
     "DIRECTION_NAMES", "MODE_NAMES", "SWITCHES", "SWITCH_LABELS",
     "CYCLE_MAX", "CYCLE_MIN", "FIT_MODES", "MAX_FRAMES", "STICK_MAX",

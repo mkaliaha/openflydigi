@@ -246,6 +246,17 @@ editors refresh together. Mapping and motor bytes enter the staged package befor
 any notification, so a view never sees half an edit. Unsupported/non-restorable
 motor records disable their own controls. Zero trigger feedback strength is shown
 explicitly, with a level-1 action that preserves the current mode.
+`Apex6GyroModel` uses the native mapping's motion methods for targets,
+hold/toggle activation, primary and secondary keys (including LT/RT), inversion,
+mouse radius and exact response coordinates. Settings apply across all layers.
+Opening the editor preserves absent records, both supported layouts, reserved
+bytes and additional activation slots. Mixed activation modes remain explicit;
+choosing a mode updates every active slot, matching the backend. Target changes
+reset the curve/routing through the existing API. Unknown records or missing
+IMU capability disable editing; unordered curves disable only curve editing.
+`Apex6CurveEditor.qml` is shared by the analog and gyro views, retaining their
+model bindings and wheel-scroll behavior. Mouse output/radius and precise
+nonlinear curve behavior have storage coverage but no new physical acceptance.
 `LightingModel` shares its QML-facing properties and colour list while
 using native effect parameters. Native write replies include the bytes actually
 submitted, so later edits remain dirty. Profile writes use the existing package
@@ -259,10 +270,11 @@ without discarding edits, and late replies after a device switch are ignored.
 Lighting acknowledgements update only lighting in the profile's baseline, so
 they cannot confirm unsent mapping or motor edits. The app coordinates active-slot reads
 and lighting refreshes; explicit reload discards edits, reconnect keeps them.
-The native sidebar currently exposes Controller, Device, Buttons, Macros, Sticks, Vibration, Triggers and Lighting, alongside
-installation-wide sections. Apex 5/Vader pages retain their existing routes.
+The native sidebar currently exposes Controller, Device, Buttons, Macros, Sticks,
+Gyro, Vibration, Triggers and Lighting, alongside installation-wide sections.
+Apex 5/Vader pages retain their existing routes.
 Native Triggers exposes scenes and response/zones without depending on the legacy
-force-effect capability flag. Gyro, library and screen workflows remain separate work.
+force-effect capability flag. Backup/library and screen workflows remain separate work.
 
 ## The QML shell
 
@@ -381,14 +393,15 @@ python3 tests/test_apex6_gui.py         # native worker/model integration and fa
 python3 tests/test_apex6_analog_gui.py  # response/zone fixtures and profile lifecycle
 python3 tests/test_apex6_macros_gui.py  # macro fixtures, drafts, bindings and transactions
 python3 tests/test_apex6_haptics_gui.py # feedback fixtures, transitions and motor transactions
+python3 tests/test_apex6_gyro_gui.py    # gyro fixtures, activation/curve controls and transactions
 python3 tests/test_shell.py            # window smoke test, the way main.py loads it
 python3 tests/test_qml.py              # QtQuickTest: real clicks on real delegates
 python3 tests/test_qml.py -functions   # list the cases
 ```
 
 `test_shell.py` and `test_qml.py` need Kirigami and so run inside `apex-dev`;
-the five model/worker suites need PySide6 only, and no test needs a display or a
-controller. All seven print a message and exit 0 when PySide6 is absent, so a
+the six model/worker suites need PySide6 only, and no test needs a display or a
+controller. All eight print a message and exit 0 when PySide6 is absent, so a
 backend-only run stays dependency-free. The two window suites set
 `QT_QPA_PLATFORM=offscreen`, `QT_QUICK_BACKEND=software` and
 `QSG_RENDER_LOOP=basic` with `setdefault` in both test entry points, so a value

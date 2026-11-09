@@ -25,7 +25,7 @@ Detailed evidence lives in [PROTOCOL.md](PROTOCOL.md) and
 |---|---|---|
 | Flydigi Apex 5 | Hardware-validated | Reference controller. Profiles, mappings, macros, sticks, gyro-to-stick, vibration, adaptive triggers, lighting, settings, display, game routes, and virtual-DualSense relays are implemented. |
 | Flydigi Vader 5 Pro | Experimental and partial | Identity, capability gating, profiles, mappings, sticks, gyro, vibration, lighting, settings, v3.2 macro-store handling, and a derived factory profile are implemented. No Vader 5 hardware has been tested. |
-| Flydigi Apex 6 / Apex 6 Pro | Experimental; Pro configuration partly hardware-validated | GPA6 identity and snapshots; global settings, simple remapping, timing fields, lighting and profile selection/save verified on Pro firmware 9.0.6.8. Stick/trigger response editing has independent codec, fake-pad, hardware write/read-back and guided physical-input coverage. Native vibration and scene settings have storage and selected physical acceptance. Macro editing has independent codec, fake-pad, hardware storage and selected guided playback checks. Grip waveforms were felt on hardware; the motor lifecycle matches the native engine's grip-only route, including trigger handling, fresh motor-RAM replay and no mode ACK waits. Exact live-mode restoration remains unverified. Opt-in USB DualSense input/audio/rumble has software coverage; a full game run, motion, trigger translation, uhid and richer GUI editors remain outstanding; the desktop settings/profile-selection/button/Shift/analog/macro/lighting workflow is implemented and fake-controller-tested. See [findings](docs/findings-apex6.md). |
+| Flydigi Apex 6 / Apex 6 Pro | Experimental; Pro configuration partly hardware-validated | GPA6 identity and snapshots; global settings, simple remapping, timing fields, lighting and profile selection/save verified on Pro firmware 9.0.6.8. Stick/trigger response editing has independent codec, fake-pad, hardware write/read-back and guided physical-input coverage. Native vibration and scene settings have storage and selected physical acceptance. Macro editing has independent codec, fake-pad, hardware storage and selected guided playback checks. Grip waveforms were felt on hardware; the motor lifecycle matches the native engine's grip-only route, including trigger handling, fresh motor-RAM replay and no mode ACK waits. Exact live-mode restoration remains unverified. Opt-in USB DualSense input/audio/rumble has software coverage; a full game run, motion, trigger translation, uhid and richer GUI editors remain outstanding; the desktop settings/profile-selection/button/Shift/analog/macro/feedback/gyro/lighting workflow is implemented and fake-controller-tested. See [findings](docs/findings-apex6.md). |
 | Flydigi CD2 dock | Hardware-validated with one noted gap | Device identity, four settings, generated lighting, and picture/GIF sampling are hardware-validated. Nickname read/write is implemented, but nickname writing is not hardware-verified. |
 | Other Flydigi hardware | Unsupported | It may be discovered by the shared transport. Normal configuration commands refuse unsupported models; explicitly ungated developer bench tools are outside that guarantee. |
 
@@ -158,7 +158,8 @@ identity/profile/configuration snapshots match the baseline exactly. Recovery
 after an interrupted transfer is software-tested only; GUI wiring is pending.
 
 The GUI foundation now routes Apex 6 explicitly through its native backend.
-The existing Controller, Device, Buttons, Macros, Sticks, Vibration, Triggers and Lighting pages handle active-profile reads,
+The existing Controller, Device, Buttons, Macros, Sticks, Gyro, Vibration, Triggers
+and Lighting pages handle active-profile reads,
 slot selection/save, all supported global fields and all six lighting effects.
 Read-back, UUID/slot guards, stale-edit refusal, dirty reconnect preservation and
 late acknowledgements are covered by fake-controller tests. The native Buttons
@@ -189,10 +190,19 @@ response/Base-zone reset update every native view; Shift zones stay intact.
 All 160 vibration fixtures and 60 scene combinations match, with both sides
 checked. Model/worker tests cover failed-write rollback, stale state, newer edits
 after acknowledgements and motor-only reconnect preservation. Unknown motor
-records remain read-only and zero feedback strength is explicit. No new hardware
-GUI acceptance run is claimed. The remaining editors, library and screen GUI
-workflows are still separate work. Apex 6 remains outside the legacy backend
-allowlist and selecting it does not change the daemon's legacy pad preference.
+records remain read-only and zero feedback strength is explicit.
+Native Gyro now edits targets, hold/toggle activation, primary/secondary keys,
+inversion, mouse radius and the native response curve through the existing
+mapping API. Hidden activation slots and both record layouts are preserved;
+mixed activation modes are explicit. Unsupported records are read-only and a
+malformed curve disables only curve editing. Sticks, Triggers and Gyro share
+the same curve controls. All 104 complete vendor gyro fixtures match GUI edits;
+worker checks cover guarded Apply/Save, rollback, stale context, late replies
+and reconnect/reload. No new hardware GUI acceptance run is claimed. Mouse
+output/radius and precise nonlinear curves retain their existing physical limits.
+Backup/library and screen GUI workflows are still separate work. Apex 6 remains
+outside the legacy backend allowlist and selecting it does not change the
+daemon's legacy pad preference.
 
 ## Feature status
 

@@ -36,11 +36,17 @@ Kirigami.ScrollablePage {
             explanation: "Pick a profile on the Controller page."
         }
 
+        Apex6GyroEditor {
+            Layout.fillWidth: true
+            visible: App.profile.apex6 && App.profile.loaded
+            editor: App.profile.nativeGyro
+        }
+
         FormCard.FormCard {
             // A profile set up in Space Station to move the host's pointer. The
             // byte is real and this app cannot honour it, so it says so instead
             // of showing Off and quietly meaning it.
-            visible: App.profile.loaded && App.profile.motion.isMouse
+            visible: App.profile.loaded && !App.profile.apex6 && App.profile.motion.isMouse
 
             FormCard.FormTextDelegate {
                 objectName: "gyroIsMouse"
@@ -54,7 +60,7 @@ Kirigami.ScrollablePage {
         }
 
         FormCard.FormCard {
-            visible: App.profile.loaded
+            visible: App.profile.loaded && !App.profile.apex6
 
             FormComboBox {
                 objectName: "gyroTarget"
@@ -96,7 +102,7 @@ Kirigami.ScrollablePage {
         }
 
         FormCard.FormCard {
-            visible: App.profile.loaded && App.profile.motion.enabled
+            visible: App.profile.loaded && !App.profile.apex6 && App.profile.motion.enabled
             Layout.topMargin: Kirigami.Units.largeSpacing
 
             FormComboBox {
@@ -166,7 +172,7 @@ Kirigami.ScrollablePage {
         }
 
         FormCard.FormCard {
-            visible: App.profile.loaded && App.profile.motion.enabled
+            visible: App.profile.loaded && !App.profile.apex6 && App.profile.motion.enabled
             Layout.topMargin: Kirigami.Units.largeSpacing
 
             SliderRow {
@@ -198,7 +204,7 @@ Kirigami.ScrollablePage {
         }
 
         FormCard.FormCard {
-            visible: App.profile.loaded
+            visible: App.profile.loaded && !App.profile.apex6
             Layout.topMargin: Kirigami.Units.largeSpacing
 
             FormCard.FormTextDelegate {

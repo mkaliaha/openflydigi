@@ -21,6 +21,7 @@ from .apex6_buttons import Apex6ButtonsModel
 from .apex6_analog import Apex6AnalogModel
 from .apex6_macros import Apex6MacrosModel
 from .apex6_haptics import Apex6HapticsModel
+from .apex6_gyro import Apex6GyroModel
 
 # See gui/models/device.py for what these two names do.
 QML_IMPORT_NAME = "Apex5"
@@ -2247,6 +2248,7 @@ class ProfileModel(QObject):
         self._native_triggers = Apex6AnalogModel(self, "trigger")
         self._native_macros = Apex6MacrosModel(self)
         self._native_haptics = Apex6HapticsModel(self)
+        self._native_gyro = Apex6GyroModel(self)
 
     # -- which pad's buttons ------------------------------------------------
     #
@@ -2305,6 +2307,7 @@ class ProfileModel(QObject):
         self._native_sticks.clear()
         self._native_triggers.clear()
         self._native_haptics.refresh()
+        self._native_gyro.refresh()
         self._cfg_id = -1
         self._saved = True
         self._slots.setCount(self._slots.count)
@@ -2380,9 +2383,14 @@ class ProfileModel(QObject):
     def nativeHaptics(self):
         return self._native_haptics
 
+    @Property(Apex6GyroModel, constant=True)
+    def nativeGyro(self):
+        return self._native_gyro
+
     def _refresh_native(self):
         for editor in (self._native_buttons, self._native_sticks,
-                       self._native_triggers, self._native_macros, self._native_haptics):
+                       self._native_triggers, self._native_macros, self._native_haptics,
+                       self._native_gyro):
             editor.refresh()
 
     @Property(bool, notify=writingChanged)
