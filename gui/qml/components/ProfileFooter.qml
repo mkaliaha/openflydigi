@@ -37,6 +37,7 @@ Controls.ToolBar {
             text: "Apply"
             icon.name: "dialog-ok-apply"
             enabled: App.profile.dirty && !App.profile.writing
+                     && (!App.profile.apex6 || !App.profile.nativeMacros.draftDirty)
                      && (!App.profile.apex6 || App.profile.canSaveToFlash)
             onClicked: App.profile.write(false)
 
@@ -63,6 +64,7 @@ Controls.ToolBar {
             enabled: (App.profile.dirty || App.profile.saveNeeded || (App.profile.apex6 && App.profile.loaded))
                      && App.profile.canSaveToFlash
                      && !App.profile.writing
+                     && (!App.profile.apex6 || !App.profile.nativeMacros.draftDirty)
             onClicked: App.profile.write(true)
 
             Controls.ToolTip.visible: hovered

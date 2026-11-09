@@ -427,6 +427,11 @@ class Fixture(QObject):
         from flydigi.gpa6_profile import MappingConfig
         return MappingConfig(self._native.ram(5)).activators(source, layer=layer) or []
 
+    @Slot(int, result="QVariantList")
+    def nativeMacros(self, layer):
+        from flydigi.gpa6_profile import MappingConfig
+        return MappingConfig(self._native.ram(5)).macros(layer=layer)
+
     @Slot(str, str, int, result="QVariantMap")
     def nativeAnalog(self, control, side, layer):
         from flydigi.gpa6_profile import MappingConfig

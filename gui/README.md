@@ -23,7 +23,7 @@ third-party Python package. It still requires Linux, writable `/dev/uhid`, and
 access to the physical controller and its input nodes. PySide6 is imported by
 this directory, by `tools/generate-qmltypes` and by the GUI test files
 (`tests/test_models.py`, `tests/test_shell.py`, `tests/test_qml.py`,
-`tests/test_apex6_gui.py`, `tests/test_apex6_analog_gui.py`,
+`tests/test_apex6_gui.py`, `tests/test_apex6_analog_gui.py`, `tests/test_apex6_macros_gui.py`,
 `tests/qml_harness.py`), and nowhere else. Code outside `gui/` that needs to
 know whether PySide6 is present asks a subprocess (`python3 -c "import
 PySide6"`) rather than importing it.
@@ -215,16 +215,26 @@ activators/targets remain readable and unchanged until an explicit button reset.
 The native source picker excludes Home, LT/RT and C/Z, which are not physical
 native Apex button sources; unrelated stored entries remain intact. Turbo
 intervals display milliseconds in steps of 10. Macros can be bound only when
-they already exist in the selected layer; macro authoring is separate work.
+they already exist in the selected layer; the native Macros editor creates them.
 `Apex6AnalogModel` supplies Sticks and Triggers with exact response coordinates,
 stick flags/presets, and zone editing for each side/layer. Response points apply
 across all layers. The plot uses the native points directly and is labelled as a
 preview. Unknown response records disable only response editing; unsupported
-zones remain readable until explicitly cleared. Both native editor models use
+zones remain readable until explicitly cleared. The native editor models use
 the plain Python `TargetFields` helper for typed outputs, with Qt notifications
 defined on each model. Mapping edits refresh all native editors so shared layers
 and macro choices cannot become stale. Spin boxes and pickers retain model
 bindings after user edits; wheel events scroll the page without changing values.
+`Apex6MacrosModel` edits native definitions by layer and ID, independently of
+button/zone bindings. It stages a complete draft so changing both halves of a
+press/release pair is possible before backend validation. Update macro copies
+only changed fields into the current mapping; unsupported stored bodies can be
+renamed or given a repeat gap without rebuilding their bytes. Deletion uses the
+backend's same-layer reference cleanup. Copying creates an unbound definition.
+Drafts count as profile edits for reconnect, survive page navigation and block
+Apply/Save until updated or discarded. Selection cannot silently abandon a
+draft. Explicit reload, profile selection and controller changes discard it.
+Native recording is not routed through the legacy recorder.
 `LightingModel` shares its QML-facing properties and colour list while
 using native effect parameters. Native write replies include the bytes actually
 submitted, so later edits remain dirty. Profile writes use the existing package
@@ -235,7 +245,7 @@ without discarding edits, and late replies after a device switch are ignored.
 Lighting acknowledgements update only lighting in the profile's baseline, so
 they cannot confirm unsent mapping edits. The app coordinates active-slot reads
 and lighting refreshes; explicit reload discards edits, reconnect keeps them.
-The native sidebar currently exposes Controller, Device, Buttons, Sticks, Triggers and Lighting, alongside
+The native sidebar currently exposes Controller, Device, Buttons, Macros, Sticks, Triggers and Lighting, alongside
 installation-wide sections. Apex 5/Vader pages retain their existing routes.
 Native Triggers exposes response/zones and does not depend on the legacy force
 effect capability flag. Native trigger scenes and vibration remain separate work.
@@ -355,14 +365,15 @@ of the module, not from a package-level setting.
 python3 tests/test_models.py           # headless, no engine
 python3 tests/test_apex6_gui.py         # native worker/model integration and failures
 python3 tests/test_apex6_analog_gui.py  # response/zone fixtures and profile lifecycle
+python3 tests/test_apex6_macros_gui.py  # macro fixtures, drafts, bindings and transactions
 python3 tests/test_shell.py            # window smoke test, the way main.py loads it
 python3 tests/test_qml.py              # QtQuickTest: real clicks on real delegates
 python3 tests/test_qml.py -functions   # list the cases
 ```
 
 `test_shell.py` and `test_qml.py` need Kirigami and so run inside `apex-dev`;
-the three model/worker suites need PySide6 only, and no test needs a display or a
-controller. All five print a message and exit 0 when PySide6 is absent, so a
+the four model/worker suites need PySide6 only, and no test needs a display or a
+controller. All six print a message and exit 0 when PySide6 is absent, so a
 backend-only run stays dependency-free. The two window suites set
 `QT_QPA_PLATFORM=offscreen`, `QT_QUICK_BACKEND=software` and
 `QSG_RENDER_LOOP=basic` with `setdefault` in both test entry points, so a value

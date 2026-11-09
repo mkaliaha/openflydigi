@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Mikalai Kaliaha
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Shared native output fields for button actions and analog zones."""
+"""Shared native output fields for button actions, analog zones and macro steps."""
 from copy import deepcopy
 
 from flydigi import gpa6_actions as actions

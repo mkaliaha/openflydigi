@@ -28,12 +28,13 @@ Kirigami.ScrollablePage {
     objectName: "macrosPage"
     title: "Macros"
 
-    readonly property bool blocked: App.device.thirdParty
+    readonly property bool blocked: !App.profile.apex6 && App.device.thirdParty
 
     actions: [
         Kirigami.Action {
             objectName: "recordAction"
             text: "Record a macro"
+            visible: !App.profile.apex6
             icon.name: "media-record"
             enabled: App.profile.loaded && App.profile.macros.canAdd
                      && !page.blocked && !App.profile.macros.recording
@@ -47,6 +48,7 @@ Kirigami.ScrollablePage {
         Kirigami.Action {
             objectName: "buildAction"
             text: "Build a macro"
+            visible: !App.profile.apex6
             icon.name: "list-add"
             enabled: App.profile.loaded && App.profile.macros.canAdd
                      && App.profile.macros.canAddStep
@@ -59,6 +61,13 @@ Kirigami.ScrollablePage {
 
     ColumnLayout {
         spacing: 0
+
+        Loader {
+            Layout.fillWidth: true
+            active: App.profile.apex6 && App.profile.loaded
+            visible: active
+            sourceComponent: Apex6MacrosEditor {}
+        }
 
         // Not a warning about something that might go wrong: with another
         // driver holding the pad the gamepad node stops reporting, so a
@@ -105,7 +114,9 @@ Kirigami.ScrollablePage {
             visible: !App.profile.loaded
             icon.name: "input-gaming"
             text: "No profile open"
-            explanation: "Pick a profile on the Controller page. Reading one "
+            explanation: App.profile.apex6
+                         ? "Reload from the controller to read its active profile."
+                         : "Pick a profile on the Controller page. Reading one "
                          + "makes the pad re-seat its trigger motors, so it "
                          + "only happens when you ask."
         }
@@ -114,7 +125,7 @@ Kirigami.ScrollablePage {
             objectName: "macrosEmpty"
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.gridUnit
-            visible: App.profile.loaded && App.profile.macros.count === 0
+            visible: !App.profile.apex6 && App.profile.loaded && App.profile.macros.count === 0
             icon.name: "media-record"
             text: "No macros in this profile"
             explanation: "A macro is a sequence of button presses the pad "
@@ -123,7 +134,7 @@ Kirigami.ScrollablePage {
         }
 
         Repeater {
-            model: App.profile.loaded ? App.profile.macros : null
+            model: App.profile.loaded && !App.profile.apex6 ? App.profile.macros : null
 
             // A whole card per macro rather than rows in one card: a macro has
             // a heading, three controls and a step list, and the rows of two
@@ -259,7 +270,7 @@ Kirigami.ScrollablePage {
 
         FormCard.FormCard {
             Layout.topMargin: Kirigami.Units.largeSpacing
-            visible: App.profile.loaded
+            visible: App.profile.loaded && !App.profile.apex6
 
             FormCard.FormTextDelegate {
                 objectName: "macroBudget"

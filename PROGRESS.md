@@ -25,7 +25,7 @@ Detailed evidence lives in [PROTOCOL.md](PROTOCOL.md) and
 |---|---|---|
 | Flydigi Apex 5 | Hardware-validated | Reference controller. Profiles, mappings, macros, sticks, gyro-to-stick, vibration, adaptive triggers, lighting, settings, display, game routes, and virtual-DualSense relays are implemented. |
 | Flydigi Vader 5 Pro | Experimental and partial | Identity, capability gating, profiles, mappings, sticks, gyro, vibration, lighting, settings, v3.2 macro-store handling, and a derived factory profile are implemented. No Vader 5 hardware has been tested. |
-| Flydigi Apex 6 / Apex 6 Pro | Experimental; Pro configuration partly hardware-validated | GPA6 identity and snapshots; global settings, simple remapping, timing fields, lighting and profile selection/save verified on Pro firmware 9.0.6.8. Stick/trigger response editing has independent codec, fake-pad, hardware write/read-back and guided physical-input coverage. Native vibration and scene settings have storage and selected physical acceptance. Macro editing has independent codec, fake-pad, hardware storage and selected guided playback checks. Grip waveforms were felt on hardware; the motor lifecycle matches the native engine's grip-only route, including trigger handling, fresh motor-RAM replay and no mode ACK waits. Exact live-mode restoration remains unverified. Opt-in USB DualSense input/audio/rumble has software coverage; a full game run, motion, trigger translation, uhid and richer GUI editors remain outstanding; the desktop settings/profile-selection/button/Shift/lighting workflow is implemented and fake-controller-tested. See [findings](docs/findings-apex6.md). |
+| Flydigi Apex 6 / Apex 6 Pro | Experimental; Pro configuration partly hardware-validated | GPA6 identity and snapshots; global settings, simple remapping, timing fields, lighting and profile selection/save verified on Pro firmware 9.0.6.8. Stick/trigger response editing has independent codec, fake-pad, hardware write/read-back and guided physical-input coverage. Native vibration and scene settings have storage and selected physical acceptance. Macro editing has independent codec, fake-pad, hardware storage and selected guided playback checks. Grip waveforms were felt on hardware; the motor lifecycle matches the native engine's grip-only route, including trigger handling, fresh motor-RAM replay and no mode ACK waits. Exact live-mode restoration remains unverified. Opt-in USB DualSense input/audio/rumble has software coverage; a full game run, motion, trigger translation, uhid and richer GUI editors remain outstanding; the desktop settings/profile-selection/button/Shift/analog/macro/lighting workflow is implemented and fake-controller-tested. See [findings](docs/findings-apex6.md). |
 | Flydigi CD2 dock | Hardware-validated with one noted gap | Device identity, four settings, generated lighting, and picture/GIF sampling are hardware-validated. Nickname read/write is implemented, but nickname writing is not hardware-verified. |
 | Other Flydigi hardware | Unsupported | It may be discovered by the shared transport. Normal configuration commands refuse unsupported models; explicitly ungated developer bench tools are outside that guarantee. |
 
@@ -158,7 +158,7 @@ identity/profile/configuration snapshots match the baseline exactly. Recovery
 after an interrupted transfer is software-tested only; GUI wiring is pending.
 
 The GUI foundation now routes Apex 6 explicitly through its native backend.
-The existing Controller, Device, Buttons, Sticks, Triggers and Lighting pages handle active-profile reads,
+The existing Controller, Device, Buttons, Macros, Sticks, Triggers and Lighting pages handle active-profile reads,
 slot selection/save, all supported global fields and all six lighting effects.
 Read-back, UUID/slot guards, stale-edit refusal, dirty reconnect preservation and
 late acknowledgements are covered by fake-controller tests. The native Buttons
@@ -174,7 +174,14 @@ direction/radius zones. Zone targets reuse the button output fields. The curve
 plot previews stored points; it is not a measured firmware response. Unsupported
 data remains preserved, and explicit zone clearing is scoped to one side/layer.
 GUI edits match 24 response and 88 zone vendor fixtures. The editors share the
-existing profile transaction and dirty/reconnect handling. No new hardware
+existing profile transaction and dirty/reconnect handling. Native Macros now
+supports creating, copying, naming and deleting definitions per layer, all four
+playback modes, typed outputs and step/timing editing. Complete draft sequences
+are validated before entering the profile; pending drafts survive navigation
+and reconnect and block Apply/Save. Unknown bodies remain readable and preserved
+during metadata-only edits. Deletion cleans matching same-layer bindings.
+GUI edits match all 43 independent macro fixtures. Native recording remains
+separate. No new hardware
 GUI acceptance run is claimed. The remaining editors, library and screen GUI
 workflows are still separate work. Apex 6 remains outside the legacy backend
 allowlist and selecting it does not change the daemon's legacy pad preference.
@@ -254,15 +261,16 @@ because it also exposes the audio endpoint used for PS5 haptics.
 
 ## Current test state
 
-The intended test contract is a hardware-free backend suite plus five
+The intended test contract is a hardware-free backend suite plus six
 Qt-dependent Python scripts.
 
 Current inventory:
 
 - 31 backend `tests/test_*.py` scripts;
-- 5 Qt-dependent Python scripts: `test_models.py`, `test_shell.py`,
-  `test_qml.py`, `test_apex6_gui.py`, and `test_apex6_analog_gui.py`;
-- 14 QML files under `tests/qml/tst_*.qml`.
+- 6 Qt-dependent Python scripts: `test_models.py`, `test_shell.py`,
+  `test_qml.py`, `test_apex6_gui.py`, `test_apex6_analog_gui.py`,
+  and `test_apex6_macros_gui.py`;
+- 15 QML files under `tests/qml/tst_*.qml`.
 
 Run the [discovered backend set](README.md#tests) rather than maintaining a
 hand-written filename list. All 31 backend scripts are hardware-free. The
@@ -276,6 +284,7 @@ installed:
 python3 tests/test_models.py
 python3 tests/test_apex6_gui.py
 python3 tests/test_apex6_analog_gui.py
+python3 tests/test_apex6_macros_gui.py
 python3 tests/test_shell.py
 python3 tests/test_qml.py
 tools/generate-qmltypes

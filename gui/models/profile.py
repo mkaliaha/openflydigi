@@ -19,6 +19,7 @@ from PySide6.QtQml import QmlElement
 from flydigi import effects, gpa6_backup, mapping
 from .apex6_buttons import Apex6ButtonsModel
 from .apex6_analog import Apex6AnalogModel
+from .apex6_macros import Apex6MacrosModel
 
 # See gui/models/device.py for what these two names do.
 QML_IMPORT_NAME = "Apex5"
@@ -2243,6 +2244,7 @@ class ProfileModel(QObject):
         self._native_buttons = Apex6ButtonsModel(self)
         self._native_sticks = Apex6AnalogModel(self, "stick")
         self._native_triggers = Apex6AnalogModel(self, "trigger")
+        self._native_macros = Apex6MacrosModel(self)
 
     # -- which pad's buttons ------------------------------------------------
     #
@@ -2361,8 +2363,13 @@ class ProfileModel(QObject):
     def nativeTriggers(self):
         return self._native_triggers
 
+    @Property(Apex6MacrosModel, constant=True)
+    def nativeMacros(self):
+        return self._native_macros
+
     def _refresh_native(self):
-        for editor in (self._native_buttons, self._native_sticks, self._native_triggers):
+        for editor in (self._native_buttons, self._native_sticks,
+                       self._native_triggers, self._native_macros):
             editor.refresh()
 
     @Property(bool, notify=writingChanged)
@@ -2439,6 +2446,9 @@ class ProfileModel(QObject):
         """
         self._edited = config
         self._generation += 1
+        # Explicit reload/profile/controller switches discard macro drafts;
+        # reconnect with dirty edits never calls _replace.
+        self._native_macros.clear()
 
     @Property(ProfileListModel, constant=True)
     def slots(self):
@@ -2478,7 +2488,10 @@ class ProfileModel(QObject):
 
     @Property(bool, notify=dirtyChanged)
     def dirty(self):
-        """Whether the open profile differs from what the pad last gave us.
+        """Whether the open profile or a native macro draft has unapplied edits.
+
+        Drafts are counted here for reconnect preservation, but do not enter
+        the packed profile until validated by Update macro.
 
         **A field, and it used to be an 840-byte compare per read.** Derived
         state is still the right design -- nothing has to remember to set a flag
@@ -2491,8 +2504,8 @@ class ProfileModel(QObject):
 
     def _recompute_dirty(self):
         self._dirty = (self._edited is not None and self._cfg_id >= 0
-                       and self._pack()
-                       != self._slots.stored(self._cfg_id))
+                       and ((self.apex6 and self._native_macros.draftDirty)
+                            or self._pack() != self._slots.stored(self._cfg_id)))
         return self._dirty
 
     @Property(bool, notify=cfgIdChanged)
@@ -2548,6 +2561,7 @@ class ProfileModel(QObject):
         if self.apex6:
             return ("Select a profile to read it." if not self.loaded else
                     "Profile changed on the pad. Reload before applying edits." if not self.canSaveToFlash else
+                    "Update or discard the draft on the Macros page before applying." if self._native_macros.draftDirty else
                     "Unapplied edits. Applied changes may persist without saving." if self.dirty else
                     "Applied changes may persist without saving. Save commits the active profile.")
         if self._edited is None:
@@ -2693,6 +2707,9 @@ class ProfileModel(QObject):
     @Slot(bool)
     def write(self, save):
         if self._edited is None or self._cfg_id < 0:
+            return
+        if self.apex6 and self._native_macros.draftDirty:
+            self.saveRefused.emit("Update or discard the draft on the Macros page before applying.")
             return
         # Refuse rather than commit the wrong slot -- see canSaveToFlash. The
         # guard is here and not only in the view because `write` is a public
