@@ -33,6 +33,43 @@ PACKET_LEN = 32
 MAGIC1 = 0x5A
 MAGIC2 = 0xA5
 REPORT_ID_OUT = 0x03
+REPORT_ID_IN = 0x04
+
+# **The Vader 5 Pro receiver speaks this same protocol with unnumbered
+# reports.** Measured on a Vader 5 Pro, 2.4G receiver `37d7:2401`, firmware
+# 7.1.4.4 / receiver 0.4.6.7: its vendor interface (usage page 0xffa0,
+# interface 1) declares one 32-byte input and one 32-byte output report and no
+# report ids. The frame inside is byte for byte the one above -- 5A A5, command,
+# payload length + 2, payload, additive checksum at 3 + length -- and a command-1
+# reply carries the Apex 5's fields at the Apex 5's offsets:
+#
+#   5a a5 01 01 00 82 02 00 00 00 00 05 45 01 00 71 44 04 67 ...
+#            |  |  ^^ DeviceType 130 = f5, then dongle, mac, battery 5/5
+#
+# What differs is only the report id: 0x00 placeholder out, nothing in. So the
+# Controller writes such a node with 0x00 where 0x03 was, and prepends 0x04 to
+# what it reads, and every legacy parser keeps its indexing. The same 32-byte
+# write (placeholder + 31 bytes) is what Vader5-Control sends to this pad.
+#
+# PID 2401 is also the id Space Station's new-architecture probe accepts, which
+# is why it sits in `gpa6.PRODUCT_IDS`. Sending a GPA6 frame to a Vader 5 got
+# an answer only intermittently -- its checksum sits at byte 31 rather than
+# after the payload -- and the 0x01 reply then fails GPA6's strict checksum:
+# the pad's trailing byte is 0x27 where a sum over bytes 2..30 is 0x92. That was
+# the "malformed GPA6 reply to 0x01". The product string decides which dialect
+# a 2401 node gets; `identity.require` still checks the DeviceType afterwards.
+VADER5_RECEIVER_PID = 0x2401
+
+# **The receiver drops a frame identical to the one before it**, if it arrives
+# within about a second. Measured: command 1 sent five times 0.5 s apart answers
+# 1st and 4th only; 1.0 s apart, every time; 1, 16, 1, 16, 1 back to back, every
+# time. Changing a byte after the checksum does not help, so it is the frame
+# rather than the raw report that is compared. A repeated read -- a poll, a retry
+# -- would otherwise time out every other call. So a repeat inside the window is
+# preceded by one read-only separator (command 16, or 1 when the repeat is
+# itself 16), whose reply is consumed before the real exchange.
+REPEAT_WINDOW = 1.5
+SEPARATOR_CMDS = (0x10, 0x01)
 
 # Vendor collection: usage page 0xffa0. Identical on wired and dongle.
 VENDOR_DESC_PREFIX = b"\x06\xa0\xff"
@@ -159,6 +196,13 @@ def is_mock(path):
     return mock.is_mock(path)
 
 
+def is_vader5_receiver(node, ids=None):
+    """Whether a hidraw node is the Vader 5 receiver's unnumbered interface."""
+    ids = ids or hid_ids(node)
+    return (ids is not None and ids[0] == VID and ids[1] == VADER5_RECEIVER_PID
+            and "vader" in hid_name(node).lower())
+
+
 def find_nodes(family=FAMILY_PAD):
     """Every Flydigi command interface of one device family, in node order.
 
@@ -280,6 +324,10 @@ class Controller:
     # consulted. `flydigi/charger.py:Dock` is the one subclass.
     FAMILY = FAMILY_PAD
     dialect = "legacy"
+    # True for the Vader 5 receiver: legacy frames over unnumbered reports.
+    unnumbered = False
+    _last_frame = None
+    _last_sent = 0.0
 
     def __new__(cls, path=None):
         """Resolve which device this is, and hand back a fake for a fake one.
@@ -316,8 +364,14 @@ class Controller:
         ids = hid_ids(node)
         if ids and ids[0] == VID and ids[1] in gpa6.PRODUCT_IDS:
             with open(f"/sys/class/hidraw/{node}/device/report_descriptor", "rb") as fh:
-                self.report_layout = gpa6.report_layout(fh.read())
-            self.dialect = "gpa6"
+                layout = gpa6.report_layout(fh.read())
+            if is_vader5_receiver(node, ids):
+                if (layout.output_id, layout.output_size, layout.input_ids) != (0, PACKET_LEN, (0,)):
+                    raise OSError(f"{self.path}: unexpected Vader 5 report layout {layout}")
+                self.unnumbered = True
+            else:
+                self.report_layout = layout
+                self.dialect = "gpa6"
         self.fd = os.open(self.path, os.O_RDWR | os.O_NONBLOCK)
         # flock is per *open file description*, so two Controllers in one
         # process already exclude each other -- but two threads sharing one
@@ -429,10 +483,15 @@ class Controller:
                     or buf[0] != self.report_layout.output_id
                     or buf[1:3] != b"\x5a\xa5"):
                 raise ProtocolError("legacy packets are refused on GPA6 devices")
+        out = self._outgoing(buf)
         with self.claim():
             self._drain()
-            if os.write(self.fd, bytes(buf)) != len(buf):
+            if self.unnumbered:
+                self._separate(out)
+            if os.write(self.fd, out) != len(out):
                 raise OSError("short HID report write")
+            if self.unnumbered:
+                self._last_frame, self._last_sent = out, time.monotonic()
             replies = []
             deadline = time.time() + wait
             while time.time() < deadline:
@@ -440,12 +499,48 @@ class Controller:
                     [self.fd], [], [], max(0.0, deadline - time.time()))
                 if not ready:
                     continue
-                data = os.read(self.fd, 65 if self.dialect == "gpa6" else 64)
+                data = self._incoming(
+                    os.read(self.fd, 65 if self.dialect == "gpa6" else 64))
                 if data:
                     replies.append(data)
                     if until is not None and until(replies):
                         break
             return replies
+
+    def _outgoing(self, buf):
+        """The bytes to write: the legacy frame, re-addressed for this node."""
+        buf = bytes(buf)
+        if not self.unnumbered:
+            return buf
+        if len(buf) != PACKET_LEN or buf[0] != REPORT_ID_OUT or buf[1:3] != b"\x5a\xa5":
+            raise ValueError("only legacy 32-byte vendor frames go to a Vader 5 receiver")
+        return b"\x00" + buf[1:]
+
+    def _separate(self, out):
+        """Make a repeat inside REPEAT_WINDOW differ from the frame before it."""
+        if (out != self._last_frame
+                or time.monotonic() - self._last_sent >= REPEAT_WINDOW):
+            return
+        cmd = SEPARATOR_CMDS[out[3] == SEPARATOR_CMDS[0]]
+        sep = bytearray(PACKET_LEN)
+        sep[1:6] = bytes((MAGIC1, MAGIC2, cmd, 2, (cmd + 2) & 0xFF))
+        if os.write(self.fd, bytes(sep)) != len(sep):
+            raise OSError("short HID report write")
+        self._last_frame, self._last_sent = bytes(sep), time.monotonic()
+        deadline = time.monotonic() + 0.25
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select(
+                [self.fd], [], [], max(0.0, deadline - time.monotonic()))
+            if ready:
+                data = os.read(self.fd, 64)
+                if len(data) > 2 and data[:3] == bytes((MAGIC1, MAGIC2, cmd)):
+                    return
+
+    def _incoming(self, data):
+        """A reply as legacy parsers index it: report id 0x04 at [0]."""
+        if self.unnumbered and len(data) == PACKET_LEN and data[:2] == b"\x5a\xa5":
+            return bytes([REPORT_ID_IN]) + bytes(data)
+        return data
 
     def command(self, cmd_id, payload=b"", wait=0.3, until=None):
         return self.send(build(cmd_id, payload), wait=wait, until=until)
