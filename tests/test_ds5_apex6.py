@@ -5,6 +5,7 @@
 
 """Apex 6 USB feedback integration without hardware, root or vendor files."""
 from collections import deque
+import errno
 from pathlib import Path
 import math
 import runpy
@@ -76,10 +77,11 @@ class FeedbackTests(unittest.TestCase):
         self.assertEqual(self.pad.frames[-1][4], 0x98)
         self.assertEqual(self.feedback.dropped_bytes, 0)
 
-    def test_packet_offsets_and_failed_packets(self):
+    def test_packet_offsets_and_out_status_ignored(self):
+        # usb_submit_urb() presets every OUT iso frame status to -EXDEV.
         data = pcm(frames=192) + b"padding!" + pcm(frames=192)
-        self.audio(data, [(0, 1536, 0, 0), (1544, 1536, 0, -1)])
-        expected = waveform.StereoResampler(channels=4).feed(data[:1536] + bytes(1536))
+        self.audio(data, [(0, 1536, 0, -errno.EXDEV), (1544, 1536, 0, -errno.EXDEV)])
+        expected = waveform.StereoResampler(channels=4).feed(data[:1536] + data[1544:])
         self.feedback.step()
         self.assertEqual(samples(self.pad, 0), bytes(gpa6.quantize(l) for l, _ in expected))
 

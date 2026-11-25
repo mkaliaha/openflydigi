@@ -182,8 +182,10 @@ class Feedback:
             if not self.accepting:
                 return
             # OUT uses requested lengths; actual_length is normally zero.
-            # Respect offsets (which may include padding), reject malformed
-            # descriptors and substitute silence for failed packets.
+            # Respect offsets (which may include padding) and reject malformed
+            # descriptors. Ignore the per-packet status: usb_submit_urb()
+            # presets every iso frame to -EXDEV before vhci forwards it, so
+            # on OUT it carries no information about the payload.
             end = 0
             for offset, length, _actual, _status in packets:
                 if (offset < end or length < 0 or length % PCM_WIDTH
@@ -192,14 +194,14 @@ class Feedback:
                     self._clear_audio()
                     return
                 end = offset + length
-            for offset, length, _actual, status in packets:
+            for offset, length, _actual, _status in packets:
                 if not length:
                     continue
                 keep = min(length, MAX_BYTES)
                 if keep < length:
                     self.dropped_bytes += length - keep
                     self.discontinuity = True
-                block = bytes(keep) if status else bytes(data[offset + length - keep:offset + length])
+                block = bytes(data[offset + length - keep:offset + length])
                 self.blocks.append((now, block))
                 self.queued_bytes += keep
                 while self.queued_bytes > MAX_BYTES:
