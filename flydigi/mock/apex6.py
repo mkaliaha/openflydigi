@@ -7,8 +7,11 @@
 The wire decoder is independent of the production encoder. Area 1 is assumed
 volatile; area-0 trigger writes update RAM 6 and clear unused record bytes,
 as measured on Pro 9.0.6.8. Profile selection resets live motor modes.
-Frames require setup, and the trigger column is intentionally unsupported.
-No claim is made about actuator response, receiver timing or selector routing.
+Frames require setup. The trigger column is accepted only after the stream
+route (mode 3, params 00 40) for the trigger(s) its selector names; this is the
+route confirmed to vibrate on Pro 9.0.7.6, where routing both and selecting
+one side also isolated it. No claim is made about actuator response or
+receiver timing.
 In particular, the emulator accepts grip mode-1 restoration, which the tested
 Pro firmware 9.0.6.8 refuses; passing lifecycle tests do not resolve that gap.
 """
@@ -291,7 +294,8 @@ class FakeApex6:
                 if valid:
                     target, mode, params = payload[1], payload[2], payload[3:]
                     if target <= 2:
-                        valid = mode < 3 and len(params) == (0, 10, 3)[mode]
+                        valid = ((mode < 3 and len(params) == (0, 10, 3)[mode])
+                                 or (payload[0] == 1 and mode == 3 and params == b"\x00\x40"))
                     else:
                         valid = payload[0] == 1 and ((mode == 0 and not params)
                                  or (mode == 1 and len(params) == 1)
@@ -305,16 +309,20 @@ class FakeApex6:
                             self.maps[self.slot][offset:offset + 11] = bytes([mode]) + params.ljust(10, b"\0")
                 reply = self._reply(command, bytes([0 if valid else 1]))
             elif command == 0x57:
-                if len(payload) != 25 or payload[0] & 0xe4 != 0x80:
-                    raise ValueError("invalid control byte or unsupported trigger output")
+                if len(payload) != 25 or payload[0] & 0xe0 != 0x80 or payload[0] & 3 == 3:
+                    raise ValueError("invalid control byte")
+                if payload[0] & 4:
+                    sides = ((0,), (1,), (0, 1))[payload[0] & 3]
+                    if any(self.trigger_runtime[side][0] != 3 for side in sides):
+                        raise ValueError("trigger waveform received before trigger route")
                 for bit, side in ((8, 16), (16, 17)):
                     if payload[0] & bit and self.runtime[side][0] != 2:
                         # Neutral cleanup is accepted after partial setup too.
                         column = 2 if side == 16 else 3
                         if any(x != 128 for x in payload[column::3]):
                             raise ValueError("waveform received before grip setup")
-                if any(x != 128 for x in payload[1::3]):
-                    raise ValueError("trigger samples must be neutral")
+                if not payload[0] & 4 and any(x != 128 for x in payload[1::3]):
+                    raise ValueError("disabled trigger samples must be neutral")
                 self.frames.append(body)
                 self.frame_count += 1
                 return []

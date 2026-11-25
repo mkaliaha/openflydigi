@@ -17,7 +17,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import wave
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -311,6 +311,24 @@ class LifecycleTests(unittest.TestCase):
         with self.assertRaises(identity.WrongDevice):
             self.session().start()
         self.assertFalse(any(c == 0x53 for c, _ in self.pad.history))
+
+    def test_trigger_session_route_frame_and_stop(self):
+        session = waveform.TriggerSession(self.pad, "right", experimental=True, clock=self.clock)
+        session.start()
+        self.assertEqual([p for c, p in self.pad.history if c == 0x53], [bytes.fromhex("0101030040")])
+        sent = []
+        session.ctrl = Mock(send=lambda report, wait: sent.append(report))
+        session._write_samples([1.0] * 8, [-1.0] * 8, 0)
+        session.ctrl = self.pad
+        self.assertEqual(sent, [session.protocol.layout.wrap(gpa6.waveform(
+            trigger=[1.0] * 8, enabled=(True, False, False), selector=1))])
+        self.assertEqual(gpa6.waveform(trigger=[1.0] * 8, enabled=(True, False, False), selector=1)[4:29],
+                         bytes([0x85]) + bytes((255, 128, 128)) * 8)
+        self.pad.history.clear()
+        session.stop()
+        self.assertEqual([p for c, p in self.pad.history if c == 0x53][:2],
+                         [bytes.fromhex("010200"), bytes.fromhex("011200")])
+        self.assertIsNone(self.pad._grip_session)
 
     def test_unknown_motor_layout_prevents_replay_after_stop(self):
         for offset, value in ((0, 3), (1, 3), (12, 255), (23, 3), (25, 255)):
