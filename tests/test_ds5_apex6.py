@@ -121,9 +121,38 @@ class FeedbackTests(unittest.TestCase):
         self.device.transfer_out(EP_HID_OUT, rumble(0, 0, flags=12))
         self.device.transfer_out(EP_HID_OUT, b"\x02\xff")
         self.feedback.step()
-        self.assertEqual(self.feedback.ignored_triggers, 2)
+        self.assertEqual((self.feedback.trigger_effects, self.feedback.ignored_triggers), (2, 0))
         self.assertTrue(all(cmd in (1, 4, 7, 0xa1, 0xa3, 0x53, 0x57)
                             for cmd, _ in self.pad.history))
+
+    def test_trigger_effect_renders_on_routed_column_and_is_handed_back(self):
+        self.assertIn(bytes.fromhex("0102030040"), [p for c, p in self.pad.history if c == 0x53])
+        self.assertEqual(self.pad.trigger_runtime, {0: (3, b"\0\x40"), 1: (3, b"\0\x40")})
+        # Right trigger 0x26 vibration, all zones at full amplitude, 50 Hz.
+        report = bytearray(rumble(0, 0, flags=4))
+        report[11:22] = bytes((0x26, 0xff, 0x03, 0xff, 0xff, 0xff, 0x3f, 0, 0, 50, 0))
+        self.device.transfer_out(EP_HID_OUT, bytes(report))
+        self.feedback.set_positions(0, 200)
+        column = []
+        for _ in range(8):
+            self.clock.now += .008
+            self.feedback.step()
+            control = self.pad.frames[-1][4]
+            self.assertEqual(control & 7, 4 | 1)
+            column += self.pad.frames[-1][5:29:3]
+        self.assertGreater(max(column) - min(column), 100)
+        self.assertLessEqual(max(column), gpa6.quantize(1.0))
+        # Unknown types are counted and leave the effect playing.
+        report[11] = 0xfc
+        self.device.transfer_out(EP_HID_OUT, bytes(report))
+        self.clock.now += .008
+        self.feedback.step()
+        self.assertEqual(self.feedback.ignored_triggers, 1)
+        self.assertEqual(self.pad.frames[-1][4] & 7, 5)
+        self.feedback.set_connected(False)
+        self.feedback.step()
+        self.assertEqual(self.pad.trigger_runtime, {0: (0, b""), 1: (0, b"")})
+        self.assertEqual(self.pad.runtime, self.original)
 
     def test_oversized_and_stale_pcm_are_bounded(self):
         self.audio(pcm(frames=48000))

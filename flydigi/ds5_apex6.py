@@ -7,7 +7,9 @@
 The output thread owns its HID handle and session claim, including cleanup.
 USB callbacks only enqueue bounded PCM or replace a rumble level. Input uses a
 separate, UUID-pinned evdev link; it never closes the output worker's handle.
-Trigger translation and vendor motion reports are deliberately not enabled.
+DualSense trigger effects are rendered as voice-coil waveforms on the trigger
+column of the same stream (see ds5_triggers). Vendor motion reports are not
+enabled.
 """
 from collections import deque
 import math
@@ -16,7 +18,7 @@ import select
 import threading
 import time
 
-from . import ds5, dsmode, evdev, gpa6, identity, registry, relay, usbip, waveform
+from . import ds5, ds5_triggers, dsmode, evdev, gpa6, identity, registry, relay, usbip, waveform
 from .device import DeviceBusy, DeviceNotFound
 from .ds5_usbip import DualSense, EP_HID_IN
 
@@ -97,11 +99,23 @@ class DualSenseSession(waveform.GripSession):
     80/160 Hz, maximum amplitude 0.35 per side, are application choices rather
     than a recovered Flydigi/DS5 transfer function. The encoder clips the sum.
     Phase follows elapsed time so scheduler stalls cannot accumulate a burst.
+
+    With a trigger renderer, both trigger coils are routed onto the stream
+    (motor mode 3, params 00 40) after grip setup, and each frame's selector
+    picks the trigger(s) with an active effect. The inherited stop disables
+    trigger output before the persistent motor configuration is replayed.
     """
 
-    def __init__(self, ctrl, **kwargs):
+    def __init__(self, ctrl, triggers=None, **kwargs):
         super().__init__(ctrl, channels=4, **kwargs)
         self.rumble = (0, 0)
+        self.triggers = triggers
+        self.positions = (0, 0)
+
+    def _route(self):
+        super()._route()
+        if self.triggers is not None:
+            self.protocol.mode(2, 3, b"\x00\x40", wait_for_ack=False)
 
     def _write_samples(self, left, right, now):
         mixed = []
@@ -111,7 +125,12 @@ class DualSenseSession(waveform.GripSession):
                 + 0.35 * level / 255 * math.sin(2 * math.pi * hz * (now + i / waveform.RATE))
                 for i in range(waveform.SAMPLES)
             ])
-        super()._write_samples(*mixed, now)
+        trigger, selector = None, None
+        if self.triggers is not None:
+            trigger, selector = self.triggers.render(self.positions, now, waveform.SAMPLES)
+        frame = gpa6.waveform(trigger or (), *mixed, enabled=(trigger is not None, True, True),
+                              selector=selector or 0)
+        self.ctrl.send(self.protocol.layout.wrap(frame), wait=0)
 
 
 class Feedback:
@@ -122,7 +141,7 @@ class Feedback:
     input link invalidates all pending feedback. Reopening always rechecks UUID.
     """
 
-    def __init__(self, uid, *, audio=True, gain=1.0, clock=time.monotonic,
+    def __init__(self, uid, *, audio=True, triggers=True, gain=1.0, clock=time.monotonic,
                  open_pad=registry.open_pad, log=None):
         # Validate before the privileged attach or worker starts.
         if not math.isfinite(gain) or not 0 <= gain <= 4:
@@ -141,7 +160,12 @@ class Feedback:
         self.ctrl = self.session = None
         self.next_try = 0.0
         self.dropped_bytes = self.invalid_urbs = self.output_reports = 0
-        self.ignored_triggers = 0
+        self.ignored_triggers = self.trigger_effects = 0
+        # Trigger state survives pad reconnects: games send effects on change.
+        # The renderer is touched only by the output thread.
+        self.triggers = ds5_triggers.Renderer() if triggers else None
+        self.trigger_inbox = deque(maxlen=64)
+        self.positions = (0, 0)
         self.sent = 0
         self.failed = None
         self.stop_event = threading.Event()
@@ -170,9 +194,20 @@ class Feedback:
         parsed = ds5.parse_output(data)
         with self.lock:
             self.output_reports += 1
-            self.ignored_triggers += len(parsed["effects"])
+            for effect in parsed["effects"]:
+                decoded = ds5_triggers.decode(effect.type, effect.params)
+                if decoded is None or self.triggers is None:
+                    self.ignored_triggers += 1
+                else:
+                    self.trigger_effects += 1
+                    self.trigger_inbox.append((self.clock(), effect.side, decoded))
             if self.accepting and parsed["rumble"] is not None:
                 self.rumble = parsed["rumble"]
+
+    def set_positions(self, left, right):
+        """Physical L2/R2 travel, 0..255, from the input thread."""
+        with self.lock:
+            self.positions = (left, right)
 
     def on_haptics(self, data, packets):
         if not self.audio:
@@ -239,7 +274,7 @@ class Feedback:
                     return
                 self.ctrl = self.open_pad("uid:" + self.uid)
                 self.session = DualSenseSession(
-                    self.ctrl, experimental=True, expected_uid=self.uid,
+                    self.ctrl, triggers=self.triggers, experimental=True, expected_uid=self.uid,
                     gain=self.gain, clock=self.clock, max_latency=MAX_LATENCY)
                 self.session.start()
                 self.session_epoch = epoch
@@ -257,6 +292,13 @@ class Feedback:
                 self.queued_bytes = 0
                 reset, self.discontinuity = self.discontinuity, False
                 rumble = self.rumble
+                updates = list(self.trigger_inbox)
+                self.trigger_inbox.clear()
+                positions = self.positions
+            if self.triggers is not None:
+                for stamp, side, decoded in updates:
+                    self.triggers.side(side).set(decoded, stamp)
+            self.session.positions = positions
             fresh = []
             for stamp, data in blocks:
                 if now - stamp > MAX_LATENCY:
@@ -354,7 +396,7 @@ def run(args, log, diagnostics=None):
         feedback.start()
         log(f"experimental Apex 6 input: {pad.name} ({pad.reader.path}); UUID {pad.uid}")
         log(f"grip audio {'enabled' if args.motors else 'disabled (use --motors)'}; "
-            "synthesized HID rumble enabled; adaptive triggers and motion unavailable")
+            "synthesized HID rumble and voice-coil trigger effects enabled; motion unavailable")
         ignore = ",".join((dsmode.IGNORE_VALUE, "0x37d7/0x2502"))
         log("games: set " + " ".join(f"{var}={ignore}" for var in dsmode.IGNORE_VARS))
         if args.verify:
@@ -386,6 +428,7 @@ def run(args, log, diagnostics=None):
                 frames += 1
             if loopback and loopback.fileno() in ready and loopback.read():
                 verified += 1
+            feedback.set_positions(state.l2, state.r2)
             now = time.monotonic()
             if now >= next_report:
                 next_report = now + 0.004
@@ -401,7 +444,8 @@ def run(args, log, diagnostics=None):
                 log(f"reports={reports} evdev={frames} motion=0 out={feedback.output_reports} "
                     f"iso_urbs={device.haptic_urbs} pad={int(pad.connected)} drops={pad.drops} "
                     f"loopback={verified} grip_packets={feedback.sent} "
-                    f"pcm_dropped={feedback.dropped_bytes} ignored_triggers={feedback.ignored_triggers}")
+                    f"pcm_dropped={feedback.dropped_bytes} trigger_effects={feedback.trigger_effects} "
+                    f"ignored_triggers={feedback.ignored_triggers}")
                 if diagnostics:
                     log(diagnostics.summary())
     except KeyboardInterrupt:
