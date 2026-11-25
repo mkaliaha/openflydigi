@@ -122,7 +122,7 @@ class GripSession:
             self.slot = self.protocol.slot()
             # A partial setup can change the pad even if a later write fails.
             self.dirty = True
-            self.protocol.grip_stream(True)
+            self._route()
             self.active = True
             self.queue.clear()
             self.resampler.reset()
@@ -218,6 +218,9 @@ class GripSession:
                     raise exc from cleanup
             raise gpa6.ProtocolError(f"{exc}; cleanup failed: {cleanup}") from exc
 
+    def _route(self):
+        self.protocol.grip_stream(True)
+
     def _write_samples(self, left, right, now):
         self.ctrl.send(self.protocol.layout.wrap(gpa6.waveform(left=left, right=right)), wait=0)
 
@@ -238,3 +241,25 @@ class GripSession:
             claim, self._claim = self._claim, None
             self.ctrl._grip_session = None
             claim.__exit__(None, None, None)
+
+
+class TriggerSession(GripSession):
+    """EXPERIMENTAL trigger voice-coil test output; routing is unvalidated.
+
+    Routes the trigger(s) onto the 0x57 stream with motor mode 3 (params
+    00 40) and plays the left input channel on the stream's trigger column,
+    whose selector bits pick the coil: 0 left, 1 right, 2 both. Stop and
+    restore follow GripSession, whose native stop disables trigger output.
+    """
+    TARGETS = {"left": 0, "right": 1, "both": 2}
+
+    def __init__(self, ctrl, side, **kwargs):
+        super().__init__(ctrl, **kwargs)
+        self.target = self.TARGETS[side]
+
+    def _route(self):
+        self.protocol.mode(self.target, 3, b"\x00\x40", wait_for_ack=False)
+
+    def _write_samples(self, left, right, now):
+        frame = gpa6.waveform(trigger=left, enabled=(True, False, False), selector=self.target)
+        self.ctrl.send(self.protocol.layout.wrap(frame), wait=0)

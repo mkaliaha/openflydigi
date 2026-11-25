@@ -212,6 +212,8 @@ def main():
     tone.add_argument("--left", type=float, default=80, help="left frequency in Hz; 0 disables")
     tone.add_argument("--right", type=float, default=120, help="right frequency in Hz; 0 disables")
     tone.add_argument("--amplitude", type=float, default=0.15)
+    tone.add_argument("--trigger", choices=sorted(waveform.TriggerSession.TARGETS),
+                      help="EXPERIMENTAL: play --left on this trigger voice coil instead of the grips")
     play = sub.add_parser("play", help="play 48 kHz s16 PCM WAV; stereo or four-channel DualSense capture")
     play.add_argument("wav")
     args = parser.parse_args()
@@ -589,9 +591,16 @@ def main():
                 if "decode_error" in block:
                     print(f"{name}: raw bytes retained; {block['decode_error']}", file=sys.stderr)
             return 0
-        print(f"{identity.name_for(protocol.info()['device_type'])}: experimental grip output; "
+        def make_session(ctrl):
+            if getattr(args, "trigger", None):
+                return waveform.TriggerSession(ctrl, args.trigger, experimental=True,
+                                               expected_uid=uid, channels=channels)
+            return waveform.GripSession(ctrl, experimental=True, expected_uid=uid, channels=channels)
+
+        print(f"{identity.name_for(protocol.info()['device_type'])}: experimental "
+              f"{'trigger (' + args.trigger + ')' if getattr(args, 'trigger', None) else 'grip'} output; "
               f"UUID {uid}" + (" [MOCK]" if device.is_mock(ctrl.path) else ""), file=sys.stderr)
-        session = waveform.GripSession(ctrl, experimental=True, expected_uid=uid, channels=channels)
+        session = make_session(ctrl)
         session.start()
         start = time.monotonic()
         next_feed = start
@@ -601,7 +610,7 @@ def main():
             if session is None:
                 try:
                     ctrl = open_selected("uid:" + uid)
-                    session = waveform.GripSession(ctrl, experimental=True, expected_uid=uid, channels=channels)
+                    session = make_session(ctrl)
                     session.start()
                     next_feed = now
                     source_frame = int((now - start) * 48000)
