@@ -141,8 +141,8 @@ class Feedback:
     input link invalidates all pending feedback. Reopening always rechecks UUID.
     """
 
-    def __init__(self, uid, *, audio=True, triggers=True, gain=1.0, clock=time.monotonic,
-                 open_pad=registry.open_pad, log=None):
+    def __init__(self, uid, *, audio=True, triggers=True, trace=False, gain=1.0,
+                 clock=time.monotonic, open_pad=registry.open_pad, log=None):
         # Validate before the privileged attach or worker starts.
         if not math.isfinite(gain) or not 0 <= gain <= 4:
             raise ValueError("Apex 6 audio gain must be finite and between 0 and 4")
@@ -165,6 +165,11 @@ class Feedback:
         # The renderer is touched only by the output thread.
         self.triggers = ds5_triggers.Renderer() if triggers else None
         self.trigger_inbox = deque(maxlen=64)
+        # With trace, each change of a side's raw effect block is logged from
+        # the output thread, never from the USB callback.
+        self.trace = trace
+        self.trace_last = {"left": None, "right": None}
+        self.trace_inbox = deque(maxlen=64)
         self.positions = (0, 0)
         self.sent = 0
         self.failed = None
@@ -195,6 +200,9 @@ class Feedback:
         with self.lock:
             self.output_reports += 1
             for effect in parsed["effects"]:
+                if self.trace and effect.key() != self.trace_last[effect.side]:
+                    self.trace_last[effect.side] = effect.key()
+                    self.trace_inbox.append((self.clock(), effect, self.positions))
                 decoded = ds5_triggers.decode(effect.type, effect.params)
                 if decoded is None or self.triggers is None:
                     self.ignored_triggers += 1
@@ -295,6 +303,12 @@ class Feedback:
                 updates = list(self.trigger_inbox)
                 self.trigger_inbox.clear()
                 positions = self.positions
+                traced = list(self.trace_inbox)
+                self.trace_inbox.clear()
+            for stamp, effect, (l2, r2) in traced:
+                self.log(f"trigger {stamp:.3f} {effect.side:<5} type=0x{effect.type:02X} "
+                         f"params={bytes(effect.params).hex(' ')} L2={l2} R2={r2} "
+                         f"-> {ds5_triggers.decode(effect.type, effect.params)!r}")
             if self.triggers is not None:
                 for stamp, side, decoded in updates:
                     self.triggers.side(side).set(decoded, stamp)
@@ -361,7 +375,8 @@ class Feedback:
 
 def run(args, log, diagnostics=None):
     """Run the explicitly selected experimental route without legacy writes."""
-    feedback = Feedback(None, audio=args.motors, gain=args.gain, log=log)
+    feedback = Feedback(None, audio=args.motors, trace=getattr(args, "trace_triggers", False),
+                        gain=args.gain, log=log)
     pad = InputLink(args.device, log=log)
     # Diagnostics run on the main thread through their own bounded queue.
     meter_lock = threading.Lock()

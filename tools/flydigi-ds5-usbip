@@ -156,8 +156,10 @@ def main():
     ap.add_argument("--motors", action="store_true",
                     help="drive the controller's grip motors from the haptic stream")
     ap.add_argument("--experimental-apex6", action="store_true",
-                    help="opt into Apex 6/6 Pro linear grips: USB audio and HID rumble; "
-                         "requires --device; no adaptive triggers or motion")
+                    help="opt into Apex 6/6 Pro linear grips: USB audio, HID rumble and "
+                         "voice-coil trigger effects; requires --device; no motion")
+    ap.add_argument("--trace-triggers", action="store_true",
+                    help="with --experimental-apex6, log every change of a trigger effect")
     ap.add_argument("--gain", type=float, default=1.5)
     ap.add_argument("--crossover", type=float, default=250.0)
     ap.add_argument("--gate", type=float, default=haptics_dsp.GATE)

@@ -9,8 +9,9 @@ volatile; area-0 trigger writes update RAM 6 and clear unused record bytes,
 as measured on Pro 9.0.6.8. Profile selection resets live motor modes.
 Frames require setup. The trigger column is accepted only after the stream
 route (mode 3, params 00 40) for the trigger(s) its selector names; this is the
-route confirmed to vibrate on Pro 9.0.7.6. No claim is made about actuator
-response, receiver timing or whether routing both and selecting one isolates it.
+route confirmed to vibrate on Pro 9.0.7.6, where routing both and selecting
+one side also isolated it. No claim is made about actuator response or
+receiver timing.
 In particular, the emulator accepts grip mode-1 restoration, which the tested
 Pro firmware 9.0.6.8 refuses; passing lifecycle tests do not resolve that gap.
 """

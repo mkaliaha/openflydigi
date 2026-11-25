@@ -125,6 +125,19 @@ class FeedbackTests(unittest.TestCase):
         self.assertTrue(all(cmd in (1, 4, 7, 0xa1, 0xa3, 0x53, 0x57)
                             for cmd, _ in self.pad.history))
 
+    def test_trace_logs_each_effect_change_once_from_output_thread(self):
+        lines = []
+        self.feedback.trace, self.feedback.log = True, lines.append
+        report = bytearray(rumble(0, 0, flags=8))
+        report[22:33] = bytes((0x21, 0xff, 0x03) + (0,) * 8)
+        self.device.transfer_out(EP_HID_OUT, bytes(report))
+        self.device.transfer_out(EP_HID_OUT, bytes(report))
+        self.assertEqual(lines, [])
+        self.feedback.step()
+        self.assertEqual(len(lines), 1)
+        self.assertIn("left  type=0x21 params=ff 03", lines[0])
+        self.assertIn("resistance", lines[0])
+
     def test_trigger_effect_renders_on_routed_column_and_is_handed_back(self):
         self.assertIn(bytes.fromhex("0102030040"), [p for c, p in self.pad.history if c == 0x53])
         self.assertEqual(self.pad.trigger_runtime, {0: (3, b"\0\x40"), 1: (3, b"\0\x40")})
